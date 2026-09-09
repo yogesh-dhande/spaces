@@ -106,6 +106,8 @@
             GhosttyEmbeddedAppService.shared.tick()
         }
 
+        func sessionStateRevision() -> UInt64? { sessionDriver.sessionStateRevision() }
+
         /// Owner input activity is recorded before the delivery it describes, matching how the scroll and
         /// mouse-button paths record theirs. The event marks the host taking delivery of the input, and the
         /// mac latency gate anchors its total there, so recording it after the write would leave ghostty's
@@ -320,10 +322,7 @@
             }
         }
 
-        private enum RenderStateExportMode {
-            case selfContained
-            case streamDeltaAllowed
-        }
+        private typealias RenderStateExportMode = GhosttyRenderUpdateProducer.ExportMode
 
         public let launchConfiguration: TerminalSessionLaunchConfiguration
         public let paths: TerminalSessionPaths
@@ -392,13 +391,12 @@
         private var lastSessionStateFlags: GhosttyEmbeddedSessionStateChange.Flags?
         private var lastScreenStateRevision: UInt64?
         private var lastExportedScreenStateRevision: UInt64?
-        private var lastRenderUpdateBaseline: GhosttyRenderUpdateBaseline?
+        /// Ghostty's state revision as of the most recent live capture. See `captureLiveSessionScreenState`.
+        private var lastCapturedSessionStateRevision: UInt64?
+        /// The shared full-vs-delta policy, the stream's delta baseline, the pending subscriber-baseline
+        /// promise, and the scroll-rect carry. Identical to what the Linux headless core runs.
+        private var renderUpdateProducer = GhosttyRenderUpdateProducer()
         private var renderUpdateRevision: UInt64 = 0
-        private var forceNextBroadcastFullRenderUpdate = false
-        /// Scroll rects a `.selfContained` export drained from Ghostty but could not ship (a self-contained
-        /// export always forces a full frame, and a full frame never carries rects). See
-        /// `TerminalStreamScrollRectCarry` for why this exists; folded/drained in `makeRenderUpdate`.
-        private var streamScrollRectCarry = TerminalStreamScrollRectCarry()
         /// Live in-memory runtime state — the AUTHORITATIVE source broadcasts serve, advanced the moment a
         /// new state is computed regardless of whether it reaches disk. Kept distinct from
         /// `lastPersistedRuntimeState` so the invariant holds under a failed persist: broadcasts always show
@@ -1200,8 +1198,7 @@
             // Advance past the recorded revision and force the first broadcast to a full
             // render update so reconnecting clients rebuild from a self-contained baseline.
             lastScreenStateRevision = record.screenStateRevision &+ 1
-            lastRenderUpdateBaseline = nil
-            forceNextBroadcastFullRenderUpdate = true
+            renderUpdateProducer.resetBaselineAndForceNextFull()
             lastKnownSurfaceSize = (columns: record.columns, rows: record.rows)
 
             try startControlServer()
@@ -1384,7 +1381,7 @@
         private func advanceOwnerEpoch(reason: String) {
             ownerEpoch &+= 1
             lastResizeSerialByClientID.removeAll(keepingCapacity: true)
-            lastRenderUpdateBaseline = nil
+            renderUpdateProducer.discardBaseline()
             trace("owner_epoch_advanced reason=\(reason) owner_epoch=\(ownerEpoch) owner=\(activeOwnerClientID() ?? "nil")")
         }
 
@@ -1457,7 +1454,7 @@
             // frame rather than a color-only delta from a stale baseline. There is no host-side
             // screen revision to bump here: lastScreenStateRevision tracks Ghostty's own
             // revisions, which the retheme advances on its own.
-            if appearanceChanged { forceNextBroadcastFullRenderUpdate = true }
+            if appearanceChanged { renderUpdateProducer.armSubscriberBaselineReset() }
             TerminalPerformance.logMetric(
                 "terminal_control_attach", target: "session=\(launchConfiguration.sessionID) client=\(authoritativeClient.id)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "mode=\(mode.rawValue)")
@@ -1485,7 +1482,7 @@
             // the recolored screen reaches subscribers as a self-contained full frame through the
             // screen state-change broadcast Ghostty triggers once the retheme lands.
             let appearanceChanged = GhosttyEmbeddedAppService.shared.applyColorScheme(appearance)
-            if appearanceChanged { forceNextBroadcastFullRenderUpdate = true }
+            if appearanceChanged { renderUpdateProducer.armSubscriberBaselineReset() }
             TerminalPerformance.logMetric(
                 "terminal_control_set_appearance", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
@@ -1822,13 +1819,40 @@
                 logMobileTakeoverPerformance(
                     name: "owner_input_activity", attributes: ["owner_kind": ownerClient.kind.rawValue, "interactive": "1", "input_kind": "scroll"])
             }
+            // Ghostty owns the wheel: it accumulates sub-cell precise deltas across events, and while an
+            // application is tracking the mouse it writes a wheel report to the child and leaves the
+            // viewport alone. So "the scroll was delivered" says nothing about whether the screen moved,
+            // and a flick's momentum events are mostly steps that move nothing. Bracketing the call with
+            // the viewport offset is what tells the two apart, exactly as the Linux host's
+            // `scroll_viewport_with_info` before/after pair does: an unmoved viewport has no new screen
+            // state to publish, and the child's own answer to a wheel report arrives as output.
+            let beforeScreenState = captureLiveSessionScreenState()
             let scrolled = rendererHostStorage.sendScroll(
                 horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
-            if scrolled { broadcastCurrentState(reason: .scroll) }
+            // The pre-scroll capture drained ghostty's pending rects, so its movement rides forward on the
+            // carry rather than being lost between the two reads.
+            renderUpdateProducer.foldScrollRects(beforeScreenState.scrollRects, overflowed: beforeScreenState.scrollRectsOverflowed)
+            let response = scrollControlResponse(scrolled: scrolled, beforeScreenState: beforeScreenState)
             TerminalPerformance.logMetric(
                 "terminal_control_scroll", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: scrolled)
-            return TerminalControlResponse(ok: scrolled, message: scrolled ? "Scrolled terminal." : "Unable to scroll terminal.")
+            return response
+        }
+
+        /// Publishes the post-scroll frame when the viewport actually moved, and answers the request either
+        /// way. A session with no exported grid at all falls into the same "nothing to publish" arm: there
+        /// is no screen a `.scroll` broadcast could carry.
+        private func scrollControlResponse(scrolled: Bool, beforeScreenState: LiveSessionScreenState) -> TerminalControlResponse {
+            guard scrolled else { return TerminalControlResponse(ok: false, message: "Unable to scroll terminal.") }
+            let afterScreenState = captureLiveSessionScreenState()
+            guard let beforeOffset = beforeScreenState.snapshot?.scrollbarOffset, let afterOffset = afterScreenState.snapshot?.scrollbarOffset,
+                beforeOffset != afterOffset
+            else {
+                renderUpdateProducer.foldScrollRects(afterScreenState.scrollRects, overflowed: afterScreenState.scrollRectsOverflowed)
+                return TerminalControlResponse(ok: true, message: "Already at scroll boundary.")
+            }
+            broadcastCurrentState(reason: .scroll, preCapturedScreenState: afterScreenState)
+            return TerminalControlResponse(ok: true, message: "Scrolled terminal.")
         }
 
         /// Resolves a control request's normalized pointer fields. Absent coordinates leave the daemon's
@@ -2529,6 +2553,11 @@
             TerminalOverviewSignal.post()
         }
 
+        /// The broadcast here is frameless by policy (`TerminalRemoteSessionStatePolicy` excludes screen
+        /// state for `.runtimeState`), so it costs a metadata payload rather than a render frame, and it is
+        /// gated on the persisted runtime signature actually moving. It is also the only push that reaches a
+        /// client on an otherwise idle session, where nothing else is broadcasting: title, working directory,
+        /// grid, run identity, and whether the session is still interactive all reach the phone through it.
         private func postRuntimeStateDidChange() {
             TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: launchConfiguration.sessionID)
             // This post covers any metadata change still owed, so the tick does not send a second one.
@@ -2587,6 +2616,11 @@
             }
         }
 
+        /// Whether a screen revision still owes subscribers a frame. An export records the revision it
+        /// shipped from Ghostty's own live counter (see `captureLiveSessionScreenState`), so the revision
+        /// Ghostty raised while processing a keystroke echo is already marked exported by the `output`
+        /// broadcast that carried those bytes, and the coalesced screen-state broadcast trailing it
+        /// publishes nothing: one screen broadcast per screen revision, not two.
         private func screenStateRevisionNeedsExport(_ revision: UInt64?) -> Bool {
             guard let revision else { return true }
             guard let lastExportedScreenStateRevision else { return true }
@@ -2999,7 +3033,7 @@
                     // carry (a held frame only ever reaches here on a one-shot `.selfContained` read).
                     // Dropping them would leave the next stream frame under-reporting how far content moved,
                     // and a mirror rebasing a drag against that lands on the wrong rows.
-                    streamScrollRectCarry.fold(rects: resolvedScreenState.scrollRects, overflowed: resolvedScreenState.scrollRectsOverflowed)
+                    renderUpdateProducer.foldScrollRects(resolvedScreenState.scrollRects, overflowed: resolvedScreenState.scrollRectsOverflowed)
                 }
                 let renderUpdateConstructionStartedAt = Date()
                 let renderUpdateValue =
@@ -3010,16 +3044,17 @@
                             for: $0, reason: reason, nativeScrollRects: resolvedScreenState.scrollRects,
                             nativeScrollRectsOverflowed: resolvedScreenState.scrollRectsOverflowed, exportMode: exportMode)
                     }
-                if renderUpdateValue != nil, markNextBroadcastFull { forceNextBroadcastFullRenderUpdate = true }
+                if renderUpdateValue != nil, markNextBroadcastFull { renderUpdateProducer.armSubscriberBaselineReset() }
                 // Deliberately not armed when the omission was the held-frame match above: that arm exists
                 // for a reader left with no baseline at all, and forcing the next broadcast full would make
                 // every subscriber of this session pay a full frame for a reader that needed none.
                 if renderUpdateValue == nil, !readerHoldsCurrentFrame, markNextBroadcastFullWhenMissingRenderUpdate {
-                    forceNextBroadcastFullRenderUpdate = true
+                    renderUpdateProducer.armSubscriberBaselineReset()
                 }
                 let renderUpdateConstructionMS = TerminalPerformance.elapsedMS(since: renderUpdateConstructionStartedAt)
-                if renderUpdateValue != nil, let lastScreenStateRevision, exportMode == .streamDeltaAllowed {
-                    lastExportedScreenStateRevision = lastScreenStateRevision
+                if renderUpdateValue != nil, exportMode == .streamDeltaAllowed {
+                    let exportedRevision = max(lastScreenStateRevision ?? 0, lastCapturedSessionStateRevision ?? 0)
+                    if exportedRevision > 0 { lastExportedScreenStateRevision = max(lastExportedScreenStateRevision ?? 0, exportedRevision) }
                 }
                 trace(
                     "render_frame_export_end reason=\(reason) render_update=\(renderUpdateValue == nil ? 0 : 1) frame_size=\(traceSize(columns: snapshot?.columns, rows: snapshot?.rows)) source=\(resolvedScreenState.source) owner_epoch=\(ownerEpoch)"
@@ -3084,7 +3119,7 @@
                 }
                 return payload.replacingRenderUpdate(materialized: renderUpdateValue, encodingObserver: encodingObserver)
             }
-            if markNextBroadcastFullWhenMissingRenderUpdate { forceNextBroadcastFullRenderUpdate = true }
+            if markNextBroadcastFullWhenMissingRenderUpdate { renderUpdateProducer.armSubscriberBaselineReset() }
             return GhosttyRemoteSessionStatePayload(
                 sessionID: launchConfiguration.sessionID, reason: reason, emittedAt: GhosttyRemoteSessionStateTimestamp.string(from: Date()),
                 sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
@@ -3093,76 +3128,18 @@
                 outputEndByteOffset: bootstrapOutputEndByteOffset, clipboardWrite: clipboardWrite, ownerEpoch: ownerEpoch)
         }
 
+        /// Runs the shared render-update policy (`GhosttyRenderUpdateProducer`) for this export.
+        ///
+        /// `reason` reaches this helper as a raw wire string (see `broadcastCurrentState`'s doc comment:
+        /// the debug testing hook deliberately drives this pipeline with reasons outside the enum), so it
+        /// is parsed once here; an unrecognized reason parses to nil and forces nothing on its own.
         private func makeRenderUpdate(
-            for frame: GhosttyRenderFrame, reason: String, nativeScrollRects capturedScrollRects: [GhosttyRenderScrollRectOperation] = [],
-            nativeScrollRectsOverflowed capturedScrollRectsOverflowed: Bool = false, exportMode: RenderStateExportMode = .selfContained
+            for frame: GhosttyRenderFrame, reason: String, nativeScrollRects: [GhosttyRenderScrollRectOperation] = [],
+            nativeScrollRectsOverflowed: Bool = false, exportMode: RenderStateExportMode = .selfContained
         ) -> GhosttyRenderUpdate {
-            // A `.selfContained` export always forces a full frame below (`forceFullForSelfContainedExport`),
-            // and a full frame never carries scroll rects, so the rects Ghostty just drained for this export
-            // would otherwise vanish. Carry them for the next stream export instead. A `.streamDeltaAllowed`
-            // export that itself ends up emitting a full frame (baseline reset, delta-apply failure, etc.) is
-            // still correct to drain here: a client poisons its own carry on any full frame it receives, so
-            // the rects this drain hands it are moot the moment the full frame lands.
-            let nativeScrollRects: [GhosttyRenderScrollRectOperation]
-            let nativeScrollRectsOverflowed: Bool
-            switch exportMode {
-            case .selfContained:
-                streamScrollRectCarry.fold(rects: capturedScrollRects, overflowed: capturedScrollRectsOverflowed)
-                nativeScrollRects = []
-                nativeScrollRectsOverflowed = false
-            case .streamDeltaAllowed:
-                (nativeScrollRects, nativeScrollRectsOverflowed) = streamScrollRectCarry.drain(
-                    mergingWith: capturedScrollRects, overflowed: capturedScrollRectsOverflowed)
-            }
-            // `reason` reaches this helper as a raw wire string (see `broadcastCurrentState`'s doc comment:
-            // the debug testing hook deliberately drives this pipeline with reasons outside the enum), so
-            // it is parsed once here and every comparison below reads the parsed case. An unrecognized
-            // reason parses to nil and simply matches none of the cases below, exactly as an unmatched
-            // string comparison always did.
-            let reasonKind = TerminalRemoteSessionStateReason(rawValue: reason)
-            let hasPendingSubscriberBaselineReset = exportMode == .streamDeltaAllowed && forceNextBroadcastFullRenderUpdate
-            let forceFullForSubscriberBaseline = hasPendingSubscriberBaselineReset && reasonKind != .scroll
-            let forceFullForSelfContainedExport = exportMode == .selfContained
-            let forceFullForExplicitResync =
-                reasonKind == .initial || reasonKind == .inputOutput || reasonKind == .resize || reasonKind == .terminated
-            let forceFull =
-                forceFullForExplicitResync || forceFullForSelfContainedExport || lastRenderUpdateBaseline?.sessionRevision == frame.sessionRevision
-                || forceFullForSubscriberBaseline
-            let forceFullReason =
-                if reasonKind == .initial { "initial_baseline" } else if reasonKind == .inputOutput || reasonKind == .terminated {
-                    "explicit_resync"
-                } else if reasonKind == .resize { "resize_self_contained" } else if forceFullForSubscriberBaseline {
-                    "subscriber_baseline_reset"
-                } else if forceFullForSelfContainedExport { "self_contained_state_export" } else { "baseline_already_current" }
-            let update = GhosttyRenderUpdateFactory.makeUpdate(
-                target: frame, baseline: lastRenderUpdateBaseline, forceFull: forceFull, forceFullReason: forceFullReason,
-                nativeScrollRects: nativeScrollRects, nativeScrollRectsOverflowed: nativeScrollRectsOverflowed)
-            let shouldUpdateStreamBaseline = exportMode == .streamDeltaAllowed
-            // What actually goes out, which is `update` except where a delta that could not be applied
-            // locally is replaced below. The pending-baseline promise is answered against this rather than
-            // against `update`, so both readings agree with what the subscriber received.
-            var emittedUpdate = update
-            switch update.kind {
-            case .full:
-                if shouldUpdateStreamBaseline, let fullFrame = update.fullFrame {
-                    lastRenderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: fullFrame)
-                }
-            case .delta:
-                if let appliedBaseline = try? GhosttyRenderUpdateApplier.apply(update, to: lastRenderUpdateBaseline) {
-                    lastRenderUpdateBaseline = appliedBaseline
-                } else {
-                    emittedUpdate = GhosttyRenderUpdate.full(frame, fallbackReason: "local_delta_apply_failed")
-                    if shouldUpdateStreamBaseline { lastRenderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: frame) }
-                }
-            case .resyncRequired: if shouldUpdateStreamBaseline { lastRenderUpdateBaseline = nil }
-            }
-            // The arm is a promise to a subscriber whose initial carried no render update, and only a full
-            // frame keeps it. A scroll is excluded from `forceFullForSubscriberBaseline` on purpose — its
-            // delta rewrites the viewport through scroll rects and a full frame would waste that — but a
-            // delta hands the subscriber nothing to apply, so spending the promise on one would leave it
-            // with a frame it can only drop and a resync round trip before the pane shows anything.
-            if hasPendingSubscriberBaselineReset, emittedUpdate.kind == .full { forceNextBroadcastFullRenderUpdate = false }
-            return emittedUpdate
+            renderUpdateProducer.makeUpdate(
+                for: frame, reason: TerminalRemoteSessionStateReason(rawValue: reason), nativeScrollRects: nativeScrollRects,
+                nativeScrollRectsOverflowed: nativeScrollRectsOverflowed, exportMode: exportMode)
         }
 
         private func renderFrameRevision(for snapshot: GhosttyTerminalSnapshot) -> UInt64 {
@@ -3174,12 +3151,11 @@
                 renderUpdateRevision = 1
             }
 
-            if let baselineRevision = lastRenderUpdateBaseline?.sessionRevision, baselineRevision > renderUpdateRevision {
+            let baseline = renderUpdateProducer.baseline
+            if let baselineRevision = baseline?.sessionRevision, baselineRevision > renderUpdateRevision {
                 renderUpdateRevision = baselineRevision
             }
-            if let lastRenderUpdateBaseline, lastRenderUpdateBaseline.sessionRevision == Optional(renderUpdateRevision),
-                lastRenderUpdateBaseline.snapshot != snapshot
-            {
+            if let baseline, baseline.sessionRevision == Optional(renderUpdateRevision), baseline.snapshot != snapshot {
                 if renderUpdateRevision < UInt64.max { renderUpdateRevision += 1 }
             }
             return renderUpdateRevision
@@ -3217,7 +3193,7 @@
 
             let isLiveRuntime = runtimeState?.state == .running || runtimeState?.state == .starting
             // The rects `captureLiveSessionScreenState()` just drained are dropped here rather than folded
-            // into `streamScrollRectCarry`: they describe movement on a screen this export just found empty,
+            // into the producer's scroll-rect carry: they describe movement on a screen this export found empty,
             // and a mirror's drag carry only ever needs to track movement over visible content it can select
             // against. Movement on an empty screen cannot mislead a drag over visible content later, so
             // carrying it forward would only cost carry capacity for no product benefit.
@@ -3230,6 +3206,15 @@
         private func captureLiveSessionScreenState() -> LiveSessionScreenState {
             flushPendingIncomingOutputForStateExport()
             rendererHostStorage.prepareRenderStateExport()
+            // Read Ghostty's live revision between the tick and the capture. Ghostty raises its revision
+            // while processing the bytes the tick just fed it, but the host only learns the new value when
+            // the delivery task the state callback spawns runs, which is usually AFTER the export this
+            // capture feeds. Recording the live value is what lets that export claim the screen revision it
+            // actually shipped, so the coalesced state-change broadcast trailing it recognizes the frame as
+            // already published. Read before the capture, never after: a later read could name a revision
+            // whose content this frame does not carry, and the trailing broadcast would then be suppressed
+            // while the phone is still missing it.
+            lastCapturedSessionStateRevision = rendererHostStorage.sessionStateRevision()
             let capturedRenderState = rendererHostStorage.sessionRenderStateSnapshot()
             let sessionSnapshot = capturedRenderState?.snapshot
             let sessionSnapshotText = sessionSnapshot == nil ? rendererHostStorage.sessionSnapshotText() : nil

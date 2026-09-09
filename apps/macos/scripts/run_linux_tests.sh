@@ -67,6 +67,7 @@ for suite in \
   TerminalServiceSystemdUnitTests \
   TerminalServiceSystemdStartDeadlineTests \
   GhosttyVtSessionEventSinkTests \
+  GhosttyRenderUpdateProducerTests \
   SpacesBlockingIOThreadTests \
   TerminalSessionAttachmentSnapshotMutationsTests \
   WorkspaceFileWriteModePreservationTests \

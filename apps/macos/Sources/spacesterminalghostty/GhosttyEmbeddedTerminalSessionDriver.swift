@@ -769,6 +769,14 @@
             }
         }
 
+        /// Ghostty's own state revision as of right now, without waiting for the delivery task the state
+        /// callback spawns. An export reads this between ticking Ghostty and capturing the frame, so the
+        /// revision it records is never newer than the picture it ships.
+        func sessionStateRevision() -> UInt64? {
+            guard let session else { return nil }
+            return ghostty_session_state_revision(session)
+        }
+
         private func deliverSessionStateChange(forcedFlags: GhosttyEmbeddedSessionStateChange.Flags? = nil) {
             guard let session else { return }
             let revision = ghostty_session_state_revision(session)
