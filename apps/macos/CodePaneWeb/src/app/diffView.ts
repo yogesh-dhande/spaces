@@ -135,6 +135,27 @@ export class DiffView {
    * `setItems`, but its untouched records must remain intact so streaming one patch neither
    * re-parses nor re-measures the rest of the diff. */
   private itemsByPath = new Map<string, CodeViewItem<AnchoredComment>>();
+  /** The parsed, language-scoped `FileDiffMetadata` rendered for each path, held alongside the
+   * patch text it was parsed from and the revision its `cacheKey` carries. `@pierre/diffs` compares
+   * two diffs by `cacheKey` alone (`utils/areDiffTargetsEqual` consults object identity only for
+   * keyless diffs), which makes the key a two-way contract this map exists to keep.
+   *
+   * One key must always name one object. `processFile` builds a new record per call
+   * (`utils/parsePatchFiles`) and an item is rebuilt for annotation changes, version bumps, and
+   * re-streams, so re-parsing on every build would hand Pierre a fresh object under an unchanged
+   * key: `FileDiff.render` takes its "nothing changed" early return and keeps the object it already
+   * rendered, then `VirtualizedFileDiff.finalizeRender` compares that object against the supplied
+   * one by identity and throws "VirtualizedFileDiff.render: rendered a different diff than its
+   * prepared layout". Reusing the parsed diff while the patch text is byte-identical prevents that.
+   *
+   * Different content must always name a different key. A live refresh can replace a path's patch
+   * text, and Pierre reads no further than the key to decide nothing changed: it would skip
+   * `updateExternalDiff` and keep rendering the superseded patch. So each parse takes the next
+   * revision for that path and keys the diff `<path>#<revision>`; the revision advances only when
+   * the patch text actually changes, which is exactly when Pierre must see both a new key and a new
+   * object. A path that leaves the file set is dropped here and starts over at revision 1, by which
+   * point its renderer is gone too. */
+  private parsedDiffsByPath = new Map<string, { patch: string; fileDiff: FileDiffMetadata; revision: number }>();
   /** Queued/streaming manifest rows belong in the sidebar, not CodeView. Completed patches append
    * in scheduler order, so the virtualizer only creates/measures the newly available item. */
   private readonly renderedPaths = new Set<string>();
@@ -245,6 +266,13 @@ export class DiffView {
     // whose path the manifest omits is still a rendered item, so it is a legitimate restore target
     // and a viewport inside it must hold streamed reveals like any other.
     this.syncRecoveryEditFile();
+    // A path that left the file set keeps no parsed diff; a path that stayed keeps the object
+    // Pierre already rendered under its `cacheKey` (see `parsedDiffsByPath`). This runs after
+    // `syncRecoveryEditFile`: a recovery editor's path is still a rendered item, so it keeps its
+    // revision counter and is handed a key it has never rendered when the manifest brings it back.
+    for (const path of [...this.parsedDiffsByPath.keys()]) {
+      if (!this.filesByPath.has(path)) this.parsedDiffsByPath.delete(path);
+    }
     if (this.pendingScrollPosition !== undefined && !this.filesByPath.has(this.pendingScrollPosition.path)) {
       this.pendingScrollPosition = undefined;
     }
@@ -586,6 +614,7 @@ export class DiffView {
     this.itemVersions = new Map();
     this.itemTypes.clear();
     this.itemsByPath.clear();
+    this.parsedDiffsByPath.clear();
     this.renderedPaths.clear();
     this.fileIndexesByPath.clear();
     // A failed refresh is a non-preserving reset. Do not let a restore target from the previous
@@ -638,6 +667,7 @@ export class DiffView {
     this.itemVersions = new Map();
     this.itemTypes.clear();
     this.itemsByPath.clear();
+    this.parsedDiffsByPath.clear();
     this.renderedPaths.clear();
     this.fileIndexesByPath.clear();
     // Loading is a non-preserving scope reset. Do not let a restore target from the previous
@@ -1077,24 +1107,50 @@ export class DiffView {
         edit: true,
       };
     }
+    if (file.submodule !== undefined) {
+      // A gitlink has no textual patch to render: it renders as a read-only pointer row, same
+      // renderer as a binary placeholder (`type: "file"`, no gutter/line ids/annotations).
+      //
+      // This check sits below the editing branch on purpose: a live inline edit session whose path
+      // turns into a submodule mid-session (the user replaces the very file they are editing with a
+      // submodule at the same path, on disk, while the Editor is open) keeps its edit surface until
+      // the session ends. Accepted: the transition is a deliberate, rare user action outside the
+      // Editor; the session's next save fails loudly through the ordinary file-write error path
+      // (the path is a directory now), and ending the session re-renders the pointer row. A
+      // pre-emptive teardown here would discard an unsaved buffer on a refresh tick instead.
+      return this.placeholderItem(file.path, submoduleLabel(file.submodule));
+    }
     if (file.isBinary) {
       return this.placeholderItem(file.path, "Binary file not shown.");
     }
     if (file.patch === undefined) {
       return this.placeholderItem(file.path, "Loading patch…");
     }
-    const fileDiff = processFile(file.patch ?? "", {
-      cacheKey: file.path,
-      isGitDiff: true,
-      throwOnError: false,
-    });
-    if (!fileDiff) {
-      return this.placeholderItem(file.path, "Unable to parse this file's diff.");
+    const cached = this.parsedDiffsByPath.get(file.path);
+    let scopedDiff: FileDiffMetadata;
+    if (cached !== undefined && cached.patch === file.patch) {
+      // Same patch text keeps the same key and the same object (see `parsedDiffsByPath`).
+      scopedDiff = cached.fileDiff;
+    } else {
+      // Changed patch text takes the next revision, so the new content arrives under a key Pierre
+      // reads as different (see `parsedDiffsByPath`). An unparseable patch leaves the entry alone:
+      // its renderer is replaced by the placeholder below, and keeping the counter means a later
+      // patch still gets a revision this path has never rendered.
+      const revision = (cached?.revision ?? 0) + 1;
+      const fileDiff = processFile(file.patch, {
+        cacheKey: `${file.path}#${revision}`,
+        isGitDiff: true,
+        throwOnError: false,
+      });
+      if (!fileDiff) {
+        return this.placeholderItem(file.path, "Unable to parse this file's diff.");
+      }
+      // Force the language explicitly: auto-detection would otherwise hand the
+      // highlighter any of Shiki's ~180 language ids, most of which aren't
+      // loaded (see theme/index.ts's resolveAllowedLanguage doc comment).
+      scopedDiff = setLanguageOverride(fileDiff, resolveAllowedLanguage(file.path));
+      this.parsedDiffsByPath.set(file.path, { patch: file.patch, fileDiff: scopedDiff, revision });
     }
-    // Force the language explicitly: auto-detection would otherwise hand the
-    // highlighter any of Shiki's ~180 language ids, most of which aren't
-    // loaded (see theme/index.ts's resolveAllowedLanguage doc comment).
-    const scopedDiff = setLanguageOverride(fileDiff, resolveAllowedLanguage(file.path));
     return {
       id: file.path,
       type: "diff",
@@ -1300,14 +1356,17 @@ export class DiffView {
   /** Restores a viewport that rested on a placeholder item. Pierre's File renderer emits
    *  `data-line` nodes of its own, which `decorateRenderedLines` labels like any other line, so
    *  `visiblePosition` legitimately samples a placeholder and a refresh can preserve its path. A
-   *  binary or unparseable file has no source line to scroll to and no later patch to wait for, so
-   *  its own start is the honest restore target, and with a scroll-preserving refresh holding every
-   *  streamed reveal nothing else would bring it back. A queued placeholder is excluded: its real
-   *  patch is still streaming and restores the exact line at that FileDiff's post-render. */
+   *  binary file, a submodule pointer row, or an unparseable file has no source line to scroll to
+   *  and no later patch to wait for, so its own start is the honest restore target, and with a
+   *  scroll-preserving refresh holding every streamed reveal nothing else would bring it back. A
+   *  queued placeholder is excluded: its real patch is still streaming and restores the exact line
+   *  at that FileDiff's post-render. */
   private restorePlaceholderPosition(path: string): void {
     if (this.pendingScrollPosition?.path !== path) return;
     const file = this.filesByPath.get(path);
-    if (file === undefined || (!file.isBinary && file.patch === undefined)) return;
+    // A binary file and a submodule (gitlink) entry never carry patch text, so an absent `patch`
+    // means "still streaming" only for an ordinary file.
+    if (file === undefined || (!file.isBinary && file.submodule === undefined && file.patch === undefined)) return;
     this.pendingScrollPosition = undefined;
     if (this.restoredScrollPosition?.path === path) this.restoredScrollPosition = undefined;
     this.scrollToFileInternal(path);
@@ -1497,4 +1556,30 @@ function statusChipText(status: AutosaveStatus): string {
     case "idle":
       return "";
   }
+}
+
+/** Text for a submodule (gitlink) entry's placeholder row. `oldCommit`/`newCommit` are full
+ * 40-character shas; only the first 7 characters are shown, matching every other short-sha
+ * display in this pane (e.g. `DiffFileEntry.oldSHA`/`newSHA`). One side is absent exactly when the
+ * submodule was added (`oldCommit` absent) or removed (`newCommit` absent), both never absent at
+ * once, since a submodule entry always has at least one side. When both sides are present and
+ * identical, the pointer itself did not move (a renamed submodule, one whose own worktree is
+ * dirty, or one left unresolved by a conflicting merge): a single sha is shown rather than a
+ * no-op `X → X` arrow. `dirty` and `unmerged` are independent flags (a conflicted pointer's own
+ * worktree can also carry uncommitted edits), so both suffixes can appear together. */
+function submoduleLabel(submodule: NonNullable<DiffFileEntry["submodule"]>): string {
+  const oldShort = submodule.oldCommit?.slice(0, 7);
+  const newShort = submodule.newCommit?.slice(0, 7);
+  const base =
+    submodule.oldCommit !== undefined && submodule.oldCommit === submodule.newCommit
+      ? `Submodule ${newShort}`
+      : oldShort !== undefined && newShort !== undefined
+        ? `Submodule ${oldShort} → ${newShort}`
+        : newShort !== undefined
+          ? `Submodule added ${newShort}`
+          : `Submodule removed ${oldShort}`;
+  const flags = [submodule.dirty ? "dirty" : undefined, submodule.unmerged ? "unmerged" : undefined].filter(
+    (flag): flag is string => flag !== undefined,
+  );
+  return flags.length > 0 ? `${base} (${flags.join(", ")})` : base;
 }

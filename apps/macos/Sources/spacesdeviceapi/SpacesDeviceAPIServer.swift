@@ -4408,6 +4408,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 let comparisonPath = oldPath ?? relativePath
                 switch try gitTreePath(at: comparisonBaseRevision, relativePath: comparisonPath, workspaceDir: workspaceDir) {
                 case .missing: comparisonOldData = nil
+                // A submodule replaced by a regular file at the same path (the reverse type change, source
+                // mode 160000, destination a blob) is listed as an ordinary text patch by
+                // `SpacesDeviceWorkspaceDiffEngine.parseRawZ` (the destination side decides), but at the
+                // comparison revision the path is still a gitlink, so an inline edit started from that diff
+                // row lands here and is refused with this message. The file stays editable in Editor mode,
+                // which reads the worktree directly without a comparison revision. This is an accepted
+                // limitation of a rare shape, deliberately not special-cased with a synthetic comparison side.
                 case .nonRegular:
                     return SpacesDeviceAPIResponse(ok: false, message: "Comparison file is not a regular file.", errorCode: .invalidArgument)
                 case .regularBlob:
@@ -4861,7 +4868,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         while nextIndex < snapshot.plans.count {
             let plan = snapshot.plans[nextIndex]
             let file = SpacesDeviceWorkspaceDiffManifestFile(
-                path: plan.path, oldPath: plan.oldPath, status: plan.status, comparisonBaseRevision: plan.comparisonBaseRevision)
+                path: plan.path, oldPath: plan.oldPath, status: plan.status, comparisonBaseRevision: plan.comparisonBaseRevision,
+                isSubmodule: plan.isSubmodule)
             let encodedFileByteCount = try metadataEncoder.encode(file).count
             let delimiterByteCount = chunk.isEmpty ? 0 : 1
             guard encodedByteCount + delimiterByteCount + encodedFileByteCount <= Self.workspaceDiffManifestChunkByteCap else { break }
@@ -4976,9 +4984,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     ok: false, message: "The requested file is not changed in this workspace diff manifest.", errorCode: .notFound)
             }
 
-            // Binary and empty patches have complete metadata but no byte stream. Do not create a transfer
+            // Binary, empty, and submodule-pointer patches have complete metadata but no byte stream: a
+            // gitlink's "content" is a commit id, not text, so the Editor renders `transfer.file.submodule`
+            // as a read-only pointer summary rather than a unified diff, and the (tiny, two-line) patch text
+            // git actually produced for it is discarded here rather than streamed. Do not create a transfer
             // that a client could only discover is already complete on a needless second request.
-            guard !transfer.file.isBinary, transfer.patchByteCount > 0 else {
+            // An Editor client predating the `submodule` metadata would see a non-binary entry with no
+            // patch bytes; the `SpacesWireProtocol.version` bump that came with this field keeps such a
+            // client from pairing with this daemon at all, so no older-shape bytes are streamed.
+            guard !transfer.file.isBinary, transfer.file.submodule == nil, transfer.patchByteCount > 0 else {
                 return SpacesDeviceAPIResponse(
                     ok: true, message: "Loaded workspace diff patch metadata.",
                     result: .workspaceDiffFileChunk(.init(scopeSignature: transfer.scopeSignature, file: transfer.file)))
