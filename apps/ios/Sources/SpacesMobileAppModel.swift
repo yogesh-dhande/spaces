@@ -638,11 +638,19 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// paths (e.g. `TerminalViewerModel`) reuse the same backend instead of building a parallel client
     /// from `settings`. Reflects the current device after a switch.
     var deviceClient: SpacesDeviceAPIClient { bridgeClient }
+    /// The last screen each terminal session painted, kept here because `TerminalDetailView` owns its
+    /// `TerminalViewerModel` as `@State` and the pop that closes a terminal destroys both (#674). A
+    /// reopen paints from this before it asks the device anything; see `TerminalRetainedScreenStore`.
+    @ObservationIgnored let retainedTerminalScreens = TerminalRetainedScreenStore()
     /// Monotonic identity of the connection the published overview belongs to. Bumped whenever the
     /// active connection changes (device switch or removal, new settings, auth reset) so an overview
     /// fetch begun against the previous connection can neither publish its stale payload nor satisfy
     /// a `refresh()` caller waiting on the new one.
-    @ObservationIgnored private var overviewIdentity = 0
+    ///
+    /// `didSet` drops every retained terminal screen: those screens belong to the connection being left
+    /// behind, and a session id from it means nothing on the device being switched to. Doing it here
+    /// rather than at each of the several call sites is what keeps a newly added one from forgetting.
+    @ObservationIgnored private var overviewIdentity = 0 { didSet { retainedTerminalScreens.removeAll() } }
     /// The in-flight overview fetch, tagged with the identity it serves. `refresh()` joins it when
     /// the identity still matches, and re-fetches after it completes when the identity moved on.
     @ObservationIgnored private var refreshInFlight: (identity: Int, task: Task<Void, Never>)?
@@ -2942,6 +2950,18 @@ private enum SpacesMobileMutationTimeoutRecovery {
         if let payload {
             pruneDismissedAlertIDs(against: payload)
             resolveDeferredWorkspaceDeletions(against: payload)
+            // A session the device no longer lists cannot be reopened, an ended one is never painted from
+            // memory (its final transcript is what it shows, and it stays listed for days), and one that
+            // another device actively owns is being drawn somewhere else, so the screen this device last
+            // saw is stale and a reopen would show the active-owner notice instead of it. Their retained
+            // screens are dropped here. An owner that is one of this app's own viewers does not count: the
+            // viewer keeps the store current itself, and it stays attached for a round trip after its
+            // detail is dismissed, which is exactly when the list's first refresh lands. This is the only
+            // place that knows which sessions still exist and who owns them, and it runs against every
+            // successful fetch rather than only the ones that changed `overview`.
+            retainedTerminalScreens.retainOnly(sessionIDs: Set(payload.sessions.filter { session in
+                !TerminalViewerModel.isEndedRuntimeState(session.state) && !retainedTerminalScreens.isOwnedElsewhere(session.attachmentSnapshot)
+            }.map(\.id)))
         }
     }
 

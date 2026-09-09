@@ -92,6 +92,44 @@
             XCTAssertEqual(firstPaintEvents.first?.attributes["rows"], "30")
         }
 
+        /// Mirrors `TerminalViewerOpenPaintTests.testAReopenPaintsTheRetainedScreenBeforeAnyRequestIsSent`:
+        /// reopening a terminal the app already painted puts that screen up from memory, so the first
+        /// paint happens inside `start()` itself, before the open has asked the device anything. It is
+        /// still one `terminal_first_paint` per open, named by its own reason so the report never mixes
+        /// these samples in with the ones that waited on the network.
+        func testFirstPaintIsLoggedWithRetainedFrameWhenAReopenPaintsFromMemory() async throws {
+            let events = EventCollector()
+            SpacesDeviceTerminalPerformanceLogger.sinkForTesting = { events.record($0) }
+            let store = TerminalRetainedScreenStore()
+
+            // The open that leaves the screen behind. Its own first paint is the ordinary one, and it is
+            // awaited before the reopen so the two events cannot interleave: the release that logs it runs
+            // off the pipeline's consumer thread and hops to the main actor to emit.
+            let first = makeModel(retainedScreens: store)
+            first.start()
+            first.updateViewportSize(columns: 40, rows: 30)
+            await first.applyLatestState(
+                try Self.framedState(
+                    columns: 40, rows: 30, revision: 1, emittedAt: "2026-06-04T14:23:31Z", owner: first.remoteClientForTesting,
+                    reason: TerminalRemoteSessionStateReason.attachmentState.rawValue), isOutOfBand: false)
+            XCTAssertNotNil(first.ownerRenderEpoch, "sanity: the first open must have painted")
+            await waitUntil("the first open's own paint to be logged") { events.recorded.contains { $0.name == "terminal_first_paint" } }
+            first.stop()
+
+            let reopened = makeModel(retainedScreens: store)
+            defer { reopened.stop() }
+            reopened.start()
+
+            let firstPaintEvents = events.recorded.filter { $0.name == "terminal_first_paint" }
+            XCTAssertEqual(firstPaintEvents.count, 2, "the reopen adds exactly one first paint of its own, synchronously with start()")
+            XCTAssertEqual(firstPaintEvents.first?.attributes["hold_released_by"], "matching_frame", "sanity: the first open waited for its frame")
+            let reopenPaint = firstPaintEvents.last
+            XCTAssertEqual(reopenPaint?.attributes["hold_released_by"], "retained_frame")
+            XCTAssertEqual(reopenPaint?.attributes["columns"], "40")
+            XCTAssertEqual(reopenPaint?.attributes["rows"], "30")
+            XCTAssertNotNil(reopenPaint?.elapsedMS, "elapsed time since terminal_open_begin must be recorded")
+        }
+
         /// Mirrors `TerminalViewerOpenPaintTests.testHoldReleasesWhenItsBoundedWaitExpires`: past the
         /// bounded wait, whatever is newest paints, and that release is the other named path (besides a
         /// matched frame) the baseline must account for.
@@ -250,7 +288,9 @@
             func close() async {}
         }
 
-        private func makeModel(backend: (any SpacesDeviceAPIBackend)? = nil) -> TerminalViewerModel {
+        private func makeModel(
+            backend: (any SpacesDeviceAPIBackend)? = nil, retainedScreens: TerminalRetainedScreenStore = TerminalRetainedScreenStore()
+        ) -> TerminalViewerModel {
             let bridgeClient: SpacesDeviceAPIClient
             if let backend {
                 bridgeClient = SpacesDeviceAPIClient(settings: Self.settings, backend: backend)
@@ -259,7 +299,7 @@
             }
             return TerminalViewerModel(
                 session: Self.session, settings: Self.settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
-                bridgeClient: bridgeClient)
+                bridgeClient: bridgeClient, retainedScreens: retainedScreens)
         }
 
         /// A payload carrying a full frame at `columns`x`rows`, mirroring `TerminalViewerOpenPaintTests
