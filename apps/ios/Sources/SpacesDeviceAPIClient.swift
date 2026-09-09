@@ -539,17 +539,26 @@ struct SpacesDeviceAPIClient: Sendable {
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
 
-    /// Renews an attached remote client's lease without changing its attachment mode. A foreground
-    /// terminal detail uses the `.notFound` response to distinguish an expired client row, which it
-    /// must reattach as a viewer before it can take ownership again, from a transient transport failure.
-    func heartbeat(sessionID: String, clientID: String, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil)
-        async throws
-    {
+    /// Renews an attached remote client's lease without changing its attachment mode, and answers with the
+    /// session's state. A foreground terminal detail uses the `.notFound` response to distinguish an
+    /// expired client row, which it must reattach as a viewer before it can take ownership again, from a
+    /// transient transport failure.
+    ///
+    /// - Parameter heldFrame: The render frame this client currently displays. When it names the session's
+    ///   current frame the returned state carries no render update at all, so a viewer returning from the
+    ///   background confirms an unchanged screen in this one round trip and no frame bytes.
+    /// - Returns: The session's state, or nil when the daemon could not read it for a session that has
+    ///   just gone away.
+    func heartbeat(
+        sessionID: String, clientID: String, heldFrame: TerminalHeldFrameIdentity? = nil, timeout: Duration = .seconds(3),
+        commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> GhosttyRemoteSessionStatePayload? {
         let request = SpacesDeviceAPIRequest(
-            command: .terminalControl(.init(action: .heartbeat, sessionID: sessionID, clientID: clientID)), authToken: settings.trimmedAuthToken,
-            clientApp: clientAppIdentity)
+            command: .terminalControl(.init(action: .heartbeat, sessionID: sessionID, clientID: clientID, heldFrameIdentity: heldFrame)),
+            authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+        return response.sessionState
     }
 
     func takeOver(sessionID: String, clientID: String, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil)

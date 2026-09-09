@@ -689,7 +689,13 @@ def metric_scrollback(window):
 
 
 def metric_background(window, mode):
-    """mode "terminal": foreground -> next stream_first_frame/render_frame_payload_receive.
+    """mode "terminal": foreground -> the resume settling, which is whichever comes first of the
+    screen repainting (stream_first_frame/render_frame_payload_receive with render_update=1) and
+    the resume's own state read completing with no frame to follow (explicit_state_refresh_end
+    reason=foreground_resume, render_update=0). A resume heartbeat that carries a changed screen
+    fires that refresh-end event before the frame is decoded and applied, so it does not count as
+    the settle point there; only a frameless confirmation (render_update=0, meaning the held frame
+    already matched) does.
     mode "list": foreground -> next successful overview_refresh_end."""
     if window is None:
         return None
@@ -707,8 +713,12 @@ def metric_background(window, mode):
         if mode == "terminal":
             target = first_named_any(
                 candidates,
-                ("stream_first_frame", "render_frame_payload_receive"),
-                predicate=lambda e: e.get("name") != "render_frame_payload_receive" or attr(e, "render_update") == "1",
+                ("stream_first_frame", "render_frame_payload_receive", "explicit_state_refresh_end"),
+                predicate=lambda e: (
+                    attr(e, "reason") == "foreground_resume" and attr(e, "render_update") == "0"
+                    if e.get("name") == "explicit_state_refresh_end"
+                    else e.get("name") != "render_frame_payload_receive" or attr(e, "render_update") == "1"
+                ),
             )
         else:
             target = first_named(candidates, "overview_refresh_end", predicate=lambda e: attr(e, "success") == "1")
@@ -860,8 +870,8 @@ SCROLLBACK_COLUMNS = [
 ]
 
 BACKGROUND_COLUMNS = [
-    ("resume_p50", "foreground->frame p50 ms", fmt_ms),
-    ("resume_max", "foreground->frame max ms", fmt_ms),
+    ("resume_p50", "foreground->settled p50 ms", fmt_ms),
+    ("resume_max", "foreground->settled max ms", fmt_ms),
     ("frames_p50", "frames/resume p50", fmt_count),
     ("frames_max", "frames/resume max", fmt_count),
     ("kb_p50", "decoded KB/resume p50", fmt_kb),

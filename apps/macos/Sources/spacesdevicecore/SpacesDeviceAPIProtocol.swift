@@ -1976,6 +1976,10 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
     public let selectionEndColumn: UInt16?
     public let selectionEndRow: UInt32?
     public let selectionRectangle: Bool?
+    /// The render frame the requesting client currently displays, sent on `heartbeat`. A heartbeat
+    /// answers with the session's state, and an identity that names the session's current frame lets that
+    /// state omit the render update entirely (see `TerminalHeldFrameIdentity`).
+    public let heldFrameIdentity: TerminalHeldFrameIdentity?
 
     public init(
         action: SpacesDeviceTerminalControlAction, sessionID: String, clientID: String? = nil, client: TerminalClient? = nil,
@@ -1985,7 +1989,7 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         mouseButton: UInt8? = nil, mousePressed: Bool? = nil, mousePointerX: Double? = nil, mousePointerY: Double? = nil,
         mousePointerMods: UInt32? = nil, appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil,
         selectionStartColumn: UInt16? = nil, selectionStartRow: UInt32? = nil, selectionEndColumn: UInt16? = nil, selectionEndRow: UInt32? = nil,
-        selectionRectangle: Bool? = nil
+        selectionRectangle: Bool? = nil, heldFrameIdentity: TerminalHeldFrameIdentity? = nil
     ) {
         self.action = action
         self.sessionID = sessionID
@@ -2017,6 +2021,7 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         self.selectionEndColumn = selectionEndColumn
         self.selectionEndRow = selectionEndRow
         self.selectionRectangle = selectionRectangle
+        self.heldFrameIdentity = heldFrameIdentity
     }
 }
 

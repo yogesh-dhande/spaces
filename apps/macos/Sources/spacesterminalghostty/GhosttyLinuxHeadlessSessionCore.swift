@@ -368,8 +368,8 @@
         /// socket exports for a fresh subscriber. Serving a Device API `.state` from here lets the daemon skip
         /// dialing its own session's unix socket to ask itself a question it can answer directly. Platform
         /// parity with the macOS `GhosttyEmbeddedSessionCore.currentOneShotStatePayload()`.
-        public func currentOneShotStatePayload() -> GhosttyRemoteSessionStatePayload? {
-            makeStatePayload(reason: .initial, exportMode: .selfContained, markNextBroadcastFull: false)
+        public func currentOneShotStatePayload(heldFrame: TerminalHeldFrameIdentity? = nil) -> GhosttyRemoteSessionStatePayload? {
+            makeStatePayload(reason: .initial, exportMode: .selfContained, markNextBroadcastFull: false, heldFrame: heldFrame)
         }
 
         /// The session summary built entirely from this core's in-memory launch configuration and
@@ -1982,10 +1982,13 @@
                 name: "render_frame_payload_publish", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), attributes: attributes)
         }
 
+        /// - Parameter heldFrame: The frame a one-shot reader already displays. When it names the frame this
+        ///   export would produce, the payload carries no render update: see `TerminalHeldFrameIdentity`.
         private func makeStatePayload(
             reason: TerminalRemoteSessionStateReason, runtimeStateOverride: TerminalSessionRuntimeState? = nil,
             exportMode: RenderStateExportMode = .selfContained, markNextBroadcastFull: Bool = false,
-            clipboardWrite: TerminalClipboardWritePayload? = nil, payloadPublishStartedAt: Date? = nil
+            clipboardWrite: TerminalClipboardWritePayload? = nil, payloadPublishStartedAt: Date? = nil,
+            heldFrame: TerminalHeldFrameIdentity? = nil
         ) -> GhosttyRemoteSessionStatePayload? {
             // A nil read here (cache empty, reseed currently failing) rides straight into the payload below:
             // `attachmentSnapshot` on the wire is itself optional, and a subscriber merging updates keeps its
@@ -2014,6 +2017,14 @@
                 let snapshotExportStartedAt = performanceLoggingEnabled ? Date() : nil
                 let capturedFrame = try? renderFrame()
                 frame = capturedFrame?.frame
+                // The reader already displays this exact frame, so the full-grid encode would produce bytes
+                // it drops. The rects this capture drained are still folded into the carry, exactly as the
+                // self-contained `makeRenderUpdate` would have, so the next stream frame keeps reporting how
+                // far content moved. See `TerminalHeldFrameIdentity`.
+                let readerHoldsCurrentFrame = frame.map { heldFrame?.matches($0) == true } ?? false
+                if readerHoldsCurrentFrame, let capturedFrame {
+                    streamScrollRectCarry.fold(rects: capturedFrame.scrollRects, overflowed: capturedFrame.scrollRectsOverflowed)
+                }
                 // `renderFrame()` may have just cleared a scrollback-garbaged selection pin. Broadcasting
                 // that clear from here would reenter this very method (`broadcastCurrentState` calls back
                 // into `makeStatePayload`), so defer it to the next engine-actor turn instead.
@@ -2022,11 +2033,14 @@
                     Task { @TerminalEngineActor [weak self] in self?.broadcastCurrentState(reason: .selection) }
                 }
                 let renderUpdateConstructionStartedAt = performanceLoggingEnabled ? Date() : nil
-                renderUpdateValue = capturedFrame.map {
-                    makeRenderUpdate(
-                        for: $0.frame, reason: reason, nativeScrollRects: $0.scrollRects, nativeScrollRectsOverflowed: $0.scrollRectsOverflowed,
-                        exportMode: exportMode)
-                }
+                renderUpdateValue =
+                    readerHoldsCurrentFrame
+                    ? nil
+                    : capturedFrame.map {
+                        makeRenderUpdate(
+                            for: $0.frame, reason: reason, nativeScrollRects: $0.scrollRects, nativeScrollRectsOverflowed: $0.scrollRectsOverflowed,
+                            exportMode: exportMode)
+                    }
                 if performanceLoggingEnabled, let snapshotExportStartedAt, let renderUpdateConstructionStartedAt {
                     let renderUpdateConstructionMS = TerminalPerformance.elapsedMS(since: renderUpdateConstructionStartedAt)
                     var attributes = GhosttyRenderFrameMetrics.attributes(
