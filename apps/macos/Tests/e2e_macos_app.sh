@@ -2271,20 +2271,21 @@ APPLESCRIPT
 }
 
 # Pierre's inline editor is a contenteditable element. Assigning its AXValue changes the
-# accessibility snapshot but does not dispatch the input events that enable Save. Paste through
-# the focused editor instead, preserving the user's clipboard even when AppleScript fails. Keep
-# this keyboard path scoped to code-pane editors; the generic setter remains the right operation
-# for ordinary native/WebKit form controls.
+# accessibility snapshot but does not dispatch the input events that mark the buffer dirty. Paste
+# through the focused editor instead, preserving the user's clipboard even when AppleScript fails.
+# Keep this keyboard path scoped to code-pane editors; the generic setter remains the right
+# operation for ordinary native/WebKit form controls.
 ui_replace_code_pane_editor_value() {
   local identifier="$1"
   local value="$2"
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   # Pierre may replace the contenteditable between an accessibility wait and the next traversal.
-  # Keep locating, focusing, selecting, and typing in one attempt so a replacement can only make
+  # Keep locating, focusing, selecting, and pasting in one attempt so a replacement can only make
   # an attempt miss; the next attempt starts from the current editor node.
+  local error_file="$TMP_ROOT/ui-replace-editor-value.err"
   while (( SECONDS < deadline )); do
     activate_spaces_pid "$SPACES_PID"
-    if osascript - "$SPACES_PID" "$identifier" "$value" >/dev/null 2>&1 <<'APPLESCRIPT'
+    if osascript - "$SPACES_PID" "$identifier" "$value" >/dev/null 2>"$error_file" <<'APPLESCRIPT'
 on elementMatchesIdentifier(targetElement, targetID)
   tell application "System Events"
     try
@@ -2297,29 +2298,64 @@ on elementMatchesIdentifier(targetElement, targetID)
   return false
 end elementMatchesIdentifier
 
-on focusAndReplaceIdentifier(targetElement, targetID, targetValue)
-  if my elementMatchesIdentifier(targetElement, targetID) then
-    tell application "System Events"
-      set focused of targetElement to true
-      key code 0 using {command down}
-      key code 9 using {command down}
-    end tell
-    return true
-  end if
+on findIdentifier(targetElement, targetID)
+  if my elementMatchesIdentifier(targetElement, targetID) then return targetElement
   tell application "System Events"
     try
       repeat with childElement in UI elements of targetElement
-        if my focusAndReplaceIdentifier(childElement, targetID, targetValue) then return true
+        set found to my findIdentifier(childElement, targetID)
+        if found is not missing value then return found
       end repeat
     end try
     try
       repeat with childElement in rows of targetElement
-        if my focusAndReplaceIdentifier(childElement, targetID, targetValue) then return true
+        set found to my findIdentifier(childElement, targetID)
+        if found is not missing value then return found
       end repeat
     end try
   end tell
-  return false
-end focusAndReplaceIdentifier
+  return missing value
+end findIdentifier
+
+-- The accessibility value joins the editor's rendered lines with its own line separators and
+-- Pierre only renders a window of a long document, so a multi-line paste is recognised by its
+-- first non-empty line rather than by the whole string. Every caller replaces the buffer with
+-- content whose first line the buffer did not hold before, which the pre-paste check relies on.
+on editorReportedValue(editorElement)
+  tell application "System Events"
+    try
+      return (value of attribute "AXValue" of editorElement) as text
+    end try
+  end tell
+  return ""
+end editorReportedValue
+
+on firstNonEmptyLine(targetValue)
+  set savedDelimiters to AppleScript's text item delimiters
+  set AppleScript's text item delimiters to linefeed
+  set rawLines to text items of targetValue
+  set AppleScript's text item delimiters to savedDelimiters
+  repeat with rawLine in rawLines
+    if (rawLine as text) is not "" then return rawLine as text
+  end repeat
+  error "editor replacement value is empty"
+end firstNonEmptyLine
+
+on findInProcess(targetPID, targetID)
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      set frontmost of proc to true
+      repeat with targetWindow in windows of proc
+        try
+          perform action "AXRaise" of targetWindow
+        end try
+        set found to my findIdentifier(targetWindow, targetID)
+        if found is not missing value then return found
+      end repeat
+    end repeat
+  end tell
+  return missing value
+end findInProcess
 
 on run argv
   set targetPID to (item 1 of argv) as integer
@@ -2328,27 +2364,44 @@ on run argv
   set savedClipboard to the clipboard
   try
     set the clipboard to targetValue
-    set replaced to false
+    set firstLine to my firstNonEmptyLine(targetValue)
+    set editorElement to my findInProcess(targetPID, targetID)
+    if editorElement is missing value then error "identifier not found: " & targetID
+    -- A retried attempt whose earlier paste already landed must not paste again: the landed check
+    -- below would then pass on the existing text before the new Cmd+V consumed the clipboard.
+    if my editorReportedValue(editorElement) contains firstLine then
+      set the clipboard to savedClipboard
+      return
+    end if
     tell application "System Events"
-      repeat with proc in every process whose unix id is targetPID
-        set frontmost of proc to true
-        repeat with targetWindow in windows of proc
-          try
-            perform action "AXRaise" of targetWindow
-          end try
-          if my focusAndReplaceIdentifier(targetWindow, targetID, targetValue) then
-            set replaced to true
-            exit repeat
-          end if
-        end repeat
-        if replaced then exit repeat
-      end repeat
+      set focused of editorElement to true
+      key code 0 using {command down}
+      key code 9 using {command down}
     end tell
-    if not replaced then error "identifier not found: " & targetID
-    -- Cmd+V is delivered to WebKit asynchronously; let its input event consume the temporary
-    -- clipboard before restoring the user's original contents.
-    delay 0.1
+    -- Cmd+V is delivered to WebKit asynchronously and WebKit reads the pasteboard only when it
+    -- performs the paste. Restoring the clipboard before that point pastes the user's original
+    -- contents into the buffer instead, so wait until the editor reports the new text, which it
+    -- did not contain before the paste. Autosave can re-attach the editor node while waiting, so
+    -- locate it afresh on every poll.
+    set pasted to false
+    set reported to ""
+    set pasteDeadline to (current date) + 10
+    repeat while (current date) < pasteDeadline
+      delay 0.2
+      set currentElement to my findInProcess(targetPID, targetID)
+      if currentElement is not missing value then
+        set reported to my editorReportedValue(currentElement)
+        if reported contains firstLine then
+          set pasted to true
+          exit repeat
+        end if
+      end if
+    end repeat
     set the clipboard to savedClipboard
+    if not pasted then
+      if (length of reported) > 160 then set reported to text 1 thru 160 of reported
+      error "paste did not reach editor " & targetID & "; editor reports: " & reported
+    end if
   on error errorMessage number errorNumber
     try
       set the clipboard to savedClipboard
@@ -2362,7 +2415,7 @@ APPLESCRIPT
     fi
     sleep 0.2
   done
-  fail "timed out replacing code-pane editor value: $identifier"
+  fail "timed out replacing code-pane editor value: $identifier ($(tr '\n' ' ' <"$error_file"))"
 }
 
 # Sends navigation keystrokes to the current code-pane editor rather than whichever application

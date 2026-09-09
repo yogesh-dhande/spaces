@@ -65,8 +65,17 @@ function queryOpenShadowRoots(root: ParentNode, selector: string): HTMLElement[]
   return matches;
 }
 
+/** Lets Pierre finish the render pass that follows an edit. A stale-render regression paints the
+ *  new text and then reverts the line divs on the next frame, so the rendered text is only worth
+ *  asserting once those frames have run. */
+async function settleRender(frames = 3): Promise<void> {
+  for (let i = 0; i < frames; i += 1) await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+}
+
 describe("DiffView with the real Pierre renderer", () => {
   beforeEach(() => {
+    // jsdom has no layout, so Pierre's caret reveal would throw on the element it scrolls to.
+    Element.prototype.scrollIntoView = function scrollIntoView(): void {};
     vi.stubGlobal("ResizeObserver", NoopResizeObserver);
     vi.stubGlobal("IntersectionObserver", AlwaysVisibleIntersectionObserver);
     vi.stubGlobal("CSSStyleSheet", class {
@@ -273,6 +282,104 @@ describe("DiffView with the real Pierre renderer", () => {
     expect(utility[0]?.closest("[data-file]")).not.toBeNull();
     const unsafeStyle = queryOpenShadowRoots(container, "style[data-unsafe-css]")[0];
     expect(unsafeStyle?.textContent).toContain("[data-file] [data-utility-button]");
+    container.remove();
+  });
+
+  it("repaints the inline editor after a paste replaces a selection spanning both lines", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const onDiffEditChange = vi.fn();
+    const view = new DiffView(container, "unified", { ...hooks(() => {}), onDiffEditChange });
+
+    view.setFiles([twoLineFile()], false);
+    await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
+    view.beginEdit("src/example.txt", "const value = newValue;\nconst other = newValue;\n");
+    await vi.waitFor(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(1));
+    const editorElement = queryOpenShadowRoots(container, "#code-pane-diff-edit-input")[0]!;
+
+    const editor = (view as unknown as {
+      codeView?: {
+        getEditor(id: string): {
+          setSelections(selections: Array<{
+            start: { line: number; character: number };
+            end: { line: number; character: number };
+            direction: "forward" | "backward" | "none";
+          }>): void;
+        } | undefined;
+      };
+    }).codeView?.getEditor("src/example.txt");
+    expect(editor).toBeDefined();
+
+    editor!.setSelections([{ start: { line: 0, character: 0 }, end: { line: 2, character: 0 }, direction: "forward" }]);
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", {
+      value: { getData: (type: string) => (type === "text" ? "PASTED\n" : undefined) },
+    });
+    editorElement.dispatchEvent(paste);
+
+    await vi.waitFor(() => expect(onDiffEditChange).toHaveBeenCalledWith("src/example.txt", "PASTED\n"));
+    await settleRender();
+    // Unified layout keeps both deletion rows, and the pasted text replaces every addition row.
+    expect([...editorElement.children].map((line) => line.textContent)).toEqual([
+      "const value = oldValue;",
+      "const other = oldValue;",
+      "PASTED",
+      "",
+    ]);
+
+    container.remove();
+  });
+it("adopts disk content into the inline editor without reporting it as an unsaved edit", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const onDiffEditChange = vi.fn();
+    const view = new DiffView(container, "unified", { ...hooks(() => {}), onDiffEditChange });
+
+    view.setFiles([twoLineFile()], false);
+    await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
+    view.beginEdit("src/example.txt", "const value = newValue;\nconst other = newValue;\n");
+    await vi.waitFor(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(1));
+    onDiffEditChange.mockClear();
+
+    const disk = "const value = diskValue;\nconst other = diskValue;\n";
+    view.replaceEditContent("src/example.txt", disk, false);
+
+    await vi.waitFor(() => {
+      const surface = queryOpenShadowRoots(container, "#code-pane-diff-edit-input")[0];
+      expect(surface === undefined ? [] : [...surface.children].map((line) => line.textContent)).toEqual([
+        "const value = oldValue;",
+        "const other = oldValue;",
+        "const value = diskValue;",
+        "const other = diskValue;",
+      ]);
+    });
+    await settleRender();
+    // Adopting disk is not typing: the host must not be told the buffer changed, or a clean
+    // adoption becomes an unsaved edit and an in-flight save is mistaken for later typing.
+    expect(onDiffEditChange).not.toHaveBeenCalled();
+    expect((view as unknown as { editing?: { dirty: boolean } }).editing?.dirty).toBe(false);
+
+    // The next real edit is still reported, so the adoption suppresses one event and no more.
+    const editorElement = queryOpenShadowRoots(container, "#code-pane-diff-edit-input")[0]!;
+    const editor = (view as unknown as {
+      codeView?: {
+        getEditor(id: string): {
+          setSelections(selections: Array<{
+            start: { line: number; character: number };
+            end: { line: number; character: number };
+            direction: "forward" | "backward" | "none";
+          }>): void;
+        } | undefined;
+      };
+    }).codeView?.getEditor("src/example.txt");
+    editor!.setSelections([{ start: { line: 0, character: 0 }, end: { line: 2, character: 0 }, direction: "forward" }]);
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", {
+      value: { getData: (type: string) => (type === "text" ? "TYPED\n" : undefined) },
+    });
+    editorElement.dispatchEvent(paste);
+    await vi.waitFor(() => expect(onDiffEditChange).toHaveBeenCalledWith("src/example.txt", "TYPED\n"));
+
     container.remove();
   });
 });

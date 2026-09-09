@@ -23,7 +23,7 @@ const capturedCodeViewOptions = vi.hoisted(() => ({
   current: undefined as
     | undefined
     | {
-        onItemEditChange: (item: { id?: string; type?: string } | undefined, file: { contents: string }) => void;
+        onItemEditChange: (event: { file: { contents: string } }, item: { id?: string; type?: string } | undefined) => void;
         onLineClick?: (event: { type: "diff-line"; lineNumber: number; annotationSide?: string }, context: { type: string; item: { id: string } }) => void;
         renderHeaderMetadata?: (file: { name: string }) => HTMLElement | undefined;
         onPostRender?: (node: HTMLElement, ...args: unknown[]) => void;
@@ -39,7 +39,7 @@ const capturedCodeViewOptions = vi.hoisted(() => ({
 vi.mock("@pierre/diffs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@pierre/diffs")>();
   class FakeCodeView {
-    constructor(options: { onItemEditChange: (item: unknown, file: { contents: string }) => void }) {
+    constructor(options: { onItemEditChange: (event: { file: { contents: string } }, item: unknown) => void }) {
       capturedCodeViewOptions.current = options;
     }
     setup(): void {}
@@ -55,7 +55,7 @@ vi.mock("@pierre/diffs", async (importOriginal) => {
     // Models an attach that completed instantly so `completeEditorAttach`'s poll resolves
     // on its first frame (see the matching fake in editorView.test.ts).
     getEditor(): object {
-      return {};
+      return { getViewState: () => ({ selections: undefined }) };
     }
     updateItem(): void {}
     addItem(): void {}
@@ -1562,7 +1562,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
 
     await mountEditableDiff(uncommittedAdded);
     await startEdit();
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my added edit\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "my added edit\n" } }, { id: "editable.ts", type: "diff" });
 
     switchToLastCommit(container);
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
@@ -1677,7 +1677,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
       resolveDiff(0, [lastCommitFile], "last-commit-original");
       await mounted;
       await startEdit();
-      capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my unsaved edit\n" });
+      capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "my unsaved edit\n" } }, { id: "editable.ts", type: "diff" });
 
       useFakeTimersWithImmediatePaint();
       fireDiffSignature();
@@ -1733,7 +1733,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     resolveDiff(0, [initialFile], "last-commit-overlap-initial");
     await mounted;
     await startEdit();
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "value = mine\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "value = mine\n" } }, { id: "editable.ts", type: "diff" });
 
     fireDiffSignature();
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
@@ -1770,7 +1770,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     resolveDiff(0, [initialFile], "last-commit-merge-initial");
     await mounted;
     await startEdit();
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: mine });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: mine } }, { id: "editable.ts", type: "diff" });
 
     fireDiffSignature();
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
@@ -1805,7 +1805,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
 
     await mountEditableDiff(refFile);
     await startEdit();
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my dirty edit\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "my dirty edit\n" } }, { id: "editable.ts", type: "diff" });
 
     switchToLastCommit(container);
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
@@ -1834,7 +1834,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await mountEditableDiff(lastCommitFile);
     await startEdit();
     await vi.waitFor(() => expect(capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })).toBeDefined());
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my dirty edit\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "my dirty edit\n" } }, { id: "editable.ts", type: "diff" });
 
     switchToUncommitted(container);
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
@@ -1861,7 +1861,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
 
     await mountEditableDiff(lastCommitFile);
     await startEdit();
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my dirty edit\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "my dirty edit\n" } }, { id: "editable.ts", type: "diff" });
     hoisted.workspaceFileRead.mockRejectedValueOnce(new SpacesBridgeError("internalError", "baseline unavailable"));
 
     switchToUncommitted(container);
@@ -1888,7 +1888,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
 
     await mountEditableDiff(lastCommitFile);
     await startEdit();
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my dirty edit\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "my dirty edit\n" } }, { id: "editable.ts", type: "diff" });
     switchToUncommitted(container);
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
     rejectDiff(1, new SpacesBridgeError("invalidArgument", "comparison unavailable"));
@@ -1906,7 +1906,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     hoisted.workspaceFileRead.mockResolvedValue({ content: "disk before\n", sha256: "sha-disk", size: 12 });
     await mountEditableDiff();
     await startEdit();
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my dirty edit\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "my dirty edit\n" } }, { id: "editable.ts", type: "diff" });
 
     switchToLastCommit(container);
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
@@ -1944,7 +1944,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await vi.waitFor(() => expect(hoisted.workspaceDiffManifestRelease).toHaveBeenCalledTimes(1));
     await startEdit();
     await vi.waitFor(() => expect(capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })).toBeDefined());
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my dirty edit\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "my dirty edit\n" } }, { id: "editable.ts", type: "diff" });
     expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({ dirty: true });
 
     useFakeTimersWithImmediatePaint();
@@ -1978,7 +1978,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await vi.waitFor(() => expect(hoisted.workspaceDiffManifestRelease).toHaveBeenCalledTimes(1));
     await startEdit();
     await vi.waitFor(() => expect(capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })).toBeDefined());
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my dirty edit\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "my dirty edit\n" } }, { id: "editable.ts", type: "diff" });
 
     useFakeTimersWithImmediatePaint();
     hoisted.workspaceDiffFileChunk.mockRejectedValueOnce(new Error("patch transport dropped"));
@@ -2054,7 +2054,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     hoisted.workspaceFileRead.mockResolvedValue({ content: "disk before\n", sha256: "sha-disk", size: 12 });
     await mountEditableDiff();
     await startEdit();
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my dirty edit\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "my dirty edit\n" } }, { id: "editable.ts", type: "diff" });
 
     switchToLastCommit(container);
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
@@ -2239,12 +2239,12 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
     await vi.waitFor(() => expect(capturedCodeViewOptions.current?.renderHeaderMetadata).toBeDefined());
 
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "saved text\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "saved text\n" } }, { id: "editable.ts", type: "diff" });
     const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
     header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!.click();
     await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith("editable.ts", "saved text\n", { baseSHA256: "sha-before", purpose: "inlineDiff" }));
 
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "typed after save\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "typed after save\n" } }, { id: "editable.ts", type: "diff" });
     resolveWrite!({ ok: true, sha256: "sha-saved" });
 
     await vi.waitFor(() =>
@@ -2282,7 +2282,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
 
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "saved\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "saved\n" } }, { id: "editable.ts", type: "diff" });
     // Start the signature refresh before Save. Its file read is deliberately held while the save
     // completes, so the eventual snapshot has the old CAS baseline.
     hoisted.diffSignatureCallbacks.at(-1)!();
@@ -2297,7 +2297,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
       "saved\n",
       { baseSHA256: "sha-before", purpose: "inlineDiff" },
     ));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "typed after save\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "typed after save\n" } }, { id: "editable.ts", type: "diff" });
     resolveWrite!({ ok: true, sha256: "sha-saved" });
     await vi.waitFor(() => expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
       content: "typed after save\n",
@@ -2337,7 +2337,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
 
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "saved\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "saved\n" } }, { id: "editable.ts", type: "diff" });
     const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
     header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!.click();
     await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith(
@@ -2385,7 +2385,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
 
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "saved\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "saved\n" } }, { id: "editable.ts", type: "diff" });
     const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
     header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!.click();
     await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith(
@@ -2432,7 +2432,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await mountEditableDiff(testFile);
     await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "line 1 mine\nline 2\nline 3\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "line 1 mine\nline 2\nline 3\n" } }, { id: "editable.ts", type: "diff" });
 
     hoisted.diffSignatureCallbacks.at(-1)!();
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
@@ -2441,7 +2441,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
 
     // The disk read is still pending when the user edits the current buffer again. Reconciliation
     // must use this latest same-session content rather than discard the disk snapshot as stale.
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "line 1 mine\nline 2\nline 3\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "line 1 mine\nline 2\nline 3\n" } }, { id: "editable.ts", type: "diff" });
     resolveReconcileRead!({ content: "line 1\nline 2\nline 3 from disk\n", sha256: "sha-disk", size: 34 });
 
     await vi.waitFor(() => expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
@@ -2470,7 +2470,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
 
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "line 1 from mine\nline 2\nline 3\nline 4\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "line 1 from mine\nline 2\nline 3\nline 4\n" } }, { id: "editable.ts", type: "diff" });
     const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
     header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!.click();
     await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith(
@@ -2517,7 +2517,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await mountEditableDiff(testFile);
     await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my version\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "my version\n" } }, { id: "editable.ts", type: "diff" });
 
     // First refresh establishes the read-only conflict comparison.
     hoisted.diffSignatureCallbacks.at(-1)!();
@@ -2567,7 +2567,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
 
     await startEdit("editable.ts");
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "first edited\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "first edited\n" } }, { id: "editable.ts", type: "diff" });
 
     await startEdit("second.ts");
     const pendingHeader = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
@@ -2604,7 +2604,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
 
     await startEdit("editable.ts");
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "first edited\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "first edited\n" } }, { id: "editable.ts", type: "diff" });
     const firstHeader = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
     firstHeader.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!.click();
     await vi.waitFor(() => expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith("editable.ts", "first edited\n", { baseSHA256: "sha-first", purpose: "inlineDiff" }));
@@ -2620,7 +2620,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await vi.waitFor(() =>
       expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState?.path).toBe("second.ts"),
     );
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "second.ts", type: "diff" }, { contents: "second edited\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "second edited\n" } }, { id: "second.ts", type: "diff" });
 
     resolveFirstWrite!({ ok: true, sha256: "sha-first-saved" });
     await vi.waitFor(() =>
@@ -2724,7 +2724,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await mountEditableDiff();
     await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "unsaved recovery\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "unsaved recovery\n" } }, { id: "editable.ts", type: "diff" });
 
     hoisted.diffSignatureCallbacks.at(-1)!();
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
@@ -2743,7 +2743,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await mountEditableDiff();
     await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "unsaved recovery\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "unsaved recovery\n" } }, { id: "editable.ts", type: "diff" });
 
     useFakeTimersWithImmediatePaint();
     fireDiffSignature();
@@ -2770,7 +2770,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await mountEditableDiff();
     await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "unsaved recovery\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "unsaved recovery\n" } }, { id: "editable.ts", type: "diff" });
 
     useFakeTimersWithImmediatePaint();
     hoisted.workspaceDiffFileChunk.mockRejectedValueOnce(new Error("patch transport dropped"));
@@ -2806,7 +2806,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await mountEditableDiff(testFile);
     await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "my version\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "my version\n" } }, { id: "editable.ts", type: "diff" });
 
     hoisted.diffSignatureCallbacks.at(-1)!();
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
@@ -2849,7 +2849,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await mountEditableDiff(testFile);
     await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "restore mine\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "restore mine\n" } }, { id: "editable.ts", type: "diff" });
 
     hoisted.diffSignatureCallbacks.at(-1)!();
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
@@ -2986,7 +2986,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await mountEditableDiff();
     await startEdit();
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
-    capturedCodeViewOptions.current!.onItemEditChange({ id: "editable.ts", type: "diff" }, { contents: "edited\n" });
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "edited\n" } }, { id: "editable.ts", type: "diff" });
     const header = capturedCodeViewOptions.current!.renderHeaderMetadata!({ name: "editable.ts" })!;
     const save = header.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")!;
     save.click();
@@ -5057,7 +5057,7 @@ describe("mountRoot's Editor mode — Files/Changes sidebar and recent-files rec
      *  editor. `ensureCodeView` (and so this capture) only happens on the first successful open. */
     async function openAndDirty(path: string): Promise<void> {
       await openFileRowAndWait(path);
-      capturedCodeViewOptions.current!.onItemEditChange(undefined, { contents: `${path} content edited` });
+      capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: `${path} content edited` } }, undefined);
     }
 
     it("a refused open (dirty buffer) records nothing and leaves the discard banner up", async () => {
