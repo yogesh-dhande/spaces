@@ -347,6 +347,152 @@
             XCTAssertFalse(model.isHoldingOpenScreenUpdatesForTesting)
         }
 
+        // MARK: - Reopening a terminal the app already showed
+
+        /// The reopen contract (#674): a terminal the app painted before comes back with that screen
+        /// already on it, from memory, with no hold and nothing on the wire yet. `start()` is synchronous
+        /// with the test body up to its own return, so a request the open schedules cannot have gone out
+        /// by the assertions below, which is exactly the point being made.
+        func testAReopenPaintsTheRetainedScreenBeforeAnyRequestIsSent() async throws {
+            let store = TerminalRetainedScreenStore()
+            try await seedRetainedScreen(in: store, columns: 40, rows: 30)
+
+            let backend = TransportCountingBackend()
+            let reopened = makeModel(backend: backend, retainedScreens: store)
+            defer { reopened.stop() }
+            reopened.start()
+
+            XCTAssertEqual(reopened.ownerRenderEpoch?.bootstrapSnapshot?.columns, 40, "the reopen paints the screen the app already had")
+            XCTAssertEqual(reopened.ownerRenderEpoch?.bootstrapSnapshot?.rows, 30)
+            XCTAssertTrue(reopened.showsTerminalSurface, "the surface mounts on the retained screen, before ownership is known")
+            XCTAssertFalse(reopened.isHoldingOpenScreenUpdatesForTesting, "a screen is already on view, so there is nothing for a hold to protect")
+            XCTAssertTrue(backend.sentCommands.isEmpty, "the retained screen paints before the open asks the device anything")
+        }
+
+        /// The retained screen is a picture, not state: it must not become `latestState` (the reduction
+        /// chain's baseline) and must not stand in for a frame this lifecycle actually received. So a
+        /// viewport report at the retained screen's own grid still finds nothing to match: the
+        /// stored-frame release exists for a frame this lifecycle reduced, not for one painted from
+        /// memory.
+        func testARetainedScreenIsPaintedWithoutBecomingTheModelsState() async throws {
+            let store = TerminalRetainedScreenStore()
+            try await seedRetainedScreen(in: store, columns: 40, rows: 30)
+
+            let reopened = makeModel(retainedScreens: store)
+            defer { reopened.stop() }
+            reopened.start()
+
+            XCTAssertNil(reopened.latestState, "the retained paint is not a state this lifecycle has confirmed")
+            XCTAssertEqual(reopened.renderMode, "status", "ownership is still unknown: the retained screen says nothing about who owns the session")
+            XCTAssertFalse(reopened.isOwner)
+
+            reopened.updateViewportSize(columns: 40, rows: 30)
+
+            XCTAssertFalse(reopened.isHoldingOpenScreenUpdatesForTesting, "no hold was armed, so the report has nothing to release")
+            XCTAssertEqual(reopened.ownerRenderEpoch?.bootstrapSnapshot?.columns, 40, "the retained screen stays up until the session reports one")
+        }
+
+        /// The live screen replaces the retained one through the ordinary apply path, at this phone's own
+        /// grid, and takes over the epoch the surface draws.
+        func testTheBootstrapFrameReplacesTheRetainedScreen() async throws {
+            let store = TerminalRetainedScreenStore()
+            try await seedRetainedScreen(in: store, columns: 80, rows: 24)
+
+            let reopened = makeModel(retainedScreens: store)
+            defer { reopened.stop() }
+            reopened.start()
+            XCTAssertEqual(reopened.ownerRenderEpoch?.bootstrapSnapshot?.columns, 80, "sanity: the reopen starts on the retained screen")
+            reopened.updateViewportSize(columns: 40, rows: 30)
+
+            await reopened.applyLatestState(
+                try Self.framedState(
+                    columns: 40, rows: 30, revision: 2, emittedAt: "2026-06-04T14:23:40Z", owner: reopened.remoteClientForTesting,
+                    reason: TerminalRemoteSessionStateReason.attachmentState.rawValue), isOutOfBand: false)
+
+            XCTAssertTrue(reopened.isOwner)
+            XCTAssertEqual(reopened.ownerRenderEpoch?.bootstrapSnapshot?.columns, 40, "the live frame at the phone's grid replaces the retained one")
+            XCTAssertEqual(reopened.ownerRenderEpoch?.bootstrapSnapshot?.rows, 30)
+            XCTAssertNotNil(reopened.latestState, "the live payload is the state this lifecycle now holds")
+        }
+
+        /// A session that ended while the app was away shows its final transcript, not the screen it had
+        /// before: the ended render is what the view reports from then on, and the retained screen is
+        /// dropped so a later open never brings it back.
+        func testASessionReportedEndedReplacesTheRetainedScreen() async throws {
+            let store = TerminalRetainedScreenStore()
+            try await seedRetainedScreen(in: store, columns: 40, rows: 30)
+
+            let reopened = makeModel(retainedScreens: store)
+            defer { reopened.stop() }
+            reopened.start()
+            XCTAssertNotNil(reopened.ownerRenderEpoch, "sanity: the reopen starts on the retained screen")
+
+            await reopened.applyLatestState(
+                try Self.framedState(
+                    columns: 80, rows: 24, revision: 2, emittedAt: "2026-06-04T14:23:40Z", state: .exited,
+                    reason: TerminalRemoteSessionStateReason.runtimeState.rawValue), isOutOfBand: false)
+
+            XCTAssertEqual(reopened.renderMode, "ended")
+            XCTAssertNil(reopened.ownerRenderEpoch, "the ended transcript is what the surface draws now")
+            XCTAssertNotNil(reopened.endedRender)
+            XCTAssertTrue(store.retainedSessionIDs.isEmpty, "an ended session's screen is not worth keeping for a next open")
+        }
+
+        /// A session another client owns is not mirrored on iOS at all, so the retained screen gives way
+        /// to the same status text a first open would show, and the store drops it: that screen was
+        /// exported for ownership this device no longer has.
+        func testASessionOwnedElsewhereReplacesTheRetainedScreen() async throws {
+            let store = TerminalRetainedScreenStore()
+            try await seedRetainedScreen(in: store, columns: 40, rows: 30)
+
+            let reopened = makeModel(retainedScreens: store)
+            defer { reopened.stop() }
+            reopened.start()
+            XCTAssertNotNil(reopened.ownerRenderEpoch, "sanity: the reopen starts on the retained screen")
+
+            await reopened.applyLatestState(Self.otherOwnerState(emittedAt: "2026-06-04T14:23:40Z", state: .running), isOutOfBand: false)
+
+            XCTAssertFalse(reopened.isOwner)
+            XCTAssertNil(reopened.ownerRenderEpoch, "another client's session shows its status text, not a screen")
+            XCTAssertFalse(reopened.showsTerminalSurface)
+            XCTAssertTrue(store.retainedSessionIDs.isEmpty)
+        }
+
+        /// The daemon's owner report lags a lifecycle: a detail that is stopped and restarted, or swiped
+        /// away and reopened before its detach lands, is still listed under the previous run's client. That
+        /// client is one of this app's own viewers, so ownership never moved to another device and the
+        /// screen the reopen just painted stays up; reading it as another device would drop the screen for
+        /// good, and the next open of the same terminal would be blank again.
+        func testAReopenWhosePreviousViewerIsStillListedAsOwnerKeepsTheRetainedScreen() async throws {
+            let store = TerminalRetainedScreenStore()
+            let previousViewer = try await seedRetainedScreen(in: store, columns: 40, rows: 30)
+
+            let reopened = makeModel(retainedScreens: store)
+            defer { reopened.stop() }
+            reopened.start()
+            XCTAssertNotNil(reopened.ownerRenderEpoch, "sanity: the reopen starts on the retained screen")
+
+            await reopened.applyLatestState(
+                Self.otherOwnerState(emittedAt: "2026-06-04T14:23:40Z", state: .running, owner: previousViewer), isOutOfBand: false)
+
+            XCTAssertFalse(reopened.isOwner, "the owner named is the previous run's client, not this one")
+            XCTAssertEqual(store.retainedSessionIDs, [Self.sessionID], "this app's own previous viewer is not another device")
+            XCTAssertNotNil(reopened.ownerRenderEpoch, "the retained screen stays up while the previous run's detach lands")
+            XCTAssertTrue(reopened.showsTerminalSurface)
+        }
+
+        /// A first open of a session the app has never painted is unchanged: nothing to paint from, so the
+        /// hold is armed exactly as before.
+        func testAFirstOpenWithNoRetainedScreenStillHoldsItsFirstPaint() {
+            let model = makeModel(retainedScreens: TerminalRetainedScreenStore())
+            defer { model.stop() }
+
+            model.start()
+
+            XCTAssertNil(model.ownerRenderEpoch, "there is no screen to bring back")
+            XCTAssertTrue(model.isHoldingOpenScreenUpdatesForTesting, "a first open still holds its first paint")
+        }
+
         // MARK: - One command connection per open
 
         /// Every request the open path makes rides this viewer's own command channel, so a cold open costs
@@ -364,6 +510,41 @@
 
             XCTAssertTrue(backend.sentCommands.contains("terminal:takeover"))
             XCTAssertEqual(backend.transportCount, 1, "the viewer's requests must not each dial their own connection")
+        }
+
+        /// The connect bootstrap read and the session stream's own dial are independent, so the open pays
+        /// for them once rather than twice: the read is issued before `subscribe` and awaited after it.
+        /// The backend here answers `subscribe` only once the state read has actually reached it, so an
+        /// open that went back to issuing the read after the subscribe returned would wait out this
+        /// backend's own bound and fail rather than pass slowly.
+        func testTheConnectBootstrapReadIsInFlightWhileTheStreamIsStillConnecting() async throws {
+            let backend = StateReadDuringSubscribeBackend()
+            let model = makeModel(backend: backend)
+            defer { model.stop() }
+
+            model.start()
+
+            await waitUntil("the subscribe to be answered") { backend.subscribeCount == 1 }
+            XCTAssertTrue(backend.sawStateReadBeforeAnsweringSubscribe, "the bootstrap read must overlap the stream's connect, not follow it")
+        }
+
+        /// Leaving the terminal while the connect bootstrap read is still on the wire cancels that read
+        /// with the attempt that issued it. The read rides this viewer's command channel, which serves one
+        /// request at a time and gives a cancelled caller's turn up immediately, so a read left to settle
+        /// on its own would hold the channel for its full 12 s timeout, with the dismissal detach and the
+        /// next attempt's own bootstrap read queued behind it.
+        func testStoppingDuringTheConnectBootstrapReadCancelsIt() async throws {
+            let backend = ParkedStateReadBackend()
+            let model = makeModel(backend: backend)
+            defer { model.stop() }
+
+            model.start()
+            await waitUntil("the bootstrap read to be in flight") { backend.parkedStateReads == 1 }
+
+            model.stop()
+
+            await waitUntil("the read to be cancelled with its attempt") { backend.cancelledStateReads == 1 }
+            XCTAssertEqual(backend.cancelledStateReads, 1, "the bootstrap read must not outlive the attempt that issued it")
         }
 
         // MARK: - Release ordering: reduce marks, submit confirms
@@ -465,7 +646,12 @@
 
         // MARK: - Fixtures
 
-        private func makeModel(state: TerminalSessionState = .running, backend: (any SpacesDeviceAPIBackend)? = nil) -> TerminalViewerModel {
+        /// `retainedScreens` is what makes two models in one test the same terminal reopened: the store
+        /// outlives a viewer in the app the same way, held by `SpacesMobileAppModel`.
+        private func makeModel(
+            state: TerminalSessionState = .running, backend: (any SpacesDeviceAPIBackend)? = nil,
+            retainedScreens: TerminalRetainedScreenStore = TerminalRetainedScreenStore()
+        ) -> TerminalViewerModel {
             let bridgeClient: SpacesDeviceAPIClient
             if let backend {
                 bridgeClient = SpacesDeviceAPIClient(settings: Self.settings, backend: backend)
@@ -474,7 +660,27 @@
             }
             return TerminalViewerModel(
                 session: Self.session(state: state), settings: Self.settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
-                bridgeClient: bridgeClient)
+                bridgeClient: bridgeClient, retainedScreens: retainedScreens)
+        }
+
+        /// Runs one open all the way to a painted owner screen at `columns`x`rows` and leaves, which is
+        /// what puts that screen in `store` for the reopen the calling test is about. Answers the client
+        /// that open ran as, which is the client the daemon keeps naming as owner until its detach lands.
+        @discardableResult private func seedRetainedScreen(in store: TerminalRetainedScreenStore, columns: Int, rows: Int) async throws
+            -> TerminalClient
+        {
+            let model = makeModel(retainedScreens: store)
+            model.start()
+            model.updateViewportSize(columns: columns, rows: rows)
+            await model.applyLatestState(
+                try Self.framedState(
+                    columns: columns, rows: rows, revision: 1, emittedAt: "2026-06-04T14:23:31Z", owner: model.remoteClientForTesting,
+                    reason: TerminalRemoteSessionStateReason.attachmentState.rawValue), isOutOfBand: false)
+            XCTAssertNotNil(model.ownerRenderEpoch, "the open being seeded from must actually have painted")
+            let client = model.remoteClientForTesting
+            model.stop()
+            XCTAssertEqual(store.retainedSessionIDs, [Self.sessionID], "leaving keeps the screen the open painted")
+            return client
         }
 
         /// A payload carrying a full frame at `columns`x`rows`, the shape a session exports whenever it
@@ -503,9 +709,14 @@
                 renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
         }
 
-        private nonisolated static func otherOwnerState(emittedAt: String, state: TerminalSessionState) -> GhosttyRemoteSessionStatePayload {
-            let ownerClient = TerminalClient(
-                id: "mac-owner", kind: .localWindow, identity: TerminalClientIdentity(label: "mac"), connectedAt: emittedAt)
+        /// A payload naming `owner` as the session's active owner and carrying no screen, the shape the
+        /// daemon reports for a session some other client holds. `owner` defaults to a client on another
+        /// device; a test about this app's own previous viewer passes that viewer's client instead.
+        private nonisolated static func otherOwnerState(emittedAt: String, state: TerminalSessionState, owner: TerminalClient? = nil)
+            -> GhosttyRemoteSessionStatePayload
+        {
+            let ownerClient =
+                owner ?? TerminalClient(id: "mac-owner", kind: .localWindow, identity: TerminalClientIdentity(label: "mac"), connectedAt: emittedAt)
             return GhosttyRemoteSessionStatePayload(
                 sessionID: sessionID, reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, emittedAt: emittedAt,
                 sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
@@ -613,6 +824,160 @@
                 func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
                     backend.record(request)
                     return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+
+                func close() async {}
+            }
+        }
+
+        /// Answers requests in memory and holds `openSessionStream` until the viewer's `.state` read has
+        /// arrived, so a test can tell an open that issues that read alongside the stream's connect from
+        /// one that issues it only after the connect returns. The wait is bounded so the latter fails on
+        /// the assertion rather than hanging the suite.
+        private final class StateReadDuringSubscribeBackend: SpacesDeviceAPIBackend, @unchecked Sendable {
+            private let lock = NSLock()
+            private var stateReads = 0
+            private var subscribes = 0
+            private var sawStateRead = false
+
+            var subscribeCount: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return subscribes
+            }
+
+            var sawStateReadBeforeAnsweringSubscribe: Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return sawStateRead
+            }
+
+            func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { RecordingTransport(backend: self) }
+
+            func openSessionStream(
+                request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
+            ) async throws -> SpacesDeviceAPIStreamHandle {
+                let deadline = ContinuousClock().now + .seconds(2)
+                while ContinuousClock().now < deadline && !hasStateRead() { try? await Task.sleep(for: .milliseconds(5)) }
+                lock.lock()
+                sawStateRead = stateReads > 0
+                subscribes += 1
+                lock.unlock()
+                return SpacesDeviceAPIStreamHandle(host: "127.0.0.1") {}
+            }
+
+            private func hasStateRead() -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return stateReads > 0
+            }
+
+            fileprivate func record(_ request: SpacesDeviceAPIRequest) {
+                guard case .state = request.command else { return }
+                lock.lock()
+                stateReads += 1
+                lock.unlock()
+            }
+
+            private struct RecordingTransport: SpacesDeviceAPIRequestTransport {
+                let backend: StateReadDuringSubscribeBackend
+
+                func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                    backend.record(request)
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+
+                func close() async {}
+            }
+        }
+
+        /// Parks every `.state` request until the calling task is cancelled, answers everything else in
+        /// memory, and connects the session stream immediately. That is a bootstrap read still on the wire
+        /// when the viewer is torn down, which is the case the cancellation test needs. A parked read that
+        /// is never cancelled is failed after a bounded wait so the suite reports the defect rather than
+        /// hanging on it.
+        private final class ParkedStateReadBackend: SpacesDeviceAPIBackend, @unchecked Sendable {
+            private let lock = NSLock()
+            private var nextID: UInt64 = 0
+            private var waiters: [UInt64: CheckedContinuation<SpacesDeviceAPIResponse, Error>] = [:]
+            /// Ids cancelled before their continuation was registered. `withTaskCancellationHandler` runs
+            /// its handler immediately for an already-cancelled task, which can beat the parking below.
+            private var cancelledBeforeParking: Set<UInt64> = []
+            private var parked = 0
+            private var cancelled = 0
+
+            var parkedStateReads: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return parked
+            }
+
+            var cancelledStateReads: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return cancelled
+            }
+
+            func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { ParkingTransport(backend: self) }
+
+            func openSessionStream(
+                request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
+            ) async throws -> SpacesDeviceAPIStreamHandle { SpacesDeviceAPIStreamHandle(host: "127.0.0.1") {} }
+
+            fileprivate func park() async throws -> SpacesDeviceAPIResponse {
+                lock.lock()
+                let id = nextID
+                nextID += 1
+                parked += 1
+                lock.unlock()
+                return try await withTaskCancellationHandler {
+                    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SpacesDeviceAPIResponse, Error>) in
+                        lock.lock()
+                        if cancelledBeforeParking.remove(id) != nil {
+                            cancelled += 1
+                            lock.unlock()
+                            continuation.resume(throwing: CancellationError())
+                            return
+                        }
+                        waiters[id] = continuation
+                        lock.unlock()
+                        Task.detached { [weak self] in
+                            try? await Task.sleep(for: .seconds(3))
+                            self?.expire(id)
+                        }
+                    }
+                } onCancel: {
+                    self.cancel(id)
+                }
+            }
+
+            private func cancel(_ id: UInt64) {
+                lock.lock()
+                guard let continuation = waiters.removeValue(forKey: id) else {
+                    cancelledBeforeParking.insert(id)
+                    lock.unlock()
+                    return
+                }
+                cancelled += 1
+                lock.unlock()
+                continuation.resume(throwing: CancellationError())
+            }
+
+            private func expire(_ id: UInt64) {
+                lock.lock()
+                let continuation = waiters.removeValue(forKey: id)
+                lock.unlock()
+                continuation?.resume(throwing: SpacesDeviceAPIClientError.requestTimedOut)
+            }
+
+            private struct ParkingTransport: SpacesDeviceAPIRequestTransport {
+                let backend: ParkedStateReadBackend
+
+                func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                    guard case .state = request.command else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    return try await backend.park()
                 }
 
                 func close() async {}

@@ -77,7 +77,7 @@ struct TerminalDetailView: View {
             initialValue: TerminalViewerModel(
                 session: session, settings: settings, onAuthenticationRequired: onAuthenticationRequired,
                 onOpenTerminalDeepLink: { link in Task { await appModel.openTerminalDeepLink(link) } }, bridgeClient: appModel.deviceClient,
-                isDemoMode: appModel.isDemoModeEnabled, openSource: openSource))
+                isDemoMode: appModel.isDemoModeEnabled, openSource: openSource, retainedScreens: appModel.retainedTerminalScreens))
     }
 
     var body: some View {

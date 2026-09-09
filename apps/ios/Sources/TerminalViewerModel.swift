@@ -230,6 +230,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     @ObservationIgnored private let remoteMediaDownloader: @Sendable (URL, SpacesDeviceTerminalLinkArtifactKind) async throws -> URL
     @ObservationIgnored private let linkPreviewCacheDirectory: URL
     private var remoteClient: TerminalClient
+    /// Where this viewer's screen outlives it. The app model owns the store, so a reopen of this same
+    /// session finds the screen the previous viewer painted; a caller that passes none (every test that
+    /// is not about reopening) gets an empty store of its own and behaves exactly as a first open does.
+    @ObservationIgnored private let retainedScreens: TerminalRetainedScreenStore
     private var e2eConfig: SpacesMobileE2EConfig { .shared }
     private var streamHandle: SpacesDeviceAPIStreamHandle?
     private var reconnectTask: Task<Void, Never>?
@@ -393,6 +397,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private var hasConfirmedOwnerInputReadiness = false
     private var ownerRecoveryGraceDeadline: Date?
     private var ownerRenderEpochState: GhosttyRemoteTerminalOwnerEpoch?
+    /// The screen this open painted from `TerminalRetainedScreenStore` before it asked the device
+    /// anything (see `paintRetainedScreenIfAvailable`). Deliberately not `ownerRenderEpochState`: this is
+    /// a picture of what the app last showed, not a state this lifecycle has confirmed, so every owner
+    /// rule that reads `ownerRenderEpochState` (the ownership handshake's own bootstrap paint, the input
+    /// readiness gates, `currentOwnerEpoch`, the render mode) must keep reading nil while it is up, and
+    /// only the view-facing `ownerRenderEpoch` falls back to it. Cleared the moment a live epoch begins,
+    /// the session ends, another client is found to own the session, or the lifecycle stops.
+    private var retainedScreenEpochState: GhosttyRemoteTerminalOwnerEpoch?
     /// Reduces incoming payloads off the main actor, in arrival order across every route into this
     /// model: the live subscription, the direct `.state` fetch, and the state a takeover returns. It
     /// owns the reducer, so the render-update baseline and the previous stored payload the next reduce
@@ -541,7 +553,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         session: SpacesDeviceTerminalSessionSummary, settings: SpacesMobileConnectionSettings,
         onAuthenticationRequired: @escaping @MainActor @Sendable (String) -> Void,
         onOpenTerminalDeepLink: @escaping @MainActor @Sendable (SpacesTerminalDeepLink) -> Void, bridgeClient: SpacesDeviceAPIClient? = nil,
-        isDemoMode: Bool = false, openSource: String = "list",
+        isDemoMode: Bool = false, openSource: String = "list", retainedScreens: TerminalRetainedScreenStore = TerminalRetainedScreenStore(),
         remoteMediaDownloader: @escaping @Sendable (URL, SpacesDeviceTerminalLinkArtifactKind) async throws -> URL = TerminalViewerModel
             .defaultRemoteMediaDownloader, linkPreviewCacheDirectory: URL? = nil
     ) {
@@ -549,6 +561,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         self.settings = settings
         self.isDemoMode = isDemoMode
         self.openSource = openSource
+        self.retainedScreens = retainedScreens
         self.onAuthenticationRequired = onAuthenticationRequired
         self.onOpenTerminalDeepLink = onOpenTerminalDeepLink
         let resolvedBridgeClient = bridgeClient ?? SpacesDeviceAPIClient(settings: settings, deviceName: UIDevice.current.name)
@@ -559,6 +572,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             linkPreviewCacheDirectory
             ?? FileManager.default.temporaryDirectory.appendingPathComponent("SpacesTerminalLinkPreviews", isDirectory: true)
         remoteClient = Self.makeRemoteClient(settings: settings)
+        retainedScreens.noteOwnViewerClient(id: remoteClient.id)
     }
 
     private static func makeRemoteClient(settings: SpacesMobileConnectionSettings) -> TerminalClient {
@@ -639,7 +653,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     var title: String { latestState?.title ?? session.title }
     var renderMode: String { renderModeValue.rawValue }
-    var ownerRenderEpoch: GhosttyRemoteTerminalOwnerEpoch? { ownerRenderEpochState }
+    /// What the terminal surface draws. The live epoch whenever there is one; otherwise the screen this
+    /// open painted from the retained store, which the first live epoch replaces.
+    var ownerRenderEpoch: GhosttyRemoteTerminalOwnerEpoch? { ownerRenderEpochState ?? retainedScreenEpochState }
     var endedRender: GhosttyRemoteTerminalEndedRender? {
         guard shouldRenderEndedTerminalSurface, let snapshot = latestState?.renderSnapshot else { return nil }
         return GhosttyRemoteTerminalEndedRender(id: endedRenderID(for: snapshot), snapshot: snapshot)
@@ -647,11 +663,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     var latestScreenStateRevision: UInt64? { latestState?.screenStateRevision }
     var snapshotText: String? { latestState?.renderText }
     var renderStateKey: String {
-        if let ownerRenderEpochState { return "owner|\(ownerRenderEpochState.id)" }
+        if let ownerRenderEpoch { return "owner|\(ownerRenderEpoch.id)" }
         if let endedRender { return "ended|\(endedRender.id)" }
         return "status"
     }
-    var showsTerminalSurface: Bool { isOwner || ownerRenderEpochState != nil || endedRender != nil }
+    /// A retained screen counts: it is on the surface from `start()`, before this open knows who owns the
+    /// session, and the view mounts the surface on exactly this.
+    var showsTerminalSurface: Bool { isOwner || ownerRenderEpoch != nil || endedRender != nil }
     var shouldPresentLiveSurface: Bool { showsTerminalSurface }
     var visibleText: String {
         if shouldRenderEndedTerminalSurface, let snapshotText = latestState?.renderText { return snapshotText }
@@ -722,6 +740,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // close or detach the new stream.
             commandChannel = bridgeClient.makeCommandChannel()
             remoteClient = Self.makeRemoteClient(settings: settings)
+            retainedScreens.noteOwnViewerClient(id: remoteClient.id)
         }
         runState = .running
         isSessionUnavailable = false
@@ -732,8 +751,45 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             reconnectTask = Task { [weak self] in await self?.loadEndedState() }
             return
         }
-        beginOpenScreenHold()
+        // A screen the app already has beats waiting for one: the retained paint goes up now, and the hold
+        // is not armed at all, because the hold exists to keep an unwanted grid off an empty screen and
+        // this screen is not empty. Without one, the open holds its first paint exactly as it always has.
+        if !paintRetainedScreenIfAvailable() { beginOpenScreenHold() }
         scheduleReconnect(after: .zero)
+    }
+
+    /// Paints the screen this session last showed on this device, from `TerminalRetainedScreenStore`,
+    /// before any request goes out. Answers whether it painted.
+    ///
+    /// This is a paint and nothing else. `latestState` stays nil until the bootstrap read lands, so the
+    /// reduction chain, the delta baseline, the ownership decision and the open hold's own rules all
+    /// begin this open with no more knowledge than they had before: the screen is simply not blank while
+    /// they do. The retained screen is at the grid it was captured at; when the live state arrives at
+    /// this phone's grid it replaces this paint through the ordinary apply path, and the one correction
+    /// that follows a grid change is accepted as the price of showing something immediately. A session
+    /// that turns out to have ended, or to be owned by another client, is corrected the same way.
+    private func paintRetainedScreenIfAvailable() -> Bool {
+        // Demo Mode serves a recorded transcript through the read-only ended-surface path and never owns
+        // a session, so it never retains a screen and never has one to bring back; an ended session
+        // paints its own final transcript. A live epoch already on the surface (a start() that follows
+        // one without a stop in between) is a screen the session itself reported, which nothing from
+        // memory should displace.
+        guard !isDemoMode, !isEndedState, ownerRenderEpochState == nil else { return false }
+        guard let retained = retainedScreens.entry(forSessionID: session.id) else { return false }
+        retainedScreenEpochState = GhosttyRemoteTerminalOwnerEpoch(
+            sessionID: session.id, id: retained.epochID, ownerEpoch: retained.ownerEpoch, bootstrapSnapshot: retained.snapshot)
+        trace("retained_screen_paint columns=\(retained.columns) rows=\(retained.rows)")
+        logFirstPaint(holdReleasedBy: "retained_frame", columns: retained.columns, rows: retained.rows)
+        return true
+    }
+
+    /// Takes the retained screen off the surface, for the transitions that replace it with something the
+    /// session actually reports: a live owner frame, the ended transcript, or the status text a session
+    /// another client owns shows instead of a screen.
+    private func clearRetainedScreenPaint() {
+        guard retainedScreenEpochState != nil else { return }
+        retainedScreenEpochState = nil
+        trace("retained_screen_paint_cleared")
     }
 
     /// Arms the 60-second `battery_sample` cadence for as long as this detail stays open (cancelled by
@@ -1054,6 +1110,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         resizeSerial = 0
         needsOwnershipSynchronizationAfterCurrentRun = false
         ownerRenderEpochState = nil
+        // The retained screen belongs to an open, not to the model: the next `start()` paints it again
+        // from the store, which is also what a retained detail's own reopen goes through.
+        clearRetainedScreenPaint()
         invalidateLinkPreviewRequests()
         isPreparingLinkPreview = false
         linkPreviewErrorMessage = nil
@@ -2362,6 +2421,34 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 trace("connect_attach_success")
             }
             guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
+            // Every connect bootstraps from a direct read, an owner's included. `isOwner` can only be true
+            // here on a reconnect (at first connect `latestState` is nil and the fallback snapshot cannot
+            // name this model's freshly minted client ID as the owner), and that is exactly the case that
+            // needs the read: an owner whose stream dropped and reconnected silently would otherwise resume
+            // the new subscription's deltas on the frame it still holds, with nothing confirming that
+            // baseline is still the one the daemon is sending deltas against. The reducer's guards would
+            // catch a divergent delta and drive a resync, but only after a wrong-frame window plus a round
+            // trip this read avoids. The response is ordered out-of-band, so one that lands behind the new
+            // subscription's initial refuses instead of regressing what the stream already delivered.
+            //
+            // It is started here, before `subscribe`, and awaited after it: the read rides this viewer's
+            // command channel while the stream does its own dial and TLS handshake, so the two costs
+            // overlap instead of adding up, taking a round trip off every open, which on a high-latency
+            // link is hundreds of milliseconds (#674). Neither depends on the other: what makes the
+            // baseline safe is the read being ordered against the stream by the reducer, not the order
+            // the two requests were issued in.
+            //
+            // It is a structured child (`async let`), not a detached task, because the read must end when
+            // the attempt that asked for it ends. It is cancelled with the enclosing task whenever this
+            // attempt is torn down (`beginStop`, `scheduleReconnect` and the stream-disconnect path all
+            // cancel `reconnectTask`), and a path out of this `do` that never reaches the await below
+            // (the subscribe throwing, this attempt being superseded) cancels and awaits it as the scope
+            // exits. What makes that load-bearing is the command channel: the read holds this viewer's
+            // channel, which serves one request at a time, and a cancelled caller gives its turn up
+            // immediately. An orphaned read would instead hold the channel for its full 12 s timeout,
+            // with the dismissal detach (`detachForStop`, same channel) and the next attempt's own
+            // bootstrap read queued behind it.
+            async let bootstrapRead = readStateForConnectBootstrap(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt)
             // Reset before subscribing, not after: the onEvent closure below can start delivering frames
             // on this actor while this call is still suspended awaiting the handle, so an assignment placed
             // after `subscribe` returns could stomp a delivery that already landed for this same attempt.
@@ -2400,26 +2487,22 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 logPerformanceEvent(name: "stream_first_frame", elapsedMS: elapsedMS, attributes: ["host": handle.host ?? ""])
             }
             errorMessage = nil
-            reconnectTask = nil
             // `subscribe` returning is only proof the dial and TLS handshake completed; it is not proof
             // the connection is actually usable, so no `stream_connect_end` success event is logged here.
             // `stream_first_frame` (in `registerLiveStreamFrame`) is the proven-connected moment, since
             // it fires only once the daemon has actually sent data back over this connection.
             trace("connect_subscribe_success")
-            // Every connect bootstraps from a direct read, an owner's included. `isOwner` can only be true
-            // here on a reconnect — at first connect `latestState` is nil and the fallback snapshot cannot
-            // name this model's freshly minted client ID as the owner — and that is exactly the case that
-            // needs the read: an owner whose stream dropped and reconnected silently would otherwise resume
-            // the new subscription's deltas on the frame it still holds, with nothing confirming that
-            // baseline is still the one the daemon is sending deltas against. The reducer's guards would
-            // catch a divergent delta and drive a resync, but only after a wrong-frame window plus a round
-            // trip this read avoids. The response is ordered out-of-band, so one that lands behind the new
-            // subscription's initial refuses instead of regressing what the stream already delivered.
-            let refreshedState = await refreshLatestState(
-                timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "connect_bootstrap", lifecycle: lifecycle,
-                clientID: clientID, isCurrent: { self.isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) }
-            )
+            // The bootstrap read started above, before the subscribe. Its outcome is handled here, exactly
+            // where it was handled when the read was issued at this point.
+            let refreshedState = await bootstrapRead
             guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
+            // Retired only once the attempt is actually over, which is here and not at the subscribe
+            // above: while the bootstrap read is still in flight this task is the attempt, and
+            // `reconnectTask` is the only handle to it. Every teardown (`beginStop`, `scheduleReconnect`,
+            // `retryConnection`, the ended-state transition) cancels through that handle, and clearing it
+            // early would leave the read running with nothing able to stop it. The guard above is what
+            // keeps this from retiring a newer attempt's handle: a superseded attempt returns first.
+            reconnectTask = nil
             // Only a non-owner settles `isConnecting` on a bootstrap that answered nothing: an owner
             // reconnects silently, so it never raised the flag in the first place.
             if refreshedState == nil, !isOwner, !isStopping {
@@ -2432,6 +2515,18 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             trace("connect_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
             await handleConnectError(error)
         }
+    }
+
+    /// `connect`'s bootstrap read, as one call taking only sendable values. `async let` evaluates its
+    /// right-hand side in the child task, which is not main-actor isolated, so the `isCurrent` closure is
+    /// built here instead: it calls a main-actor method synchronously and can only be formed in a
+    /// main-actor context.
+    private func readStateForConnectBootstrap(lifecycle: UInt64, clientID: String, reconnectAttempt: UInt64) async
+        -> GhosttyRemoteSessionStatePayload?
+    {
+        await refreshLatestState(
+            timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "connect_bootstrap", lifecycle: lifecycle, clientID: clientID,
+            isCurrent: { self.isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) })
     }
 
     private func isCurrentConnect(lifecycle: UInt64, clientID: String, reconnectAttempt: UInt64) -> Bool {
@@ -2576,6 +2671,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         } catch {
             guard refreshIsCurrent() else {
                 trace("fetch_state_stale_lifecycle_failure reason=\(reason)")
+                return .unavailable
+            }
+            // A cancelled read is not a failure to report: the attempt that asked for it is over. A
+            // subscribe that threw is handled by that attempt's own error path, and a superseded attempt
+            // applies nowhere. (`isTransientReconnectError` classifies `CancellationError` as transient
+            // for the same reason; this returns before the failure trace, the failure metric and the
+            // error banner rather than only suppressing the banner.)
+            if error is CancellationError || Task.isCancelled {
+                trace("fetch_state_cancelled reason=\(reason)")
                 return .unavailable
             }
             trace(
@@ -2856,7 +2960,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     private var isStartingState: Bool { (latestState?.runtimeState?.state ?? session.state) == .starting }
 
-    private static func isEndedRuntimeState(_ state: TerminalSessionState?) -> Bool {
+    static func isEndedRuntimeState(_ state: TerminalSessionState?) -> Bool {
         guard let state else { return false }
         return state != .running && state != .starting
     }
@@ -3628,6 +3732,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             needsOwnershipSynchronizationAfterCurrentRun = false
             ownerRecoveryGraceDeadline = nil
             ownerRenderEpochState = nil
+            // The session is over: its final transcript is what this view shows from here on, and a
+            // screen from before it ended is neither what to draw nor worth keeping for a next open.
+            clearRetainedScreenPaint()
+            retainedScreens.drop(sessionID: session.id)
             reportedOwnerReadyEpochID = nil
             reportedOwnerNonblankEpochID = nil
             connectionState = .idle
@@ -3717,6 +3825,22 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             isInputSurfaceReady = false
             lastSentResizeSize = nil
             ownerRenderEpochState = nil
+            // A session another client actively owns is not mirrored here at all (the viewer shows its
+            // "limited to the active owner" text instead of a screen), so a retained screen is replaced
+            // by that text and dropped from the store: it was exported for ownership this device no
+            // longer has. An ownerless session is left alone: this open may still take it over, and until
+            // then the retained screen is the best thing to show.
+            //
+            // An owner that is one of this app's own viewers is not another device and ownership never
+            // moved, so that screen stays. It is matched against every client id this app has minted
+            // rather than only this run's, because the id the daemon reports lags a lifecycle: a detail
+            // that is stopped and restarted, or swiped away and reopened before the asynchronous detach
+            // lands, is still listed under the previous run's client. Reading that as another device
+            // would drop the screen this open just painted, for good.
+            if let activeOwnerClientID, !retainedScreens.ownViewerClientIDs.contains(activeOwnerClientID) {
+                clearRetainedScreenPaint()
+                retainedScreens.drop(sessionID: session.id)
+            }
             needsOwnershipSynchronizationAfterCurrentRun = false
             ownershipSynchronizationTask?.cancel()
             ownershipSynchronizationTask = nil
@@ -3912,11 +4036,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             .init(sessionID: session.id, source: "ios-viewer", name: name, elapsedMS: elapsedMS, count: count, attributes: attributes))
     }
 
-    /// Emits `terminal_first_paint` for an open-hold release. The single place that builds the event's
-    /// attribute set, so every release path reports the same shape. `frame` is included only when a
-    /// decoded update kind is known.
+    /// Emits `terminal_first_paint` for an open-hold release, or for the retained screen an open painted
+    /// instead of arming a hold (`retained_frame`). The single place that builds the event's attribute
+    /// set, so every path reports the same shape. `frame` is included only when a decoded update kind is
+    /// known.
     ///
-    /// Only `matching_frame` and `stored_frame` mean a frame painted. For the other reasons (`timeout`,
+    /// Only `retained_frame`, `matching_frame` and `stored_frame` mean a frame painted, `retained_frame`
+    /// from memory before any request went out. For the other reasons (`timeout`,
     /// `handshake_without_frame`, `not_owner`, `session_ended`) the event marks when the open wait ended
     /// and the view stopped holding: the preparing screen may stay up longer, or nothing may paint at all.
     /// The report keeps each reason in its own table, so those samples never mix into the paint numbers.
@@ -3965,8 +4091,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         reportedOwnerNonblankEpochID = nil
         hasConfirmedOwnerInputReadiness = false
         let epochID = ownerRenderEpochID(for: payload)
+        let ownerEpoch = payload.renderOwnerEpoch ?? 0
         ownerRenderEpochState = GhosttyRemoteTerminalOwnerEpoch(
-            sessionID: session.id, id: epochID, ownerEpoch: payload.renderOwnerEpoch ?? 0, bootstrapSnapshot: bootstrapSnapshot)
+            sessionID: session.id, id: epochID, ownerEpoch: ownerEpoch, bootstrapSnapshot: bootstrapSnapshot)
+        // The live screen is up, so the retained one it replaced is no longer what the surface draws.
+        clearRetainedScreenPaint()
+        retainedScreens.retain(snapshot: bootstrapSnapshot, epochID: epochID, ownerEpoch: ownerEpoch, forSessionID: session.id)
         trace("owner_render_epoch_begin id=\(epochID) snapshot=1")
         logPerformanceEvent(
             name: "owner_bootstrap_state_received",
@@ -3980,9 +4110,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private func updateOwnerRenderSnapshot(from payload: GhosttyRemoteSessionStatePayload) {
         guard let ownerRenderEpochState, let snapshot = payload.renderSnapshot else { return }
         guard ownerRenderEpochState.bootstrapSnapshot != snapshot else { return }
+        let ownerEpoch = payload.renderOwnerEpoch ?? ownerRenderEpochState.ownerEpoch
         self.ownerRenderEpochState = GhosttyRemoteTerminalOwnerEpoch(
-            sessionID: ownerRenderEpochState.sessionID, id: ownerRenderEpochState.id,
-            ownerEpoch: payload.renderOwnerEpoch ?? ownerRenderEpochState.ownerEpoch, bootstrapSnapshot: snapshot)
+            sessionID: ownerRenderEpochState.sessionID, id: ownerRenderEpochState.id, ownerEpoch: ownerEpoch, bootstrapSnapshot: snapshot)
+        // Every owner screen this viewer draws is what a reopen of this session paints from, so the store
+        // follows the surface rather than only its first frame.
+        retainedScreens.retain(snapshot: snapshot, epochID: ownerRenderEpochState.id, ownerEpoch: ownerEpoch, forSessionID: session.id)
         trace("owner_render_snapshot_update id=\(ownerRenderEpochState.id) snapshot=1")
     }
 
