@@ -658,6 +658,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// change of connection restarts the run without every reset site having to clear it. `nil` once a
     /// refresh succeeds.
     @ObservationIgnored private var refreshFailureStreak: (identity: Int, startedAt: ContinuousClock.Instant)?
+    /// True while a run of failed overview fetches is open. `OverviewPollingModifier` reads it to keep
+    /// retrying at the list cadence behind a detail route, so the alert `refreshFailureAlertDelay` gates
+    /// is reported about five seconds into an outage rather than one slow poll later.
+    var isRefreshFailing: Bool { refreshFailureStreak != nil }
     /// Bumped every time the app stops watching this connection (see `noteConnectionMonitoringPaused`).
     /// A refresh attempt captures it at the start and records nothing about failure timing if it changed,
     /// because an attempt spanning a pause has no meaningful duration: the clock keeps advancing while

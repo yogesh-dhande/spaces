@@ -39,7 +39,7 @@ struct SpacesTabView: View {
             selectedSession = SelectedTerminalSessionRoute(session: session, openSource: "deep_link")
             model.pendingTerminalDeepLinkSession = nil
         }.accessibilityIdentifier("tab.spaces").overviewPolling(
-            model: model, tab: .spaces, activeDetailRouteID: activeDetailRouteID, refreshGeneration: terminalListRefreshGeneration
+            model: model, tab: .spaces, route: pollingRoute, refreshGeneration: terminalListRefreshGeneration
         ).sheet(isPresented: workspaceCreateSheetBinding) { WorkspaceCreateSheet(model: model) }.sheet(isPresented: $isShowingVisibilitySheet) {
             WorkspaceVisibilitySheet(model: model)
         }.confirmationDialog(
@@ -83,8 +83,10 @@ struct SpacesTabView: View {
     }
 
     /// Any detail route — a terminal, a pending terminal launch, or a browser session — that should
-    /// pause this tab's refresh poll while it is on screen.
-    private var activeDetailRouteID: String? { selectedSession?.id ?? pendingTerminalLaunch?.id ?? selectedBrowserSession?.id }
+    /// slow this tab's refresh poll while it is on screen. None of these install their own poller.
+    private var pollingRoute: OverviewPollingRoute? {
+        (selectedSession?.id ?? pendingTerminalLaunch?.id ?? selectedBrowserSession?.id).map(OverviewPollingRoute.detail)
+    }
 
     private var workspaceCreateSheetBinding: Binding<Bool> {
         Binding(get: { model.isShowingWorkspaceCreateSheet }, set: { model.isShowingWorkspaceCreateSheet = $0 })

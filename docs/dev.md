@@ -514,10 +514,10 @@ Nine scenarios run under each of three shaped network profiles, both directions:
 The scenarios: `cold-open`, `back-and-forth`, `keyboard`, `streaming`, `scrollback`, `background-terminal`, `background-list`, `reconnect` (the only scenario that scripts a dead link, through the shaping proxy's control port), and `idle`.
 
 ```bash
-apps/macos/.build/debug/spacese2e mobile-baseline
+apps/macos/.build/debug/spacese2e e2e mobile-baseline
 ```
 
-`--remote` targets this worktree's remote Linux dev profile instead of the local dev daemon; deploy to it first with `scripts/dev-build-and-launch.sh` (without `--local`), since the lane does not deploy the daemon itself. `--profile <name>` and `--scenario <name>` (both repeatable) narrow a run to a subset of profiles or scenarios for iterating on the lane, and `--idle-seconds N` (default 120) sets the `idle` scenario's hold.
+`--remote` targets this worktree's remote Linux dev profile instead of the local dev daemon; deploy to it first with `scripts/dev-build-and-launch.sh` (without `--local`), since the lane does not deploy the daemon itself. The `spacese2e e2e` wrapper forwards only `--remote`; `--profile <name>` and `--scenario <name>` (both repeatable) narrowing a run to a subset of profiles or scenarios for iterating on the lane, and `--idle-seconds N` (default 120) setting the `idle` scenario's hold, are accepted by the underlying `apps/macos/Tests/e2e_mobile_baseline.sh` script directly, not by the wrapper. Run the script itself from the worktree root, after the macOS debug products are built, with the environment the wrapper otherwise sets: `SPACES_E2E_SKIP_MACOS_BUILD=1 SPACES_E2E_SKIP_GHOSTTYKIT_SETUP=1 apps/macos/Tests/e2e_mobile_baseline.sh --profile good --scenario cold-open`.
 
 Two measurement details worth knowing when reading a report. The runner turns Simulator's "Connect Hardware Keyboard" setting off for the run and restores it afterwards: with it on, the terminal's accessory keyboard toggle cannot bring the software keyboard back after the first hide, which is the exact transition the `keyboard` scenario measures. Only the `streaming` scenario enables the app's E2E render dump (the sole way to see the fixture's `AGENT_SCREEN_READY` and `BURST_DONE` markers on a Metal-rendered surface), so its frame timings include one file write per frame that no other scenario pays.
 
