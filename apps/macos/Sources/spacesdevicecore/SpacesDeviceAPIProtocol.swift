@@ -1850,10 +1850,20 @@ public struct SpacesDeviceAgentSessionRenameRequest: Codable, Sendable, Equatabl
     }
 }
 
+/// A one-shot read of a terminal session's state.
 public struct SpacesDeviceTerminalSessionRequest: Codable, Sendable, Equatable {
     public let sessionID: String
+    /// Whether the reader wants the session's screen on the response. A reader that already has a frame
+    /// coming from somewhere else asks for false and is answered with the session's metadata alone, so the
+    /// daemon spends no full-grid capture or encode and nothing decodes a frame that would be dropped. The
+    /// connect bootstrap read is that reader: the subscription it is issued alongside delivers its own
+    /// initial frame.
+    public let includesRenderUpdate: Bool
 
-    public init(sessionID: String) { self.sessionID = sessionID }
+    public init(sessionID: String, includesRenderUpdate: Bool) {
+        self.sessionID = sessionID
+        self.includesRenderUpdate = includesRenderUpdate
+    }
 }
 
 /// One-shot agent input for a terminal session (`spaces terminal send text/bytes --device`). Unlike
@@ -1980,6 +1990,12 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
     /// answers with the session's state, and an identity that names the session's current frame lets that
     /// state omit the render update entirely (see `TerminalHeldFrameIdentity`).
     public let heldFrameIdentity: TerminalHeldFrameIdentity?
+    /// Whether the requester wants the session's screen on the acknowledgment, for the controls whose
+    /// answer carries session state at all (`TerminalControlCommand.includesSessionStateOnSuccess`, plus
+    /// the Device API's heartbeat). The controls that echo no state ignore it. The requester decides
+    /// rather than the daemon, because the two clients that take a session over need different answers:
+    /// see `SpacesDeviceAPIServer.handleTerminalControlRequest`.
+    public let includesRenderUpdate: Bool
 
     public init(
         action: SpacesDeviceTerminalControlAction, sessionID: String, clientID: String? = nil, client: TerminalClient? = nil,
@@ -1989,7 +2005,7 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         mouseButton: UInt8? = nil, mousePressed: Bool? = nil, mousePointerX: Double? = nil, mousePointerY: Double? = nil,
         mousePointerMods: UInt32? = nil, appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil,
         selectionStartColumn: UInt16? = nil, selectionStartRow: UInt32? = nil, selectionEndColumn: UInt16? = nil, selectionEndRow: UInt32? = nil,
-        selectionRectangle: Bool? = nil, heldFrameIdentity: TerminalHeldFrameIdentity? = nil
+        selectionRectangle: Bool? = nil, heldFrameIdentity: TerminalHeldFrameIdentity? = nil, includesRenderUpdate: Bool = true
     ) {
         self.action = action
         self.sessionID = sessionID
@@ -2022,6 +2038,7 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         self.selectionEndRow = selectionEndRow
         self.selectionRectangle = selectionRectangle
         self.heldFrameIdentity = heldFrameIdentity
+        self.includesRenderUpdate = includesRenderUpdate
     }
 }
 

@@ -17,7 +17,7 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
     public let inheritedResyncRequest: Bool
     /// True for the response to a direct `.state` read. `TerminalViewerModel.applyLatestState` and
     /// `RemoteGhosttySessionHost` read a fetch's verdict off the output that accounted for that
-    /// submission (`reduction.payload`, `reduction.isRefusedOutOfBandPayload`), so an out-of-band output
+    /// submission (`reduction.payload`, `reduction.isRefusedPayload`), so an out-of-band output
     /// must keep its own apply: `ApplyMailbox.mayCollapse` refuses to collapse it in either direction.
     public let isOutOfBand: Bool
     /// The `reason`s of the outputs this one collapsed away, in collapse order, deduplicated, never
@@ -133,7 +133,7 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
         if let base = reduction, base.frameToApply == nil, let skippedFrame = skipped.reduction?.frameToApply {
             mergedReduction = TerminalRemoteStateReductionResult(
                 payload: base.payload, storedPayload: base.storedPayload, decodedUpdate: base.decodedUpdate, frameToApply: skippedFrame,
-                dropReason: base.dropReason, didRequestResync: base.didRequestResync, isRefusedOutOfBandPayload: base.isRefusedOutOfBandPayload)
+                dropReason: base.dropReason, didRequestResync: base.didRequestResync, isRefusedPayload: base.isRefusedPayload)
         } else if let base = reduction, let survivingFrame = base.frameToApply, let skippedFrame = skipped.reduction?.frameToApply {
             // Bounded like the mirror's own carry buffer: repeated collapses onto one stalled pending
             // output would otherwise grow the merged array (and re-copy it per collapse) without limit.
@@ -152,7 +152,7 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
                 snapshot: survivingFrame.snapshot, scrollRects: mergedRects, scrollRectsOverflowed: mergedOverflowed)
             mergedReduction = TerminalRemoteStateReductionResult(
                 payload: base.payload, storedPayload: base.storedPayload, decodedUpdate: base.decodedUpdate, frameToApply: mergedFrame,
-                dropReason: base.dropReason, didRequestResync: base.didRequestResync, isRefusedOutOfBandPayload: base.isRefusedOutOfBandPayload)
+                dropReason: base.dropReason, didRequestResync: base.didRequestResync, isRefusedPayload: base.isRefusedPayload)
         }
         var mergedCoalescedReasons: [String] = []
         var seenReasons = Set<String>()

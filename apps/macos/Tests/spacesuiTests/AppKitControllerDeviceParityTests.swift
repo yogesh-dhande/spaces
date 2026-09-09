@@ -1302,6 +1302,21 @@ import workspacecore
         #expect(request.rows == 40)
         #expect(request.ownerEpoch == 7)
         #expect(request.resizeSerial == 3)
+        #expect(request.includesRenderUpdate)
+    }
+
+    /// The Mac's paired-device pane takes a session over through the same Device API the iOS viewer uses,
+    /// and unlike that viewer it needs the screen on the acknowledgment: `DeviceTerminalSessionStateModel
+    /// .apply` orders every payload by `emittedAt`, so a frameless acknowledgment that outran the
+    /// transfer's own broadcast would make the pane discard that broadcast as older and leave it with no
+    /// frame for the new owner epoch.
+    @Test func deviceTerminalControlRequestAsksForTheScreenOnATakeover() throws {
+        let control = TerminalControlRequest(command: "takeover", clientID: "mac-client")
+
+        let request = try TerminalPaneService.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
+
+        #expect(request.action == .takeover)
+        #expect(request.includesRenderUpdate)
     }
 
     @Test func deviceTerminalControlRequestCarriesMouseButtonAndPointerToTheDaemon() throws {

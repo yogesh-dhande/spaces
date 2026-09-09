@@ -124,7 +124,7 @@
                 SpacesDeviceAPIRequest(command: .terminalControl(.init(action: .resize, sessionID: sessionID, clientID: "c", columns: 61, rows: 41))))
             XCTAssertTrue(resize.ok)
 
-            let state = await backend.serve(SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID))))
+            let state = await backend.serve(SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID, includesRenderUpdate: true))))
             XCTAssertTrue(state.ok)
             let runtimeState = try XCTUnwrap(state.sessionState?.runtimeState)
             XCTAssertEqual(runtimeState.columns, 61)
@@ -216,7 +216,7 @@
             XCTAssertEqual(summary.title, row.name)
 
             // Opening the synthesized session replays a recorded frame.
-            let state = await backend.serve(SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID))))
+            let state = await backend.serve(SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID, includesRenderUpdate: true))))
             XCTAssertTrue(state.ok)
             XCTAssertNotNil(state.sessionState?.renderSnapshot, "The synthesized session must replay a recorded terminal frame.")
 
@@ -244,7 +244,7 @@
                 XCTAssertEqual(row.runState, .running)
                 XCTAssertNotNil(row.processID)
                 let sessionID = try XCTUnwrap(row.sessionID)
-                let state = await backend.serve(SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID))))
+                let state = await backend.serve(SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID, includesRenderUpdate: true))))
                 XCTAssertNotNil(state.sessionState?.renderSnapshot)
             }
         }
@@ -266,7 +266,7 @@
                 "The two grid recordings must be distinguishable for this test to prove selection.")
 
             // Without any resize the smallest (phone) recording is served.
-            let phone = await backend.serve(SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID))))
+            let phone = await backend.serve(SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID, includesRenderUpdate: true))))
             let phoneSnapshot = try XCTUnwrap(phone.sessionState?.renderSnapshot)
             XCTAssertEqual(phoneSnapshot.columns, phoneRecording.columns)
             XCTAssertEqual(phoneSnapshot.rows, phoneRecording.rows)
@@ -276,7 +276,7 @@
                 SpacesDeviceAPIRequest(command: .terminalControl(.init(action: .resize, sessionID: sessionID, clientID: "c", columns: 116, rows: 78)))
             )
             XCTAssertTrue(resize.ok)
-            let pad = await backend.serve(SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID))))
+            let pad = await backend.serve(SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID, includesRenderUpdate: true))))
             let padSnapshot = try XCTUnwrap(pad.sessionState?.renderSnapshot)
             XCTAssertEqual(padSnapshot.columns, padRecording.columns)
             XCTAssertEqual(padSnapshot.rows, padRecording.rows)

@@ -820,6 +820,7 @@ def typed_device_request(request):
         payload["action"] = "clearScreen" if command == "clear" else command
         payload.setdefault("appendNewline", False)
         payload.setdefault("asPaste", False)
+        payload.setdefault("includesRenderUpdate", True)
         return {"command": {"terminalControl": payload}}
     return {"command": {command: payload}}
 
@@ -3456,6 +3457,7 @@ def typed_device_request(request: dict) -> dict:
         payload["action"] = "clearScreen" if command == "clear" else command
         payload.setdefault("appendNewline", False)
         payload.setdefault("asPaste", False)
+        payload.setdefault("includesRenderUpdate", True)
         return {"command": {"terminalControl": payload}}
     return {"command": {command: payload}}
 
@@ -3758,6 +3760,7 @@ def typed_device_request(request: dict) -> dict:
         payload["action"] = "clearScreen" if command == "clear" else command
         payload.setdefault("appendNewline", False)
         payload.setdefault("asPaste", False)
+        payload.setdefault("includesRenderUpdate", True)
         return {"command": {"terminalControl": payload}}
     return {"command": {command: payload}}
 

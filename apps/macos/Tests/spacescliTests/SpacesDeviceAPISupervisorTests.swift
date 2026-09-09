@@ -637,7 +637,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
 
             let response = try await Task.detached {
                 try Self.sendDeviceAPIRequest(
-                    SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID)), authToken: authToken, clientApp: clientApp),
+                    SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID, includesRenderUpdate: true)), authToken: authToken, clientApp: clientApp),
                     port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             }.value
 
@@ -850,7 +850,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
 
             let response = try await Task.detached {
                 try Self.sendDeviceAPIRequest(
-                    SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID)), authToken: authToken, clientApp: clientApp),
+                    SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID, includesRenderUpdate: true)), authToken: authToken, clientApp: clientApp),
                     port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             }.value
 

@@ -364,12 +364,14 @@
             makeStatePayload(reason: reason, exportMode: .selfContained)
         }
 
-        /// The payload a one-shot state read is answered with, matching what this session's own subscription
-        /// socket exports for a fresh subscriber. Serving a Device API `.state` from here lets the daemon skip
-        /// dialing its own session's unix socket to ask itself a question it can answer directly. Platform
-        /// parity with the macOS `GhosttyEmbeddedSessionCore.currentOneShotStatePayload()`.
-        public func currentOneShotStatePayload(heldFrame: TerminalHeldFrameIdentity? = nil) -> GhosttyRemoteSessionStatePayload? {
-            makeStatePayload(reason: .initial, exportMode: .selfContained, markNextBroadcastFull: false, heldFrame: heldFrame)
+        /// The payload a one-shot state read is answered with. A `.screen` read matches what this session's
+        /// own subscription socket exports for a fresh subscriber; a `.metadataOnly` read carries the
+        /// session's metadata with no screen, running no capture and no encode. Serving a Device API
+        /// `.state` from here lets the daemon skip dialing its own session's unix socket to ask itself a
+        /// question it can answer directly. Platform parity with the macOS
+        /// `GhosttyEmbeddedSessionCore.currentOneShotStatePayload(_:)`.
+        public func currentOneShotStatePayload(_ read: TerminalOneShotStateRead) -> GhosttyRemoteSessionStatePayload? {
+            makeStatePayload(reason: .initial, exportMode: .selfContained, markNextBroadcastFull: false, oneShotRead: read)
         }
 
         /// The session summary built entirely from this core's in-memory launch configuration and
@@ -1982,13 +1984,14 @@
                 name: "render_frame_payload_publish", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), attributes: attributes)
         }
 
-        /// - Parameter heldFrame: The frame a one-shot reader already displays. When it names the frame this
-        ///   export would produce, the payload carries no render update: see `TerminalHeldFrameIdentity`.
+        /// - Parameter oneShotRead: What a one-shot reader asked for, nil for a broadcast. A
+        ///   `.metadataOnly` read suppresses the screen the policy below would otherwise include, so this
+        ///   export runs no capture and no encode; a `.screen` read naming the frame this export would
+        ///   produce carries no render update either (see `TerminalHeldFrameIdentity`).
         private func makeStatePayload(
             reason: TerminalRemoteSessionStateReason, runtimeStateOverride: TerminalSessionRuntimeState? = nil,
             exportMode: RenderStateExportMode = .selfContained, markNextBroadcastFull: Bool = false,
-            clipboardWrite: TerminalClipboardWritePayload? = nil, payloadPublishStartedAt: Date? = nil,
-            heldFrame: TerminalHeldFrameIdentity? = nil
+            clipboardWrite: TerminalClipboardWritePayload? = nil, payloadPublishStartedAt: Date? = nil, oneShotRead: TerminalOneShotStateRead? = nil
         ) -> GhosttyRemoteSessionStatePayload? {
             // A nil read here (cache empty, reseed currently failing) rides straight into the payload below:
             // `attachmentSnapshot` on the wire is itself optional, and a subscriber merging updates keeps its
@@ -1998,7 +2001,9 @@
             // See `TerminalSessionAttachmentSnapshot.liveWireProjection`.
             let attachmentSnapshot = currentLiveWireAttachmentSnapshot()
             let ownerKind = TerminalRemoteSessionStatePolicy.activeOwnerClientKind(in: attachmentSnapshot)
-            let includeScreenState = TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: reason.rawValue, ownerKind: ownerKind)
+            let includeScreenState =
+                (oneShotRead?.includesScreen ?? true)
+                && TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: reason.rawValue, ownerKind: ownerKind)
             let runtimeState: TerminalSessionRuntimeState
             if let runtimeStateOverride {
                 // Embed the caller-supplied snapshot verbatim so the payload's runtime state and the durable
@@ -2021,7 +2026,7 @@
                 // it drops. The rects this capture drained are still folded into the carry, exactly as the
                 // self-contained `makeRenderUpdate` would have, so the next stream frame keeps reporting how
                 // far content moved. See `TerminalHeldFrameIdentity`.
-                let readerHoldsCurrentFrame = frame.map { heldFrame?.matches($0) == true } ?? false
+                let readerHoldsCurrentFrame = frame.map { oneShotRead?.heldFrame?.matches($0) == true } ?? false
                 if readerHoldsCurrentFrame, let capturedFrame {
                     streamScrollRectCarry.fold(rects: capturedFrame.scrollRects, overflowed: capturedFrame.scrollRectsOverflowed)
                 }
@@ -2097,7 +2102,7 @@
                 sessionStateFlags: nil, screenStateRevision: screenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
                 title: runtimeState.title ?? launchConfiguration.title,
                 workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, outputByteCount: outputByteCount,
-                outputEndByteOffset: outputByteCount, clipboardWrite: clipboardWrite)
+                outputEndByteOffset: outputByteCount, clipboardWrite: clipboardWrite, ownerEpoch: ownerEpoch)
             guard let renderUpdateValue else { return payload }
             if let encodingObserver { return payload.replacingRenderUpdate(materialized: renderUpdateValue, encodingObserver: encodingObserver) }
             return payload.replacingRenderUpdate(materialized: renderUpdateValue)

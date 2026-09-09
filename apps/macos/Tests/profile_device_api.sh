@@ -145,6 +145,7 @@ def typed_device_api_payload(payload: dict) -> dict:
         command_payload["action"] = "clearScreen" if command == "clear" else command
         command_payload.setdefault("appendNewline", False)
         command_payload.setdefault("asPaste", False)
+        command_payload.setdefault("includesRenderUpdate", True)
         typed_command = {"terminalControl": command_payload}
     else:
         typed_command = {command: command_payload}

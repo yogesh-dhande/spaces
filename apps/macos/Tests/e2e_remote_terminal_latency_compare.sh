@@ -672,6 +672,7 @@ class RemoteFactory:
             payload.setdefault("clientID", client_id)
             payload.setdefault("appendNewline", False)
             payload.setdefault("asPaste", False)
+            payload.setdefault("includesRenderUpdate", True)
             payload["action"] = action
             payload["sessionID"] = session_id
             request_json_line = json.dumps(

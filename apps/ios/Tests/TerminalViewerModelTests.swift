@@ -382,11 +382,15 @@
                 }.count
             }
 
-            func countStateRequests() -> Int {
-                requests.filter { request in
-                    if case .state = request.command { return true }
-                    return false
-                }.count
+            func countStateRequests() -> Int { stateRequests().count }
+
+            /// The `.state` reads in the order they were sent, so a test can inspect what each one asked
+            /// the daemon for.
+            func stateRequests() -> [SpacesDeviceTerminalSessionRequest] {
+                requests.compactMap { request in
+                    guard case .state(let payload) = request.command else { return nil }
+                    return payload
+                }
             }
 
             func lastAttachedClient() -> TerminalClient? {
@@ -540,6 +544,83 @@
             XCTAssertEqual(model.visibleText, "Preparing terminal…")
             XCTAssertFalse(model.showsTakeOverAction)
             XCTAssertFalse(model.acceptsInput)
+        }
+
+        /// The connect bootstrap read is the only `.state` read that asks the daemon for no screen: the
+        /// subscription it is issued alongside delivers the session's frame, so asking here would move the
+        /// identical frame twice on every open. Every other read is itself what brings the screen.
+        func testTheConnectBootstrapReadAsksForNoRenderUpdate() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didRead = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didRead, "the open must issue its bootstrap read")
+            let reads = await recorder.stateRequests()
+            XCTAssertEqual(reads.map(\.includesRenderUpdate), [false], "the bootstrap read must ask for the session's metadata alone")
+        }
+
+        /// The control counterpart. A takeover is the one state-carrying control this viewer wants answered
+        /// without a screen: it holds its first paint until a frame at its own grid arrives, and the frame
+        /// for the epoch the transfer opens reaches it as the `attachment_state` broadcast. Attach keeps the
+        /// screen, as every other state-carrying control does, and the Mac's paired-device pane keeps it on
+        /// a takeover too, which is why the request carries the choice rather than the daemon deciding by
+        /// action.
+        func testTheTakeoverAsksForNoRenderUpdate() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            // The bootstrap read reports a session another device owns, which is what makes the open
+            // attempt the automatic takeover this test asserts on.
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .state = request.command else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                return Self.terminalStateResponse(Self.ownedState(clientID: "mac-owner", emittedAt: "2026-06-04T14:23:30Z"))
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didTakeOver = try await waitForTerminalControlAction(.takeover, count: 1, recorder: recorder)
+            XCTAssertTrue(didTakeOver, "an open must attempt the takeover this asserts on")
+            let requests = await recorder.snapshot()
+            let controls = requests.compactMap { request -> SpacesDeviceTerminalControlRequest? in
+                guard case .terminalControl(let payload) = request.command else { return nil }
+                return payload
+            }
+            XCTAssertEqual(
+                controls.first { $0.action == .takeover }?.includesRenderUpdate, false,
+                "the takeover's acknowledgment must cost the session no screen export")
+            XCTAssertEqual(
+                controls.first { $0.action == .attach }?.includesRenderUpdate, true,
+                "every other state-carrying control is answered with the screen")
+        }
+
+        /// The counterpart to the bootstrap read: an ended session's state load has no stream behind it at
+        /// all, so its read is the only thing that can bring the final screen and must ask for it.
+        func testTheEndedStateReadAsksForTheRenderUpdate() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(state: .exited), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didRead = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didRead, "an ended session must load its final state")
+            let reads = await recorder.stateRequests()
+            XCTAssertEqual(reads.map(\.includesRenderUpdate), [true], "a read nothing else feeds must ask for the screen")
         }
 
         func testEndedTerminalDoesNotPerformForegroundOwnershipEvaluation() async throws {
@@ -2976,6 +3057,58 @@
             XCTAssertTrue(model.isOwner, "the takeover's own attachment snapshot must apply however it is stamped")
             let stateRequestCount = await recorder.countStateRequests()
             XCTAssertEqual(stateRequestCount, 0, "a takeover that applied needs no confirmation read")
+        }
+
+        /// The daemon answers a takeover with the session's metadata and no screen, so the payload that
+        /// confirms ownership carries no render update and therefore no owner epoch of its own. The resize
+        /// the ownership handshake sends right after must not be stamped with the epoch of the owner this
+        /// client displaced: the daemon accepts a nil epoch from the owner but rejects a mismatched one as
+        /// stale, so a carried-forward stamp would drop the one resize that brings the session to the
+        /// phone's grid, and the open would sit on the previous owner's size.
+        func testTheResizeAfterAScreenlessTakeoverIsNotStampedWithTheDisplacedOwnersEpoch() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalControl(let payload) = request.command, payload.action == .takeover, let clientID = payload.clientID else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                // Exactly the shape the Device API returns for a takeover: the attachment snapshot naming
+                // this client the owner, and no render update.
+                return Self.terminalStateResponse(Self.ownedState(clientID: clientID, emittedAt: "2026-06-04T14:23:31Z"))
+            }
+            // A starting session, so no automatic takeover races the explicit one below.
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            let displacedOwner = TerminalClient(
+                id: "displaced-owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:23:29Z")
+            let displacedAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: displacedOwner.id, mode: .owner, attachedAt: "2026-06-04T14:23:29Z")
+            await model.applyLatestState(
+                try Self.framedState(
+                    text: "mac", sessionRevision: 1, ownerEpoch: 1, emittedAt: "2026-06-04T14:23:30Z",
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [displacedOwner], attachments: [displacedAttachment])),
+                isOutOfBand: false)
+            XCTAssertFalse(model.isOwner, "the stream's frame must leave the other client owning the session")
+
+            await model.takeOver()
+            XCTAssertTrue(model.isOwner, "a screenless takeover response must still confirm ownership")
+
+            model.updateViewportSize(columns: 40, rows: 30)
+
+            let didResize = try await waitForTerminalControlAction(.resize, count: 1, recorder: recorder)
+            XCTAssertTrue(didResize, "the ownership handshake must send the phone's grid after the takeover")
+            let requests = await recorder.snapshot()
+            let resize = try XCTUnwrap(
+                requests.compactMap { request -> SpacesDeviceTerminalControlRequest? in
+                    guard case .terminalControl(let payload) = request.command, payload.action == .resize else { return nil }
+                    return payload
+                }.first)
+            XCTAssertNotEqual(
+                resize.ownerEpoch, 1,
+                "the displaced owner's epoch must not stamp the new owner's resize: the daemon would reject it as stale")
         }
 
         /// An owner whose stream drops reconnects silently, and the new subscription's deltas are computed

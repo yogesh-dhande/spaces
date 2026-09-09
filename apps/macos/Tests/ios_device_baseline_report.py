@@ -30,6 +30,7 @@ PROFILES = ["good", "constrained", "poor"]
 # Fixed report/section order, matching the lane contract's marker list.
 SCENARIOS = [
     "cold-open",
+    "cold-open-owned",
     "back-and-forth",
     "keyboard",
     "streaming",
@@ -982,6 +983,13 @@ def build_report_sections(run_root: Path):
     return [
         build_header(run_root, device_events, shaper_events, sessions, windows),
         render_table("Cold open", COLD_OPEN_COLUMNS, metrics_for("cold-open", metric_cold_open)),
+        # Same columns and metric function as "Cold open", scoped to the cold-open-owned scenario:
+        # a phone connecting to a session a Mac window already owns (GitHub issue #672), where the
+        # connect bootstrap, the subscribe's initial frame, the takeover broadcast, and the resize
+        # each move a full frame instead of the ownerless session's empty one.
+        render_table(
+            "Cold open (Mac-owned session)", COLD_OPEN_COLUMNS, metrics_for("cold-open-owned", metric_cold_open)
+        ),
         render_table("Back and forth", BACK_AND_FORTH_COLUMNS, metrics_for("back-and-forth", metric_back_and_forth)),
         render_table("Keyboard", KEYBOARD_COLUMNS, metrics_for("keyboard", metric_keyboard)),
         render_table("Streaming", STREAMING_COLUMNS, metrics_for("streaming", metric_streaming)),

@@ -243,6 +243,47 @@ class ColdOpenMetricTests(unittest.TestCase):
         self.assertIsNone(report.metric_cold_open(None))
 
 
+class ColdOpenOwnedMetricTests(unittest.TestCase):
+    """cold-open-owned reuses metric_cold_open unchanged (parametrized by scenario name in
+    build_report_sections), so this only needs to prove the scenario is wired into SCENARIOS --
+    build_scenario_windows only builds a window for a scenario listed there -- and that the shared
+    metric function computes the same columns against that window."""
+
+    def test_computes_every_column(self) -> None:
+        events = [
+            *scenario_bracket("good", "cold-open-owned", "2026-09-08T10:00:00.100Z", "2026-09-08T10:00:04.100Z"),
+            app_event(
+                "app", "ios-app", "app_launch", "2026-09-08T10:00:00.050Z", 1_000_000_000,
+                attributes={"device_model": "iPhone15,3", "ios_version": "18.0", "build": "42"},
+            ),
+            app_event(
+                "app", "ios-app", "overview_refresh_end", "2026-09-08T10:00:00.400Z", 1_350_000_000,
+                attributes={"success": "1"},
+            ),
+            lane_marker("ios-uitest", "2026-09-08T10:00:00.500Z", 0, "good", "cold-open-owned", "open_tap"),
+            app_event(
+                "s1", "ios-viewer", "terminal_open_begin", "2026-09-08T10:00:00.500Z", 1_450_000_000, attributes={"source": "list"}
+            ),
+            app_event(
+                "s1", "ios-viewer", "render_frame_payload_receive", "2026-09-08T10:00:00.600Z", 1_550_000_000,
+                count=27_000, attributes={"render_update": "1"},
+            ),
+            app_event(
+                "s1", "ios-viewer", "terminal_first_paint", "2026-09-08T10:00:00.700Z", 1_650_000_000,
+                elapsed_ms=200, attributes={"hold_released_by": "matching_frame"},
+            ),
+        ]
+        shaper_events = [shaper_bytes("2026-09-08T10:00:00.500Z", up=100, down=5000)]
+        window = window_for(events, shaper_events, "good", "cold-open-owned")
+        self.assertIsNotNone(window)
+        metrics = report.metric_cold_open(window)
+        self.assertEqual(metrics["launch_to_list_ms"], 350.0)
+        self.assertEqual(metrics["open_to_paint_ms"], 200.0)
+        self.assertEqual(metrics["hold_released_by"], "matching_frame")
+        self.assertEqual(metrics["frames_to_paint"], 1)
+        self.assertAlmostEqual(metrics["wire_kb_down"], 5000 / 1024.0)
+
+
 class BackAndForthMetricTests(unittest.TestCase):
     def test_per_reopen_stats_across_two_iterations(self) -> None:
         events = [
@@ -570,6 +611,7 @@ class FullRenderSmokeTest(unittest.TestCase):
             for heading in (
                 "# iOS performance baseline:",
                 "## Cold open",
+                "## Cold open (Mac-owned session)",
                 "## Back and forth",
                 "## Keyboard",
                 "## Streaming",

@@ -143,10 +143,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     typealias AgentHookInstallHandler = @Sendable ([CodingAgent]) throws -> AgentHookInstallOutcome
     /// Exports the current state of a session this daemon hosts live, or nil when it hosts no live core for
     /// that session id (the reader then falls through to the persisted/socket read).
-    /// Answers a one-shot state read for a session this process hosts. `heldFrame` is the frame the
-    /// asking client already displays, which the core uses to omit a render update the client would
-    /// only drop.
-    public typealias LiveTerminalSessionStateProvider = @Sendable (String, TerminalHeldFrameIdentity?) -> GhosttyRemoteSessionStatePayload?
+    /// Answers a one-shot state read for a session this process hosts. `TerminalOneShotStateRead` is what
+    /// the reader asked for: whether it wants the screen at all, and the frame it already displays when it
+    /// does, both of which let the core skip exporting bytes the reader would only drop.
+    public typealias LiveTerminalSessionStateProvider = @Sendable (String, TerminalOneShotStateRead) -> GhosttyRemoteSessionStatePayload?
 
     static let pongResponse = SpacesDeviceAPIResponse(ok: true, message: "pong")
     private static let streamRelayReadBufferSize = 256 * 1024
@@ -3431,8 +3431,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // Device API heartbeat caller is the iOS foreground resume, which always consumes it. The wire
         // version gate keeps a client that would ignore it from pairing at all.
         let includesSessionState = terminalCommand.includesSessionStateOnSuccess || payload.action == .heartbeat
-        let sessionState =
-            response.ok && includesSessionState ? try? loadCurrentState(sessionID: sessionID, heldFrame: payload.heldFrameIdentity) : nil
+        // The reader says whether its acknowledgment carries the screen, exactly as a `.state` request does,
+        // because the two clients that take a session over need different answers and the action alone
+        // cannot tell them apart. The iOS viewer asks for none on a takeover: it holds its first paint until
+        // a frame at its own grid arrives, and it takes the transfer's frame from the `attachment_state`
+        // broadcast the daemon sends every subscriber. The Mac's paired-device pane keeps the screen,
+        // because `DeviceTerminalSessionStateModel.apply` orders every payload by `emittedAt`, so a
+        // frameless acknowledgment that outran that broadcast would make the pane discard the broadcast as
+        // older and leave it with no frame for the new owner epoch.
+        let stateRead: TerminalOneShotStateRead =
+            payload.includesRenderUpdate ? .screen(heldFrame: payload.heldFrameIdentity) : .metadataOnly
+        let sessionState = response.ok && includesSessionState ? try? loadCurrentState(sessionID: sessionID, read: stateRead) : nil
         responseAttributes["include_session_state"] = sessionState == nil ? "0" : "1"
         logDeviceAPIPerformance(
             sessionID: sessionID, name: "terminal_control_response_ready", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
@@ -5926,7 +5935,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private func handleStateRequest(_ request: SpacesDeviceTerminalSessionRequest) throws -> SpacesDeviceAPIResponse {
         let sessionID = request.sessionID
         let startedAt = Date()
-        let payload = try loadCurrentState(sessionID: sessionID)
+        // A `.state` reader never quotes a held frame: the one request that could (the foreground resume)
+        // rides the heartbeat above instead, so the only question here is whether the reader wants a screen.
+        let payload = try loadCurrentState(sessionID: sessionID, read: request.includesRenderUpdate ? .screen(heldFrame: nil) : .metadataOnly)
         TerminalPerformance.logMetric(
             "device_api_state", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
         return SpacesDeviceAPIResponse(ok: true, message: "Loaded terminal state.", result: .terminalState(payload))
@@ -6820,13 +6831,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return address
     }
 
-    /// - Parameter heldFrame: The frame the asking client already displays, when it named one. A session
-    ///   this process hosts answers a matching identity with a frameless payload; the subscription-socket
-    ///   read below has no way to say it, so it exports its usual full frame.
-    private func loadCurrentState(sessionID: String, heldFrame: TerminalHeldFrameIdentity? = nil) throws -> GhosttyRemoteSessionStatePayload {
+    /// Reads a session's current state, honoring what the caller asked for where it can.
+    ///
+    /// The parameter carries the internal name `stateRead` because this function's body calls POSIX `read`.
+    ///
+    /// - Parameter read: What the asking client wants: metadata alone, or the screen with it, and in the
+    ///   latter case the frame it already displays when it named one. A session this process hosts honors
+    ///   both; the persisted and subscription-socket reads below have no way to say either, so they answer
+    ///   with whatever that session exports.
+    private func loadCurrentState(sessionID: String, read stateRead: TerminalOneShotStateRead) throws -> GhosttyRemoteSessionStatePayload {
         // A session this daemon hosts is in this process, so read its state from the live core instead of
         // connecting to that core's own subscription socket and having it export the same frame back.
-        if let livePayload = liveTerminalSessionStateProvider?(sessionID, heldFrame) { return livePayload }
+        if let livePayload = liveTerminalSessionStateProvider?(sessionID, stateRead) { return livePayload }
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive {
             if let finalState = try? TerminalSessionPersistence.readRemoteSessionState(paths: paths) { return finalState }

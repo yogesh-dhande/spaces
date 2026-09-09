@@ -104,6 +104,9 @@ def control(action: str, session_id: str, client_id: str = TYPING_CLIENT_ID, **e
     payload = {"action": action, "sessionID": session_id, "clientID": client_id,
                "appendNewline": False, "asPaste": False}
     payload.update(extra)
+    # The Swift decoder is synthesized Codable with a non-optional Bool for this field, so setdefault
+    # keeps any caller-supplied value while guaranteeing every terminalControl payload carries it.
+    payload.setdefault("includesRenderUpdate", True)
     return {"command": {"terminalControl": payload}, "authToken": AUTH_TOKEN, "clientApp": CLIENT_APP}
 
 
@@ -117,7 +120,11 @@ def owner_attach(session_id: str, client_id: str, columns: int, rows: int) -> di
 
 
 def state(session_id: str) -> dict:
-    return {"command": {"state": {"sessionID": session_id}}, "authToken": AUTH_TOKEN, "clientApp": CLIENT_APP}
+    return {
+        "command": {"state": {"sessionID": session_id, "includesRenderUpdate": True}},
+        "authToken": AUTH_TOKEN,
+        "clientApp": CLIENT_APP,
+    }
 
 
 # Every session is attached at the size a real pane opens at rather than the 80x24 default: a `.state`

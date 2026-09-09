@@ -69,8 +69,11 @@ public struct TerminalRemoteStateReductionResult: Sendable {
     public let frameToApply: GhosttyRenderFrame?
     public let dropReason: String?
     public let didRequestResync: Bool
-    /// True when the reduction moved nothing at all: an out-of-band payload the reducer refused whole
-    /// (`staleOutOfBandReduction`), whose `storedPayload` is therefore the previous payload untouched.
+    /// True when the reduction moved nothing at all: a payload the reducer refused whole
+    /// (`refusedPayloadReduction`), whose `storedPayload` is therefore the previous payload untouched.
+    /// Two payloads reach that refusal: an out-of-band response the stream has already carried the session
+    /// past, and an in-band payload stamped with an older owner epoch than the one already reduced here
+    /// (see `reduce`).
     ///
     /// `payload` still carries the refused input — its attachment snapshot, its render snapshot, its
     /// metadata — because the metrics and traces describe the payload that arrived. A consumer must
@@ -81,11 +84,11 @@ public struct TerminalRemoteStateReductionResult: Sendable {
     /// A partial refusal (`supersededScreen`, where only the render update is refused and the payload's
     /// metadata is ordered on its own terms and genuinely merges) is NOT this: the flag stays false
     /// there, and the payload's remaining state applies as it always did.
-    public let isRefusedOutOfBandPayload: Bool
+    public let isRefusedPayload: Bool
 
     public init(
         payload: GhosttyRemoteSessionStatePayload, storedPayload: GhosttyRemoteSessionStatePayload, decodedUpdate: GhosttyRenderUpdate?,
-        frameToApply: GhosttyRenderFrame?, dropReason: String?, didRequestResync: Bool, isRefusedOutOfBandPayload: Bool = false
+        frameToApply: GhosttyRenderFrame?, dropReason: String?, didRequestResync: Bool, isRefusedPayload: Bool = false
     ) {
         self.payload = payload
         self.storedPayload = storedPayload
@@ -93,7 +96,7 @@ public struct TerminalRemoteStateReductionResult: Sendable {
         self.frameToApply = frameToApply
         self.dropReason = dropReason
         self.didRequestResync = didRequestResync
-        self.isRefusedOutOfBandPayload = isRefusedOutOfBandPayload
+        self.isRefusedPayload = isRefusedPayload
     }
 }
 
@@ -115,7 +118,7 @@ public struct TerminalRemoteStateReducer: Sendable {
     /// - Parameter isOutOfBand: True for a payload that did not arrive on the session's stream — the
     ///   response to a direct `.state` read. Such a payload was captured at request time and can reach
     ///   this reducer after the stream has already carried the session past it, so it must prove it is not
-    ///   stale before it is allowed to move the chain (see `staleOutOfBandReduction`). Nothing on the wire
+    ///   stale before it is allowed to move the chain (see `refusedPayloadReduction`). Nothing on the wire
     ///   marks one: a fetch response is stamped `initial`, the same reason a fresh subscriber's unicast
     ///   initial carries, so provenance is passed in by the caller that made the request.
     public mutating func reduce(
@@ -137,7 +140,7 @@ public struct TerminalRemoteStateReducer: Sendable {
                 // An older owner epoch invalidates the whole payload, not just its screen: the attachment
                 // snapshot it carries names the owner from before a handoff, and merging that would revert
                 // ownership on top of refusing the frame.
-                return staleOutOfBandReduction(
+                return refusedPayloadReduction(
                     payload: incomingPayload, storedPayload: previousPayload, dropReason: Self.staleOutOfBandStateDropReason)
             case .supersededScreen:
                 incomingPayload = incomingPayload.replacingRenderUpdate(nil)
@@ -145,9 +148,32 @@ public struct TerminalRemoteStateReducer: Sendable {
             case .usable: break
             }
             if !incomingPayload.hasRenderUpdate, Self.isStaleMetadata(incomingPayload, against: previousPayload) {
-                return staleOutOfBandReduction(
+                return refusedPayloadReduction(
                     payload: incomingPayload, storedPayload: previousPayload, dropReason: Self.staleOutOfBandStateDropReason)
             }
+        }
+        // An in-band payload from an older owner epoch describes a session generation that is over, frame
+        // included, so none of it may land: merging it would hand the session back to the client this
+        // device displaced and repaint the grid that owner was running at. The daemon's session core bumps
+        // `ownerEpoch` on every ownership transfer and never lowers it, stamps it on every payload it
+        // builds, and always follows a transfer with a full frame at the new epoch, so refusing the older
+        // generation loses nothing. Equal epochs apply in order exactly as before.
+        //
+        // The stream and a control response are two carriers of one session's state, which is what makes
+        // this reachable: a takeover's acknowledgment can overtake the subscription's initial payload on a
+        // slow link, and that initial is stamped for the epoch the transfer ended.
+        //
+        // Deliberately not ordered by `emittedAt`. A wall clock can step backwards, which would refuse
+        // every ownership change until it caught up and strand the viewer as a non-owner; and a stream
+        // initial older than a bootstrap read that answered ahead of it still has to apply, because it
+        // heads the delta chain and nothing else re-heads it. An epoch answers only the question that
+        // matters here and answers it monotonically. A payload with no epoch on either side is left alone:
+        // that is a terminated session's persisted final state, which no live core built.
+        if !isOutOfBand, let previousPayload, let incomingOwnerEpoch = incomingPayload.ownerEpoch,
+            let previousOwnerEpoch = previousPayload.ownerEpoch, incomingOwnerEpoch < previousOwnerEpoch
+        {
+            return refusedPayloadReduction(
+                payload: incomingPayload, storedPayload: previousPayload, dropReason: Self.staleOwnershipGenerationDropReason)
         }
         let resolved = payloadByResolvingRenderUpdate(incomingPayload)
         var payload = resolved.payload
@@ -252,16 +278,16 @@ public struct TerminalRemoteStateReducer: Sendable {
         return .supersededScreen
     }
 
-    /// The reduction an out-of-band payload gets when nothing about it may move the client's state.
+    /// The reduction a payload gets when nothing about it may move the client's state.
     ///
     /// Deliberately does NOT request a resync, unlike every other drop in `reduce` (see the note there):
     /// those lose state the client needed, while this refuses state the client is already past.
-    private func staleOutOfBandReduction(
+    private func refusedPayloadReduction(
         payload: GhosttyRemoteSessionStatePayload, storedPayload: GhosttyRemoteSessionStatePayload, dropReason: String
     ) -> TerminalRemoteStateReductionResult {
         TerminalRemoteStateReductionResult(
             payload: payload, storedPayload: storedPayload, decodedUpdate: nil, frameToApply: nil, dropReason: dropReason, didRequestResync: false,
-            isRefusedOutOfBandPayload: true)
+            isRefusedPayload: true)
     }
 
     /// The whole payload was refused: its screen belonged to a superseded session generation, or it
@@ -269,6 +295,8 @@ public struct TerminalRemoteStateReducer: Sendable {
     private static let staleOutOfBandStateDropReason = "stale_out_of_band_state"
     /// Only the render update was refused; the payload's metadata was still considered on its own terms.
     private static let staleOutOfBandFrameDropReason = "stale_out_of_band_frame"
+    /// The whole payload was refused: its owner epoch is older than the generation already reduced here.
+    private static let staleOwnershipGenerationDropReason = "stale_ownership_generation"
 
     /// Orders a payload carrying no usable screen by `emittedAt`, because nothing else it carries is
     /// reliably ordered: attachment-only updates and Linux payloads reuse the prior revisions

@@ -2840,18 +2840,21 @@
             currentRemoteSessionState(reason: reason, outputByteCount: nil, exportMode: .selfContained)
         }
 
-        /// The payload a one-shot state read is answered with, byte-for-byte what this session's own
-        /// subscription socket would have exported for a fresh subscriber: a self-contained frame that also
-        /// arms the next broadcast to carry a full render update when this export could not produce one, so
-        /// a reader left without a baseline still converges. Serving a Device API `.state` from here lets the
-        /// daemon skip dialing its own session's unix socket to ask itself a question it can answer directly.
-        /// - Parameter heldFrame: The frame the reader already displays. When it names this session's
-        ///   current frame the payload carries no render update at all, so a client confirming an unchanged
-        ///   screen pays no frame bytes.
-        public func currentOneShotStatePayload(heldFrame: TerminalHeldFrameIdentity? = nil) -> GhosttyRemoteSessionStatePayload? {
+        /// The payload a one-shot state read is answered with. A `.screen` read is byte-for-byte what this
+        /// session's own subscription socket would have exported for a fresh subscriber: a self-contained
+        /// frame that also arms the next broadcast to carry a full render update when this export could not
+        /// produce one, so a reader left without a baseline still converges. Serving a Device API `.state`
+        /// from here lets the daemon skip dialing its own session's unix socket to ask itself a question it
+        /// can answer directly.
+        ///
+        /// A `.metadataOnly` read arms nothing: that arm exists for a reader with no baseline, and this
+        /// reader is taking its baseline from the subscription it opened alongside the read. Arming here
+        /// would make every subscriber of this session pay a full frame, and defer the screen by a
+        /// broadcast, for a reader that asked for no screen at all.
+        public func currentOneShotStatePayload(_ read: TerminalOneShotStateRead) -> GhosttyRemoteSessionStatePayload? {
             currentRemoteSessionState(
-                reason: .initial, outputByteCount: nil, exportMode: .selfContained, markNextBroadcastFullWhenMissingRenderUpdate: true,
-                heldFrame: heldFrame)
+                reason: .initial, outputByteCount: nil, exportMode: .selfContained, markNextBroadcastFullWhenMissingRenderUpdate: read.includesScreen,
+                oneShotRead: read)
         }
 
         /// Typed convenience over the raw-string core below: every production broadcast names one of the
@@ -2937,21 +2940,24 @@
             reason: TerminalRemoteSessionStateReason, outputByteCount: Int?, outputEndByteOffset: Int? = nil,
             exportMode: RenderStateExportMode = .selfContained, markNextBroadcastFull: Bool = false,
             markNextBroadcastFullWhenMissingRenderUpdate: Bool = false, clipboardWrite: TerminalClipboardWritePayload? = nil,
-            preCapturedScreenState: LiveSessionScreenState? = nil, payloadPublishStartedAt: Date? = nil,
-            heldFrame: TerminalHeldFrameIdentity? = nil
+            preCapturedScreenState: LiveSessionScreenState? = nil, payloadPublishStartedAt: Date? = nil, oneShotRead: TerminalOneShotStateRead? = nil
         ) -> GhosttyRemoteSessionStatePayload? {
             currentRemoteSessionState(
                 reason: reason.rawValue, outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset, exportMode: exportMode,
                 markNextBroadcastFull: markNextBroadcastFull,
                 markNextBroadcastFullWhenMissingRenderUpdate: markNextBroadcastFullWhenMissingRenderUpdate, clipboardWrite: clipboardWrite,
-                preCapturedScreenState: preCapturedScreenState, payloadPublishStartedAt: payloadPublishStartedAt, heldFrame: heldFrame)
+                preCapturedScreenState: preCapturedScreenState, payloadPublishStartedAt: payloadPublishStartedAt, oneShotRead: oneShotRead)
         }
 
+        /// - Parameter oneShotRead: What a one-shot reader asked for, nil for a broadcast. A
+        ///   `.metadataOnly` read suppresses the screen the policy below would otherwise include, so this
+        ///   export runs no capture and no encode; nothing in the payload's metadata comes from the
+        ///   capture.
         private func currentRemoteSessionState(
             reason: String, outputByteCount: Int?, outputEndByteOffset: Int? = nil, exportMode: RenderStateExportMode = .selfContained,
             markNextBroadcastFull: Bool = false, markNextBroadcastFullWhenMissingRenderUpdate: Bool = false,
             clipboardWrite: TerminalClipboardWritePayload? = nil, preCapturedScreenState: LiveSessionScreenState? = nil,
-            payloadPublishStartedAt: Date? = nil, heldFrame: TerminalHeldFrameIdentity? = nil
+            payloadPublishStartedAt: Date? = nil, oneShotRead: TerminalOneShotStateRead? = nil
         ) -> GhosttyRemoteSessionStatePayload? {
             // Serve runtime state from memory: this core is the sole writer of a live session's runtime
             // state and advances `latestRuntimeState` the moment it computes a new one, so the in-memory copy
@@ -2963,7 +2969,8 @@
             // See `TerminalSessionAttachmentSnapshot.liveWireProjection`.
             let attachmentSnapshot = currentLiveWireAttachmentSnapshot()
             let ownerClient = activeOwnerClient()
-            let includeScreenState = Self.remoteStateShouldIncludeScreenState(reason: reason, ownerKind: ownerClient?.kind)
+            let includeScreenState =
+                (oneShotRead?.includesScreen ?? true) && Self.remoteStateShouldIncludeScreenState(reason: reason, ownerKind: ownerClient?.kind)
             let bootstrapOutputByteCount = outputByteCount
             let bootstrapOutputEndByteOffset = outputEndByteOffset
             if includeScreenState {
@@ -2985,7 +2992,7 @@
                 // encode on bytes the reader drops. Skipping `makeRenderUpdate` leaves the stream's delta
                 // baseline exactly where it was, which is correct: the reader's picture and the baseline
                 // still agree, so the next broadcast's delta applies as it would have.
-                let readerHoldsCurrentFrame = frame.map { heldFrame?.matches($0) == true } ?? false
+                let readerHoldsCurrentFrame = frame.map { oneShotRead?.heldFrame?.matches($0) == true } ?? false
                 if readerHoldsCurrentFrame {
                     // The omission still owes the stream the rects this capture just drained out of ghostty,
                     // exactly as the self-contained `makeRenderUpdate` below would have folded them into the
@@ -3035,7 +3042,7 @@
                     sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
                     screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
                     title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, outputByteCount: bootstrapOutputByteCount,
-                    outputEndByteOffset: bootstrapOutputEndByteOffset, clipboardWrite: clipboardWrite)
+                    outputEndByteOffset: bootstrapOutputEndByteOffset, clipboardWrite: clipboardWrite, ownerEpoch: ownerEpoch)
                 guard let renderUpdateValue else {
                     renderUpdateAttributes["render_update_bytes"] = "0"
                     renderUpdateAttributes["render_update_encode_ms"] = "0"
@@ -3083,7 +3090,7 @@
                 sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
                 screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
                 title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, outputByteCount: bootstrapOutputByteCount,
-                outputEndByteOffset: bootstrapOutputEndByteOffset, clipboardWrite: clipboardWrite)
+                outputEndByteOffset: bootstrapOutputEndByteOffset, clipboardWrite: clipboardWrite, ownerEpoch: ownerEpoch)
         }
 
         private func makeRenderUpdate(

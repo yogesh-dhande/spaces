@@ -503,7 +503,7 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-st
 
 The iOS performance baseline lane is an on-demand, fully automated performance lane: the iOS app runs in a simulator, driven by XCUITest, talking to a live Spaces daemon (this worktree's local dev daemon, or this worktree's remote Linux dev profile) through a Mac-side shaping proxy. It is not part of `scripts/verify.sh` or any CI lane; run it by hand when a change might move device-side timing, payload size, or connection recovery behavior and needs a real number. It measures only and fixes nothing: a slow number never fails the run, only a broken precondition (simulator unavailable, daemon unreachable, pairing failure) stops it.
 
-Nine scenarios run under each of three shaped network profiles, both directions:
+Ten scenarios run under each of three shaped network profiles, both directions:
 
 | profile | one-way delay | bandwidth (each direction) |
 |---|---|---|
@@ -511,7 +511,7 @@ Nine scenarios run under each of three shaped network profiles, both directions:
 | constrained | 40 ms (80 ms RTT) | 8 Mbit/s |
 | poor | 200 ms (400 ms RTT) | 1 Mbit/s |
 
-The scenarios: `cold-open`, `back-and-forth`, `keyboard`, `streaming`, `scrollback`, `background-terminal`, `background-list`, `reconnect` (the only scenario that scripts a dead link, through the shaping proxy's control port), and `idle`.
+The scenarios: `cold-open`, `cold-open-owned` (the same cold open, but against a session a native Mac window already owns, opened with `spaces terminal show` before the UI test runs; local-only, since no Mac window can own a remote session, so a `--remote` run leaves it out of the default set and rejects it when asked for by name), `back-and-forth`, `keyboard`, `streaming`, `scrollback`, `background-terminal`, `background-list`, `reconnect` (the only scenario that scripts a dead link, through the shaping proxy's control port), and `idle`. `spaces terminal show` requires a running Mac app holding this profile's app-owner lease, so a `cold-open-owned` run stages this worktree's Mac app when no instance for the profile is running and quits it at the end of the run; an instance that was already running is left alone.
 
 ```bash
 apps/macos/.build/debug/spacese2e e2e mobile-baseline
