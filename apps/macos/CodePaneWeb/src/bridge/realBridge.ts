@@ -49,13 +49,15 @@ import {
  *     attached first.
  *
  *   Swift -> JS (push events): `window.dispatchEvent(new CustomEvent(name,
- *     { detail }))` for three event names — `spaces:init` (once, at startup,
+ *     { detail }))` for five event names: `spaces:init` (once, at startup,
  *     detail: CodePaneInitPayload), `spaces:diffSignature` (any time the
  *     active scope's git state changes, detail: DiffSignatureEvent),
  *     `spaces:fileListSignature` (any time the authoritative
  *     `workspaceFileList` result changes, detail: FileListSignatureEvent), and
  *     `spaces:fileSignature` (any time the editor's currently open file
- *     changes or is deleted on disk, detail: FileSignatureEvent). The host
+ *     changes or is deleted on disk, detail: FileSignatureEvent), and
+ *     `spaces:flushEdits` (the host is about to quit or tear this pane down and
+ *     wants every unsaved edit written first, detail: { token }). The host
  *     decides which path `spaces:fileSignature` tracks based on
  *     `workspaceFileRead` completions marked with the `editor` purpose; inline
  *     diff reads use `inlineDiff` and never retarget that watcher.
@@ -63,7 +65,8 @@ import {
  *   JS -> Swift (state pushes, fire-and-forget): the same message handler,
  *     no `id`. `workspaceStateChanged` atomically carries all workspace-local
  *     recovery state, including mode, editor source state, sidebar state,
- *     diff edit state, comments, and agent launch tracking.
+ *     diff edit state, comments, and agent launch tracking. `editsFlushed`
+ *     answers one `spaces:flushEdits` request, echoing its token.
  */
 
 type PendingCall = {
@@ -162,6 +165,13 @@ class RealSpacesBridge implements SpacesBridge {
   notifyRenderMetric(metric: CodePaneRenderMetric): void {
     const handler = window.webkit?.messageHandlers?.spacesBridge;
     handler?.postMessage({ method: "renderMetric", params: metric });
+  }
+
+  /** Fire-and-forget answer to one `spaces:flushEdits` request; the echoed token is what lets the
+   * host match this reply to the quit it is holding open. */
+  notifyEditsFlushed(token: string): void {
+    const handler = window.webkit?.messageHandlers?.spacesBridge;
+    handler?.postMessage({ method: "editsFlushed", params: { token } });
   }
 
   async workspaceDiffManifestChunk(

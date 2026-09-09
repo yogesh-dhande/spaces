@@ -178,6 +178,26 @@ function file(overrides: Partial<DiffFileEntry> = {}): DiffFileEntry {
   return { path: "src/foo.ts", status: "modified", patch: PATCH, isBinary: false, ...overrides };
 }
 
+/** A patch whose single hunk really renders `line` on both sides. A rendered diff shows only its
+ *  hunks, so a restored line outside every hunk is collapsed and the pane answers it with a
+ *  file-start scroll instead; a test about restoring an exact line therefore has to name one its
+ *  fixture patch actually contains. */
+function patchCoveringLine(path: string, line: number): string {
+  const start = Math.max(line - 2, 1);
+  return [
+    `diff --git a/${path} b/${path}`,
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    `@@ -${start},5 +${start},5 @@`,
+    " context one",
+    " context two",
+    "-before",
+    "+after",
+    " context three",
+    " context four",
+  ].join("\n") + "\n";
+}
+
 function comment(overrides: Partial<SpacesReviewComment> = {}): SpacesReviewComment {
   return {
     id: "c1",
@@ -285,7 +305,7 @@ describe("DiffView progressive patch replacement", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
     const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
-    const current = file({ path: "src/current.ts", patchState: "ready" });
+    const current = file({ path: "src/current.ts", patchState: "ready", patch: patchCoveringLine("src/current.ts", 11) });
     const queuedReplacement = file({ path: current.path, patch: undefined, patchState: "queued" });
     diffView.setFiles([current], false);
 
@@ -311,7 +331,7 @@ describe("DiffView progressive patch replacement", () => {
     expect(diffView.durableScrollPosition()).toEqual({ path: current.path, line: 11, side: "new" });
     expect(diffView.focusedPosition()).toEqual({ path: current.path, line: 12, side: "new" });
 
-    diffView.updateFile(file({ path: current.path, patchState: "ready" }));
+    diffView.updateFile(file({ path: current.path, patchState: "ready", patch: patchCoveringLine(current.path, 11) }));
     const onPostRender = control.lastOptions?.onPostRender as
       | ((node: HTMLElement, context: { item: { id: string } }) => void)
       | undefined;
@@ -480,7 +500,7 @@ describe("DiffView inline edit", () => {
     expect(control.setItemsCalls.at(-1)?.[0]).toBe(unchangedItem);
   });
 
-  it("keeps a detached dirty edit as a reachable Save/Cancel surface when the refreshed manifest no longer names its path", () => {
+  it("keeps a detached dirty edit as a reachable editing surface when the refreshed manifest no longer names its path", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([], true);
 
@@ -494,9 +514,8 @@ describe("DiffView inline edit", () => {
     const header = (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
       name: "src/omitted.ts",
     });
-    expect(header?.textContent).toContain("Unsaved changes");
-    expect(header?.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
-    expect(header?.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
+    expect(header?.textContent).toContain("Editing");
+    expect(header?.querySelectorAll("button")).toHaveLength(0);
   });
 
   it("keeps a dirty editor reachable when a diff refresh fails", () => {
@@ -521,9 +540,8 @@ describe("DiffView inline edit", () => {
     const header = (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
       name: "src/foo.ts",
     });
-    expect(header?.textContent).toContain("Unsaved changes");
-    expect(header?.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
-    expect(header?.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
+    expect(header?.textContent).toContain("Editing");
+    expect(header?.querySelectorAll("button")).toHaveLength(0);
 
     host.remove();
   });
@@ -550,9 +568,8 @@ describe("DiffView inline edit", () => {
     const header = (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
       name: "src/foo.ts",
     });
-    expect(header?.textContent).toContain("Unsaved changes");
-    expect(header?.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
-    expect(header?.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
+    expect(header?.textContent).toContain("Editing");
+    expect(header?.querySelectorAll("button")).toHaveLength(0);
 
     expect(control.items.has("src/stale.ts")).toBe(false);
     // A successful replacement adopts the real manifest without dropping the active editor, and a
@@ -575,24 +592,92 @@ describe("DiffView inline edit", () => {
     host.remove();
   });
 
-  it("keeps Save and Cancel available while waiting to discard edits and open another file", () => {
-    const onDiscardAndOpenDiffEdit = vi.fn();
-    const diffView = new DiffView(document.createElement("div"), "unified", {
-      ...makeHooks(),
-      onDiscardAndOpenDiffEdit,
-    }, testContextMenu());
+  it("offers no Save or Cancel action in any inline edit state", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([file()], false);
     diffView.beginEdit("src/foo.ts", EDIT_CONTENT, true);
-    diffView.requestOpenAfterDiscard("src/bar.ts");
+    const render = () =>
+      (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
+        name: "src/foo.ts",
+      })!;
 
-    const header = (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
-      name: "src/foo.ts",
-    })!;
-    expect(header.querySelector("#code-pane-diff-edit-save")).not.toBeNull();
-    expect(header.querySelector("#code-pane-diff-edit-cancel")).not.toBeNull();
-    const discard = [...header.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Discard edits and open")!;
-    discard.click();
-    expect(onDiscardAndOpenDiffEdit).toHaveBeenCalledWith("src/foo.ts", "src/bar.ts");
+    for (const status of [
+      { kind: "idle" } as const,
+      { kind: "dirty" } as const,
+      { kind: "saving" } as const,
+      { kind: "saved" } as const,
+      { kind: "failed", reason: "daemon unavailable", retryInMs: 2000 } as const,
+      { kind: "blocked", reason: "File changed on disk" } as const,
+    ]) {
+      diffView.setEditStatus("src/foo.ts", status);
+      const header = render();
+      expect(header.querySelector("#code-pane-diff-edit-save")).toBeNull();
+      expect(header.querySelector("#code-pane-diff-edit-cancel")).toBeNull();
+      expect([...header.querySelectorAll("button")].map((button) => button.textContent)).not.toContain("Discard edits and open");
+    }
+  });
+
+  it("reports each autosave status as the header's save chip", () => {
+    const onRetryDiffEditSave = vi.fn();
+    const diffView = new DiffView(document.createElement("div"), "unified", { ...makeHooks(), onRetryDiffEditSave }, testContextMenu());
+    diffView.setFiles([file()], false);
+    diffView.beginEdit("src/foo.ts", EDIT_CONTENT, true);
+    const chip = () =>
+      (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
+        name: "src/foo.ts",
+      })!.querySelector<HTMLElement>("#code-pane-diff-edit-status");
+
+    // Idle is the one status with nothing to report: nothing typed, nothing written.
+    expect(chip()).toBeNull();
+
+    diffView.setEditStatus("src/foo.ts", { kind: "dirty" });
+    expect(chip()?.textContent).toBe("Unsaved");
+    expect(chip()?.dataset.state).toBe("dirty");
+    // The status role exposes the chip as an element; announcements stay off so the failed
+    // state's per-second retry countdown is not read aloud on every tick.
+    expect(chip()?.getAttribute("role")).toBe("status");
+    expect(chip()?.getAttribute("aria-live")).toBe("off");
+
+    diffView.setEditStatus("src/foo.ts", { kind: "saving" });
+    expect(chip()?.textContent).toBe("Saving…");
+    expect(chip()?.dataset.state).toBe("saving");
+
+    diffView.setEditStatus("src/foo.ts", { kind: "saved" });
+    expect(chip()?.textContent).toBe("Saved");
+    expect(chip()?.dataset.state).toBe("saved");
+
+    // The countdown rounds up, so a backoff that is still running never reads "retry in 0 s".
+    diffView.setEditStatus("src/foo.ts", { kind: "failed", reason: "daemon unavailable", retryInMs: 1500 });
+    expect(chip()?.textContent).toBe("Save failed: daemon unavailable · retry in 2 s");
+    expect(chip()?.dataset.state).toBe("failed");
+
+    diffView.setEditStatus("src/foo.ts", { kind: "blocked", reason: "File deleted on disk" });
+    expect(chip()?.textContent).toBe("Save blocked: File deleted on disk");
+    expect(chip()?.dataset.state).toBe("blocked");
+    expect(onRetryDiffEditSave).not.toHaveBeenCalled();
+  });
+
+  it("offers Retry now only while a save is failing", () => {
+    const onRetryDiffEditSave = vi.fn();
+    const diffView = new DiffView(document.createElement("div"), "unified", { ...makeHooks(), onRetryDiffEditSave }, testContextMenu());
+    diffView.setFiles([file()], false);
+    diffView.beginEdit("src/foo.ts", EDIT_CONTENT, true);
+    const render = () =>
+      (control.lastOptions?.renderHeaderMetadata as ((file: { name: string }) => HTMLElement | undefined) | undefined)?.({
+        name: "src/foo.ts",
+      })!;
+
+    diffView.setEditStatus("src/foo.ts", { kind: "dirty" });
+    expect(render().querySelector("#code-pane-diff-edit-retry")).toBeNull();
+
+    diffView.setEditStatus("src/foo.ts", { kind: "failed", reason: "daemon unavailable", retryInMs: 1000 });
+    const retry = render().querySelector<HTMLButtonElement>("#code-pane-diff-edit-retry")!;
+    expect(retry.className).toBe("btn ghost");
+    retry.click();
+    expect(onRetryDiffEditSave).toHaveBeenCalledWith("src/foo.ts");
+
+    diffView.setEditStatus("src/foo.ts", { kind: "saving" });
+    expect(render().querySelector("#code-pane-diff-edit-retry")).toBeNull();
   });
 
   it("uses the supplied workspace content for the editable right-side item instead of the patch's partial new side", () => {
@@ -639,8 +724,7 @@ describe("DiffView inline edit", () => {
       edit: true,
     });
     expect(header?.textContent).toContain("Editing");
-    expect(header?.querySelector<HTMLButtonElement>("#code-pane-diff-edit-save")).toBeNull();
-    expect([...header!.querySelectorAll<HTMLButtonElement>("button")].map((button) => button.textContent)).toEqual(["Cancel"]);
+    expect([...header!.querySelectorAll<HTMLButtonElement>("button")].map((button) => button.textContent)).toEqual([]);
   });
 
   it("replaces a dirty inline editor with a read-only disk-versus-buffer comparison until an explicit conflict action", () => {
@@ -669,6 +753,8 @@ describe("DiffView inline edit", () => {
     expect(header?.textContent).toContain("Workspace changed");
     expect(header?.querySelector("#code-pane-diff-edit-save")).toBeNull();
     expect(header?.querySelector("#code-pane-diff-edit-cancel")).toBeNull();
+    // Take disk and Keep mine are the only actions a conflict offers: there is nothing to "save"
+    // until one of them says which side wins.
     const actions = [...((header?.querySelectorAll("button") ?? []) as NodeListOf<HTMLButtonElement>)];
     expect(actions.map((button) => button.textContent)).toEqual(["Take disk", "Keep mine"]);
     actions[0]!.click();
@@ -926,7 +1012,7 @@ describe("DiffView visible recovery position", () => {
     control.scrollCalls = [];
 
     diffView.revealStreamedFile(earlier.path);
-    diffView.updateFile(file({ path: target.path, patchState: "ready" }));
+    diffView.updateFile(file({ path: target.path, patchState: "ready", patch: patchCoveringLine(target.path, 203) }));
     const onPostRender = control.lastOptions?.onPostRender as
       | ((node: HTMLElement, context: { item: { id: string } }) => void)
       | undefined;
@@ -1013,6 +1099,321 @@ describe("DiffView visible recovery position", () => {
     host.remove();
   });
 
+  // Regression: an inline edit's own autosave raises a `diffSignature` refresh, which arrives here
+  // as `setFiles(files, true)`. The rebuilt manifest re-streams every file as queued metadata, so
+  // the selected file's arriving patch calls `revealStreamedFile`, and its file-start scroll would
+  // replace the line the user is typing on. A scroll-preserving refresh holds the same reveal guard
+  // the startup restore uses, until the stream finishes.
+  it("does not let a re-streamed selected file's reveal replace the viewport a preserving refresh saved", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const path = "src/autosave-refresh.ts";
+    const patch = patchCoveringLine(path, 214);
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([file({ path, patch })], false);
+
+    const scrollRoot = host.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
+    const deepLine = document.createElement("div");
+    deepLine.dataset.line = "214";
+    deepLine.dataset.diffPath = path;
+    deepLine.dataset.diffSide = "new";
+    scrollRoot.appendChild(deepLine);
+    Object.defineProperty(scrollRoot, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    Object.defineProperty(deepLine, "getBoundingClientRect", { value: () => ({ bottom: 1 }) });
+    expect(diffView.durableScrollPosition()).toEqual({ path, line: 214, side: "new" });
+
+    diffView.setFiles([file({ path, patch })], true);
+    control.scrollCalls = [];
+
+    diffView.revealStreamedFile(path);
+    expect(control.scrollCalls).not.toContainEqual({
+      type: "item",
+      id: path,
+      align: "start",
+      behavior: "smooth",
+    });
+
+    const onPostRender = control.lastOptions?.onPostRender as
+      | ((node: HTMLElement, context: { item: { id: string } }) => void)
+      | undefined;
+    onPostRender?.(document.createElement("div"), { item: { id: path } });
+    expect(control.scrollCalls).toContainEqual({
+      type: "line",
+      id: path,
+      lineNumber: 214,
+      side: "additions",
+      behavior: "instant",
+    });
+
+    diffView.finishRestoredStream();
+    diffView.revealStreamedFile(path);
+    expect(control.scrollCalls).toContainEqual({
+      type: "item",
+      id: path,
+      align: "start",
+      behavior: "smooth",
+    });
+    host.remove();
+  });
+
+  // Clicking a line to edit it does not move the Changes selection, so the selected file and the
+  // file holding the viewport are routinely different: the reveal has to be suppressed for every
+  // re-streamed file, not only for the one the caret is in.
+  it("reveals no file at all during a preserving refresh, including one the viewport is not in", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const selected = file({ path: "src/selected.ts" });
+    const edited = file({ path: "src/edited.ts", patch: patchCoveringLine("src/edited.ts", 214) });
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([selected, edited], false);
+
+    const scrollRoot = host.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
+    const deepLine = document.createElement("div");
+    deepLine.dataset.line = "214";
+    deepLine.dataset.diffPath = edited.path;
+    deepLine.dataset.diffSide = "new";
+    scrollRoot.appendChild(deepLine);
+    Object.defineProperty(scrollRoot, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    Object.defineProperty(deepLine, "getBoundingClientRect", { value: () => ({ bottom: 1 }) });
+    expect(diffView.durableScrollPosition()).toEqual({ path: edited.path, line: 214, side: "new" });
+
+    diffView.setFiles([selected, edited], true);
+    control.scrollCalls = [];
+
+    diffView.revealStreamedFile(selected.path);
+    expect(control.scrollCalls).not.toContainEqual({
+      type: "item",
+      id: selected.path,
+      align: "start",
+      behavior: "smooth",
+    });
+
+    const onPostRender = control.lastOptions?.onPostRender as
+      | ((node: HTMLElement, context: { item: { id: string } }) => void)
+      | undefined;
+    onPostRender?.(document.createElement("div"), { item: { id: edited.path } });
+    expect(control.scrollCalls).toContainEqual({
+      type: "line",
+      id: edited.path,
+      lineNumber: 214,
+      side: "additions",
+      behavior: "instant",
+    });
+
+    diffView.finishRestoredStream();
+    diffView.revealStreamedFile(selected.path);
+    expect(control.scrollCalls).toContainEqual({
+      type: "item",
+      id: selected.path,
+      align: "start",
+      behavior: "smooth",
+    });
+    host.remove();
+  });
+
+  it("reveals a streamed selected file when the refresh had no viewport to preserve", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const path = "src/scope-change-reveal.ts";
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([file({ path })], false);
+    control.scrollCalls = [];
+
+    diffView.revealStreamedFile(path);
+
+    expect(control.scrollCalls).toContainEqual({
+      type: "item",
+      id: path,
+      align: "start",
+      behavior: "smooth",
+    });
+    host.remove();
+  });
+  /** Fakes a live viewport at `line` inside `path` by giving the scroll root one decorated line
+   *  node with the geometry `visiblePosition` samples. */
+  function fakeVisibleLine(host: HTMLElement, path: string, line: number): void {
+    const scrollRoot = host.querySelector<HTMLElement>("#code-pane-diff-scroll")!;
+    const node = document.createElement("div");
+    node.dataset.line = String(line);
+    node.dataset.diffPath = path;
+    node.dataset.diffSide = "new";
+    scrollRoot.appendChild(node);
+    Object.defineProperty(scrollRoot, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    Object.defineProperty(node, "getBoundingClientRect", { value: () => ({ bottom: 1 }) });
+  }
+
+  it("releases the preserving refresh's hold when a scope switch rebuilds the file set", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const path = "src/scope-switch-release.ts";
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([file({ path })], false);
+    fakeVisibleLine(host, path, 214);
+
+    diffView.setFiles([file({ path })], true);
+    // A scope switch supersedes the refresh that held the viewport, and its selected row has to be
+    // revealed like any other first paint.
+    diffView.setFiles([file({ path })], false);
+    control.scrollCalls = [];
+
+    diffView.revealStreamedFile(path);
+
+    expect(control.scrollCalls).toContainEqual({
+      type: "item",
+      id: path,
+      align: "start",
+      behavior: "smooth",
+    });
+    host.remove();
+  });
+
+  it("holds nothing when a preserving refresh's manifest no longer contains the viewport's file", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const gone = file({ path: "src/deleted-since.ts" });
+    const other = file({ path: "src/still-here.ts" });
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([gone, other], false);
+    fakeVisibleLine(host, gone.path, 214);
+
+    diffView.setFiles([gone, other], true);
+    // The workspace change dropped the file the viewport was in, so there is no line left to
+    // protect and the stream reveals its selected row normally.
+    diffView.setFiles([other], true);
+    control.scrollCalls = [];
+
+    diffView.revealStreamedFile(other.path);
+
+    expect(control.scrollCalls).toContainEqual({
+      type: "item",
+      id: other.path,
+      align: "start",
+      behavior: "smooth",
+    });
+    host.remove();
+  });
+
+  it("holds the viewport inside a recovery editor whose path the refreshed manifest omits", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const edited = file({ path: "src/foo.ts" });
+    const other = file({ path: "src/other.ts" });
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([edited, other], false);
+    const prepared = diffView.prepareEdit(edited.path, EDIT_CONTENT);
+    expect(diffView.beginPreparedEdit(prepared!)).toBe(true);
+    fakeVisibleLine(host, edited.path, 214);
+    expect(diffView.durableScrollPosition()).toEqual({ path: edited.path, line: 214, side: "new" });
+
+    // A refresh whose manifest omits the edited path keeps that session as a synthetic recovery
+    // item, so the viewport inside it is still a real rendered location to protect.
+    diffView.setFiles([other], true);
+    control.scrollCalls = [];
+
+    diffView.revealStreamedFile(other.path);
+
+    expect(control.scrollCalls).not.toContainEqual({
+      type: "item",
+      id: other.path,
+      align: "start",
+      behavior: "smooth",
+    });
+    host.remove();
+  });
+  it("falls back to the file start when the refreshed patch no longer renders the preserved line", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const path = "src/hunk-resolved.ts";
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([file({ path, patch: patchCoveringLine(path, 214) })], false);
+    fakeVisibleLine(host, path, 214);
+
+    // An agent resolved the hunk the user was reading, so the replacement patch touches only the
+    // top of the file. Line 214 is collapsed there and Pierre cannot scroll to it.
+    const withoutTheLine = file({
+      path,
+      patch: `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1,5 +1,5 @@\n context one\n context two\n-before\n+after\n context three\n context four\n`,
+    });
+    diffView.setFiles([withoutTheLine], true);
+    control.scrollCalls = [];
+
+    const onPostRender = control.lastOptions?.onPostRender as
+      | ((node: HTMLElement, context: { item: { id: string } }) => void)
+      | undefined;
+    onPostRender?.(document.createElement("div"), { item: { id: path } });
+
+    expect(control.scrollCalls).toContainEqual({
+      type: "item",
+      id: path,
+      align: "start",
+      behavior: "smooth",
+    });
+    expect(control.scrollCalls).not.toContainEqual(expect.objectContaining({ lineNumber: 214 }));
+    host.remove();
+  });
+  // Pierre's File renderer emits `data-line` nodes, so a binary file's placeholder can be the line
+  // the viewport sample reports, which makes it the path a preserving refresh preserves. It has no
+  // diff line to restore, and the hold means no streamed reveal will move there either.
+  it("restores a viewport resting on a binary placeholder to that file's start", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const binary = file({ path: "assets/logo.png", patch: undefined, isBinary: true });
+    const textual = file({ path: "src/after-the-image.ts" });
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([binary, textual], false);
+    fakeVisibleLine(host, binary.path, 1);
+    expect(diffView.durableScrollPosition()).toEqual({ path: binary.path, line: 1, side: "new" });
+
+    diffView.setFiles([binary, textual], true);
+    control.scrollCalls = [];
+
+    const onPostRender = control.lastOptions?.onPostRender as
+      | ((node: HTMLElement, context: { item: { id: string } }) => void)
+      | undefined;
+    onPostRender?.(document.createElement("div"), { item: { id: binary.path } });
+
+    expect(control.scrollCalls).toContainEqual({
+      type: "item",
+      id: binary.path,
+      align: "start",
+      behavior: "smooth",
+    });
+    expect(control.scrollCalls).not.toContainEqual(expect.objectContaining({ type: "line" }));
+    host.remove();
+  });
+
+  it("keeps a queued placeholder's pending line waiting for its streaming patch", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const path = "src/queued-placeholder.ts";
+    const diffView = new DiffView(host, "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([file({ path, patch: patchCoveringLine(path, 214) })], false);
+    fakeVisibleLine(host, path, 214);
+
+    // The refreshed manifest re-queues this file, so its placeholder post-renders first. Its real
+    // patch is still on the way, and that is what can address line 214.
+    diffView.setFiles([file({ path, patch: undefined, patchState: "queued" })], true);
+    control.scrollCalls = [];
+    const onPostRender = control.lastOptions?.onPostRender as
+      | ((node: HTMLElement, context: { item: { id: string } }) => void)
+      | undefined;
+    onPostRender?.(document.createElement("div"), { item: { id: path } });
+
+    expect(control.scrollCalls).toEqual([]);
+
+    diffView.updateFile(file({ path, patchState: "ready", patch: patchCoveringLine(path, 214) }));
+    onPostRender?.(document.createElement("div"), { item: { id: path } });
+
+    expect(control.scrollCalls).toContainEqual({
+      type: "line",
+      id: path,
+      lineNumber: 214,
+      side: "additions",
+      behavior: "instant",
+    });
+    host.remove();
+  });
+
   it("waits for the persisted target's textual patch post-render before restoring its line and focus", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     const queued = file({ path: "src/delayed.ts", patch: undefined, patchState: "queued" });
@@ -1022,7 +1423,7 @@ describe("DiffView visible recovery position", () => {
     expect(control.scrollCalls).toEqual([]);
     expect(control.setSelectedLinesCalls).toEqual([]);
 
-    diffView.updateFile(file({ path: queued.path, patchState: "ready" }));
+    diffView.updateFile(file({ path: queued.path, patchState: "ready", patch: patchCoveringLine(queued.path, 11) }));
     expect(control.scrollCalls).toEqual([]);
 
     const onPostRender = control.lastOptions?.onPostRender as

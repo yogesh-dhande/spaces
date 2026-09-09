@@ -87,6 +87,7 @@ function makeBridge(): SpacesBridge & {
     subscribeFileSignature: () => () => {},
     notifyWorkspaceStateChanged: () => {},
     notifyRenderMetric: () => {},
+    notifyEditsFlushed: () => {},
     notifyReady: () => {},
     startWorkspaceCommand: notUsed,
     resumeWorkspaceCommandTracking: notUsed,

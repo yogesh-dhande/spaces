@@ -4,6 +4,7 @@ import { Editor } from "@pierre/diffs/edit";
 import { applyPatch, parsePatch, reversePatch } from "diff";
 import { DiffFileEntry, ReviewCommentSide } from "../bridge/types";
 import { CODE_PANE_THEME_NAME, resolveAllowedLanguage } from "../theme";
+import type { AutosaveStatus } from "./autosave";
 import { ContextMenu } from "./contextMenu";
 import { editorLineForDiffLine, resolveDiffLineTarget } from "./diffLineTarget";
 import {
@@ -14,6 +15,13 @@ import {
   toAnnotationSide,
 } from "./reviewComments";
 import { DiffLayout } from "./state";
+
+/** Identifier `DiffView` puts on Pierre's contenteditable while an inline edit session is live.
+ *  Exported because the pane scopes its Escape shortcut to keystrokes that came from inside this
+ *  element (`root.ts`), which is the same element this file names. */
+export const DIFF_EDIT_INPUT_ID = "code-pane-diff-edit-input";
+import "../styles/editHeader.css";
+import editHeaderCSS from "../styles/editHeader.css?inline";
 
 /** DOM/data hooks `DiffView` calls into for the comment surface — kept as a small interface
  *  rather than a direct `CommentsController` dependency so this file stays a thin adapter to
@@ -29,10 +37,10 @@ export interface DiffCommentHooks {
   /** Clicking a right/new diff line starts the one active inline edit. */
   onRequestEdit?(path: string): void;
   onDiffEditChange?(path: string, content: string): void;
-  onSaveDiffEdit?(path: string): void;
-  onCancelDiffEdit?(path: string): void;
   onResolveDiffEdit?(path: string, action: "keepMine" | "takeDisk" | "closeWithoutSaving"): void;
-  onDiscardAndOpenDiffEdit?(currentPath: string, nextPath: string): void;
+  /** The "Retry now" control on a failed autosave: write again immediately instead of waiting out
+   *  the scheduler's backoff. */
+  onRetryDiffEditSave?(path: string): void;
   /** Source-line focus moved within the diff; root coalesces its recovery-state update. */
   onPositionChange?(): void;
   /** The diff line context menu's "Open in Editor" item was activated. `line` is already mapped to
@@ -135,6 +143,8 @@ export class DiffView {
         path: string;
         content: string;
         dirty: boolean;
+        /** The owning scheduler's latest autosave status, rendered as this file's header chip. */
+        status: AutosaveStatus;
         session: number;
         fileDiff: FileDiffMetadata;
         oldContent: string | null;
@@ -142,7 +152,7 @@ export class DiffView {
       }
     | undefined;
   /** A dirty editor is user data, not merely a rendering detail. If a live manifest no longer
-   * names its path, keep this synthetic file in the CodeView until Save or Cancel resolves it. */
+   * names its path, keep this synthetic file in the CodeView until its edit session ends. */
   private recoveryEditFile: DiffFileEntry | undefined;
   /** Changes only when externally supplied content replaces an edit document. It gives Pierre a
    * new file cache key for disk adoption while ordinary typing keeps the active document intact. */
@@ -151,7 +161,6 @@ export class DiffView {
    *  Pierre, held until the one document-change callback that replacement provokes. See
    *  `buildCodeViewOptions`' `onItemEditChange`. */
   private pendingControlledContent: string | undefined;
-  private pendingEditPath: string | undefined;
   private focusedLocation: { path: string; line: number; side: ReviewCommentSide } | undefined;
   /** The initial workspace snapshot names a source location, while a selected manifest row names
    * only a file. Keep the former through patch streaming so revealing the selected row cannot
@@ -161,6 +170,9 @@ export class DiffView {
    * This ownership lasts for the whole initial stream; the exact line guard may be released as
    * soon as its target post-renders so live viewport sampling can take over. */
   private protectedStreamRevealPath: string | undefined;
+  /** A scroll-preserving refresh owns the viewport for its whole re-stream: no streamed file is
+   * revealed at all until the stream finishes, the user navigates, or the view is reset. */
+  private preservedViewportHeld = false;
   /** A persisted line cannot be restored into a queued file. Keep it until the target's
    * textual diff reports post-render, when Pierre has a concrete line to reveal and focus. */
   private pendingScrollPosition:
@@ -229,6 +241,10 @@ export class DiffView {
     this.filesByPath = new Map(this.files.map((file) => [file.path, file]));
     this.fileIndexesByPath = new Map(this.files.map((file, index) => [file.path, index]));
     this.itemVersions = new Map(this.files.map((file) => [file.path, this.generation]));
+    // The recovery editor joins the file set before the viewport bookkeeping below: an inline edit
+    // whose path the manifest omits is still a rendered item, so it is a legitimate restore target
+    // and a viewport inside it must hold streamed reveals like any other.
+    this.syncRecoveryEditFile();
     if (this.pendingScrollPosition !== undefined && !this.filesByPath.has(this.pendingScrollPosition.path)) {
       this.pendingScrollPosition = undefined;
     }
@@ -238,7 +254,8 @@ export class DiffView {
     if (this.pendingFocusedPosition !== undefined && !this.filesByPath.has(this.pendingFocusedPosition.path)) {
       this.pendingFocusedPosition = undefined;
     }
-    if (preservedScrollPosition !== null && preservedScrollPosition !== undefined && this.filesByPath.has(preservedScrollPosition.path)) {
+    const holdsViewport = preservedScrollPosition !== null && preservedScrollPosition !== undefined && this.filesByPath.has(preservedScrollPosition.path);
+    if (holdsViewport) {
       this.lastDurableScrollPosition = preservedScrollPosition;
       this.pendingScrollPosition = {
         path: preservedScrollPosition.path,
@@ -246,10 +263,22 @@ export class DiffView {
         scrollSide: preservedScrollPosition.side,
       };
     }
+    // The rebuilt stream re-reveals the selected row as its patch arrives, and that file-start
+    // scroll would throw away the viewport captured above (an inline edit whose own autosave
+    // raised this refresh is the common case). The selected row is not necessarily the file the
+    // viewport is in: clicking a line to edit does not move the sidebar selection, so a user who
+    // picked file A and then scrolled down to edit file B has the selection on A and the caret in
+    // B, and revealing A is exactly what takes the editor off screen. Suppress every streamed
+    // reveal for this refresh until the stream finishes, the user navigates, or the view resets.
+    // Recomputed on every rebuild rather than latched: a superseding rebuild that does not preserve
+    // scroll (a scope switch) must reveal its selected row again, and one whose manifest dropped
+    // the viewport's file has nothing left to hold. The preserved path can also name a placeholder
+    // (Pierre's File renderer emits line nodes the sample reads), which `retryPendingRestorePosition`
+    // restores to that item's start since it has no diff line and nothing else will reveal it.
+    this.preservedViewportHeld = holdsViewport;
     if (preservedFocusedPosition !== undefined && this.filesByPath.has(preservedFocusedPosition.path)) {
       this.pendingFocusedPosition = preservedFocusedPosition;
     }
-    this.syncRecoveryEditFile();
     // A prior `setError` call (see its doc comment) repurposes `emptyEl` for a factual error
     // message; any successful refresh — including one that lands on a genuinely empty diff —
     // supersedes that, so restore the plain "No changes" wording every time this runs rather than
@@ -354,7 +383,7 @@ export class DiffView {
       this.codeView.setup(this.root);
     }
     if (this.editing?.path !== undefined && this.editing.path !== path) this.endEdit(this.editing.path);
-    this.editing = { path, content, dirty, fileDiff, oldContent, session: ++this.editSessionGeneration };
+    this.editing = { path, content, dirty, status: { kind: "idle" }, fileDiff, oldContent, session: ++this.editSessionGeneration };
     this.pendingControlledContent = content;
     this.syncRecoveryEditFile();
     this.emptyEl.style.display = "none";
@@ -431,24 +460,17 @@ export class DiffView {
     this.clearEditorIdentifier();
   }
 
-  requestOpenAfterDiscard(path: string): void {
-    if (this.editing?.path === undefined || !this.codeView) return;
-    this.pendingEditPath = path;
-    this.generation += 1;
-    this.itemVersions.set(this.editing.path, this.generation);
-    const file = this.filesByPath.get(this.editing.path);
-    if (!file) return;
-    this.codeView.updateItem(this.cacheItem(file));
-  }
-
-  /** Restores the normal editor actions when the requested replacement file could not be read. */
-  clearPendingOpen(path: string): void {
-    if (this.editing?.path !== path || this.pendingEditPath === undefined) return;
-    this.pendingEditPath = undefined;
+  /** Publishes the owning autosave scheduler's status into this file's header. Only the header
+   * changes, so this bumps that one file's item version and pushes a single `updateItem` rather
+   * than rebuilding the rendered item set. */
+  setEditStatus(path: string, status: AutosaveStatus): void {
+    if (this.editing?.path !== path || !this.codeView) return;
+    this.editing = { ...this.editing, status };
     this.generation += 1;
     this.itemVersions.set(path, this.generation);
     const file = this.filesByPath.get(path);
-    if (file) this.codeView?.updateItem(this.cacheItem(file));
+    if (!file) return;
+    this.codeView.updateItem(this.cacheItem(file));
   }
 
   endEdit(path: string): void {
@@ -458,7 +480,6 @@ export class DiffView {
     const wasRecoveryEdit = this.recoveryEditFile?.path === path;
     this.recoveryEditFile = undefined;
     if (wasRecoveryEdit) this.filesByPath.delete(path);
-    this.pendingEditPath = undefined;
     this.generation += 1;
     this.itemVersions.set(path, this.generation);
     // Leaving edit returns the active complete-side diff to its patch-backed review diff.
@@ -571,11 +592,12 @@ export class DiffView {
     // scope retarget the first rendered file in a later replacement scope.
     this.restoredScrollPosition = undefined;
     this.protectedStreamRevealPath = undefined;
+    this.preservedViewportHeld = false;
     this.pendingScrollPosition = undefined;
     this.lastDurableScrollPosition = undefined;
     // The failed manifest must not strand an active editor. Re-promote it as a synthetic file so
-    // the user can still inspect the unsaved buffer and explicitly Save or Cancel it while the
-    // fetch error remains visible above the editor.
+    // the user can still see the unsaved buffer, and its autosave status, while the fetch error
+    // remains visible above the editor.
     this.syncRecoveryEditFile();
     this.emptyEl.textContent = message;
     this.emptyEl.classList.toggle("error", options.error);
@@ -622,6 +644,7 @@ export class DiffView {
     // scope retarget the first rendered file in the replacement scope.
     this.restoredScrollPosition = undefined;
     this.protectedStreamRevealPath = undefined;
+    this.preservedViewportHeld = false;
     this.pendingScrollPosition = undefined;
     this.lastDurableScrollPosition = undefined;
     // A non-preserving scope reset must not carry a source selection into the new comparison. The
@@ -660,6 +683,7 @@ export class DiffView {
     // guard or overwrite the user's choice.
     this.restoredScrollPosition = undefined;
     this.protectedStreamRevealPath = undefined;
+    this.preservedViewportHeld = false;
     this.pendingScrollPosition = undefined;
     this.scrollToFileInternal(path);
   }
@@ -677,6 +701,9 @@ export class DiffView {
       this.applyRestoredScrollPosition({ path, scrollLine: restored.line, scrollSide: restored.side });
       return;
     }
+    // A scroll-preserving refresh owns the viewport for every file it re-streams, not just the one
+    // the viewport is in, so no reveal runs while it is held (see `setFiles`).
+    if (this.preservedViewportHeld) return;
     // The exact line guard is released once the target post-renders, but the selected row can be
     // revealed again during final/out-of-order reconciliation. Keep that late item-start scroll
     // from undoing the user's restored/live viewport until the stream explicitly finishes.
@@ -689,6 +716,7 @@ export class DiffView {
   finishRestoredStream(): void {
     this.restoredScrollPosition = undefined;
     this.protectedStreamRevealPath = undefined;
+    this.preservedViewportHeld = false;
   }
 
   /** A logical source line survives virtualized content reflow; pixel offsets do not. */
@@ -770,6 +798,7 @@ export class DiffView {
     // It must not be overwritten by a pending position from the initial workspace restore.
     this.restoredScrollPosition = undefined;
     this.protectedStreamRevealPath = undefined;
+    this.preservedViewportHeld = false;
     this.pendingScrollPosition = undefined;
     if (lineNumber === 0) {
       this.scrollToFile(filePath);
@@ -814,32 +843,38 @@ export class DiffView {
         ? "File deleted on disk"
         : this.editing.conflict?.kind === "changed"
           ? "Workspace changed"
-          : this.editing.dirty
-            ? "Unsaved changes"
-            : "Editing";
+          : "Editing";
       header.appendChild(state);
       const spacer = document.createElement("span");
       spacer.className = "sp";
       header.appendChild(spacer);
-      const cancel = document.createElement("button");
-      cancel.type = "button";
-      cancel.className = "btn";
-      cancel.id = "code-pane-diff-edit-cancel";
-      cancel.textContent = "Cancel";
-      cancel.addEventListener("click", () => this.hooks.onCancelDiffEdit?.(path));
-      const save = document.createElement("button");
-      save.type = "button";
-      save.className = "btn primary";
-      save.id = "code-pane-diff-edit-save";
-      save.textContent = "Save";
-      save.disabled = !this.editing.dirty || this.editing.conflict !== undefined;
-      save.addEventListener("click", () => this.hooks.onSaveDiffEdit?.(path));
+      // Edits are written by the autosave scheduler, so the header reports what that scheduler is
+      // doing instead of offering a Save action. Idle is the one status with nothing to say: the
+      // buffer matches disk and this session has not written anything yet.
+      const status = this.editing.status;
+      if (status.kind !== "idle") {
+        const chip = document.createElement("span");
+        chip.className = "save-status";
+        chip.id = "code-pane-diff-edit-status";
+        // The status role makes WebKit expose the span as an accessibility element instead of
+        // collapsing it into its text. Live announcements stay off: the failed state re-renders
+        // its retry countdown every second, which would otherwise be read aloud each tick.
+        chip.setAttribute("role", "status");
+        chip.setAttribute("aria-live", "off");
+        chip.dataset.state = status.kind;
+        chip.textContent = statusChipText(status);
+        header.appendChild(chip);
+        if (status.kind === "failed") {
+          const retry = document.createElement("button");
+          retry.type = "button";
+          retry.className = "btn ghost";
+          retry.id = "code-pane-diff-edit-retry";
+          retry.textContent = "Retry now";
+          retry.addEventListener("click", () => this.hooks.onRetryDiffEditSave?.(path));
+          header.appendChild(retry);
+        }
+      }
       if (this.editing.conflict !== undefined) {
-        const keepMine = document.createElement("button");
-        keepMine.type = "button";
-        keepMine.className = "btn primary";
-        keepMine.textContent = "Keep mine";
-        keepMine.addEventListener("click", () => this.hooks.onResolveDiffEdit?.(path, "keepMine"));
         const takeDisk = document.createElement("button");
         takeDisk.type = "button";
         takeDisk.className = "btn";
@@ -847,28 +882,27 @@ export class DiffView {
         takeDisk.addEventListener("click", () =>
           this.hooks.onResolveDiffEdit?.(path, this.editing?.conflict?.kind === "deleted" ? "closeWithoutSaving" : "takeDisk"),
         );
+        const keepMine = document.createElement("button");
+        keepMine.type = "button";
+        keepMine.className = "btn primary";
+        keepMine.textContent = "Keep mine";
+        keepMine.addEventListener("click", () => this.hooks.onResolveDiffEdit?.(path, "keepMine"));
         header.append(takeDisk, keepMine);
-      } else {
-        header.append(cancel);
-        if (this.editing.dirty) header.append(save);
-        if (this.pendingEditPath === undefined) return header;
-        const discard = document.createElement("button");
-        discard.type = "button";
-        discard.className = "btn";
-        discard.textContent = "Discard edits and open";
-        discard.addEventListener("click", () => this.hooks.onDiscardAndOpenDiffEdit?.(path, this.pendingEditPath!));
-        header.append(discard);
       }
       return header;
     };
     return {
       theme: CODE_PANE_THEME_NAME,
       diffStyle: this.layout,
-      // CodeView enables its native gutter utility for all renderer types. File placeholders use
-      // the file renderer and inline-edit diffs have no stable patch anchors, so hide their no-op
-      // utility in Pierre's supported shadow-root stylesheet while retaining the native callback
+      // Pierre's shadow root adopts only its own stylesheet, so everything the inline edit header
+      // needs has to travel through this option: editHeader.css styles that header, and the rule
+      // after it hides the native gutter utility. CodeView enables that utility for all renderer
+      // types, but file placeholders use the file renderer and inline-edit diffs have no stable
+      // patch anchors, so the no-op utility is hidden there while the native callback stays live
       // for ordinary read-only diffs.
-      unsafeCSS: "[data-file] [data-utility-button], :host([data-code-pane-editing]) [data-utility-button] { display: none !important; }",
+      unsafeCSS:
+        editHeaderCSS +
+        "[data-file] [data-utility-button], :host([data-code-pane-editing]) [data-utility-button] { display: none !important; }",
       enableGutterUtility: true,
       createEditor: (editorType, options, editStateKey) => new Editor(editorType, options, editStateKey),
       // Pierre reports every document change on one event carrying the whole edited document as
@@ -1128,7 +1162,7 @@ export class DiffView {
     // semantic surface that is stable in both the browser and WKWebView DOMs.
     const editorElement = this.renderedElements<HTMLElement>(`[role="textbox"][aria-multiline="true"]`, root)[0];
     if (!editorElement) return false;
-    editorElement.id = "code-pane-diff-edit-input";
+    editorElement.id = DIFF_EDIT_INPUT_ID;
     return true;
   }
 
@@ -1136,7 +1170,7 @@ export class DiffView {
    * Pierre may retain a detached/reused contenteditable while replacing a FileDiff, so clear our
    * identifier before a read-only transition even when that DOM node is not removed immediately. */
   private clearEditorIdentifier(root: HTMLElement = this.root): void {
-    for (const editorElement of this.renderedElements<HTMLElement>("#code-pane-diff-edit-input", root)) {
+    for (const editorElement of this.renderedElements<HTMLElement>(`#${DIFF_EDIT_INPUT_ID}`, root)) {
       editorElement.removeAttribute("id");
     }
   }
@@ -1242,7 +1276,10 @@ export class DiffView {
   private retryPendingRestorePosition(path: string): void {
     // `onPostRender` also runs for non-diff items. Only the target FileDiff's post-render means
     // Pierre has created the logical line that a saved scroll/focus position can address.
-    if (this.itemTypes.get(path) !== "diff") return;
+    if (this.itemTypes.get(path) !== "diff") {
+      this.restorePlaceholderPosition(path);
+      return;
+    }
     const scroll = this.pendingScrollPosition;
     if (scroll?.path === path) {
       this.pendingScrollPosition = undefined;
@@ -1260,6 +1297,41 @@ export class DiffView {
     }
   }
 
+  /** Restores a viewport that rested on a placeholder item. Pierre's File renderer emits
+   *  `data-line` nodes of its own, which `decorateRenderedLines` labels like any other line, so
+   *  `visiblePosition` legitimately samples a placeholder and a refresh can preserve its path. A
+   *  binary or unparseable file has no source line to scroll to and no later patch to wait for, so
+   *  its own start is the honest restore target, and with a scroll-preserving refresh holding every
+   *  streamed reveal nothing else would bring it back. A queued placeholder is excluded: its real
+   *  patch is still streaming and restores the exact line at that FileDiff's post-render. */
+  private restorePlaceholderPosition(path: string): void {
+    if (this.pendingScrollPosition?.path !== path) return;
+    const file = this.filesByPath.get(path);
+    if (file === undefined || (!file.isBinary && file.patch === undefined)) return;
+    this.pendingScrollPosition = undefined;
+    if (this.restoredScrollPosition?.path === path) this.restoredScrollPosition = undefined;
+    this.scrollToFileInternal(path);
+  }
+
+  /** Whether the item rendered for `path` can actually scroll to this source line. The hunk ranges
+   *  come from the `FileDiffMetadata` the cached item already carries: `cacheItem` ran Pierre's
+   *  `processFile` over this very patch, so the check reads that parse instead of running another
+   *  one over the patch text. A rendered diff shows only its hunks, and everything between them is
+   *  collapsed, so a line outside every hunk has no node and a scroll naming it silently does
+   *  nothing (a refreshed patch whose hunk the user was reading is gone, or a persisted line that
+   *  predates this comparison). An edit item renders the whole file, where every line exists, and a
+   *  placeholder item is handled by `retryPendingRestorePosition`, so both keep the line scroll. */
+  private renderedItemHasLine(path: string, side: ReviewCommentSide, line: number): boolean {
+    const item = this.itemsByPath.get(path);
+    if (item === undefined || item.type !== "diff" || item.edit === true) return true;
+    for (const hunk of item.fileDiff.hunks) {
+      const start = side === "new" ? hunk.additionStart : hunk.deletionStart;
+      const count = side === "new" ? hunk.additionCount : hunk.deletionCount;
+      if (count > 0 && line >= start && line < start + count) return true;
+    }
+    return false;
+  }
+
   private applyRestoredScrollPosition(position: {
     path: string;
     scrollLine: number | null | undefined;
@@ -1267,6 +1339,13 @@ export class DiffView {
   }): void {
     const { path, scrollLine, scrollSide } = position;
     if (scrollLine !== null && scrollLine !== undefined && scrollSide !== null && scrollSide !== undefined) {
+      // Leave the durable position and the `scrollLine` dataset alone on the fallback so the next
+      // live sample reports where the viewport actually landed rather than a line the view cannot
+      // show.
+      if (!this.renderedItemHasLine(path, scrollSide, scrollLine)) {
+        this.scrollToFileInternal(path);
+        return;
+      }
       this.lastDurableScrollPosition = { path, line: scrollLine, side: scrollSide };
       this.codeView?.scrollTo({ type: "line", id: path, lineNumber: scrollLine, side: toAnnotationSide(scrollSide), behavior: "instant" });
       this.root.dataset.scrollLine = String(scrollLine);
@@ -1339,7 +1418,7 @@ export class DiffView {
   /** Returns the manifest entries plus the one recovery-only editor, which deliberately stays out
    * of the sidebar/manifest scheduler. It is placed first so a refresh cannot strand unsaved text
    * below a long streamed diff. A queued replacement patch also uses this item: its prior verified
-   * comparison can still render Save/Cancel after that transfer aborts. */
+   * comparison can still render the live editor after that transfer aborts. */
   private displayedFiles(): readonly DiffFileEntry[] {
     return this.recoveryEditFile === undefined ? this.files : [this.recoveryEditFile, ...this.files];
   }
@@ -1398,4 +1477,24 @@ function annotationListEquals(a: readonly AnchoredComment[] | undefined, b: read
     const other = b[index]!;
     return ac.comment === other.comment && ac.position!.lineNumber === other.position!.lineNumber && ac.position!.outdated === other.position!.outdated;
   });
+}
+
+/** The inline editor's one-line autosave report. `failed` names both the reason and how long the
+ * scheduler will wait before writing again, so the "Retry now" button beside it is a shortcut
+ * rather than the only way back. */
+function statusChipText(status: AutosaveStatus): string {
+  switch (status.kind) {
+    case "dirty":
+      return "Unsaved";
+    case "saving":
+      return "Saving…";
+    case "saved":
+      return "Saved";
+    case "failed":
+      return `Save failed: ${status.reason} · retry in ${Math.ceil(status.retryInMs / 1000)} s`;
+    case "blocked":
+      return `Save blocked: ${status.reason}`;
+    case "idle":
+      return "";
+  }
 }

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorView } from "../src/app/editorView";
 import {
+  CodePaneEditorState,
   FileSignatureEvent,
   SpacesBridge,
   SpacesBridgeError,
@@ -65,6 +66,33 @@ vi.mock("@pierre/diffs/edit", () => ({
   Editor: class {},
 }));
 
+/** Builds an `EditorView` and registers it for teardown: its autosave scheduler holds a real
+ *  debounce timer, which must not outlive the test that armed it. */
+function newEditorView(
+  container: HTMLElement,
+  bridge: SpacesBridge,
+  callbacks?: ConstructorParameters<typeof EditorView>[2],
+): EditorView {
+  const view = new EditorView(container, bridge, callbacks);
+  liveViews.push(view);
+  return view;
+}
+
+const liveViews: EditorView[] = [];
+
+afterEach(() => {
+  for (const view of liveViews.splice(0)) view.dispose();
+});
+
+/** The top bar's autosave chip: the single surface for save state (there is no Save button). */
+function saveChip(container: HTMLElement): HTMLElement {
+  return container.querySelector("#code-pane-editor-save-status") as HTMLElement;
+}
+
+function saveState(container: HTMLElement): string | undefined {
+  return saveChip(container).dataset.state;
+}
+
 function makeBridge(overrides: Partial<SpacesBridge> = {}): SpacesBridge {
   return {
     workspaceDiffManifestChunk: vi.fn().mockRejectedValue(new Error("not used")),
@@ -83,6 +111,7 @@ function makeBridge(overrides: Partial<SpacesBridge> = {}): SpacesBridge {
     subscribeFileSignature: vi.fn(() => () => {}),
     notifyWorkspaceStateChanged: vi.fn(),
     notifyRenderMetric: vi.fn(),
+    notifyEditsFlushed: vi.fn(),
     // Not used by EditorView (comments are diff-mode only) — stubbed so this satisfies
     // `SpacesBridge` without any of these tests needing to care about the comment surface.
     reviewCommentList: vi.fn().mockRejectedValue(new Error("not used")),
@@ -125,7 +154,7 @@ describe("EditorView — open() reads and opens a file directly", () => {
     const result: WorkspaceFileReadResult = { content: "export {}\n", sha256: "sha-1", size: 10 };
     const workspaceFileRead = vi.fn().mockResolvedValue(result);
     const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("src/app/root.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("src/app/root.ts", "editor"));
@@ -139,7 +168,7 @@ describe("EditorView — open() reads and opens a file directly", () => {
       .fn()
       .mockRejectedValue(new SpacesBridgeError("notFound", "No such file in the mock workspace: missing.ts"));
     const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("missing.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("missing.ts", "editor"));
@@ -170,175 +199,215 @@ describe("EditorView — open() reads and opens a file directly", () => {
 // replacement coverage, and the "EditorView — external-change handling" block for the full
 // clean-reload / auto-merge / conflict-compare-view contract this now follows.
 
-describe("EditorView — save() catches a rejected write (round-8 Fix 2)", () => {
+describe("EditorView autosave: one write per burst of typing", () => {
   let container: HTMLElement;
 
   beforeEach(() => {
     container = document.createElement("div");
     capturedCodeViewOptions.current = undefined;
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function openFile(bridge: SpacesBridge, content = "line1\nline2\n", sha = "sha-1"): Promise<EditorView> {
+    (bridge.workspaceFileRead as ReturnType<typeof vi.fn>).mockResolvedValue({ content, sha256: sha, size: content.length });
+    const view = newEditorView(container, bridge);
+    await view.open("a.ts");
+    return view;
+  }
+
+  it("writes once, 800ms after the last keystroke, against the load's hash, and reports dirty then saving then saved", async () => {
+    const workspaceFileWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-2" });
+    const bridge = makeBridge({ workspaceFileWrite });
+    await openFile(bridge);
+
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "line1 edited\nline2\n" } }, undefined);
+    expect(saveState(container)).toBe("dirty");
+    expect(saveChip(container).textContent).toBe("Unsaved");
+    // The status role exposes the chip as an element; announcements stay off so the failed
+    // state's per-second retry countdown is not read aloud on every tick.
+    expect(saveChip(container).getAttribute("role")).toBe("status");
+    expect(saveChip(container).getAttribute("aria-live")).toBe("off");
+
+    // A second keystroke inside the window restarts it: one write, not two.
+    vi.advanceTimersByTime(700);
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "line1 edited twice\nline2\n" } }, undefined);
+    vi.advanceTimersByTime(700);
+    expect(workspaceFileWrite).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(100);
+    expect(saveState(container)).toBe("saving");
+    expect(saveChip(container).textContent).toBe("Saving…");
+    await vi.waitFor(() => expect(saveState(container)).toBe("saved"));
+
+    expect(workspaceFileWrite).toHaveBeenCalledTimes(1);
+    expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "line1 edited twice\nline2\n", {
+      baseSHA256: "sha-1",
+      purpose: "editor",
+    });
+    expect(saveChip(container).textContent).toBe("Saved");
+    // "Saved" is terminal until the next edit: nothing fades it out on a timer.
+    vi.advanceTimersByTime(60_000);
+    expect(saveState(container)).toBe("saved");
+  });
+
+  it("an edit made while the write is in flight is written again against the write's own returned hash, with no re-read", async () => {
+    let resolveWrite!: (result: WorkspaceFileWriteResult) => void;
+    const workspaceFileWrite = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve)))
+      .mockResolvedValue({ ok: true, sha256: "sha-3" });
+    const bridge = makeBridge({ workspaceFileWrite });
+    await openFile(bridge);
+
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "first\n" } }, undefined);
+    vi.advanceTimersByTime(800);
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledTimes(1));
+
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "second\n" } }, undefined);
+    resolveWrite({ ok: true, sha256: "sha-2" });
+
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledTimes(2));
+    // Straight through, with no second debounce: the burst already paid for its wait.
+    expect(workspaceFileWrite).toHaveBeenNthCalledWith(2, "a.ts", "second\n", { baseSHA256: "sha-2", purpose: "editor" });
+    expect(bridge.workspaceFileRead).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(saveState(container)).toBe("saved"));
+  });
+
+  it("no Save button exists in the top bar, in any state", async () => {
+    const workspaceFileWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-2" });
+    const bridge = makeBridge({ workspaceFileWrite });
+    await openFile(bridge);
+    const openBar = container.querySelector(".editor-open-bar") as HTMLElement;
+
+    expect(openBar.querySelector("button.primary")).toBeNull();
+    expect([...openBar.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Retry now"]);
+    expect(saveState(container)).toBe("idle");
+    expect(saveChip(container).style.display).toBe("none");
+    expect((openBar.querySelector("#code-pane-editor-retry-save") as HTMLElement).style.display).toBe("none");
+
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "edited\n" } }, undefined);
+    vi.advanceTimersByTime(800);
+    await vi.waitFor(() => expect(saveState(container)).toBe("saved"));
+    expect(openBar.querySelector("button.primary")).toBeNull();
+  });
+});
+
+describe("EditorView autosave: a rejected write backs off, with the reason and a Retry now action on the chip", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    capturedCodeViewOptions.current = undefined;
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   /** Opens "src/app/root.ts" and marks it edited (via the captured fake CodeView's
    *  `onItemEditChange`, bypassing the real editor same as the conflict-banner tests above), leaving
-   *  Save ready to click. */
-  async function openAndEdit(bridge: SpacesBridge): Promise<{ saveBtn: HTMLButtonElement }> {
+   *  one debounced write armed. */
+  async function openAndEdit(bridge: SpacesBridge): Promise<EditorView> {
     const readResult: WorkspaceFileReadResult = { content: "export {}\n", sha256: "sha-1", size: 10 };
     (bridge.workspaceFileRead as ReturnType<typeof vi.fn>).mockResolvedValue(readResult);
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
-    view.open("src/app/root.ts");
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("src/app/root.ts", "editor"));
+    await view.open("src/app/root.ts");
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "export {}\nedited\n" } }, undefined);
-
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    return { saveBtn };
+    return view;
   }
 
-  it("a rejected write re-enables Save, shows a factual error banner (not a conflict), and does not latch save-blocked", async () => {
+  it("reports the failure and its countdown, retries on its own backoff, and does not latch the way a conflict does", async () => {
     const workspaceFileWrite = vi.fn().mockRejectedValue(new SpacesBridgeError("unavailable", "daemon not reachable"));
     const bridge = makeBridge({ workspaceFileWrite });
-    const { saveBtn } = await openAndEdit(bridge);
+    await openAndEdit(bridge);
 
-    saveBtn.click();
-    await vi.waitFor(() => expect(bridge.workspaceFileWrite).toHaveBeenCalledTimes(1));
-    await vi.waitFor(() => expect(saveBtn.disabled).toBe(false)); // re-enabled: buffer is still dirty
+    vi.advanceTimersByTime(800);
+    await vi.waitFor(() => expect(saveState(container)).toBe("failed"));
+    expect(workspaceFileWrite).toHaveBeenCalledTimes(1);
+    expect(saveChip(container).textContent).toBe("Save failed: daemon not reachable · retry in 1 s");
+    // Nothing is latched over the code area: a transient save failure lives on the chip, unlike a
+    // durable CAS rejection's conflict compare view.
+    expect((container.querySelector(".banner") as HTMLElement).style.display).toBe("none");
 
-    const errorBanner = container.querySelector(".banner.error") as HTMLElement;
-    expect(errorBanner).not.toBeNull();
-    expect(errorBanner.style.display).toBe("flex");
-    expect(errorBanner.textContent).toBe("daemon not reachable");
-    // Not classed (or rendered) as a real conflict: a transient save failure must not use the same
-    // visual/latching state as a durable CAS rejection.
-    expect(container.querySelector(".banner.conflict")).toBeNull();
+    // The countdown is real: the scheduler retries on its own, and a second failure doubles the wait.
+    vi.advanceTimersByTime(1000);
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(saveChip(container).textContent).toBe("Save failed: daemon not reachable · retry in 2 s"));
 
-    // No conflict latch: unlike a real conflict (which blocks every further save until the next
-    // open()), a retry is not a no-op — it reaches the bridge again.
     workspaceFileWrite.mockResolvedValueOnce({ ok: true, sha256: "sha-2" });
-    saveBtn.click();
-    await vi.waitFor(() => expect(bridge.workspaceFileWrite).toHaveBeenCalledTimes(2));
+    vi.advanceTimersByTime(2000);
+    await vi.waitFor(() => expect(saveState(container)).toBe("saved"));
+    expect(saveChip(container).textContent).toBe("Saved");
+  });
+
+  it("Retry now writes immediately instead of waiting out the backoff", async () => {
+    const workspaceFileWrite = vi.fn().mockRejectedValue(new SpacesBridgeError("unavailable", "daemon not reachable"));
+    const bridge = makeBridge({ workspaceFileWrite });
+    await openAndEdit(bridge);
+
+    vi.advanceTimersByTime(800);
+    await vi.waitFor(() => expect(saveState(container)).toBe("failed"));
+    const retryBtn = container.querySelector("#code-pane-editor-retry-save") as HTMLButtonElement;
+    expect(retryBtn.style.display).toBe("inline-flex");
+    expect(retryBtn.className).toBe("btn ghost");
+
+    workspaceFileWrite.mockResolvedValueOnce({ ok: true, sha256: "sha-2" });
+    retryBtn.click();
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(saveState(container)).toBe("saved"));
+    expect(retryBtn.style.display).toBe("none");
+  });
+
+  it("a reconcile that adopts the failed write's bytes drops its pending retry, with no stale Saving flash", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "export {}\n", sha256: "sha-1", size: 10 })
+      .mockResolvedValueOnce({ content: "export {}\nedited\n", sha256: "sha-2", size: 17 });
+    const workspaceFileWrite = vi.fn().mockRejectedValue(new SpacesBridgeError("unavailable", "daemon not reachable"));
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
+    const view = newEditorView(container, bridge);
+    await view.open("src/app/root.ts");
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "export {}\nedited\n" } }, undefined);
+    vi.advanceTimersByTime(800);
+    await vi.waitFor(() => expect(saveState(container)).toBe("failed"));
+
+    // The signature poll reports disk holding exactly the buffer's bytes (the refused write did land
+    // after all, or another writer produced the same content): nothing is left for the pending retry
+    // to write.
+    fireFileSignature({ path: "src/app/root.ts", sha256: "sha-2", missing: false });
+    await vi.waitFor(() => expect(saveState(container)).toBe("idle"));
+
+    // The old deadline passes without the chip flashing "Saving…" for a buffer that is already on
+    // disk. Advanced synchronously on purpose: a stale run would emit "saving" before its first
+    // await, so a flash would still be showing on this line.
+    vi.advanceTimersByTime(1000);
+    expect(saveState(container)).toBe("idle");
+    expect(workspaceFileWrite).toHaveBeenCalledTimes(1);
+
+    // A brand-new edit waits the ordinary debounce and starts its own backoff at the floor, instead
+    // of inheriting the retired one.
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "export {}\nedited twice\n" } }, undefined);
+    vi.advanceTimersByTime(800);
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() =>
+      expect(saveChip(container).textContent).toBe("Save failed: daemon not reachable · retry in 1 s"),
+    );
   });
 
   it("a generic (non-SpacesBridgeError) rejection falls back to a generic message, mirroring open()'s own fallback", async () => {
     const workspaceFileWrite = vi.fn().mockRejectedValue(new Error("socket hung up"));
     const bridge = makeBridge({ workspaceFileWrite });
-    const { saveBtn } = await openAndEdit(bridge);
+    await openAndEdit(bridge);
 
-    saveBtn.click();
-    await vi.waitFor(() => expect(bridge.workspaceFileWrite).toHaveBeenCalledTimes(1));
-    await vi.waitFor(() => expect(saveBtn.disabled).toBe(false));
-
-    expect((container.querySelector(".banner.error") as HTMLElement).textContent).toBe("Failed to save file.");
-  });
-
-  it("a later successful save clears the error banner", async () => {
-    const workspaceFileWrite = vi
-      .fn()
-      .mockRejectedValueOnce(new SpacesBridgeError("unavailable", "daemon not reachable"));
-    const bridge = makeBridge({ workspaceFileWrite });
-    const { saveBtn } = await openAndEdit(bridge);
-
-    saveBtn.click();
-    await vi.waitFor(() => expect(bridge.workspaceFileWrite).toHaveBeenCalledTimes(1));
-    await vi.waitFor(() => expect(saveBtn.disabled).toBe(false));
-    expect((container.querySelector(".banner.error") as HTMLElement).style.display).toBe("flex");
-
-    workspaceFileWrite.mockResolvedValueOnce({ ok: true, sha256: "sha-2" });
-    saveBtn.click();
-    await vi.waitFor(() => expect(bridge.workspaceFileWrite).toHaveBeenCalledTimes(2));
-    await vi.waitFor(() =>
-      expect((container.querySelector(".banner.error") as HTMLElement).style.display).toBe("none"),
-    );
-  });
-
-  it("a write rejection that resolves after opening a different file leaves the new file's state untouched", async () => {
-    const bridge = makeBridge();
-    (bridge.workspaceFileRead as ReturnType<typeof vi.fn>).mockImplementation((path: string) =>
-      Promise.resolve(
-        path === "a.ts"
-          ? { content: "a content", sha256: "sha-a", size: 9 }
-          : { content: "b content", sha256: "sha-b", size: 9 },
-      ),
-    );
-    let rejectWrite!: (err: unknown) => void;
-    const writePromise = new Promise<WorkspaceFileWriteResult>((_resolve, reject) => (rejectWrite = reject));
-    (bridge.workspaceFileWrite as ReturnType<typeof vi.fn>).mockReturnValue(writePromise);
-    const view = new EditorView(container, bridge);
-
-    view.open("a.ts");
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
-    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "a content edited" } }, undefined);
-
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    saveBtn.click();
-    await vi.waitFor(() =>
-      expect(bridge.workspaceFileWrite).toHaveBeenCalledWith("a.ts", "a content edited", { baseSHA256: "sha-a", purpose: "editor" }),
-    );
-
-    // B is opened (and wins) while A's write is still in flight. A is still `dirty` (the save
-    // hasn't resolved yet), so this goes through the discard gate (round-13 Fix 1) rather than
-    // opening directly.
-    view.open("b.ts");
-    (container.querySelector(".banner.conflict button") as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
-    expect(saveBtn.disabled).toBe(true); // open()'s post-open state for B: nothing edited yet
-
-    // A's write now fails. Same await-ordering guarantee as the sibling generation tests above:
-    // save()'s own catch (registered on this promise back when it awaited it) fires before this
-    // `.catch` continuation, so by the time this settles A's failure has already been dropped.
-    rejectWrite(new SpacesBridgeError("unavailable", "daemon not reachable"));
-    await writePromise.catch(() => {});
-
-    expect(container.querySelector(".banner.error")).toBeNull();
-    expect(saveBtn.disabled).toBe(true);
-    expect(view.collectStateForFlush()).toBe(
-      JSON.stringify({ path: "b.ts", baseSHA256: "sha-b", baseContent: "b content", content: "b content", dirty: false, conflict: false }),
-    );
-  });
-});
-
-describe("EditorView — CAS baseline from the write result (round-4 Fix 1)", () => {
-  let container: HTMLElement;
-
-  beforeEach(() => {
-    container = document.createElement("div");
-  });
-
-  async function openAndSave(
-    bridge: SpacesBridge,
-  ): Promise<{ saveBtn: HTMLButtonElement }> {
-    const readResult: WorkspaceFileReadResult = { content: "export {}\n", sha256: "sha-1", size: 10 };
-    (bridge.workspaceFileRead as ReturnType<typeof vi.fn>).mockResolvedValue(readResult);
-    const view = new EditorView(container, bridge);
-
-    view.open("src/app/root.ts");
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("src/app/root.ts", "editor"));
-
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    saveBtn.disabled = false;
-    saveBtn.click();
-    await vi.waitFor(() => expect(bridge.workspaceFileWrite).toHaveBeenCalled());
-    return { saveBtn };
-  }
-
-  it("adopts a successful write's own hash as the next save's baseSHA256, with no intervening file read", async () => {
-    const workspaceFileWrite = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: true, sha256: "write-sha-1" })
-      .mockResolvedValueOnce({ ok: true, sha256: "write-sha-2" });
-    const bridge = makeBridge({ workspaceFileWrite });
-
-    const { saveBtn } = await openAndSave(bridge);
-    expect(bridge.workspaceFileRead).toHaveBeenCalledTimes(1);
-    expect(workspaceFileWrite).toHaveBeenNthCalledWith(1, "src/app/root.ts", "export {}\n", { baseSHA256: "sha-1", purpose: "editor" });
-
-    // A second save (the user editing again after the first one landed) must use the WRITE's own
-    // hash as its baseSHA256, proving the CAS baseline came from the write result and not a re-read.
-    saveBtn.disabled = false;
-    saveBtn.click();
-    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledTimes(2));
-
-    expect(workspaceFileWrite).toHaveBeenNthCalledWith(2, "src/app/root.ts", "export {}\n", { baseSHA256: "write-sha-1", purpose: "editor" });
-    expect(bridge.workspaceFileRead).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(800);
+    await vi.waitFor(() => expect(saveState(container)).toBe("failed"));
+    expect(saveChip(container).textContent).toBe("Save failed: Failed to save file. · retry in 1 s");
   });
 });
 
@@ -359,7 +428,7 @@ describe("EditorView — editorStateChanged push (round-5 hibernation fix)", () 
     const workspaceFileRead = vi.fn().mockResolvedValue(result);
     const notifyEditorStateChanged = vi.fn();
     const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
+    const view = newEditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
 
     view.open("a.ts");
     await vi.waitFor(() =>
@@ -379,7 +448,7 @@ describe("EditorView — editorStateChanged push (round-5 hibernation fix)", () 
     const workspaceFileRead = vi.fn().mockResolvedValue(result);
     const notifyEditorStateChanged = vi.fn();
     const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
+    const view = newEditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
 
     view.open("a.ts");
     await vi.waitFor(() => expect(notifyEditorStateChanged).toHaveBeenCalledTimes(1)); // the open's immediate push
@@ -409,26 +478,22 @@ describe("EditorView — editorStateChanged push (round-5 hibernation fix)", () 
     const workspaceFileWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-2" });
     const notifyEditorStateChanged = vi.fn();
     const bridge = makeBridge({ workspaceFileRead, workspaceFileWrite });
-    const view = new EditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
+    const view = newEditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
 
     view.open("a.ts");
     await vi.waitFor(() => expect(notifyEditorStateChanged).toHaveBeenCalledTimes(1));
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "edited" } }, undefined);
     notifyEditorStateChanged.mockClear();
 
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    saveBtn.disabled = false;
-    saveBtn.click();
-    await vi.waitFor(() =>
-      expect(notifyEditorStateChanged).toHaveBeenCalledExactlyOnceWith({
-        path: "a.ts",
-        baseSHA256: "sha-2",
-        baseContent: "edited",
-        content: "edited",
-        dirty: false,
-        conflict: false,
-      }),
-    );
+    await view.flushNow();
+    expect(notifyEditorStateChanged).toHaveBeenCalledExactlyOnceWith({
+      path: "a.ts",
+      baseSHA256: "sha-2",
+      baseContent: "edited",
+      content: "edited",
+      dirty: false,
+      conflict: false,
+    });
   });
 
   it("stays dirty when the user types again while the save is still in flight (round-7 Fix 1)", async () => {
@@ -438,16 +503,14 @@ describe("EditorView — editorStateChanged push (round-5 hibernation fix)", () 
     const workspaceFileWrite = vi.fn(() => new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve)));
     const notifyEditorStateChanged = vi.fn();
     const bridge = makeBridge({ workspaceFileRead, workspaceFileWrite });
-    const view = new EditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
+    const view = newEditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
 
     view.open("a.ts");
     await vi.waitFor(() => expect(notifyEditorStateChanged).toHaveBeenCalledTimes(1));
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "edited" } }, undefined);
     notifyEditorStateChanged.mockClear();
 
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    saveBtn.disabled = false;
-    saveBtn.click();
+    void view.flushNow();
     // The write is submitted with "edited" and is now in flight (held open by resolveWrite).
     await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited", { baseSHA256: "sha-1", purpose: "editor" }));
 
@@ -465,11 +528,17 @@ describe("EditorView — editorStateChanged push (round-5 hibernation fix)", () 
         conflict: false,
       }),
     );
-    expect(saveBtn.disabled).toBe(false);
+    // And the leftover content is written straight away, without waiting out another debounce.
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledTimes(2));
+    expect(workspaceFileWrite).toHaveBeenNthCalledWith(2, "a.ts", "edited, then more", {
+      baseSHA256: "sha-2",
+      purpose: "editor",
+    });
+    expect(saveState(container)).toBe("saving");
   });
 });
 
-describe("EditorView — save() CAS conflict routes into external-change handling", () => {
+describe("EditorView autosave: an agent's write racing a save (CAS conflict ladder)", () => {
   let container: HTMLElement;
 
   beforeEach(() => {
@@ -477,93 +546,173 @@ describe("EditorView — save() CAS conflict routes into external-change handlin
     capturedCodeViewOptions.current = undefined;
   });
 
-  /** Opens "a.ts" and edits its buffer to `edited`, leaving Save ready to click — same technique as
-   *  the other describe blocks above. Each test supplies its own `workspaceFileRead` (its first
-   *  resolution serves this open, its second serves `handleExternalChange`'s own fresh read after
-   *  the save conflicts). */
-  async function openAndEdit(bridge: SpacesBridge, edited: string): Promise<{ saveBtn: HTMLButtonElement }> {
-    const view = new EditorView(container, bridge);
+  /** Opens "a.ts" and edits its buffer to `edited`. Each test supplies its own `workspaceFileRead`
+   *  (its first resolution serves this open, its second serves `handleExternalChange`'s own fresh
+   *  read after the write is refused). The write is driven by `flushNow()` rather than the debounce
+   *  so the ladder's ordering is exact. */
+  async function openAndEdit(bridge: SpacesBridge, edited: string): Promise<EditorView> {
+    const view = newEditorView(container, bridge);
 
-    view.open("a.ts");
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+    await view.open("a.ts");
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: edited } }, undefined);
-
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    return { saveBtn };
+    return view;
   }
 
-  it("a save conflict that auto-merges cleanly (non-overlapping edits) shows the merge indicator, not the old changed-on-disk latch", async () => {
-    const workspaceFileWrite = vi.fn().mockResolvedValue({ conflict: true, currentSHA256: "sha-remote" });
-    // Base was "line1\nline2\n"; the buffer edits line1 only, while disk independently appends a
+  it("merges an agent's non-overlapping lines and rewrites, against the hash the agent's write produced", async () => {
+    const workspaceFileWrite = vi
+      .fn()
+      .mockResolvedValueOnce({ conflict: true, currentSHA256: "sha-agent" })
+      .mockResolvedValueOnce({ ok: true, sha256: "sha-merged" });
+    // Base was "line1\nline2\n"; the buffer edits line1 only, while the agent independently appends a
     // third line — non-overlapping, so diff3 auto-merges cleanly.
     const workspaceFileRead = vi
       .fn()
       .mockResolvedValueOnce({ content: "line1\nline2\n", sha256: "sha-1", size: 12 })
-      .mockResolvedValueOnce({ content: "line1\nline2\nline3\n", sha256: "sha-remote", size: 18 });
+      .mockResolvedValueOnce({ content: "line1\nline2\nline3\n", sha256: "sha-agent", size: 18 });
     const bridge = makeBridge({ workspaceFileRead, workspaceFileWrite });
-    const { saveBtn } = await openAndEdit(bridge, "line1 edited\nline2\n");
+    const view = await openAndEdit(bridge, "line1 edited\nline2\n");
 
-    saveBtn.click();
-    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalled());
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(2)); // handleExternalChange's own fresh read
+    await view.flushNow();
 
-    const merge = await vi.waitFor(() => {
-      const el = container.querySelector(".banner.merge") as HTMLElement;
-      expect(el.style.display).toBe("flex");
-      return el;
+    // Exactly one reconcile read, and exactly two writes: the refused one and the merged rewrite.
+    expect(workspaceFileRead).toHaveBeenCalledTimes(2);
+    expect(workspaceFileWrite).toHaveBeenNthCalledWith(1, "a.ts", "line1 edited\nline2\n", {
+      baseSHA256: "sha-1",
+      purpose: "editor",
     });
-    expect(merge.textContent).toContain("Merged external changes");
+    expect(workspaceFileWrite).toHaveBeenNthCalledWith(2, "a.ts", "line1 edited\nline2\nline3\n", {
+      baseSHA256: "sha-agent",
+      purpose: "editor",
+    });
+    expect(saveState(container)).toBe("saved");
     expect(container.querySelector(".banner.conflict")).toBeNull();
-    expect(saveBtn.disabled).toBe(false); // still dirty against the new (disk) baseline
+    // The merge happened inside this write's own conflict ladder, and the rewrite that followed it
+    // landed: the Undo offer still has to be reachable, exactly as it is for a merge that arrives
+    // before the debounce.
+    const merge = container.querySelector(".banner.merge") as HTMLElement;
+    expect(merge.style.display).toBe("flex");
+    expect([...merge.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Undo", "Dismiss"]);
   });
 
-  it("a save conflict with overlapping edits enters conflict state with a compare view, not the old latch text", async () => {
-    const workspaceFileWrite = vi.fn().mockResolvedValue({ conflict: true, currentSHA256: "sha-remote" });
+  it("merges an agent's change that arrives as a signature event before the debounce, then writes once against the agent's hash", async () => {
+    const workspaceFileWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-merged" });
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "line1\nline2\n", sha256: "sha-1", size: 12 })
+      .mockResolvedValueOnce({ content: "line1\nline2\nline3\n", sha256: "sha-agent", size: 18 });
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
+    const view = await openAndEdit(bridge, "line1 edited\nline2\n");
+
+    // The agent's write is seen before the debounce fires, so the merge happens first and the one
+    // write that follows already carries both sides.
+    fireFileSignature({ path: "a.ts", sha256: "sha-agent", missing: false });
+    await vi.waitFor(() => expect(container.querySelector(".banner.merge")).not.toBeNull());
+    await view.flushNow();
+
+    expect(workspaceFileWrite).toHaveBeenCalledExactlyOnceWith("a.ts", "line1 edited\nline2\nline3\n", {
+      baseSHA256: "sha-agent",
+      purpose: "editor",
+    });
+    expect(saveState(container)).toBe("saved");
+  });
+
+  it("an overlapping change blocks saving, writes nothing further, and is resolved by Keep mine", async () => {
+    const workspaceFileWrite = vi
+      .fn()
+      .mockResolvedValueOnce({ conflict: true, currentSHA256: "sha-agent" })
+      .mockResolvedValueOnce({ ok: true, sha256: "sha-mine" });
     // Both sides change the same single line differently — a genuine overlap.
     const workspaceFileRead = vi
       .fn()
       .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
-      .mockResolvedValueOnce({ content: "goodbye\n", sha256: "sha-remote", size: 8 });
+      .mockResolvedValueOnce({ content: "goodbye\n", sha256: "sha-agent", size: 8 });
     const bridge = makeBridge({ workspaceFileRead, workspaceFileWrite });
-    const { saveBtn } = await openAndEdit(bridge, "edited\n");
+    const view = await openAndEdit(bridge, "edited\n");
 
-    saveBtn.click();
-    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalled());
+    expect(await view.flushNow()).toBe("blocked");
+    expect(saveState(container)).toBe("blocked");
+    expect(saveChip(container).textContent).toBe("Save blocked: File changed on disk");
 
-    const conflictBanner = await vi.waitFor(() => {
-      const el = container.querySelector(".banner.conflict") as HTMLElement;
-      expect(el.style.display).toBe("flex");
-      return el;
-    });
-    // Not the old permanent latch text — a factual "changed on disk" status plus resolution actions.
-    expect(conflictBanner.textContent).not.toContain("save disabled");
+    const conflictBanner = container.querySelector(".banner.conflict") as HTMLElement;
+    expect(conflictBanner.style.display).toBe("flex");
     expect(conflictBanner.textContent).toContain("changed on disk");
-    expect(conflictBanner.querySelector("button")!.textContent).toBe("Keep mine");
-    expect([...conflictBanner.querySelectorAll("button")].map((b) => b.textContent)).toContain("Take disk");
-    expect(saveBtn.disabled).toBe(true);
+    expect([...conflictBanner.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Keep mine", "Take disk"]);
+
+    // Nothing more is written while blocked, not even by an explicit ⌘S.
+    expect(await view.flushNow()).toBe("blocked");
+    expect(workspaceFileWrite).toHaveBeenCalledTimes(1);
+
+    // Keep mine is the save: it writes the frozen buffer against the conflict's own disk snapshot.
+    (conflictBanner.querySelector("button") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledTimes(2));
+    expect(workspaceFileWrite).toHaveBeenNthCalledWith(2, "a.ts", "edited\n", { baseSHA256: "sha-agent", purpose: "editor" });
+    await vi.waitFor(() => expect(saveState(container)).toBe("saved"));
+    expect((container.querySelector(".banner") as HTMLElement).style.display).toBe("none");
   });
 
-  it("a save conflict where disk shows the file missing enters conflict state with deleted-on-disk wording", async () => {
+  it("Take disk resolves the same block with no write at all", async () => {
+    const workspaceFileWrite = vi.fn().mockResolvedValueOnce({ conflict: true, currentSHA256: "sha-agent" });
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
+      .mockResolvedValueOnce({ content: "goodbye\n", sha256: "sha-agent", size: 8 });
+    const bridge = makeBridge({ workspaceFileRead, workspaceFileWrite });
+    const view = await openAndEdit(bridge, "edited\n");
+
+    expect(await view.flushNow()).toBe("blocked");
+    const conflictBanner = container.querySelector(".banner.conflict") as HTMLElement;
+    ([...conflictBanner.querySelectorAll("button")].find((b) => b.textContent === "Take disk") as HTMLButtonElement).click();
+
+    expect(workspaceFileWrite).toHaveBeenCalledTimes(1); // still just the refused one
+    expect(await view.flushNow()).toBe("clean");
+    expect(workspaceFileWrite).toHaveBeenCalledTimes(1);
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "a.ts",
+        baseSHA256: "sha-agent",
+        baseContent: "goodbye\n",
+        content: "goodbye\n",
+        dirty: false,
+        conflict: false,
+      }),
+    );
+  });
+
+  it("a write refused because the file is gone blocks saving with the deleted-on-disk wording", async () => {
     const workspaceFileWrite = vi.fn().mockResolvedValue({ conflict: true, fileMissing: true });
     const workspaceFileRead = vi
       .fn()
       .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
       .mockRejectedValueOnce(new SpacesBridgeError("notFound", "a.ts is gone"));
     const bridge = makeBridge({ workspaceFileRead, workspaceFileWrite });
-    const { saveBtn } = await openAndEdit(bridge, "edited\n");
+    const view = await openAndEdit(bridge, "edited\n");
 
-    saveBtn.click();
-    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalled());
+    expect(await view.flushNow()).toBe("blocked");
+    expect(saveChip(container).textContent).toBe("Save blocked: File deleted on disk");
 
-    const conflictBanner = await vi.waitFor(() => {
-      const el = container.querySelector(".banner.conflict") as HTMLElement;
-      expect(el.style.display).toBe("flex");
-      return el;
-    });
+    const conflictBanner = container.querySelector(".banner.conflict") as HTMLElement;
+    expect(conflictBanner.style.display).toBe("flex");
     expect(conflictBanner.textContent).toContain("deleted on disk");
-    expect(conflictBanner.querySelector("button")!.textContent).toBe("Keep mine");
-    expect([...conflictBanner.querySelectorAll("button")].map((b) => b.textContent)).toContain("Close without saving");
-    expect(saveBtn.disabled).toBe(true);
+    expect([...conflictBanner.querySelectorAll("button")].map((b) => b.textContent)).toEqual([
+      "Keep mine",
+      "Close without saving",
+    ]);
+  });
+
+  it("a refused write whose reconcile read cannot run backs off instead of rewriting the same refused baseline", async () => {
+    const workspaceFileWrite = vi.fn().mockResolvedValue({ conflict: true, currentSHA256: "sha-agent" });
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
+      .mockRejectedValue(new SpacesBridgeError("unavailable", "daemon not reachable"));
+    const bridge = makeBridge({ workspaceFileRead, workspaceFileWrite });
+    const view = await openAndEdit(bridge, "edited\n");
+
+    expect(await view.flushNow()).toBe("failed");
+    expect(workspaceFileWrite).toHaveBeenCalledTimes(1);
+    expect(saveChip(container).textContent).toBe(
+      "Save failed: The file changed on disk and could not be re-read. · retry in 1 s",
+    );
   });
 });
 
@@ -583,7 +732,7 @@ describe("EditorView — restoreState (round-5 hibernation fix)", () => {
   it("a dirty snapshot with disk unchanged issues a reconcile read but leaves the buffer, banner, and dirty state untouched", async () => {
     const workspaceFileRead = vi.fn().mockResolvedValue({ content: "original content", sha256: "sha-dirty", size: 16 });
     const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     await view.restoreState({
       path: "a.ts",
@@ -596,7 +745,7 @@ describe("EditorView — restoreState (round-5 hibernation fix)", () => {
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
 
     expect(container.querySelector(".editor-path")!.textContent).toBe("a.ts");
-    expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(false);
+    expect(saveState(container)).toBe("dirty"); // restored edits are unsaved work, and say so
     // Single shared `.banner` element (its class toggles between "conflict"/"merge"/"error" — see
     // editorView.ts) stays hidden either way; whichever selector currently matches its class must not
     // be showing.
@@ -609,7 +758,7 @@ describe("EditorView — restoreState (round-5 hibernation fix)", () => {
     // appended a third line while the pane was hibernated — non-overlapping, so diff3 auto-merges.
     const workspaceFileRead = vi.fn().mockResolvedValue({ content: "line1\nline2\nline3\n", sha256: "sha-remote", size: 18 });
     const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     await view.restoreState({
       path: "a.ts",
@@ -628,13 +777,44 @@ describe("EditorView — restoreState (round-5 hibernation fix)", () => {
     });
     expect(merge.textContent).toContain("Merged external changes");
     expect(container.querySelector(".banner.conflict")).toBeNull();
-    expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(false); // still dirty against the new baseline
+    expect(saveState(container)).toBe("dirty"); // still dirty against the new baseline
+  });
+
+  it("a restored dirty buffer writes itself after the debounce, with no re-read of the file", async () => {
+    vi.useFakeTimers();
+    try {
+      const workspaceFileRead = vi.fn().mockResolvedValue({ content: "original content", sha256: "sha-dirty", size: 16 });
+      const workspaceFileWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-written" });
+      const bridge = makeBridge({ workspaceFileRead, workspaceFileWrite });
+      const view = newEditorView(container, bridge);
+
+      await view.restoreState({
+        path: "a.ts",
+        baseSHA256: "sha-dirty",
+        baseContent: "original content",
+        content: "unsaved edits",
+        dirty: true,
+        conflict: false,
+      });
+
+      expect(workspaceFileWrite).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(800);
+      await vi.waitFor(() => expect(saveState(container)).toBe("saved"));
+      expect(workspaceFileWrite).toHaveBeenCalledExactlyOnceWith("a.ts", "unsaved edits", {
+        baseSHA256: "sha-dirty",
+        purpose: "editor",
+      });
+      // Only the reconcile read: the restored buffer is never replaced from disk.
+      expect(workspaceFileRead).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a restored conflict whose file is now deleted on disk updates the compare view to deleted-on-disk wording", async () => {
     const workspaceFileRead = vi.fn().mockRejectedValue(new SpacesBridgeError("notFound", "a.ts is gone"));
     const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     await view.restoreState({
       path: "a.ts",
@@ -663,7 +843,7 @@ describe("EditorView — restoreState (round-5 hibernation fix)", () => {
     const result: WorkspaceFileReadResult = { content: "fresh from disk\n", sha256: "sha-fresh", size: 16 };
     const workspaceFileRead = vi.fn().mockResolvedValue(result);
     const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     await view.restoreState({
       path: "a.ts",
@@ -687,14 +867,14 @@ describe("EditorView — restoreState (round-5 hibernation fix)", () => {
         }),
       ),
     );
-    expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(true);
+    expect(saveState(container)).toBe("idle");
   });
 
   it("a clean snapshot with disk unchanged shows the snapshot content, issues exactly one reconcile read, and pushes nothing", async () => {
     const workspaceFileRead = vi.fn().mockResolvedValue({ content: "unchanged\n", sha256: "sha-same", size: 10 });
     const notifyEditorStateChanged = vi.fn();
     const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
+    const view = newEditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
 
     await view.restoreState({
       path: "a.ts",
@@ -730,7 +910,7 @@ describe("EditorView — restoreState (round-5 hibernation fix)", () => {
       .mockRejectedValueOnce(new SpacesBridgeError("notFound", "a.ts is gone"))
       .mockResolvedValueOnce({ content: "back again\n", sha256: "sha-back", size: 11 });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     await view.restoreState({
       path: "a.ts",
@@ -745,7 +925,7 @@ describe("EditorView — restoreState (round-5 hibernation fix)", () => {
     // path stays in the box
     await vi.waitFor(() => expect(container.querySelector(".editor-path")!.textContent).toBe("a.ts"));
     expect(view.collectStateForFlush()).toBeNull(); // no open-file state left to persist
-    expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(true);
+    expect(saveState(container)).toBe("idle");
     expect((container.querySelector(".banner") as HTMLElement).style.display).toBe("none");
 
     // The file-signature subscription restoreState installed (not just a bare error from open())
@@ -769,7 +949,7 @@ describe("EditorView — restoreState (round-5 hibernation fix)", () => {
   it("no snapshot leaves the editor blank, same as a pane's first-ever load", async () => {
     const workspaceFileRead = vi.fn();
     const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     await view.restoreState(undefined);
 
@@ -780,7 +960,7 @@ describe("EditorView — restoreState (round-5 hibernation fix)", () => {
   });
 });
 
-describe("EditorView — save() serialization (Fix 2)", () => {
+describe("EditorView autosave: write serialization", () => {
   let container: HTMLElement;
 
   beforeEach(() => {
@@ -788,31 +968,29 @@ describe("EditorView — save() serialization (Fix 2)", () => {
     capturedCodeViewOptions.current = undefined;
   });
 
-  it("a second save() while one is still in flight submits no second write", async () => {
+  it("a second flush while a write is still in flight submits no second write", async () => {
     const readResult: WorkspaceFileReadResult = { content: "hello\n", sha256: "sha-1", size: 6 };
     const workspaceFileRead = vi.fn().mockResolvedValue(readResult);
     let resolveWrite: ((result: WorkspaceFileWriteResult) => void) | undefined;
     const workspaceFileWrite = vi.fn(() => new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve)));
     const bridge = makeBridge({ workspaceFileRead, workspaceFileWrite });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+    await view.open("a.ts");
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "edited" } }, undefined);
 
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    saveBtn.disabled = false;
-    // Two clicks back to back, same tab: `disabled` alone can't stop the second click's handler
-    // from already having fired by the time the first save's synchronous prelude sets it, so this
-    // exercises the `saveInFlight` guard itself rather than the disabled attribute.
-    saveBtn.click();
-    saveBtn.click();
+    // Two ⌘S presses back to back: the second must wait out the first write rather than racing a
+    // second CAS write against the same baseline.
+    const first = view.flushNow();
+    const second = view.flushNow();
     await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalled());
 
     resolveWrite!({ ok: true, sha256: "sha-2" });
-    await vi.waitFor(() => expect(saveBtn.disabled).toBe(true)); // clean again: nothing typed since the save
+    expect(await first).toBe("clean");
+    expect(await second).toBe("clean");
 
     expect(workspaceFileWrite).toHaveBeenCalledTimes(1);
+    expect(saveState(container)).toBe("saved");
   });
 });
 
@@ -846,7 +1024,7 @@ describe("EditorView — open() latest-wins generation token (Fix 3)", () => {
   it("open(A) then open(B) before A resolves: resolving B then A leaves B's file open", async () => {
     const { workspaceFileRead, settle } = makeDeferredRead();
     const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     view.open("b.ts");
@@ -866,7 +1044,7 @@ describe("EditorView — open() latest-wins generation token (Fix 3)", () => {
   it("A's rejection after B already won surfaces no error banner and leaves B's state untouched", async () => {
     const { workspaceFileRead, settle } = makeDeferredRead();
     const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     view.open("b.ts");
@@ -889,103 +1067,7 @@ describe("EditorView — open() latest-wins generation token (Fix 3)", () => {
   });
 });
 
-describe("EditorView — save() completion is generation-guarded against a later open() (Fix 5)", () => {
-  let container: HTMLElement;
-
-  beforeEach(() => {
-    container = document.createElement("div");
-    capturedCodeViewOptions.current = undefined;
-  });
-
-  /** Opens "a.ts", edits it, and clicks Save, leaving the write held open on `resolveWrite` — so a
-   *  test can open "b.ts" (a real, non-deferred read) before settling A's write and observe whether
-   *  A's completion clobbers the editor state that has since moved on to B. */
-  async function openEditSaveA(bridge: SpacesBridge): Promise<{
-    view: EditorView;
-    saveBtn: HTMLButtonElement;
-    resolveWrite: (result: WorkspaceFileWriteResult) => void;
-    writePromise: Promise<WorkspaceFileWriteResult>;
-  }> {
-    (bridge.workspaceFileRead as ReturnType<typeof vi.fn>).mockImplementation((path: string) =>
-      Promise.resolve(
-        path === "a.ts"
-          ? { content: "a content", sha256: "sha-a", size: 9 }
-          : { content: "b content", sha256: "sha-b", size: 9 },
-      ),
-    );
-    let resolveWrite!: (result: WorkspaceFileWriteResult) => void;
-    const writePromise = new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve));
-    (bridge.workspaceFileWrite as ReturnType<typeof vi.fn>).mockReturnValue(writePromise);
-    const view = new EditorView(container, bridge);
-
-    view.open("a.ts");
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
-    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "a content edited" } }, undefined);
-
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    saveBtn.click();
-    await vi.waitFor(() =>
-      expect(bridge.workspaceFileWrite).toHaveBeenCalledWith("a.ts", "a content edited", { baseSHA256: "sha-a", purpose: "editor" }),
-    );
-
-    return { view, saveBtn, resolveWrite, writePromise };
-  }
-
-  it("a successful write for A resolving after open(B) leaves B's baseline, dirty state, and save button untouched", async () => {
-    const bridge = makeBridge();
-    const { view, saveBtn, resolveWrite, writePromise } = await openEditSaveA(bridge);
-
-    // B is opened (and wins) while A's write is still in flight. A is still `dirty` (the save
-    // hasn't resolved yet), so this goes through the discard gate (round-13 Fix 1) rather than
-    // opening directly.
-    view.open("b.ts");
-    (container.querySelector(".banner.conflict button") as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
-    expect(container.querySelector(".editor-path")!.textContent).toBe("b.ts");
-    expect(saveBtn.disabled).toBe(true); // open()'s post-open state for B: nothing edited yet
-
-    // A's write now lands successfully. Awaiting the exact promise save() itself awaits guarantees
-    // save()'s post-await continuation (including its generation check and `finally` cleanup) has
-    // already run by the time this resolves: the continuation save() registered on this promise
-    // (back when it awaited it, before it was settled) was attached first, so it fires before the
-    // continuation this `await` registers now that the promise is already resolved.
-    resolveWrite({ ok: true, sha256: "write-sha-a" });
-    await writePromise;
-
-    // If A's completion had clobbered state, baseSHA256 would read "write-sha-a" instead of B's own
-    // "sha-b" — this is the assertion the whole fix is about.
-    expect(view.collectStateForFlush()).toBe(
-      JSON.stringify({ path: "b.ts", baseSHA256: "sha-b", baseContent: "b content", content: "b content", dirty: false, conflict: false }),
-    );
-    expect(saveBtn.disabled).toBe(true);
-    expect((container.querySelector(".banner.conflict") as HTMLElement).style.display).toBe("none");
-  });
-
-  it("a conflicting write for A resolving after open(B) shows no conflict banner over B and leaves its save button untouched", async () => {
-    const bridge = makeBridge();
-    const { view, saveBtn, resolveWrite, writePromise } = await openEditSaveA(bridge);
-
-    // A is still `dirty` (the save hasn't resolved yet), so this goes through the discard gate
-    // (round-13 Fix 1) rather than opening directly.
-    view.open("b.ts");
-    (container.querySelector(".banner.conflict button") as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
-    expect(saveBtn.disabled).toBe(true);
-
-    resolveWrite({ conflict: true, currentSHA256: "sha-remote" });
-    await writePromise;
-
-    // B's own state (not A's) is untouched by A's conflict: no banner, save button still reflects
-    // B's post-open state, and the baseline/dirty snapshot is still B's, not marked conflicted.
-    expect((container.querySelector(".banner.conflict") as HTMLElement).style.display).toBe("none");
-    expect(saveBtn.disabled).toBe(true);
-    expect(view.collectStateForFlush()).toBe(
-      JSON.stringify({ path: "b.ts", baseSHA256: "sha-b", baseContent: "b content", content: "b content", dirty: false, conflict: false }),
-    );
-  });
-});
-
-describe("EditorView — save() completion is guarded against a concurrent external-change reconcile for the same file (Fix 2, round-2)", () => {
+describe("EditorView: save() completion is guarded against a concurrent external-change reconcile for the same file (Fix 2, round-2)", () => {
   let container: HTMLElement;
 
   beforeEach(() => {
@@ -1000,17 +1082,17 @@ describe("EditorView — save() completion is guarded against a concurrent exter
       .mockResolvedValueOnce({ content: "line1\nline2\nline3\n", sha256: "sha-2", size: 18 }); // handleExternalChange's own read
     let resolveWrite!: (result: WorkspaceFileWriteResult) => void;
     const writePromise = new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve));
-    const workspaceFileWrite = vi.fn().mockReturnValue(writePromise);
+    // The merged buffer is written again as soon as the reconcile lands; holding that follow-up
+    // write open keeps this test's assertions on the reconcile's own outcome.
+    const workspaceFileWrite = vi.fn().mockReturnValueOnce(writePromise).mockReturnValue(new Promise(() => {}));
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+    await view.open("a.ts");
     // Mine: edits line1 only, so a later non-overlapping "theirs" appending line3 auto-merges cleanly.
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "line1 edited\nline2\n" } }, undefined);
 
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    saveBtn.click();
+    void view.flushNow();
     await vi.waitFor(() =>
       expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "line1 edited\nline2\n", { baseSHA256: "sha-1", purpose: "editor" }),
     );
@@ -1024,14 +1106,20 @@ describe("EditorView — save() completion is guarded against a concurrent exter
       return el;
     });
     expect(merge.textContent).toContain("Merged external changes");
-    expect(saveBtn.disabled).toBe(false); // the merge's own dirty buffer is savable again
 
     // The save's write for the OLD baseline (sha-1) now lands successfully, late.
     resolveWrite({ ok: true, sha256: "write-sha-a" });
     await writePromise;
+    // The merged buffer is unsaved work, so it is written again, against the baseline the reconcile
+    // adopted rather than the one the late write returned.
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledTimes(2));
+    expect(workspaceFileWrite).toHaveBeenNthCalledWith(2, "a.ts", "line1 edited\nline2\nline3\n", {
+      baseSHA256: "sha-2",
+      purpose: "editor",
+    });
 
     // If the save's late success had clobbered the reconcile, baseSHA256 would read "write-sha-a"
-    // and the merge banner/pendingMergeUndo would be gone — this is the assertion the fix is about.
+    // and the merge banner/pendingMergeUndo would be gone; this is the assertion the fix is about.
     expect(view.collectStateForFlush()).toBe(
       JSON.stringify({
         path: "a.ts",
@@ -1044,7 +1132,6 @@ describe("EditorView — save() completion is guarded against a concurrent exter
     );
     expect((container.querySelector(".banner.merge") as HTMLElement).style.display).toBe("flex");
     expect(merge.textContent).toContain("Merged external changes");
-    expect(saveBtn.disabled).toBe(false);
   });
 
   it("a real-conflict reconcile completing while a save is in flight is untouched by the save's late success", async () => {
@@ -1056,14 +1143,12 @@ describe("EditorView — save() completion is guarded against a concurrent exter
     const writePromise = new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve));
     const workspaceFileWrite = vi.fn().mockReturnValue(writePromise);
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+    await view.open("a.ts");
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "edited\n" } }, undefined);
 
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    saveBtn.click();
+    void view.flushNow();
     await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-1", purpose: "editor" }));
 
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
@@ -1073,14 +1158,15 @@ describe("EditorView — save() completion is guarded against a concurrent exter
       return el;
     });
     expect(conflictBanner.textContent).toContain("changed on disk");
-    expect(saveBtn.disabled).toBe(true);
+    expect(saveState(container)).toBe("blocked");
 
     resolveWrite({ ok: true, sha256: "write-sha-a" });
     await writePromise;
 
     expect((container.querySelector(".banner.conflict") as HTMLElement).style.display).toBe("flex");
     expect(conflictBanner.textContent).toContain("changed on disk");
-    expect(saveBtn.disabled).toBe(true);
+    expect(saveState(container)).toBe("blocked");
+    expect(workspaceFileWrite).toHaveBeenCalledTimes(1); // no further write while blocked
   });
 
   it("a reconcile's standing conflict banner is not overwritten by the save's own late failure banner", async () => {
@@ -1092,14 +1178,12 @@ describe("EditorView — save() completion is guarded against a concurrent exter
     const writePromise = new Promise<WorkspaceFileWriteResult>((_resolve, reject) => (rejectWrite = reject));
     const workspaceFileWrite = vi.fn().mockReturnValue(writePromise);
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+    await view.open("a.ts");
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "edited\n" } }, undefined);
 
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    saveBtn.click();
+    void view.flushNow();
     await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-1", purpose: "editor" }));
 
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
@@ -1118,11 +1202,12 @@ describe("EditorView — save() completion is guarded against a concurrent exter
     expect(conflictBanner.className).toBe("banner conflict");
     expect(conflictBanner.style.display).toBe("flex");
     expect(conflictBanner.textContent).toContain("changed on disk");
-    expect(saveBtn.disabled).toBe(true);
+    // The block, not the failed write, is what the chip reports: the write is superseded.
+    expect(saveState(container)).toBe("blocked");
   });
 });
 
-describe("EditorView — opening another file while dirty is gated (round-13 Fix 1)", () => {
+describe("EditorView autosave: opening another file while dirty writes it first", () => {
   let container: HTMLElement;
 
   beforeEach(() => {
@@ -1130,101 +1215,313 @@ describe("EditorView — opening another file while dirty is gated (round-13 Fix
     capturedCodeViewOptions.current = undefined;
   });
 
-  function makePerPathBridge(): { bridge: SpacesBridge; workspaceFileRead: ReturnType<typeof vi.fn>; workspaceFileWrite: ReturnType<typeof vi.fn> } {
+  function makePerPathBridge(overrides: Partial<SpacesBridge> = {}): {
+    bridge: SpacesBridge;
+    workspaceFileRead: ReturnType<typeof vi.fn>;
+    workspaceFileWrite: ReturnType<typeof vi.fn>;
+  } {
     const workspaceFileRead = vi.fn((path: string) =>
       Promise.resolve({ content: `${path} content`, sha256: `sha-${path}`, size: 9 }),
     );
     const workspaceFileWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-written" });
-    const bridge = makeBridge({ workspaceFileRead, workspaceFileWrite });
+    const bridge = makeBridge({ workspaceFileRead, workspaceFileWrite, ...overrides });
     return { bridge, workspaceFileRead, workspaceFileWrite };
   }
 
   /** Opens `path` and marks it edited via the captured fake CodeView's `onItemEditChange`, leaving
-   *  `dirty` true — same technique as the other describe blocks above that bypass the real editor. */
-  async function openAndEdit(view: EditorView, bridge: SpacesBridge, path: string): Promise<void> {
-    view.open(path);
-    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith(path, "editor"));
+   *  `dirty` true with its debounced write still pending. */
+  async function openAndEdit(view: EditorView, path: string): Promise<void> {
+    await view.open(path);
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: `${path} content edited` } }, undefined);
   }
 
-  it("opening a new path while dirty does not open it, and shows the discard banner", async () => {
-    const { bridge, workspaceFileRead } = makePerPathBridge();
-    const view = new EditorView(container, bridge);
-    await openAndEdit(view, bridge, "a.ts");
-    workspaceFileRead.mockClear();
-
-    view.open("b.ts");
-
-    expect(workspaceFileRead).not.toHaveBeenCalledWith("b.ts", "editor");
-    const banner = container.querySelector(".banner.conflict") as HTMLElement;
-    expect(banner).not.toBeNull();
-    expect(banner.style.display).toBe("flex");
-    expect(banner.firstChild?.textContent).toBe("Unsaved changes in a.ts. Save them first, or discard them to open b.ts.");
-    expect(banner.querySelector("button")!.textContent).toBe("Discard edits and open");
-  });
-
-  // Formerly "a search-suggestion click while dirty is gated the same way as Return": the old
-  // top-bar search dropdown's suggestion-row click ultimately called the same private open method
-  // this `open()` is now the sole public front door for (⌘P quick-open, the Files tree, and the
-  // Changes list all call it too — see editorView.ts's class doc comment). There is no separate
-  // suggestion-click code path left to distinguish from a direct `open()` call, so this instead
-  // proves the gate holds across repeated calls while still dirty, re-targeting the banner to
-  // whichever path was most recently requested — a property the single "Return" test above (one
-  // gated call) doesn't cover.
-  it("a second open() call while still dirty is gated identically, and the banner re-targets to the newer path", async () => {
-    const { bridge, workspaceFileRead } = makePerPathBridge();
-    const view = new EditorView(container, bridge);
-    await openAndEdit(view, bridge, "a.ts");
-    workspaceFileRead.mockClear();
-
-    view.open("b.ts");
-    expect(workspaceFileRead).not.toHaveBeenCalledWith("b.ts", "editor");
-
-    view.open("c.ts");
-    expect(workspaceFileRead).not.toHaveBeenCalledWith("c.ts", "editor");
-    const banner = container.querySelector(".banner.conflict") as HTMLElement;
-    expect(banner.style.display).toBe("flex");
-    expect(banner.textContent).toContain("discard them to open c.ts");
-  });
-
-  it("clicking the discard action opens the requested file and clears dirty", async () => {
-    const { bridge, workspaceFileRead } = makePerPathBridge();
-    const view = new EditorView(container, bridge);
-    await openAndEdit(view, bridge, "a.ts");
-
-    view.open("b.ts");
-    const banner = container.querySelector(".banner.conflict") as HTMLElement;
-    const discardBtn = banner.querySelector("button") as HTMLButtonElement;
-    discardBtn.click();
-
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
-    expect(container.querySelector(".editor-path")!.textContent).toBe("b.ts");
-    expect(banner.style.display).toBe("none"); // open()'s success path hides the banner
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    expect(saveBtn.disabled).toBe(true); // dirty cleared, nothing edited in b.ts yet
-  });
-
-  it("saving first, then opening a different path, opens it directly with no gate", async () => {
+  it("writes the pending edit, then reads and opens the new file", async () => {
     const { bridge, workspaceFileRead, workspaceFileWrite } = makePerPathBridge();
-    const view = new EditorView(container, bridge);
-    await openAndEdit(view, bridge, "a.ts");
-
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    saveBtn.click();
-    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalled());
-    // The save clears dirty, so the gate no longer applies.
+    const view = newEditorView(container, bridge);
+    await openAndEdit(view, "a.ts");
     workspaceFileRead.mockClear();
 
-    view.open("b.ts");
+    await view.open("b.ts");
 
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
+    expect(workspaceFileWrite).toHaveBeenCalledExactlyOnceWith("a.ts", "a.ts content edited", {
+      baseSHA256: "sha-a.ts",
+      purpose: "editor",
+    });
+    // The write goes out before the new file is even read: the edit is never at the mercy of the
+    // read that replaces it.
+    expect(workspaceFileWrite.mock.invocationCallOrder[0]!).toBeLessThan(workspaceFileRead.mock.invocationCallOrder[0]!);
     expect(container.querySelector(".editor-path")!.textContent).toBe("b.ts");
-    expect(container.querySelector(".banner.conflict")?.textContent ?? "").not.toContain("Unsaved changes");
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "b.ts",
+        baseSHA256: "sha-b.ts",
+        baseContent: "b.ts content",
+        content: "b.ts content",
+        dirty: false,
+        conflict: false,
+      }),
+    );
+  });
+
+  it("a new file's session reports nothing until it is edited, even after the previous file saved", async () => {
+    const { bridge, workspaceFileWrite } = makePerPathBridge();
+    const view = newEditorView(container, bridge);
+    await openAndEdit(view, "a.ts");
+    await view.flushNow();
+    expect(workspaceFileWrite).toHaveBeenCalledTimes(1);
+    expect(saveState(container)).toBe("saved");
+
+    await view.open("b.ts");
+
+    // "Saved" was true of a.ts, not of b.ts: the chip belongs to the file on screen, and b.ts has
+    // never been edited.
+    expect(saveState(container)).toBe("idle");
+    expect(saveChip(container).style.display).toBe("none");
+
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "b.ts content edited" } }, undefined);
+
+    expect(saveState(container)).toBe("dirty");
+  });
+
+  it("a clean buffer opens the new file directly, with no write at all", async () => {
+    const { bridge, workspaceFileRead, workspaceFileWrite } = makePerPathBridge();
+    const view = newEditorView(container, bridge);
+    await view.open("a.ts");
+    workspaceFileRead.mockClear();
+
+    await view.open("b.ts");
+
+    expect(workspaceFileWrite).not.toHaveBeenCalled();
+    expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor");
+    expect(container.querySelector(".editor-path")!.textContent).toBe("b.ts");
+  });
+
+  it("a failed write refuses the open, shows the reason, and never reads the new file", async () => {
+    const workspaceFileWrite = vi.fn().mockRejectedValue(new SpacesBridgeError("unavailable", "daemon not reachable"));
+    const { bridge, workspaceFileRead } = makePerPathBridge({ workspaceFileWrite });
+    const view = newEditorView(container, bridge);
+    await openAndEdit(view, "a.ts");
+    workspaceFileRead.mockClear();
+
+    await view.open("b.ts");
+
+    expect(workspaceFileRead).not.toHaveBeenCalledWith("b.ts", "editor");
+    const banner = container.querySelector(".banner.error") as HTMLElement;
+    expect(banner.style.display).toBe("flex");
+    expect(banner.textContent).toBe("Save failed: daemon not reachable · retry in 1 s");
+    // The buffer that could not be written stays exactly where it was, still unsaved.
+    expect(container.querySelector(".editor-path")!.textContent).toBe("a.ts");
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "a.ts",
+        baseSHA256: "sha-a.ts",
+        baseContent: "a.ts content",
+        content: "a.ts content edited",
+        dirty: true,
+        conflict: false,
+      }),
+    );
+  });
+
+  it("a buffer blocked by a conflict refuses the open and keeps the conflict's own controls on screen", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
+      .mockResolvedValueOnce({ content: "goodbye\n", sha256: "sha-2", size: 8 });
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
+    const view = newEditorView(container, bridge);
+
+    await view.open("a.ts");
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "edited\n" } }, undefined);
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+    const conflict = await vi.waitFor(() => {
+      const el = container.querySelector(".banner.conflict") as HTMLElement;
+      expect(el.style.display).toBe("flex");
+      return el;
+    });
+    expect(saveState(container)).toBe("blocked");
+    // The same state the host reads back for its own decisions, reason included.
+    expect(view.saveStatus()).toEqual({ kind: "blocked", reason: "File changed on disk" });
+    workspaceFileRead.mockClear();
+
+    await view.open("b.ts");
+
+    expect(workspaceFileRead).not.toHaveBeenCalled();
+    expect(container.querySelector(".editor-path")!.textContent).toBe("a.ts");
+    // The refusal says nothing the chip does not already say, and above all it leaves the compare
+    // view standing: its two buttons are the only way out of the block it is reporting.
+    expect(saveChip(container).textContent).toBe("Save blocked: File changed on disk");
+    expect(conflict.className).toBe("banner conflict");
+    expect(conflict.style.display).toBe("flex");
+    expect([...conflict.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Keep mine", "Take disk"]);
+  });
+
+  it("a superseded open loads only the newest requested file", async () => {
+    let resolveWrite!: (result: WorkspaceFileWriteResult) => void;
+    const workspaceFileWrite = vi.fn(() => new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve)));
+    const { bridge, workspaceFileRead } = makePerPathBridge({ workspaceFileWrite });
+    const view = newEditorView(container, bridge);
+    await openAndEdit(view, "a.ts");
+    workspaceFileRead.mockClear();
+
+    // Both opens queue behind the same flush; only the last one may load.
+    const openB = view.open("b.ts");
+    const openC = view.open("c.ts");
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledTimes(1));
+    resolveWrite({ ok: true, sha256: "sha-written" });
+    await openB;
+    await openC;
+
+    expect(workspaceFileRead).not.toHaveBeenCalledWith("b.ts", "editor");
+    expect(workspaceFileRead).toHaveBeenCalledExactlyOnceWith("c.ts", "editor");
+    expect(container.querySelector(".editor-path")!.textContent).toBe("c.ts");
+  });
+
+  it("re-picking the still-dirty current file supersedes a pending open of another file", async () => {
+    let resolveWrite!: (result: WorkspaceFileWriteResult) => void;
+    const workspaceFileWrite = vi.fn(() => new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve)));
+    const { bridge, workspaceFileRead } = makePerPathBridge({ workspaceFileWrite });
+    const view = newEditorView(container, bridge);
+    await openAndEdit(view, "a.ts");
+    workspaceFileRead.mockClear();
+
+    // B queues behind the flush, then the user picks A again before that flush settles: A is the
+    // latest selection, so B must stand down rather than replace the buffer the user came back to.
+    const openB = view.open("b.ts");
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledTimes(1));
+    await view.open("a.ts");
+    resolveWrite({ ok: true, sha256: "sha-written" });
+    await openB;
+
+    expect(workspaceFileRead).not.toHaveBeenCalled();
+    expect(container.querySelector(".editor-path")!.textContent).toBe("a.ts");
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "a.ts",
+        baseSHA256: "sha-written",
+        baseContent: "a.ts content edited",
+        content: "a.ts content edited",
+        dirty: false,
+        conflict: false,
+      }),
+    );
+  });
+
+  it("re-picking the still-dirty current file stands down an open whose read is already in flight", async () => {
+    let resolveBRead!: (result: WorkspaceFileReadResult) => void;
+    const workspaceFileRead = vi.fn((path: string) =>
+      path === "b.ts"
+        ? new Promise<WorkspaceFileReadResult>((resolve) => { resolveBRead = resolve; })
+        : Promise.resolve({ content: `${path} content`, sha256: `sha-${path}`, size: 9 }),
+    );
+    const { bridge, workspaceFileWrite } = makePerPathBridge({ workspaceFileRead });
+    const view = newEditorView(container, bridge);
+    await openAndEdit(view, "a.ts");
+
+    // B's open flushes A, then parks on B's read.
+    const openB = view.open("b.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
+    // The user keeps typing into A while that read is in flight, then picks A again: A is the latest
+    // selection, so B must stand down when its read finally lands.
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "a.ts content edited twice" } }, undefined);
+    await view.open("a.ts");
+
+    resolveBRead({ content: "b.ts content", sha256: "sha-b.ts", size: 9 });
+    await openB;
+
+    expect(container.querySelector(".editor-path")!.textContent).toBe("a.ts");
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "a.ts",
+        baseSHA256: "sha-written",
+        baseContent: "a.ts content edited",
+        content: "a.ts content edited twice",
+        dirty: true,
+        conflict: false,
+      }),
+    );
+
+    // The edits typed while B was loading are still A's, and still autosave as A's.
+    await view.flushNow();
+    expect(workspaceFileWrite).toHaveBeenNthCalledWith(2, "a.ts", "a.ts content edited twice", {
+      baseSHA256: "sha-written",
+      purpose: "editor",
+    });
+  });
+
+  it("an edit typed while the new file's read is in flight is written before the buffer is swapped", async () => {
+    let resolveRead!: (result: WorkspaceFileReadResult) => void;
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "a content", sha256: "sha-a", size: 9 })
+      .mockImplementationOnce(() => new Promise<WorkspaceFileReadResult>((resolve) => (resolveRead = resolve)));
+    const { bridge, workspaceFileWrite } = makePerPathBridge({ workspaceFileRead });
+    const view = newEditorView(container, bridge);
+    await view.open("a.ts");
+
+    // A is clean, so B's read starts immediately, with no flush ahead of it.
+    const openB = view.open("b.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
+    // The user types into A while that read is in flight: open()'s own flush ran before this
+    // happened, so only the completion recheck can catch it.
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "a content edited" } }, undefined);
+
+    resolveRead({ content: "b content", sha256: "sha-b", size: 9 });
+    await openB;
+
+    expect(workspaceFileWrite).toHaveBeenCalledExactlyOnceWith("a.ts", "a content edited", {
+      baseSHA256: "sha-a",
+      purpose: "editor",
+    });
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "b.ts",
+        baseSHA256: "sha-b",
+        baseContent: "b content",
+        content: "b content",
+        dirty: false,
+        conflict: false,
+      }),
+    );
+  });
+
+  it("an edit typed during that read whose write fails refuses the open and keeps the old buffer", async () => {
+    let resolveRead!: (result: WorkspaceFileReadResult) => void;
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "a content", sha256: "sha-a", size: 9 })
+      .mockImplementationOnce(() => new Promise<WorkspaceFileReadResult>((resolve) => (resolveRead = resolve)));
+    const workspaceFileWrite = vi.fn().mockRejectedValue(new SpacesBridgeError("unavailable", "daemon not reachable"));
+    const { bridge } = makePerPathBridge({ workspaceFileRead, workspaceFileWrite });
+    const view = newEditorView(container, bridge);
+    await view.open("a.ts");
+
+    const openB = view.open("b.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "a content edited" } }, undefined);
+
+    resolveRead({ content: "b content", sha256: "sha-b", size: 9 });
+    await openB;
+
+    expect(container.querySelector(".editor-path")!.textContent).toBe("a.ts");
+    expect((container.querySelector(".banner.error") as HTMLElement).textContent).toBe(
+      "Save failed: daemon not reachable · retry in 1 s",
+    );
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "a.ts",
+        baseSHA256: "sha-a",
+        baseContent: "a content",
+        content: "a content edited",
+        dirty: true,
+        conflict: false,
+      }),
+    );
   });
 
   it("typing into a just-restored clean buffer while its reconcile read is in flight is merged, never silently discarded (round-16 Fix 1, reworked from round-15 Fix A)", async () => {
     // round-16 Fix 1: restoreState's clean branch no longer routes through open(), so the
-    // protection round-15 Fix A proved (open()'s completion-time dirty recheck) no longer applies —
+    // protection round-15 Fix A proved (open()'s completion-time dirty recheck) no longer applies;
     // there is no open() call in this path any more. The equivalent, still-real protection now lives
     // in handleExternalChange's own dirty check at completion: restoreState's synchronous restore
     // makes the buffer live (loadIntoCodeView wires up onItemEditChange) before its fire-and-forget
@@ -1236,7 +1533,7 @@ describe("EditorView — opening another file while dirty is gated (round-13 Fix
       () => new Promise<WorkspaceFileReadResult>((resolve) => { resolveRead = resolve; }),
     );
     const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     await view.restoreState({
       path: "a.ts",
@@ -1251,7 +1548,7 @@ describe("EditorView — opening another file while dirty is gated (round-13 Fix
     // The user types into the now-live restored buffer while that read is still in flight.
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "line1 edited\nline2\n" } }, undefined);
 
-    // Disk independently changed too (appended line3) — non-overlapping with the user's edit.
+    // Disk independently changed too (appended line3), non-overlapping with the user's edit.
     resolveRead({ content: "line1\nline2\nline3\n", sha256: "sha-remote", size: 18 });
 
     const merge = await vi.waitFor(() => {
@@ -1260,7 +1557,7 @@ describe("EditorView — opening another file while dirty is gated (round-13 Fix
       return el;
     });
     expect(merge.textContent).toContain("Merged external changes");
-    // The user's typed edit survived the merge — it was never silently discarded by the read that
+    // The user's typed edit survived the merge; it was never silently discarded by the read that
     // was in flight when the keystroke landed.
     expect(view.collectStateForFlush()).toBe(
       JSON.stringify({
@@ -1275,7 +1572,7 @@ describe("EditorView — opening another file while dirty is gated (round-13 Fix
   });
 });
 
-describe("EditorView — reopening the currently-open file while dirty is a no-op (Finding 2)", () => {
+describe("EditorView: reopening the currently-open file while dirty is a no-op (Finding 2)", () => {
   let container: HTMLElement;
 
   beforeEach(() => {
@@ -1300,7 +1597,7 @@ describe("EditorView — reopening the currently-open file while dirty is a no-o
   it("re-picking the same dirty file does not raise the discard banner, does not re-read, and leaves the edit intact", async () => {
     const { bridge, workspaceFileRead } = makePerPathBridge();
     const onFileOpened = vi.fn();
-    const view = new EditorView(container, bridge, { onFileOpened });
+    const view = newEditorView(container, bridge, { onFileOpened });
     await openAndEdit(view, bridge, "a.ts");
     workspaceFileRead.mockClear();
     onFileOpened.mockClear(); // drop the initial open's own call
@@ -1308,38 +1605,23 @@ describe("EditorView — reopening the currently-open file while dirty is a no-o
     view.open("a.ts");
 
     expect(workspaceFileRead).not.toHaveBeenCalled(); // no re-read of the file already open
-    // The banner element persists in the DOM (reused, not recreated) but must stay hidden — no
-    // discard-consent banner is raised for this reopen.
+    // The banner element persists in the DOM (reused, not recreated) but must stay hidden: nothing
+    // is refused, and nothing is written, for a reopen of the file already showing.
     expect((container.querySelector(".banner.conflict") as HTMLElement | null)?.style.display ?? "none").toBe("none");
-    expect(onFileOpened).not.toHaveBeenCalled(); // this isn't a new open — nothing to record
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    expect(saveBtn.disabled).toBe(false); // the edit is still there, unsaved
-  });
-
-  it("re-picking a DIFFERENT file while dirty still raises the discard banner (unchanged by this fix)", async () => {
-    const { bridge, workspaceFileRead } = makePerPathBridge();
-    const view = new EditorView(container, bridge);
-    await openAndEdit(view, bridge, "a.ts");
-    workspaceFileRead.mockClear();
-
-    view.open("b.ts");
-
-    expect(workspaceFileRead).not.toHaveBeenCalledWith("b.ts", "editor");
-    const banner = container.querySelector(".banner.conflict") as HTMLElement;
-    expect(banner.style.display).toBe("flex");
-    expect(banner.querySelector("button")!.textContent).toBe("Discard edits and open");
+    expect(onFileOpened).not.toHaveBeenCalled(); // this isn't a new open, nothing to record
+    expect(saveState(container)).toBe("dirty"); // the edit is still there, unsaved
   });
 
   it("re-picking the same file mid-conflict also just stays put, leaving the conflict banner and its Keep-mine/Take-disk actions untouched", async () => {
     // `dirty` stays true throughout a standing conflict (see `open()`'s doc comment), so the same
     // path === currentPath early return must hold here too, rather than the conflict's own dirty
-    // buffer falling through into the ordinary discard-consent gate.
+    // buffer falling through into the flush gate.
     const workspaceFileRead = vi
       .fn()
       .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
       .mockResolvedValueOnce({ content: "goodbye\n", sha256: "sha-2", size: 8 });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
@@ -1357,7 +1639,7 @@ describe("EditorView — reopening the currently-open file while dirty is a no-o
     view.open("a.ts"); // re-picking the file already open, mid-conflict
 
     expect(workspaceFileRead).not.toHaveBeenCalled(); // no re-read triggered
-    // Still the conflict banner (Keep mine / Take disk), not replaced by the discard-consent banner.
+    // Still the conflict banner (Keep mine / Take disk), and no refusal notice over it.
     expect(conflictBanner.style.display).toBe("flex");
     expect(conflictBanner.textContent).toContain("changed on disk");
     expect([...conflictBanner.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Keep mine", "Take disk"]);
@@ -1378,44 +1660,49 @@ describe("EditorView — open()'s revealLine option", () => {
     fakeCodeViewControl.editor = {};
   });
 
-  function makePerPathBridge(): { bridge: SpacesBridge; workspaceFileRead: ReturnType<typeof vi.fn> } {
+  function makePerPathBridge(overrides: Partial<SpacesBridge> = {}): {
+    bridge: SpacesBridge;
+    workspaceFileRead: ReturnType<typeof vi.fn>;
+    workspaceFileWrite: ReturnType<typeof vi.fn>;
+  } {
     const workspaceFileRead = vi.fn((path: string) =>
       Promise.resolve({ content: `${path} content`, sha256: `sha-${path}`, size: 9 }),
     );
-    const bridge = makeBridge({ workspaceFileRead });
-    return { bridge, workspaceFileRead };
+    const workspaceFileWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-written" });
+    const bridge = makeBridge({ workspaceFileRead, workspaceFileWrite, ...overrides });
+    return { bridge, workspaceFileRead, workspaceFileWrite };
   }
 
   it("scrolls to and focuses the requested line once the file finishes loading", async () => {
     const { bridge, workspaceFileRead } = makePerPathBridge();
     const focus = vi.fn();
     fakeCodeViewControl.editor = { focus };
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
-    view.open("a.ts", { revealLine: 2 });
+    await view.open("a.ts", { revealLine: 2 });
 
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+    expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor");
     await vi.waitFor(() =>
       expect(fakeCodeViewControl.scrollToCalls).toEqual([{ type: "line", id: "a.ts", lineNumber: 2, behavior: "instant" }]),
     );
     await vi.waitFor(() => expect(focus).toHaveBeenCalledWith({ lineNumber: 2 }));
   });
 
-  it("applies a pending reveal once the discard-consent path proceeds", async () => {
-    const { bridge, workspaceFileRead } = makePerPathBridge();
-    const view = new EditorView(container, bridge);
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+  it("applies the reveal after the open's mandatory flush has written the previous file", async () => {
+    const { bridge, workspaceFileWrite } = makePerPathBridge();
+    const view = newEditorView(container, bridge);
+    await view.open("a.ts");
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "a.ts content edited" } }, undefined);
-
     const focus = vi.fn();
     fakeCodeViewControl.editor = { focus };
-    view.open("b.ts", { revealLine: 3 });
-    const banner = container.querySelector(".banner.conflict") as HTMLElement;
-    const discardBtn = banner.querySelector("button") as HTMLButtonElement;
-    discardBtn.click();
+    fakeCodeViewControl.scrollToCalls = [];
 
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
+    await view.open("b.ts", { revealLine: 3 });
+
+    expect(workspaceFileWrite).toHaveBeenCalledExactlyOnceWith("a.ts", "a.ts content edited", {
+      baseSHA256: "sha-a.ts",
+      purpose: "editor",
+    });
     await vi.waitFor(() =>
       expect(fakeCodeViewControl.scrollToCalls).toEqual([{ type: "line", id: "b.ts", lineNumber: 3, behavior: "instant" }]),
     );
@@ -1425,58 +1712,55 @@ describe("EditorView — open()'s revealLine option", () => {
   it("keeps a dirty buffer where it is, with no reload and no reveal, when re-picking the same file at a line", async () => {
     // The diff's line numbers describe the file on disk; the unsaved edits in this buffer have
     // already moved those lines, so revealing the disk coordinate would land on unrelated content.
-    const { bridge, workspaceFileRead } = makePerPathBridge();
-    const view = new EditorView(container, bridge);
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+    const { bridge, workspaceFileRead, workspaceFileWrite } = makePerPathBridge();
+    const view = newEditorView(container, bridge);
+    await view.open("a.ts");
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "a.ts content edited" } }, undefined);
     workspaceFileRead.mockClear();
     fakeCodeViewControl.scrollToCalls = [];
 
     const focus = vi.fn();
     fakeCodeViewControl.editor = { focus };
-    view.open("a.ts", { revealLine: 5 });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await view.open("a.ts", { revealLine: 5 });
 
     expect(workspaceFileRead).not.toHaveBeenCalled(); // same-path short-circuit, no reload
+    expect(workspaceFileWrite).not.toHaveBeenCalled(); // and no flush: nothing is being replaced
     expect(fakeCodeViewControl.scrollToCalls).toEqual([]);
     expect(focus).not.toHaveBeenCalled();
-    expect((container.querySelector(".banner") as HTMLElement).style.display).toBe("none"); // no discard gate either
+    expect((container.querySelector(".banner") as HTMLElement).style.display).toBe("none");
   });
 
-  it("keeps a consented open's reveal line when a later open hits the dirty gate mid-read", async () => {
-    // Dirty A; open B at line 10 and consent; while B's read is still in flight, open C at line 20,
-    // which lands in the dirty gate (A is still current and dirty) and raises a fresh banner. B's
-    // load must still reveal line 10, not C's 20.
-    const reads = new Map<string, (value: { content: string; sha256: string; size: number }) => void>();
+  it("a superseded open never redirects the winning open's reveal to its own line", async () => {
+    // Open B at line 10, then open C at line 20 while B's read is still in flight. C is the latest
+    // selection, so B stands down at completion and only C's line is revealed: the reveal travels
+    // with its own load rather than through a field the next open could overwrite.
+    const reads = new Map<string, (value: WorkspaceFileReadResult) => void>();
     const workspaceFileRead = vi.fn(
       (path: string) =>
-        new Promise<{ content: string; sha256: string; size: number }>((resolve) => {
+        new Promise<WorkspaceFileReadResult>((resolve) => {
           reads.set(path, resolve);
         }),
     );
-    const bridge = makeBridge({ workspaceFileRead });
+    const { bridge } = makePerPathBridge({ workspaceFileRead });
     const focus = vi.fn();
     fakeCodeViewControl.editor = { focus };
-    const view = new EditorView(container, bridge);
-    view.open("a.ts");
-    await vi.waitFor(() => expect(reads.has("a.ts")).toBe(true));
-    reads.get("a.ts")!({ content: "a.ts content", sha256: "sha-a", size: 12 });
-    await vi.waitFor(() => expect(capturedCodeViewOptions.current).toBeDefined());
-    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "a.ts content edited" } }, undefined);
+    const view = newEditorView(container, bridge);
 
-    view.open("b.ts", { revealLine: 10 });
-    (container.querySelector(".banner.conflict button") as HTMLButtonElement).click();
+    const openB = view.open("b.ts", { revealLine: 10 });
     await vi.waitFor(() => expect(reads.has("b.ts")).toBe(true));
+    const openC = view.open("c.ts", { revealLine: 20 });
+    await vi.waitFor(() => expect(reads.has("c.ts")).toBe(true));
 
-    view.open("c.ts", { revealLine: 20 }); // dirty gate again: banner, no read
-    expect(reads.has("c.ts")).toBe(false);
+    reads.get("c.ts")!({ content: "c.ts content", sha256: "sha-c", size: 9 });
+    await openC;
+    reads.get("b.ts")!({ content: "b.ts content", sha256: "sha-b", size: 9 });
+    await openB;
 
-    reads.get("b.ts")!({ content: "b.ts content", sha256: "sha-b", size: 12 });
+    expect(container.querySelector(".editor-path")!.textContent).toBe("c.ts");
     await vi.waitFor(() =>
-      expect(fakeCodeViewControl.scrollToCalls).toEqual([{ type: "line", id: "b.ts", lineNumber: 10, behavior: "instant" }]),
+      expect(fakeCodeViewControl.scrollToCalls).toEqual([{ type: "line", id: "c.ts", lineNumber: 20, behavior: "instant" }]),
     );
-    await vi.waitFor(() => expect(focus).toHaveBeenCalledWith({ lineNumber: 10 }));
+    expect(focus).not.toHaveBeenCalledWith({ lineNumber: 10 });
   });
 
   it("a failed read leaves no pending reveal for the next open", async () => {
@@ -1487,305 +1771,17 @@ describe("EditorView — open()'s revealLine option", () => {
     const bridge = makeBridge({ workspaceFileRead });
     const focus = vi.fn();
     fakeCodeViewControl.editor = { focus };
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
-    view.open("a.ts", { revealLine: 2 });
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
-    await vi.waitFor(() => expect(container.querySelector(".banner.error")).not.toBeNull());
+    await view.open("a.ts", { revealLine: 2 });
+    expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor");
+    expect(container.querySelector(".banner.error")).not.toBeNull();
 
-    view.open("b.ts"); // no revealLine on this one
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
+    await view.open("b.ts"); // no revealLine on this one
+    expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor");
 
     expect(fakeCodeViewControl.scrollToCalls).toEqual([]);
     expect(focus).not.toHaveBeenCalled();
-  });
-});
-
-describe("EditorView — completion recheck + discard-flag interplay (round-15 Fix A+B)", () => {
-  let container: HTMLElement;
-
-  beforeEach(() => {
-    container = document.createElement("div");
-    capturedCodeViewOptions.current = undefined;
-  });
-
-  /** Same held-per-path-read idiom as the "open() latest-wins generation token" block above: each
-   *  call to `workspaceFileRead(path)` gets its own deferred promise, tracked by path (a later call
-   *  for the same path overwrites the earlier entry, which is fine here since every test only needs
-   *  to hold the LATEST in-flight read for a given path). */
-  function makeDeferredRead(): {
-    workspaceFileRead: SpacesBridge["workspaceFileRead"];
-    settle: Record<string, { resolve: (result: WorkspaceFileReadResult) => void; reject: (err: unknown) => void; promise: Promise<WorkspaceFileReadResult> }>;
-  } {
-    const settle: Record<string, { resolve: (result: WorkspaceFileReadResult) => void; reject: (err: unknown) => void; promise: Promise<WorkspaceFileReadResult> }> = {};
-    const workspaceFileRead = vi.fn((path: string, _purpose: "editor") => {
-      let resolve!: (result: WorkspaceFileReadResult) => void;
-      let reject!: (err: unknown) => void;
-      const promise = new Promise<WorkspaceFileReadResult>((res, rej) => {
-        resolve = res;
-        reject = rej;
-      });
-      settle[path] = { resolve, reject, promise };
-      return promise;
-    });
-    return { workspaceFileRead, settle };
-  }
-
-  it("Bug A: the current buffer going dirty WHILE a different open's read is in flight raises the banner at completion instead of clobbering it", async () => {
-    const { workspaceFileRead, settle } = makeDeferredRead();
-    const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
-
-    // Open A cleanly.
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
-    settle["a.ts"]!.resolve({ content: "a content", sha256: "sha-a", size: 9 });
-    await settle["a.ts"]!.promise;
-
-    // A is clean, so open()'s upfront dirty check lets B's open proceed directly — no banner yet.
-    view.open("b.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
-    expect((container.querySelector(".banner.conflict") as HTMLElement).style.display).toBe("none");
-
-    // While B's read is in flight, the user types into A (still the loaded buffer — B hasn't
-    // landed). open()'s upfront dirty check ran before this happened, so only open()'s completion-time
-    // recheck can catch it.
-    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "a content edited" } }, undefined);
-
-    settle["b.ts"]!.resolve({ content: "b content", sha256: "sha-b", size: 9 });
-    await settle["b.ts"]!.promise;
-
-    // A's buffer must be untouched: the completion recheck refused to replace it and raised the
-    // discard banner for B instead of silently clobbering A's in-progress edit.
-    const banner = await vi.waitFor(() => {
-      const el = container.querySelector(".banner.conflict") as HTMLElement;
-      expect(el.style.display).toBe("flex");
-      return el;
-    });
-    expect(banner.firstChild?.textContent).toBe("Unsaved changes in a.ts. Save them first, or discard them to open b.ts.");
-    expect(view.collectStateForFlush()).toBe(
-      JSON.stringify({ path: "a.ts", baseSHA256: "sha-a", baseContent: "a content", content: "a content edited", dirty: true, conflict: false }),
-    );
-
-    // Clicking discard commits it: a fresh read for B (the earlier one already resolved and was
-    // discarded by the recheck above), landing with `discard: true` so this completion isn't
-    // re-litigated as its own conflict.
-    (banner.querySelector("button") as HTMLButtonElement).click();
-    // a.ts, b.ts, a.ts (round-13 fix: the refused-open reconcile fired when the recheck above raised
-    // the banner, for the still-current a.ts — left unresolved here, it never blocks this test), b.ts
-    // again.
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(4));
-    settle["b.ts"]!.resolve({ content: "b content v2", sha256: "sha-b2", size: 12 });
-    await settle["b.ts"]!.promise;
-
-    expect(view.collectStateForFlush()).toBe(
-      JSON.stringify({
-        path: "b.ts",
-        baseSHA256: "sha-b2",
-        baseContent: "b content v2",
-        content: "b content v2",
-        dirty: false,
-        conflict: false,
-      }),
-    );
-    expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(true);
-    expect(banner.style.display).toBe("none");
-  });
-
-  it("Bug B (success): clicking discard does not touch the old buffer until the reopen actually succeeds", async () => {
-    const { workspaceFileRead, settle } = makeDeferredRead();
-    const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
-    settle["a.ts"]!.resolve({ content: "a content", sha256: "sha-a", size: 9 });
-    await settle["a.ts"]!.promise;
-    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "a content edited" } }, undefined);
-
-    view.open("b.ts"); // dirty: gated, banner shown, no read yet
-    const banner = container.querySelector(".banner.conflict") as HTMLElement;
-    expect(banner.style.display).toBe("flex");
-    (banner.querySelector("button") as HTMLButtonElement).click(); // discard: read for b.ts starts, held
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
-
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    // While the reopen is held, nothing about A's buffer has moved: the discard is committed only
-    // once open() actually succeeds, not at click time.
-    expect(saveBtn.disabled).toBe(false);
-    expect(view.collectStateForFlush()).toBe(
-      JSON.stringify({ path: "a.ts", baseSHA256: "sha-a", baseContent: "a content", content: "a content edited", dirty: true, conflict: false }),
-    );
-
-    settle["b.ts"]!.resolve({ content: "b content", sha256: "sha-b", size: 9 });
-    await settle["b.ts"]!.promise;
-
-    expect(container.querySelector(".editor-path")!.textContent).toBe("b.ts");
-    expect(saveBtn.disabled).toBe(true);
-    expect(view.collectStateForFlush()).toBe(
-      JSON.stringify({ path: "b.ts", baseSHA256: "sha-b", baseContent: "b content", content: "b content", dirty: false, conflict: false }),
-    );
-  });
-
-  it("Bug B (failure): a reopen that fails after discard leaves the old buffer dirty and Save enabled, not silently marked clean", async () => {
-    const { workspaceFileRead, settle } = makeDeferredRead();
-    const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
-    settle["a.ts"]!.resolve({ content: "a content", sha256: "sha-a", size: 9 });
-    await settle["a.ts"]!.promise;
-    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "a content edited" } }, undefined);
-
-    view.open("b.ts");
-    const banner = container.querySelector(".banner.conflict") as HTMLElement;
-    (banner.querySelector("button") as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
-
-    settle["b.ts"]!.reject(new SpacesBridgeError("notFound", "no such file: b.ts"));
-    await settle["b.ts"]!.promise.catch(() => {});
-
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    // Nothing was silently marked clean by the failed discard attempt: A's path, content, baseline,
-    // and dirty flag are exactly what they were before the click, and Save is still enabled.
-    expect(saveBtn.disabled).toBe(false);
-    expect(view.collectStateForFlush()).toBe(
-      JSON.stringify({ path: "a.ts", baseSHA256: "sha-a", baseContent: "a content", content: "a content edited", dirty: true, conflict: false }),
-    );
-    // The failed reopen renders its own factual error, same as any other failed open().
-    expect(container.querySelector(".banner.error")).not.toBeNull();
-  });
-});
-
-describe("EditorView — discard consent is scoped to the edit-generation at click time (against-main round-3 fix)", () => {
-  let container: HTMLElement;
-
-  beforeEach(() => {
-    container = document.createElement("div");
-    capturedCodeViewOptions.current = undefined;
-  });
-
-  /** Same held-per-path-read idiom as the "completion recheck + discard-flag interplay" block above:
-   *  each call to `workspaceFileRead(path)` gets its own deferred promise, tracked by path (a later
-   *  call for the same path overwrites the earlier entry — every test here only needs to hold the
-   *  LATEST in-flight read for a given path, since a re-raised banner's second discard click issues
-   *  a brand new read for the same target path). */
-  function makeDeferredRead(): {
-    workspaceFileRead: SpacesBridge["workspaceFileRead"];
-    settle: Record<string, { resolve: (result: WorkspaceFileReadResult) => void; reject: (err: unknown) => void; promise: Promise<WorkspaceFileReadResult> }>;
-  } {
-    const settle: Record<string, { resolve: (result: WorkspaceFileReadResult) => void; reject: (err: unknown) => void; promise: Promise<WorkspaceFileReadResult> }> = {};
-    const workspaceFileRead = vi.fn((path: string) => {
-      let resolve!: (result: WorkspaceFileReadResult) => void;
-      let reject!: (err: unknown) => void;
-      const promise = new Promise<WorkspaceFileReadResult>((res, rej) => {
-        resolve = res;
-        reject = rej;
-      });
-      settle[path] = { resolve, reject, promise };
-      return promise;
-    });
-    return { workspaceFileRead, settle };
-  }
-
-  it("an edit landing after the discard click but before its read completes re-raises the banner instead of silently discarding it", async () => {
-    const { workspaceFileRead, settle } = makeDeferredRead();
-    const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
-    settle["a.ts"]!.resolve({ content: "a content", sha256: "sha-a", size: 9 });
-    await settle["a.ts"]!.promise;
-    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "a content edited" } }, undefined);
-
-    view.open("b.ts"); // dirty: gated, banner shown, no read yet
-    const banner = container.querySelector(".banner.conflict") as HTMLElement;
-    (banner.querySelector("button") as HTMLButtonElement).click(); // discard consent captured at THIS click's bufferEditGeneration
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
-
-    // A further keystroke lands into the still-live A buffer while B's read is still held — this is
-    // new unsaved work the click's consent never covered.
-    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "a content edited further" } }, undefined);
-
-    settle["b.ts"]!.resolve({ content: "b content", sha256: "sha-b", size: 9 });
-    await settle["b.ts"]!.promise;
-
-    // The banner re-raises: the intervening edit invalidated this discard's consent.
-    await vi.waitFor(() => expect(banner.style.display).toBe("flex"));
-    expect(banner.firstChild?.textContent).toBe("Unsaved changes in a.ts. Save them first, or discard them to open b.ts.");
-
-    // The buffer was NOT replaced with B's content: A's post-intervening-edit buffer still stands,
-    // still dirty, still the open file.
-    expect(view.collectStateForFlush()).toBe(
-      JSON.stringify({ path: "a.ts", baseSHA256: "sha-a", baseContent: "a content", content: "a content edited further", dirty: true, conflict: false }),
-    );
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    expect(saveBtn.disabled).toBe(false);
-  });
-
-  it("clicking discard a second time with no further edits lets the reopen complete normally (no infinite re-raise)", async () => {
-    const { workspaceFileRead, settle } = makeDeferredRead();
-    const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
-    settle["a.ts"]!.resolve({ content: "a content", sha256: "sha-a", size: 9 });
-    await settle["a.ts"]!.promise;
-    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "a content edited" } }, undefined);
-
-    view.open("b.ts");
-    const banner = container.querySelector(".banner.conflict") as HTMLElement;
-    (banner.querySelector("button") as HTMLButtonElement).click(); // first discard click, consent gen 1
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
-    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "a content edited further" } }, undefined); // intervening edit bumps to gen 2
-    settle["b.ts"]!.resolve({ content: "b content", sha256: "sha-b", size: 9 });
-    await settle["b.ts"]!.promise;
-    await vi.waitFor(() => expect(banner.style.display).toBe("flex")); // re-raised, same as the previous test
-
-    // Second discard click: no further edit happens this time, so this click's consent generation
-    // still matches `bufferEditGeneration` when the reopen completes.
-    (banner.querySelector("button") as HTMLButtonElement).click();
-    // a.ts, b.ts, a.ts (round-13 fix: the refused-open reconcile fired when the re-raise above ran,
-    // for the still-current a.ts — left unresolved here, it never blocks this test), b.ts again.
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(4));
-    settle["b.ts"]!.resolve({ content: "b content v2", sha256: "sha-b2", size: 12 });
-    await settle["b.ts"]!.promise;
-
-    // B opens normally this time: the fix does not cause an infinite re-raise loop once there is no
-    // new edit to re-litigate.
-    expect(view.collectStateForFlush()).toBe(
-      JSON.stringify({ path: "b.ts", baseSHA256: "sha-b2", baseContent: "b content v2", content: "b content v2", dirty: false, conflict: false }),
-    );
-    expect(container.querySelector(".editor-path")!.textContent).toBe("b.ts");
-    expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(true);
-    expect(banner.style.display).toBe("none");
-  });
-
-  it("a discard with no intervening edit opens the target file normally, unchanged from before this fix", async () => {
-    const { workspaceFileRead, settle } = makeDeferredRead();
-    const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
-    settle["a.ts"]!.resolve({ content: "a content", sha256: "sha-a", size: 9 });
-    await settle["a.ts"]!.promise;
-    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "a content edited" } }, undefined);
-
-    view.open("b.ts");
-    const banner = container.querySelector(".banner.conflict") as HTMLElement;
-    (banner.querySelector("button") as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
-
-    // No edit happens while the read is held this time — the original, unraced discard shape.
-    settle["b.ts"]!.resolve({ content: "b content", sha256: "sha-b", size: 9 });
-    await settle["b.ts"]!.promise;
-
-    expect(container.querySelector(".editor-path")!.textContent).toBe("b.ts");
-    expect(banner.style.display).toBe("none");
-    expect(view.collectStateForFlush()).toBe(
-      JSON.stringify({ path: "b.ts", baseSHA256: "sha-b", baseContent: "b content", content: "b content", dirty: false, conflict: false }),
-    );
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    expect(saveBtn.disabled).toBe(true);
   });
 });
 
@@ -1802,7 +1798,7 @@ describe("EditorView.collectStateForFlush (round-6 Fix 1)", () => {
 
   it("returns null when no file is open", () => {
     const bridge = makeBridge();
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     expect(view.collectStateForFlush()).toBeNull();
   });
@@ -1812,7 +1808,7 @@ describe("EditorView.collectStateForFlush (round-6 Fix 1)", () => {
     const workspaceFileRead = vi.fn().mockResolvedValue(result);
     const notifyEditorStateChanged = vi.fn();
     const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
+    const view = newEditorView(container, bridge, { onStateChanged: notifyEditorStateChanged });
 
     view.open("a.ts");
     await vi.waitFor(() => expect(notifyEditorStateChanged).toHaveBeenCalledTimes(1));
@@ -1837,6 +1833,80 @@ describe("EditorView.collectStateForFlush (round-6 Fix 1)", () => {
   });
 });
 
+describe("EditorView.dispose (pane teardown)", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    capturedCodeViewOptions.current = undefined;
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("stops the pane dead: no signature reads, no pending retry, no state push, no write", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "line1\n", sha256: "sha-1", size: 6 })
+      .mockRejectedValue(new SpacesBridgeError("unavailable", "daemon not reachable"));
+    const workspaceFileWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-2" });
+    const onStateChanged = vi.fn();
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
+    const view = newEditorView(container, bridge, { onStateChanged });
+    await view.open("a.ts");
+
+    // Arm everything this view can leave running: a debounced state push and an autosave from the
+    // edit, and an external-change retry from a reconcile whose read could not run to a conclusion.
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "line1 edited\n" } }, undefined);
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(2));
+    workspaceFileRead.mockClear();
+    onStateChanged.mockClear();
+
+    view.dispose();
+
+    // Long enough for the retry backoff, the state-push debounce and the autosave debounce alike.
+    await vi.advanceTimersByTimeAsync(60_000);
+    // A signature event that beat the unsubscribe must not restart any of it either.
+    fireFileSignature({ path: "a.ts", sha256: "sha-3", missing: false });
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(workspaceFileRead).not.toHaveBeenCalled();
+    expect(workspaceFileWrite).not.toHaveBeenCalled();
+    expect(onStateChanged).not.toHaveBeenCalled();
+    expect(bridge.subscribeFileSignature).toHaveBeenCalledTimes(1); // never re-armed
+  });
+
+  it("an open whose read lands after teardown neither swaps the buffer nor re-arms the signature stream", async () => {
+    let resolveBRead!: (result: WorkspaceFileReadResult) => void;
+    const workspaceFileRead = vi.fn((path: string) =>
+      path === "b.ts"
+        ? new Promise<WorkspaceFileReadResult>((resolve) => { resolveBRead = resolve; })
+        : Promise.resolve({ content: `${path} content`, sha256: `sha-${path}`, size: 9 }),
+    );
+    const onFileOpened = vi.fn();
+    const onStateChanged = vi.fn();
+    const bridge = makeBridge({ workspaceFileRead });
+    const view = newEditorView(container, bridge, { onFileOpened, onStateChanged });
+    await view.open("a.ts");
+    const openB = view.open("b.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
+    onFileOpened.mockClear();
+    onStateChanged.mockClear();
+
+    view.dispose();
+    resolveBRead({ content: "b.ts content", sha256: "sha-b.ts", size: 9 });
+    await openB;
+
+    expect(container.querySelector(".editor-path")!.textContent).toBe("a.ts");
+    expect(onFileOpened).not.toHaveBeenCalled();
+    expect(onStateChanged).not.toHaveBeenCalled();
+    expect(bridge.subscribeFileSignature).toHaveBeenCalledTimes(1); // a.ts's, never replaced by b.ts's
+  });
+});
+
 describe("EditorView — external-change handling: clean buffer (silent reload / deletion placeholder)", () => {
   let container: HTMLElement;
 
@@ -1850,7 +1920,7 @@ describe("EditorView — external-change handling: clean buffer (silent reload /
       .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
       .mockResolvedValueOnce({ content: "hello, updated\n", sha256: "sha-2", size: 15 });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
@@ -1880,7 +1950,7 @@ describe("EditorView — external-change handling: clean buffer (silent reload /
   it("a stray file-signature event whose hash already matches the baseline is a no-op", async () => {
     const workspaceFileRead = vi.fn().mockResolvedValue({ content: "hello\n", sha256: "sha-1", size: 6 });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
@@ -1911,7 +1981,7 @@ describe("EditorView — external-change handling: clean buffer (silent reload /
       .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
       .mockRejectedValueOnce(new SpacesBridgeError("notFound", "a.ts is gone"));
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
 
@@ -1920,7 +1990,7 @@ describe("EditorView — external-change handling: clean buffer (silent reload /
 
     await vi.waitFor(() => expect(container.querySelector(".editor-path")!.textContent).toBe("a.ts")); // path stays in the box
     expect(view.collectStateForFlush()).toBeNull(); // no open-file state left to persist
-    expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(true);
+    expect(saveState(container)).toBe("idle");
     // See the previous test's comment: hidden-ness is asserted via `style.display`, not class
     // absence — the shared banner element's last modifier class is not reset here.
     expect((container.querySelector(".banner") as HTMLElement).style.display).toBe("none");
@@ -1941,7 +2011,7 @@ describe("EditorView — external-change handling: dirty buffer, auto-merge + Un
       .mockResolvedValueOnce({ content: "line1\nline2\n", sha256: "sha-1", size: 12 })
       .mockResolvedValueOnce({ content: "line1\nline2\nline3\n", sha256: "sha-2", size: 18 });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
@@ -1979,7 +2049,7 @@ describe("EditorView — external-change handling: dirty buffer, auto-merge + Un
       .mockResolvedValueOnce({ content: "line1\nline2\n", sha256: "sha-1", size: 12 })
       .mockResolvedValueOnce({ content: "line1\nline2\nline3\n", sha256: "sha-2", size: 18 });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
@@ -2007,61 +2077,170 @@ describe("EditorView — external-change handling: dirty buffer, auto-merge + Un
     );
   });
 
-  it("Undo reverts the buffer to its pre-merge content and enters conflict state against the same disk snapshot, with no re-read", async () => {
-    const workspaceFileRead = vi
-      .fn()
-      .mockResolvedValueOnce({ content: "line1\nline2\n", sha256: "sha-1", size: 12 })
-      .mockResolvedValueOnce({ content: "line1\nline2\nline3\n", sha256: "sha-2", size: 18 });
-    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
-
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+  /** Drives the merge established by a `spaces:fileSignature` push, under fake timers so the
+   *  autosave that follows the merge can be advanced deliberately rather than raced. Leaves the
+   *  merged buffer on screen, unwritten, with the indicator up. */
+  async function mergeViaSignatureEvent(
+    view: EditorView,
+    workspaceFileRead: ReturnType<typeof vi.fn>,
+    fireFileSignature: (event: FileSignatureEvent) => void,
+  ): Promise<HTMLElement> {
+    await view.open("a.ts");
+    expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor");
+    // Mine: edits line1 only. Theirs: appends line3 only. Non-overlapping.
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "line1 edited\nline2\n" } }, undefined);
     fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+    await vi.advanceTimersByTimeAsync(10);
+    const merge = container.querySelector(".banner.merge") as HTMLElement;
+    expect(merge.style.display).toBe("flex");
+    return merge;
+  }
 
-    const merge = await vi.waitFor(() => {
-      const el = container.querySelector(".banner.merge") as HTMLElement;
-      expect(el.style.display).toBe("flex");
-      return el;
-    });
-    const undoBtn = [...merge.querySelectorAll("button")].find((b) => b.textContent === "Undo")!;
-    undoBtn.click();
+  it("the autosave that follows a merge leaves the Undo offer standing, and Undo writes the pre-merge buffer back against that write's hash", async () => {
+    vi.useFakeTimers();
+    try {
+      const workspaceFileRead = vi
+        .fn()
+        .mockResolvedValueOnce({ content: "line1\nline2\n", sha256: "sha-1", size: 12 })
+        .mockResolvedValueOnce({ content: "line1\nline2\nline3\n", sha256: "sha-2", size: 18 });
+      const workspaceFileWrite = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, sha256: "sha-merged" })
+        .mockResolvedValue({ ok: true, sha256: "sha-undone" });
+      const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
+      const view = newEditorView(container, bridge);
+      const merge = await mergeViaSignatureEvent(view, workspaceFileRead, fireFileSignature);
 
-    expect(workspaceFileRead).toHaveBeenCalledTimes(2); // Undo did not trigger a third read
-    const conflictBanner = container.querySelector(".banner.conflict") as HTMLElement;
-    expect(conflictBanner.style.display).toBe("flex");
-    expect(conflictBanner.textContent).toContain("changed on disk");
-    expect(view.collectStateForFlush()).toBe(
-      JSON.stringify({
-        path: "a.ts",
+      // The merged buffer is dirty, so autosave writes it one debounce later.
+      await vi.advanceTimersByTimeAsync(800);
+      expect(workspaceFileWrite).toHaveBeenCalledExactlyOnceWith("a.ts", "line1 edited\nline2\nline3\n", {
         baseSHA256: "sha-2",
-        baseContent: "line1\nline2\nline3\n",
-        content: "line1 edited\nline2\n", // reverted to the pre-merge buffer
-        dirty: true,
-        conflict: true,
-      }),
-    );
-    expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(true);
+        purpose: "editor",
+      });
+      expect(saveState(container)).toBe("saved");
+      // The whole point: the merge reaching disk is exactly the state Undo exists to take back, so
+      // the offer outlives its own write.
+      expect(merge.style.display).toBe("flex");
+      const undoBtn = [...merge.querySelectorAll("button")].find((b) => b.textContent === "Undo")!;
+
+      undoBtn.click();
+
+      expect(merge.style.display).toBe("none");
+      expect(saveState(container)).toBe("dirty");
+      await vi.advanceTimersByTimeAsync(800);
+      // An ordinary edit: the pre-merge buffer goes back to disk, CAS-checked against the hash the
+      // merged write returned.
+      expect(workspaceFileWrite).toHaveBeenNthCalledWith(2, "a.ts", "line1 edited\nline2\n", {
+        baseSHA256: "sha-merged",
+        purpose: "editor",
+      });
+      expect(workspaceFileRead).toHaveBeenCalledTimes(2); // Undo did not trigger a third read
+      expect(view.collectStateForFlush()).toBe(
+        JSON.stringify({
+          path: "a.ts",
+          baseSHA256: "sha-undone",
+          baseContent: "line1 edited\nline2\n",
+          content: "line1 edited\nline2\n", // reverted to the pre-merge buffer
+          dirty: false,
+          conflict: false,
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a further edit after a merge retires the Undo offer instead of leaving it live", async () => {
-    const workspaceFileRead = vi
-      .fn()
-      .mockResolvedValueOnce({ content: "line1\nline2\n", sha256: "sha-1", size: 12 })
-      .mockResolvedValueOnce({ content: "line1\nline2\nline3\n", sha256: "sha-2", size: 18 });
-    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    vi.useFakeTimers();
+    try {
+      const workspaceFileRead = vi
+        .fn()
+        .mockResolvedValueOnce({ content: "line1\nline2\n", sha256: "sha-1", size: 12 })
+        .mockResolvedValueOnce({ content: "line1\nline2\nline3\n", sha256: "sha-2", size: 18 });
+      const workspaceFileWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-merged" });
+      const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
+      const view = newEditorView(container, bridge);
+      const merge = await mergeViaSignatureEvent(view, workspaceFileRead, fireFileSignature);
+      await vi.advanceTimersByTimeAsync(800); // the merged buffer's own write lands, offer survives it
+      expect(merge.style.display).toBe("flex");
 
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
-    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "line1 edited\nline2\n" } }, undefined);
-    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+      capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "line1 edited\nline2\nmore\n" } }, undefined);
 
-    await vi.waitFor(() => expect((container.querySelector(".banner.merge") as HTMLElement).style.display).toBe("flex"));
-    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "line1 edited\nline2\nmore\n" } }, undefined);
+      expect(merge.style.display).toBe("none");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
-    expect((container.querySelector(".banner.merge") as HTMLElement).style.display).toBe("none");
+  it("the file-signature poll seeing this pane's own merged write leaves the Undo offer standing", async () => {
+    vi.useFakeTimers();
+    try {
+      const workspaceFileRead = vi
+        .fn()
+        .mockResolvedValueOnce({ content: "line1\nline2\n", sha256: "sha-1", size: 12 })
+        .mockResolvedValueOnce({ content: "line1\nline2\nline3\n", sha256: "sha-2", size: 18 })
+        .mockResolvedValueOnce({ content: "line1 edited\nline2\nline3\n", sha256: "sha-merged", size: 25 });
+      let resolveWrite!: (result: WorkspaceFileWriteResult) => void;
+      const workspaceFileWrite = vi.fn(
+        () => new Promise<WorkspaceFileWriteResult>((resolve) => { resolveWrite = resolve; }),
+      );
+      const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
+      const view = newEditorView(container, bridge);
+      const merge = await mergeViaSignatureEvent(view, workspaceFileRead, fireFileSignature);
+      await vi.advanceTimersByTimeAsync(800);
+      expect(workspaceFileWrite).toHaveBeenCalledTimes(1);
+
+      // The 2s signature poll reports the pane's own merged write back to it, beating the write's
+      // own response: disk now equals the buffer, which is the state the merge produced rather than
+      // a change to it, so this reconcile settles the buffer without retiring the offer.
+      fireFileSignature({ path: "a.ts", sha256: "sha-merged", missing: false });
+      await vi.advanceTimersByTimeAsync(10);
+      resolveWrite({ ok: true, sha256: "sha-merged" });
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(workspaceFileRead).toHaveBeenCalledTimes(3); // the poll's own read is what settled this
+      expect(merge.style.display).toBe("flex");
+      expect(saveState(container)).toBe("saved");
+      expect(workspaceFileWrite).toHaveBeenCalledTimes(1); // nothing left to write
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an external change that replaces a clean merged buffer retires the Undo offer with it", async () => {
+    vi.useFakeTimers();
+    try {
+      const workspaceFileRead = vi
+        .fn()
+        .mockResolvedValueOnce({ content: "line1\nline2\n", sha256: "sha-1", size: 12 })
+        .mockResolvedValueOnce({ content: "line1\nline2\nline3\n", sha256: "sha-2", size: 18 })
+        .mockResolvedValueOnce({ content: "rewritten by someone else\n", sha256: "sha-3", size: 26 });
+      const workspaceFileWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-merged" });
+      const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
+      const view = newEditorView(container, bridge);
+      const merge = await mergeViaSignatureEvent(view, workspaceFileRead, fireFileSignature);
+      await vi.advanceTimersByTimeAsync(800); // merged buffer written, so the buffer is clean again
+      expect(merge.style.display).toBe("flex");
+
+      // Someone else rewrites the file wholesale: the clean-buffer reload replaces the very buffer
+      // the Undo snapshot was taken against, so reverting to it would discard this reload.
+      fireFileSignature({ path: "a.ts", sha256: "sha-3", missing: false });
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(merge.style.display).toBe("none");
+      expect(view.collectStateForFlush()).toBe(
+        JSON.stringify({
+          path: "a.ts",
+          baseSHA256: "sha-3",
+          baseContent: "rewritten by someone else\n",
+          content: "rewritten by someone else\n",
+          dirty: false,
+          conflict: false,
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -2099,7 +2278,7 @@ describe("EditorView — failed/refused-open reconcile (round-13 fix)", () => {
   it("failure leg: a failed open of a different file fires a reconcile for the still-current file instead of stranding its own discarded reconcile", async () => {
     const { workspaceFileRead, calls } = makeIndexedDeferredRead();
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     // 1. Open a.ts, resolving immediately.
     view.open("a.ts");
@@ -2151,10 +2330,11 @@ describe("EditorView — failed/refused-open reconcile (round-13 fix)", () => {
     });
   });
 
-  it("refusal leg: a discard-gated open of a different file fires a reconcile for the still-current file instead of stranding its own discarded reconcile", async () => {
+  it("refusal leg: an open refused by a failed write fires a reconcile for the still-current file instead of stranding its own discarded reconcile", async () => {
     const { workspaceFileRead, calls } = makeIndexedDeferredRead();
-    const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const workspaceFileWrite = vi.fn().mockRejectedValue(new SpacesBridgeError("unavailable", "daemon not reachable"));
+    const bridge = makeBridge({ workspaceFileRead, workspaceFileWrite });
+    const view = newEditorView(container, bridge);
 
     // 1. Open a.ts cleanly.
     view.open("a.ts");
@@ -2175,13 +2355,14 @@ describe("EditorView — failed/refused-open reconcile (round-13 fix)", () => {
     calls[1]!.resolve({ content: "CB\n", sha256: "HB", size: 3 });
     await calls[1]!.promise;
 
-    // 5. The completion recheck refuses to replace A and raises the discard banner instead.
+    // 5. The completion recheck writes A's edit first; that write fails, so the open is refused and
+    // the reason is shown instead of B replacing the buffer.
     const banner = await vi.waitFor(() => {
-      const el = container.querySelector(".banner.conflict") as HTMLElement;
+      const el = container.querySelector(".banner.error") as HTMLElement;
       expect(el.style.display).toBe("flex");
       return el;
     });
-    expect(banner.textContent).toContain("Unsaved changes in a.ts");
+    expect(banner.textContent).toBe("Save failed: daemon not reachable · retry in 1 s");
 
     // 6. WITH THE FIX: the refusal fires a fresh reconcile for a.ts too. Resolve it with disk content
     // identical to what's already the baseline — the common "nothing actually changed" case.
@@ -2190,10 +2371,10 @@ describe("EditorView — failed/refused-open reconcile (round-13 fix)", () => {
     calls[2]!.resolve({ content: "C0\n", sha256: "H0", size: 3 });
     await calls[2]!.promise;
 
-    // 7. Same-hash no-op: the discard banner and the edited buffer are untouched.
+    // 7. Same-hash no-op: the refusal notice and the edited buffer are untouched.
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect((container.querySelector(".banner.conflict") as HTMLElement).style.display).toBe("flex");
-    expect(banner.textContent).toContain("Unsaved changes in a.ts");
+    expect(banner.style.display).toBe("flex");
+    expect(banner.textContent).toBe("Save failed: daemon not reachable · retry in 1 s");
     expect(view.collectStateForFlush()).toBe(
       JSON.stringify({ path: "a.ts", baseSHA256: "H0", baseContent: "C0\n", content: "C0 edited\n", dirty: true, conflict: false }),
     );
@@ -2202,7 +2383,7 @@ describe("EditorView — failed/refused-open reconcile (round-13 fix)", () => {
   it("control: a first-ever open that fails has no previously-open file to reconcile, so no extra read fires", async () => {
     const workspaceFileRead = vi.fn().mockRejectedValueOnce(new SpacesBridgeError("notFound", "no such file: a.ts"));
     const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     await vi.waitFor(() => expect(container.querySelector(".banner.error")).not.toBeNull());
@@ -2230,14 +2411,13 @@ describe("EditorView — external-change handling: dirty buffer reconciles clean
     const writePromise = new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve));
     const workspaceFileWrite = vi.fn().mockReturnValue(writePromise);
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "edited\n" } }, undefined);
 
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    saveBtn.click();
+    void view.flushNow();
     await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-1", purpose: "editor" }));
 
     // The write's own CAS commit lands on disk and the 2s signature poll pushes it before the
@@ -2247,7 +2427,7 @@ describe("EditorView — external-change handling: dirty buffer reconciles clean
 
     // No merge indicator: disk already matched the buffer, so there was nothing to merge.
     expect(container.querySelector(".banner.merge")).toBeNull();
-    expect(saveBtn.disabled).toBe(true);
+    expect(saveState(container)).toBe("saving"); // the write it recognized has not answered yet
     expect(view.collectStateForFlush()).toBe(
       JSON.stringify({
         path: "a.ts",
@@ -2266,7 +2446,9 @@ describe("EditorView — external-change handling: dirty buffer reconciles clean
     await writePromise;
 
     expect(container.querySelector(".banner.merge")).toBeNull();
-    expect(saveBtn.disabled).toBe(true);
+    // No duplicate write: the reconcile already recorded the buffer as written.
+    await vi.waitFor(() => expect(saveState(container)).toBe("saved"));
+    expect(workspaceFileWrite).toHaveBeenCalledTimes(1);
     expect(view.collectStateForFlush()).toBe(
       JSON.stringify({
         path: "a.ts",
@@ -2286,7 +2468,7 @@ describe("EditorView — external-change handling: dirty buffer reconciles clean
       // The external writer's content happens to equal the buffer's current (unsaved) content.
       .mockResolvedValueOnce({ content: "line1 edited\nline2\n", sha256: "sha-2", size: 19 });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
@@ -2296,7 +2478,7 @@ describe("EditorView — external-change handling: dirty buffer reconciles clean
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(2));
 
     expect(container.querySelector(".banner.merge")).toBeNull();
-    expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(true);
+    expect(saveState(container)).toBe("idle"); // nothing left to write, and nothing was ever written
     expect(view.collectStateForFlush()).toBe(
       JSON.stringify({
         path: "a.ts",
@@ -2329,16 +2511,16 @@ describe("EditorView — a disk read matching an in-flight save's submitted cont
       .mockResolvedValueOnce({ content: "v1\n", sha256: "sha-2", size: 3 });
     let resolveWrite!: (result: WorkspaceFileWriteResult) => void;
     const writePromise = new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve));
-    const workspaceFileWrite = vi.fn().mockReturnValue(writePromise);
+    // The leftover typing is written again once the first write answers; holding that follow-up open
+    // keeps this test's assertions on the reconcile's own outcome.
+    const workspaceFileWrite = vi.fn().mockReturnValueOnce(writePromise).mockReturnValue(new Promise(() => {}));
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+    await view.open("a.ts");
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "v1\n" } }, undefined);
 
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    saveBtn.click();
+    void view.flushNow();
     await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "v1\n", { baseSHA256: "sha-1", purpose: "editor" }));
 
     // Further typing during the flight: the write already submitted "v1\n", but the buffer moves on
@@ -2357,7 +2539,6 @@ describe("EditorView — a disk read matching an in-flight save's submitted cont
     // stay hidden, and no merge banner (a different className) was raised at all.
     expect((container.querySelector(".banner.conflict") as HTMLElement).style.display).toBe("none");
     expect(container.querySelector(".banner.merge")).toBeNull();
-    expect(saveBtn.disabled).toBe(false);
     expect(view.collectStateForFlush()).toBe(
       JSON.stringify({
         path: "a.ts",
@@ -2380,7 +2561,6 @@ describe("EditorView — a disk read matching an in-flight save's submitted cont
     // stay hidden, and no merge banner (a different className) was raised at all.
     expect((container.querySelector(".banner.conflict") as HTMLElement).style.display).toBe("none");
     expect(container.querySelector(".banner.merge")).toBeNull();
-    expect(saveBtn.disabled).toBe(false);
     expect(view.collectStateForFlush()).toBe(
       JSON.stringify({
         path: "a.ts",
@@ -2391,6 +2571,9 @@ describe("EditorView — a disk read matching an in-flight save's submitted cont
         conflict: false,
       }),
     );
+    // The typing that was never written goes out next, against the baseline the reconcile adopted.
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledTimes(2));
+    expect(workspaceFileWrite).toHaveBeenNthCalledWith(2, "a.ts", "v2\n", { baseSHA256: "sha-2", purpose: "editor" });
   });
 
   it("a genuinely third-party disk read during the same held-save shape still routes to diff3 and shows the conflict view (regression)", async () => {
@@ -2404,14 +2587,12 @@ describe("EditorView — a disk read matching an in-flight save's submitted cont
     const writePromise = new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve));
     const workspaceFileWrite = vi.fn().mockReturnValue(writePromise);
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+    await view.open("a.ts");
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "world\n" } }, undefined);
 
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    saveBtn.click();
+    void view.flushNow();
     await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "world\n", { baseSHA256: "sha-1", purpose: "editor" }));
 
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "world2\n" } }, undefined);
@@ -2424,7 +2605,7 @@ describe("EditorView — a disk read matching an in-flight save's submitted cont
       return el;
     });
     expect(conflictBanner.textContent).toContain("changed on disk");
-    expect(saveBtn.disabled).toBe(true);
+    expect(saveState(container)).toBe("blocked");
 
     // The save's own write for the OLD baseline now lands successfully, late — its success arm stands
     // down on the pre-existing fetchToken guard, so the conflict this fix must still catch stays put.
@@ -2433,7 +2614,8 @@ describe("EditorView — a disk read matching an in-flight save's submitted cont
 
     expect(conflictBanner.style.display).toBe("flex");
     expect(conflictBanner.textContent).toContain("changed on disk");
-    expect(saveBtn.disabled).toBe(true);
+    expect(saveState(container)).toBe("blocked");
+    expect(workspaceFileWrite).toHaveBeenCalledTimes(1); // blocked: nothing further is written
   });
 });
 
@@ -2451,7 +2633,7 @@ describe("EditorView — external-change handling: dirty buffer, real conflict +
       .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
       .mockResolvedValueOnce({ content: "goodbye\n", sha256: "sha-2", size: 8 });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
@@ -2465,7 +2647,7 @@ describe("EditorView — external-change handling: dirty buffer, real conflict +
       return el;
     });
     expect(conflictBanner.textContent).toContain("changed on disk");
-    expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(true);
+    expect(saveState(container)).toBe("blocked");
   });
 
   it("Keep mine force-writes the buffer over disk (CAS-checked against the conflict's disk snapshot) and returns to a clean, non-conflict state", async () => {
@@ -2475,7 +2657,7 @@ describe("EditorView — external-change handling: dirty buffer, real conflict +
       .mockResolvedValueOnce({ content: "goodbye\n", sha256: "sha-2", size: 8 });
     const workspaceFileWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-3" });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
@@ -2509,7 +2691,7 @@ describe("EditorView — external-change handling: dirty buffer, real conflict +
       .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
       .mockResolvedValueOnce({ content: "goodbye\n", sha256: "sha-2", size: 8 });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
@@ -2543,7 +2725,7 @@ describe("EditorView — external-change handling: dirty buffer, real conflict +
       .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
       .mockRejectedValueOnce(new SpacesBridgeError("notFound", "a.ts is gone"));
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "edited\n" } }, undefined);
@@ -2560,7 +2742,7 @@ describe("EditorView — external-change handling: dirty buffer, real conflict +
 
     expect(container.querySelector(".editor-path")!.textContent).toBe("a.ts"); // path stays in the box
     expect(view.collectStateForFlush()).toBeNull();
-    expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(true);
+    expect(saveState(container)).toBe("idle");
   });
 });
 
@@ -2584,7 +2766,7 @@ describe("EditorView — Keep mine's late arms stand down when a newer reconcili
     const writePromise = new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve));
     const workspaceFileWrite = vi.fn().mockReturnValue(writePromise);
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
@@ -2624,9 +2806,7 @@ describe("EditorView — Keep mine's late arms stand down when a newer reconcili
       }),
     );
     expect(container.querySelector(".banner.conflict")!.textContent).toContain("changed on disk");
-    // The Save button (first "primary" button in document order — the compare view's own "Keep mine"
-    // is a second "primary" button inside the banner) stays disabled: still in conflict.
-    expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(true);
+    expect(saveState(container)).toBe("blocked"); // the newer conflict still blocks saving
   });
 
   // Regression: plain Keep mine with no interleaved signature event during the write still commits
@@ -2637,7 +2817,7 @@ describe("EditorView — Keep mine's late arms stand down when a newer reconcili
   // existing coverage is judged insufficient.
 });
 
-describe("EditorView — Keep mine disables both banner buttons while its write is in flight (P2 fix: Take-disk-after-Keep-mine race)", () => {
+describe("EditorView autosave: Keep mine dismisses the compare view at click time (Take-disk-after-Keep-mine race)", () => {
   let container: HTMLElement;
 
   beforeEach(() => {
@@ -2645,7 +2825,23 @@ describe("EditorView — Keep mine disables both banner buttons while its write 
     capturedCodeViewOptions.current = undefined;
   });
 
-  it("Take disk stays inert while Keep mine's write is in flight, and the write's late success still commits mine as clean", async () => {
+  async function enterConflict(bridge: SpacesBridge, fireFileSignature: (event: FileSignatureEvent) => void): Promise<{
+    view: EditorView;
+    conflictBanner: HTMLElement;
+  }> {
+    const view = newEditorView(container, bridge);
+    await view.open("a.ts");
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "edited\n" } }, undefined);
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+    const conflictBanner = await vi.waitFor(() => {
+      const el = container.querySelector(".banner.conflict") as HTMLElement;
+      expect(el.style.display).toBe("flex");
+      return el;
+    });
+    return { view, conflictBanner };
+  }
+
+  it("Take disk is gone while Keep mine's write is in flight, and the write commits mine as clean", async () => {
     const workspaceFileRead = vi
       .fn()
       .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
@@ -2654,32 +2850,15 @@ describe("EditorView — Keep mine disables both banner buttons while its write 
     const writePromise = new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve));
     const workspaceFileWrite = vi.fn().mockReturnValue(writePromise);
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
-    const view = new EditorView(container, bridge);
+    const { view, conflictBanner } = await enterConflict(bridge, fireFileSignature);
 
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
-    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "edited\n" } }, undefined);
-    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
-
-    const conflictBanner = await vi.waitFor(() => {
-      const el = container.querySelector(".banner.conflict") as HTMLElement;
-      expect(el.style.display).toBe("flex");
-      return el;
-    });
-    const keepMineBtn = [...conflictBanner.querySelectorAll("button")].find((b) => b.textContent === "Keep mine")!;
-    const takeDiskBtn = [...conflictBanner.querySelectorAll("button")].find((b) => b.textContent === "Take disk")!;
-
-    keepMineBtn.click();
+    (conflictBanner.querySelector("button") as HTMLButtonElement).click(); // "Keep mine" is the first button
     await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-2", purpose: "editor" }));
 
-    expect(keepMineBtn.disabled).toBe(true);
-    expect(takeDiskBtn.disabled).toBe(true);
-
-    // Take disk is clicked anyway while disabled: like a real browser, jsdom does not fire a click
-    // handler on a disabled button, so this must be a no-op — the compare view keeps showing and the
-    // buffer/state are untouched (still "mine", still in conflict against the original snapshot).
-    takeDiskBtn.click();
-    expect(conflictBanner.style.display).toBe("flex");
+    // The decision is taken the moment it is clicked: the compare view (and with it "Take disk") is
+    // no longer on screen for a slow write to race.
+    expect(conflictBanner.style.display).toBe("none"); // hidden, so neither action is reachable
+    expect(saveState(container)).toBe("saving");
     expect(view.collectStateForFlush()).toBe(
       JSON.stringify({
         path: "a.ts",
@@ -2687,16 +2866,14 @@ describe("EditorView — Keep mine disables both banner buttons while its write 
         baseContent: "goodbye\n",
         content: "edited\n",
         dirty: true,
-        conflict: true,
+        conflict: false,
       }),
     );
 
-    // Keep mine's write now lands successfully: the pane commits "mine" as clean, same success-arm
-    // behavior as the plain Keep mine test above ("Keep mine force-writes the buffer over disk...").
     resolveWrite({ ok: true, sha256: "sha-3" });
     await writePromise;
 
-    await vi.waitFor(() => expect(conflictBanner.style.display).toBe("none"));
+    await vi.waitFor(() => expect(saveState(container)).toBe("saved"));
     expect(view.collectStateForFlush()).toBe(
       JSON.stringify({
         path: "a.ts",
@@ -2709,43 +2886,35 @@ describe("EditorView — Keep mine disables both banner buttons while its write 
     );
   });
 
-  it("a rejected Keep mine write re-renders the compare view with fresh, enabled buttons", async () => {
+  it("a rejected Keep mine write reports the failure on the chip and keeps retrying, without re-latching the conflict", async () => {
     const workspaceFileRead = vi
       .fn()
       .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
       .mockResolvedValueOnce({ content: "goodbye\n", sha256: "sha-2", size: 8 });
-    let rejectWrite!: (err: unknown) => void;
-    const writePromise = new Promise<WorkspaceFileWriteResult>((_resolve, reject) => (rejectWrite = reject));
-    const workspaceFileWrite = vi.fn().mockReturnValue(writePromise);
+    const workspaceFileWrite = vi.fn().mockRejectedValue(new SpacesBridgeError("unavailable", "daemon not reachable"));
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
-    const view = new EditorView(container, bridge);
+    const { view, conflictBanner } = await enterConflict(bridge, fireFileSignature);
 
-    view.open("a.ts");
-    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
-    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "edited\n" } }, undefined);
-    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+    (conflictBanner.querySelector("button") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(saveState(container)).toBe("failed"));
 
-    const conflictBanner = await vi.waitFor(() => {
-      const el = container.querySelector(".banner.conflict") as HTMLElement;
-      expect(el.style.display).toBe("flex");
-      return el;
-    });
-    const keepMineBtn = conflictBanner.querySelector("button") as HTMLButtonElement; // "Keep mine" is the first button
-    keepMineBtn.click();
-    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-2", purpose: "editor" }));
-    expect(keepMineBtn.disabled).toBe(true);
+    expect(saveChip(container).textContent).toBe("Save failed: daemon not reachable · retry in 1 s");
+    expect(conflictBanner.style.display).toBe("none"); // the user's decision stands; only the write failed
+    expect(view.collectStateForFlush()).toBe(
+      JSON.stringify({
+        path: "a.ts",
+        baseSHA256: "sha-2",
+        baseContent: "goodbye\n",
+        content: "edited\n",
+        dirty: true,
+        conflict: false,
+      }),
+    );
 
-    rejectWrite(new SpacesBridgeError("unavailable", "daemon not reachable"));
-    await writePromise.catch(() => {});
-
-    // The failure arm calls `renderConflictCompareView(message)`, which rebuilds the banner's
-    // buttons from scratch (fresh elements, `disabled` defaulting to false) rather than re-enabling
-    // the stale ones — so this also confirms the same DOM node (`this.banner`) got new children.
-    await vi.waitFor(() => expect(conflictBanner.textContent).toContain("daemon not reachable"));
-    const reKeepMineBtn = [...conflictBanner.querySelectorAll("button")].find((b) => b.textContent === "Keep mine")!;
-    const reTakeDiskBtn = [...conflictBanner.querySelectorAll("button")].find((b) => b.textContent === "Take disk")!;
-    expect(reKeepMineBtn.disabled).toBe(false);
-    expect(reTakeDiskBtn.disabled).toBe(false);
+    // Retry now issues the same write again, still against the conflict's own disk snapshot.
+    (container.querySelector("#code-pane-editor-retry-save") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledTimes(2));
+    expect(workspaceFileWrite).toHaveBeenNthCalledWith(2, "a.ts", "edited\n", { baseSHA256: "sha-2", purpose: "editor" });
   });
 });
 
@@ -2765,7 +2934,7 @@ describe("EditorView — external-change handling: superseded fetch (round-16 la
       return promise;
     });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(1));
@@ -2818,7 +2987,7 @@ describe("EditorView — external-change execution-failure retry (round-17 Fix A
       .mockRejectedValueOnce(new SpacesBridgeError("internalError", "daemon hiccup")) // signature event's read fails transiently
       .mockResolvedValueOnce({ content: "hello, updated\n", sha256: "sha-2", size: 15 }); // retried read succeeds
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(1));
@@ -2855,7 +3024,7 @@ describe("EditorView — external-change execution-failure retry (round-17 Fix A
       .mockRejectedValueOnce(new SpacesBridgeError("internalError", "daemon hiccup")) // a.ts's external-change fails transiently
       .mockResolvedValueOnce({ content: "b content\n", sha256: "sha-b", size: 10 }); // open b.ts
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(1));
 
@@ -2894,7 +3063,7 @@ describe("EditorView — external-change execution-failure retry (round-17 Fix A
       .mockRejectedValueOnce(new SpacesBridgeError("internalError", "daemon hiccup")) // first event fails transiently
       .mockResolvedValueOnce({ content: "hello, v3\n", sha256: "sha-3", size: 10 }); // second, genuinely newer event succeeds
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(1));
@@ -2933,7 +3102,7 @@ describe("EditorView — external-change execution-failure retry (round-17 Fix A
       .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
       .mockRejectedValueOnce(new SpacesBridgeError("notFound", "a.ts is gone"));
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(1));
 
@@ -2970,7 +3139,7 @@ describe("EditorView — external-change execution-failure retry: invalidArgumen
       .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
       .mockRejectedValueOnce(new SpacesBridgeError("invalidArgument", "a.ts is not a UTF-8 text file"));
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(1));
 
@@ -3004,7 +3173,7 @@ describe("EditorView — external-change execution-failure retry: invalidArgumen
       .mockRejectedValueOnce(new SpacesBridgeError("invalidArgument", "a.ts is not a UTF-8 text file"))
       .mockResolvedValueOnce({ content: "hello, fixed\n", sha256: "sha-3", size: 13 });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(1));
@@ -3048,7 +3217,7 @@ describe("EditorView — invalidArgument banner clears once the file becomes rea
       // invalidArgument never touched.
       .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(1));
@@ -3076,7 +3245,7 @@ describe("EditorView — invalidArgument banner clears once the file becomes rea
       .mockRejectedValueOnce(new SpacesBridgeError("invalidArgument", "a.ts is not a UTF-8 text file"))
       .mockResolvedValueOnce({ content: "hello v2\n", sha256: "sha-2", size: 9 });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(1));
@@ -3111,7 +3280,7 @@ describe("EditorView — invalidArgument banner clears once the file becomes rea
       // Spurious dedupe: same content/hash as what the merge already adopted as its baseline.
       .mockResolvedValueOnce({ content: "line1\nline2\nline3\n", sha256: "sha-2", size: 18 });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
@@ -3169,10 +3338,12 @@ describe("EditorView — round-24 Fix 3 (P2): unreadableBannerVisible does not l
   //
   // The leak is only observable when the unrelated banner is put up by a path OTHER than
   // `handleExternalChange` itself — so nothing has yet consumed the leaked-true flag — and a
-  // `handleExternalChange` call for the new file arrives afterward. `showDiscardBanner` (opening a
-  // third file while the second is dirty) is exactly such a path: it sets the banner directly, with no
-  // `handleExternalChange` call in between opening the second file and putting up that banner.
-  it("a discard-consent banner on the switched-to file survives a spurious same-hash event, even though the previous file left the unreadable flag set", async () => {
+  // `handleExternalChange` call for the new file arrives afterward. `open()`'s refusal notice
+  // (opening a third file while the second one's write is failing) is exactly such a path: it sets
+  // the banner directly, with no `handleExternalChange` call in between opening the second file and
+  // putting up that banner.
+  it("a refused open's notice on the switched-to file survives a spurious same-hash event, even though the previous file left the unreadable flag set", async () => {
+    const workspaceFileWrite = vi.fn().mockRejectedValue(new SpacesBridgeError("unavailable", "daemon not reachable"));
     const workspaceFileRead = vi
       .fn()
       // open a.ts
@@ -3183,8 +3354,8 @@ describe("EditorView — round-24 Fix 3 (P2): unreadableBannerVisible does not l
       .mockResolvedValueOnce({ content: "line1\nline2\n", sha256: "sha-b1", size: 12 })
       // b.ts's spurious same-hash dedupe (matches its own unchanged baseline)
       .mockResolvedValueOnce({ content: "line1\nline2\n", sha256: "sha-b1", size: 12 });
-    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
+    const view = newEditorView(container, bridge);
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(1));
     fireFileSignature({ path: "a.ts", sha256: "sha-a2", missing: false });
@@ -3197,25 +3368,25 @@ describe("EditorView — round-24 Fix 3 (P2): unreadableBannerVisible does not l
     // applied -- this alone is not evidence the leaked flag was cleared.
     expect((container.querySelector(".banner") as HTMLElement).style.display).toBe("none");
 
-    // Dirty b.ts, then attempt to open a third file while dirty -- open()'s gate shows the
-    // discard-consent banner directly (no handleExternalChange call happens in between), so if the
-    // leaked flag from a.ts is still true, nothing has consumed it yet.
+    // Dirty b.ts, then attempt to open a third file: the write that has to land first fails, so
+    // open() shows its refusal notice directly (no handleExternalChange call happens in between), and
+    // if the leaked flag from a.ts is still true, nothing has consumed it yet.
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "line1 edited\nline2\n" } }, undefined);
-    view.open("c.ts");
-    const discardBanner = container.querySelector(".banner.conflict") as HTMLElement;
-    expect(discardBanner.style.display).toBe("flex");
-    expect(discardBanner.textContent).toContain("Unsaved changes in b.ts");
+    await view.open("c.ts");
+    const refusalBanner = container.querySelector(".banner.error") as HTMLElement;
+    expect(refusalBanner.style.display).toBe("flex");
+    expect(refusalBanner.textContent).toBe("Save failed: daemon not reachable · retry in 1 s");
 
     // A spurious same-hash dedupe for b.ts -- this is the FIRST handleExternalChange call to run for
     // b.ts. Pre-fix, the leaked-true flag hits the gated clear at the top of the decoded-outcome
-    // handling (before the same-hash early return a few lines below it), wiping the discard banner it
+    // handling (before the same-hash early return a few lines below it), wiping the refusal notice it
     // never put up. Post-fix, this fix already cleared the flag when b.ts was opened, so the gated
     // clear block is skipped entirely and the banner is untouched.
     fireFileSignature({ path: "b.ts", sha256: "sha-b1", missing: false });
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(4));
 
-    expect(discardBanner.style.display).toBe("flex");
-    expect(discardBanner.textContent).toContain("Unsaved changes in b.ts");
+    expect(refusalBanner.style.display).toBe("flex");
+    expect(refusalBanner.textContent).toBe("Save failed: daemon not reachable · retry in 1 s");
     // Sanity: the read genuinely was the spurious same-hash path (no reload happened).
     expect(view.collectStateForFlush()).toBe(
       JSON.stringify({
@@ -3250,7 +3421,7 @@ describe("EditorView — a standing conflict stays latched until explicit resolu
       .mockResolvedValueOnce({ content: "line1 theirs\nline2\nline3 edited\n", sha256: "sha-3", size: 30 });
     const workspaceFileWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-4" });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
@@ -3262,17 +3433,17 @@ describe("EditorView — a standing conflict stays latched until explicit resolu
       expect(el.style.display).toBe("flex");
       return el;
     });
-    const saveBtn = container.querySelector("button.primary") as HTMLButtonElement;
-    expect(saveBtn.disabled).toBe(true);
+    expect(saveState(container)).toBe("blocked");
 
     // Second external change: disk2 diverges from disk1 only outside H. Without the fix, this would
-    // diff3-merge cleanly against the frozen conflict base and silently re-enable Save.
+    // diff3-merge cleanly against the frozen conflict base and silently resume saving.
     fireFileSignature({ path: "a.ts", sha256: "sha-3", missing: false });
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(3));
 
     expect(conflictBanner.style.display).toBe("flex");
     expect(conflictBanner.textContent).toContain("changed on disk");
-    expect(saveBtn.disabled).toBe(true);
+    expect(saveState(container)).toBe("blocked");
+    expect(workspaceFileWrite).not.toHaveBeenCalled(); // still blocked: nothing was written
     expect(container.querySelector(".banner.merge")).toBeNull();
 
     // Keep mine's CAS baseline must have followed the refreshed (disk2) snapshot, not the stale disk1
@@ -3291,7 +3462,7 @@ describe("EditorView — a standing conflict stays latched until explicit resolu
       // A later writer (e.g. Keep mine from another client) lands exactly the frozen buffer content.
       .mockResolvedValueOnce({ content: "edited\n", sha256: "sha-4", size: 7 });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
 
     view.open("a.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
@@ -3308,7 +3479,7 @@ describe("EditorView — a standing conflict stays latched until explicit resolu
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(3));
 
     expect(conflictBanner.style.display).toBe("none");
-    expect((container.querySelector("button.primary") as HTMLButtonElement).disabled).toBe(true); // not dirty
+    expect(saveState(container)).toBe("idle"); // not dirty, and nothing was ever written
     // Pushed state confirms the conflict is fully cleared, not just the banner hidden, and that the
     // edit view (not the diff/compare view) was restored -- collectStateForFlush's `conflict: false`
     // is the seam this harness exposes for that, since the fake CodeView doesn't render real DOM.
@@ -3322,6 +3493,81 @@ describe("EditorView — a standing conflict stays latched until explicit resolu
         conflict: false,
       }),
     );
+  });
+});
+
+describe("EditorView: Keep mine on a deleted file survives hibernation", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    capturedCodeViewOptions.current = undefined;
+  });
+
+  /** Reads that always report the file as gone, which is the whole premise here: the user confirmed
+   *  a create-if-missing write, and disk has not changed since. */
+  function deletedRead() {
+    return vi.fn(() => Promise.reject(new SpacesBridgeError("notFound", "a.ts is gone")));
+  }
+
+  /** One macrotask, enough for a fire-and-forget reconcile to run to its conclusion. */
+  function settle(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  it("carries the confirmed create target across a restart instead of asking for the decision again", async () => {
+    const workspaceFileWrite = vi.fn().mockRejectedValue(new SpacesBridgeError("unavailable", "daemon not reachable"));
+    const bridge = makeBridge({ workspaceFileRead: deletedRead(), workspaceFileWrite });
+    const view = newEditorView(container, bridge);
+    await view.restoreState({
+      path: "a.ts",
+      baseSHA256: "sha-1",
+      baseContent: "old\n",
+      content: "mine\n",
+      dirty: true,
+      conflict: false,
+    });
+    const banner = await vi.waitFor(() => {
+      const el = container.querySelector(".banner.conflict") as HTMLElement;
+      expect(el.style.display).toBe("flex");
+      return el;
+    });
+
+    // The user confirms: keep my buffer, recreate the file. The create write then fails.
+    [...banner.querySelectorAll("button")].find((b) => b.textContent === "Keep mine")!.click();
+    await vi.waitFor(() => expect(saveState(container)).toBe("failed"));
+    expect(workspaceFileWrite).toHaveBeenCalledExactlyOnceWith("a.ts", "mine\n", {
+      baseSHA256: undefined,
+      purpose: "editor",
+    });
+
+    // The decision travels in the durable snapshot, not in page memory.
+    const snapshot = JSON.parse(view.collectStateForFlush()!) as CodePaneEditorState;
+    expect(snapshot.confirmedBaseSHA256).toBeNull();
+
+    const restoredContainer = document.createElement("div");
+    const restoredRead = deletedRead();
+    const restoredWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-created" });
+    const restoredBridge = makeBridge({ workspaceFileRead: restoredRead, workspaceFileWrite: restoredWrite });
+    const restored = newEditorView(restoredContainer, restoredBridge);
+
+    await restored.restoreState(snapshot);
+    await vi.waitFor(() => expect(restoredRead).toHaveBeenCalledWith("a.ts", "editor"));
+    await settle();
+
+    // The file is still gone, but the decision about it already stands: no second compare view, no
+    // block, and the retry still carries the create target.
+    // The banner element always exists (it is built with the pane); what matters is that no compare
+    // view was put up in it.
+    expect((restoredContainer.querySelector(".banner") as HTMLElement).style.display).toBe("none");
+    expect(saveState(restoredContainer)).not.toBe("blocked");
+    await restored.flushNow();
+    expect(restoredWrite).toHaveBeenCalledExactlyOnceWith("a.ts", "mine\n", {
+      baseSHA256: undefined,
+      purpose: "editor",
+    });
+    // Written at last: the decision is spent and no longer travels with the state.
+    expect(JSON.parse(restored.collectStateForFlush()!).confirmedBaseSHA256).toBeUndefined();
   });
 });
 
@@ -3351,7 +3597,7 @@ describe("EditorView — editor-attach heal (completeEditorAttach)", () => {
   it("polls until the editor attaches, then forces exactly one version-bumped re-render", async () => {
     const result: WorkspaceFileReadResult = { content: "a\n", sha256: "sha-1", size: 2 };
     const bridge = makeBridge({ workspaceFileRead: vi.fn().mockResolvedValue(result) });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
     await openFile(view, bridge, "src/a.ts");
 
     // Attach still pending: the poll must keep waiting without forcing a render.
@@ -3370,7 +3616,7 @@ describe("EditorView — editor-attach heal (completeEditorAttach)", () => {
   it("a poll superseded by a newer open stands down; only the newest load heals", async () => {
     const result: WorkspaceFileReadResult = { content: "a\n", sha256: "sha-1", size: 2 };
     const bridge = makeBridge({ workspaceFileRead: vi.fn().mockResolvedValue(result) });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
     await openFile(view, bridge, "src/a.ts");
     await openFile(view, bridge, "src/b.ts");
 
@@ -3390,7 +3636,7 @@ describe("EditorView — editor-attach heal (completeEditorAttach)", () => {
       .mockResolvedValueOnce({ content: "changed\n", sha256: "sha-2", size: 8 });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
     const onFileRendered = vi.fn();
-    const view = new EditorView(container, bridge, { onFileRendered });
+    const view = newEditorView(container, bridge, { onFileRendered });
     await openFile(view, bridge, "src/a.ts");
     await vi.waitFor(() => expect(fakeCodeViewControl.updateItemCalls.length).toBe(1));
 
@@ -3403,7 +3649,7 @@ describe("EditorView — editor-attach heal (completeEditorAttach)", () => {
   it("retries restored caret focus until the asynchronously attached editor is available", async () => {
     const result: WorkspaceFileReadResult = { content: "one\ntwo\nthree\n", sha256: "sha-1", size: 14 };
     const bridge = makeBridge({ workspaceFileRead: vi.fn().mockResolvedValue(result) });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
     await openFile(view, bridge, "src/a.ts");
 
     view.restorePosition(null, 3);
@@ -3418,7 +3664,7 @@ describe("EditorView — editor-attach heal (completeEditorAttach)", () => {
   it("does not start a restored-caret poll for the read-only conflict comparison", async () => {
     const workspaceFileRead = vi.fn().mockResolvedValue({ content: "disk\n", sha256: "sha-disk", size: 5 });
     const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
     await view.restoreState({
       path: "src/conflict.ts",
       baseSHA256: "sha-base",
@@ -3442,7 +3688,7 @@ describe("EditorView — editor-attach heal (completeEditorAttach)", () => {
     fakeCodeViewControl.editor = {};
     const workspaceFileRead = vi.fn().mockRejectedValue(new SpacesBridgeError("notFound", "src/deleted.ts is gone"));
     const bridge = makeBridge({ workspaceFileRead });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
     await view.restoreState({
       path: "src/deleted.ts",
       baseSHA256: "sha-base",
@@ -3470,7 +3716,7 @@ describe("EditorView — editor-attach heal (completeEditorAttach)", () => {
     const bridge = makeBridge({
       workspaceFileRead: vi.fn().mockResolvedValue({ content: "one\n", sha256: "sha-1", size: 4 }),
     });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
     await openFile(view, bridge, "src/a.ts");
     await vi.waitFor(() => expect(fakeCodeViewControl.updateItemCalls.length).toBe(1));
     fakeCodeViewControl.editor = undefined;
@@ -3501,7 +3747,7 @@ describe("EditorView focused-line recovery", () => {
   it("does not report a rendered line after its scroll host is detached", () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
-    const view = new EditorView(container, makeBridge());
+    const view = newEditorView(container, makeBridge());
     const host = container.querySelector<HTMLElement>("#code-pane-editor-scroll")!;
     const line = document.createElement("div");
     line.dataset.line = "4";
@@ -3517,7 +3763,7 @@ describe("EditorView focused-line recovery", () => {
   it("does not report a line whose bottom is exactly at the viewport top", () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
-    const view = new EditorView(container, makeBridge());
+    const view = newEditorView(container, makeBridge());
     const host = container.querySelector<HTMLElement>("#code-pane-editor-scroll")!;
     const preceding = document.createElement("div");
     preceding.dataset.line = "3";
@@ -3538,7 +3784,7 @@ describe("EditorView focused-line recovery", () => {
     const bridge = makeBridge({
       workspaceFileRead: vi.fn().mockResolvedValue({ content: "one\ntwo\nthree\n", sha256: "sha-1", size: 14 }),
     });
-    const view = new EditorView(container, bridge);
+    const view = newEditorView(container, bridge);
     view.open("src/a.ts");
     await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("src/a.ts", "editor"));
 
