@@ -149,6 +149,12 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 - Include keyboard equivalents where useful.
 - Prefer stock AppKit menu behavior unless a richer interaction is clearly needed.
 
+## In-Page Context Menus
+- The Editor's web content cannot add items to WebKit's native right-click menu, so a right-click action inside it (Open in Editor on a diff line) uses one in-page menu pattern: a small floating panel at the pointer, clamped inside the pane, styled like the toolbar's compare menu (panel surface, hairline border, 4px radius on items, row-selection hover), with an optional muted monospace header naming the target (`file:line`) above the items.
+- The in-page menu only ever appears where it has something to offer. Where the system menu is the point (selected text and its Copy item, a live inline edit and its Paste and Undo items, a click off any target) the native menu is left untouched rather than replaced with an empty or irrelevant one.
+- Focus moves to the first item on open and returns to the previously focused element on close; arrow keys move between items, Return or Space activates, and Esc, a click outside, focus moving to another surface (such as the quick-open overlay), scrolling, a window blur, a resize, or a replacement of the content the menu was opened over dismisses.
+- The menu is never wider than the pane: a long header wraps rather than pushing its tail past the edge.
+
 ## Motion And Hover Behavior
 - Motion should be minimal and functional.
 - Hover should mostly:

@@ -286,6 +286,7 @@ export const FIXTURE_INIT_PAYLOAD: CodePaneInitPayload = {
     diffFocusedSide: null,
   },
   theme: "dark",
+  isGitRepository: true,
   // Matches FIXTURE_REF_LIST.branches so the harness's "Branch…" search dialog demonstrates the
   // "base" badge and first-sort behavior.
   baseBranch: "main",

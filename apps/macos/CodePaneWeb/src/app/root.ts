@@ -16,6 +16,7 @@ import {
   type DiffScope,
 } from "../bridge/types";
 import { CommentsController, CommentsToolbarState } from "./commentsController";
+import { createContextMenu } from "./contextMenu";
 import { DiffView, type PreparedDiffEdit } from "./diffView";
 import { EditorSidebar } from "./editorSidebar";
 import { EditorView } from "./editorView";
@@ -91,7 +92,10 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   // Editor mode's sidebar-toggle/recent-files state lives at the pane boundary alongside the other
   // workspace-local recovery fields, rather than inside EditorView.
   let editorUIState: CodePaneEditorUIState = {
-    sidebarMode: initPayload.workspaceState.editorSidebarMode,
+    // Saved state can name the Changes tab for a workspace that has since stopped being a git
+    // repository; the sidebar carries no Changes tab there, so the restored value is coerced before
+    // anything reads it.
+    sidebarMode: initPayload.isGitRepository ? initPayload.workspaceState.editorSidebarMode : "files",
     recentPaths: initPayload.workspaceState.editorRecentPaths,
   };
   let fileTreeExpandedPaths = initPayload.workspaceState.fileTreeExpandedPaths;
@@ -193,6 +197,10 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   const toolbarHost = document.createElement("div");
   pane.appendChild(toolbarHost);
 
+  // Mounted on the pane, not on the diff's own scrolling area: a menu opened over a diff line must
+  // not be clipped by, or scroll with, the region the right-click landed in.
+  const contextMenu = createContextMenu(pane);
+
   const body = document.createElement("div");
   body.className = "code-body";
   pane.appendChild(body);
@@ -255,6 +263,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   );
   const diffView = new DiffView(diffAreaEl, state.layout, {
     ...comments.hooks,
+    onRequestOpenInEditor: (path, line) => void openInEditorAtDiffLine(path, line),
     onRequestEdit: (path) => void beginDiffEdit(path),
     onDiffEditChange: (path, content) => {
       if (diffEditorState?.path !== path) return;
@@ -271,7 +280,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     onResolveDiffEdit: (path, action) => void resolveDiffEdit(path, action),
     onPositionChange: () => scheduleWorkspaceStatePush(),
     onDiscardAndOpenDiffEdit: (currentPath, nextPath) => void discardAndOpenDiffEdit(currentPath, nextPath),
-  });
+  }, contextMenu);
   // Seed the inactive diff view before any initialization await. A pane can be torn down while it
   // starts in Editor mode, or while its first diff manifest is still loading; the hibernation
   // collector must retain the saved logical location even though no diff line is mounted yet.
@@ -342,6 +351,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       sidebarMode: editorUIState.sidebarMode,
       selectedPath: initPayload.workspaceState.fileTreeSelectedPath ?? initPayload.workspaceState.editorState?.path ?? undefined,
       expandedPaths: fileTreeExpandedPaths,
+      changesAvailable: initPayload.isGitRepository,
     },
     openInEditor,
     {
@@ -520,11 +530,56 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       });
   }
 
+  /** The diff's right-click "Open in Editor". Every scope but Last Commit compares against the
+   *  worktree itself, so a new-side line is the editor's line as is. Last Commit's patch numbers
+   *  its new side against the committed revision while the editor shows the live worktree file, so
+   *  the line is revealed only while the two still match, the same equivalence check that gates
+   *  Last Commit inline editing; once the worktree has moved on (or the file is gone, which the
+   *  editor's own read then reports), the file opens without moving the caret rather than at a
+   *  line that belongs to the commit.
+   *
+   *  The check and the editor's own read of the file are two back-to-back reads, not one: a
+   *  worktree write landing between them shows the newer bytes with the caret on the commit's
+   *  line. That window is milliseconds wide, the caret is not data (the editor's signature stream
+   *  reconciles the content either way), so the reveal is not additionally bound to the checked
+   *  bytes' hash.
+   *
+   *  The check is the one open that awaits before opening. Every navigation gesture bumps
+   *  `navigationGeneration`, so a right-click still waiting on a slow check yields to whatever the
+   *  user did meanwhile (another right-click, a Files tree or ⌘P pick, a Changes row, a scope or
+   *  mode switch) instead of landing on top of it. */
+  async function openInEditorAtDiffLine(path: string, line: number): Promise<void> {
+    if (state.scope.kind !== "lastCommit") {
+      openInEditor(path, { line });
+      return;
+    }
+    navigationGeneration += 1;
+    const request = navigationGeneration;
+    const file = files.find((candidate) => candidate.path === path);
+    let worktreeMatchesCommit = false;
+    if (file?.targetRevision !== undefined) {
+      try {
+        const revision = await bridge.workspaceRevisionFileRead({ path, revision: file.targetRevision, oldPath: file.oldPath });
+        worktreeMatchesCommit = revision.isWorktreeEquivalentToRevision === true;
+      } catch {
+        // Unverifiable is treated like diverged: open without a reveal.
+      }
+    }
+    if (navigationGeneration !== request) return;
+    openInEditor(path, worktreeMatchesCommit ? { line } : undefined);
+  }
+
+  /** Bumped by every navigation gesture (an open, a Changes-row pick, a scope or mode switch) and
+   *  read only by `openInEditorAtDiffLine` above. A layout toggle is not navigation: the pending
+   *  open still lands on the same file and line. */
+  let navigationGeneration = 0;
+
   /** Opens `path` in Editor mode, switching modes first if the pane isn't already there — the
    *  common landing point for all three entry points Design O/K define (see this file's imports'
    *  doc comments): the ⌘P overlay (outside the diff), the Files tree, and the Changes list's own
    *  click handler while already in Editor mode (`changesOnSelect` below). */
-  function openInEditor(path: string): void {
+  function openInEditor(path: string, options?: { line?: number }): void {
+    navigationGeneration += 1;
     // `editorView.open` can refuse (a dirty buffer's discard-consent banner) or fail (an async read
     // error) instead of actually opening `path` — recording the recent / moving the tree selection
     // here unconditionally would do so even then. Both are handled by `EditorView`'s `onFileOpened`
@@ -541,7 +596,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
     // wait behind it for no benefit. `open()` has no dependency on the pane already being in editor
     // mode — it only touches `editorContainerEl`'s children, and does so after its `await`, by which
     // point the synchronous `dispatch` call below has already mounted it.
-    editorView.open(path);
+    editorView.open(path, { revealLine: options?.line });
     if (state.mode !== "editor") dispatch({ type: "setMode", mode: "editor" });
   }
 
@@ -553,6 +608,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
    *  every mode toggle. */
   function changesOnSelect(path: string): void {
     if (state.mode === "diff") {
+      navigationGeneration += 1;
       diffSelectedPath = path;
       diffTreeSelectedPath = path;
       const selected = files.find((file) => file.path === path);
@@ -623,6 +679,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
       scope: state.scope,
       layout: state.layout,
       baseBranch: initPayload.baseBranch,
+      isGitRepository: initPayload.isGitRepository,
       baseBranchRefName: configuredBaseRefName,
       agents: lastCommentsToolbarState.agents,
       selectedAgentId: lastCommentsToolbarState.selectedAgentId,
@@ -2051,6 +2108,17 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
    * before this gate is even called, so a deferred pull never leaves the user looking at stale UI.
    */
   async function refreshDiff(preserveScroll: boolean, trigger: DiffRenderTrigger): Promise<void> {
+    if (!initPayload.isGitRepository) {
+      // A workspace whose project is not a git repository has no comparison to fetch, so this
+      // renders the neutral notice instead of a manifest request the daemon would reject. Marking
+      // the diff loaded stops the Changes tab's catch-up pull and diff mode's entry pull from
+      // asking again; nothing failed, so there is nothing to retry.
+      files = [];
+      renderChangesList();
+      diffView.setNotice("Not a git repository");
+      diffLoaded = true;
+      return;
+    }
     if (diffPullInFlight) {
       diffRequestToken += 1;
       clearTimeout(diffRetryTimer);
@@ -2113,6 +2181,9 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   }
 
   function resubscribeDiffSignature(): void {
+    // A non-git workspace has no diff signature to observe: the host's stream is git-backed, and
+    // this pane never pulls a diff for such a workspace either (see refreshDiff).
+    if (!initPayload.isGitRepository) return;
     // Only one scope is observed at a time (see SpacesBridge.subscribeDiffSignature's
     // doc comment): replace the previous subscription rather than layering another.
     unsubscribeSignature?.();
@@ -2122,6 +2193,7 @@ export async function mountRoot(container: HTMLElement): Promise<void> {
   }
 
   function dispatch(action: CodePaneAction, configuredBaseScopeRefName?: string): void {
+    if (action.type === "setMode" || action.type === "setScope") navigationGeneration += 1;
     // This must happen before `renderBody` detaches the old mode's virtualized DOM. The captured
     // lines become the inactive view's durable values until the next time it is visible.
     captureViewPositions();

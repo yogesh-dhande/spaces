@@ -52,9 +52,10 @@ struct CodePaneAgentStartSnapshot: Equatable, Sendable {
     /// every other workspace-scoped action already routes through.
     func codePaneDevice(workspaceID: String) -> SpacesPairedDeviceRecord?
 
-    /// The workspace's display name and configured base branch (`nil` if none configured), for
-    /// the `spaces:init` payload and for resolving a `.baseBranch` diff scope.
-    func codePaneWorkspaceInfo(workspaceID: String) -> (name: String, baseBranch: String?)?
+    /// The workspace's display name, its configured base branch (`nil` if none configured), and
+    /// whether its project is a git repository, for the `spaces:init` payload, for resolving a
+    /// `.baseBranch` diff scope, and for seeding the pane's initial Diff/Editor mode.
+    func codePaneWorkspaceInfo(workspaceID: String) -> (name: String, baseBranch: String?, isGitRepository: Bool)?
 
     /// The app's current effective light/dark appearance, for the `spaces:init` payload at
     /// construction time. Subsequent changes arrive through `CodePaneContentController.applyAppearance`,
@@ -74,9 +75,9 @@ struct CodePaneAgentStartSnapshot: Equatable, Sendable {
 extension AppKitController: CodePaneHosting {
     func codePaneDevice(workspaceID: String) -> SpacesPairedDeviceRecord? { deviceForWorkspaceMutation(workspaceID: workspaceID) }
 
-    func codePaneWorkspaceInfo(workspaceID: String) -> (name: String, baseBranch: String?)? {
-        guard let (_, workspace) = findWorkspace(id: workspaceID) else { return nil }
-        return (workspace.displayName, workspace.baseBranch)
+    func codePaneWorkspaceInfo(workspaceID: String) -> (name: String, baseBranch: String?, isGitRepository: Bool)? {
+        guard let (project, workspace) = findWorkspace(id: workspaceID) else { return nil }
+        return (workspace.displayName, workspace.baseBranch, project.isGitRepo)
     }
 
     func codePaneCurrentAppearance() -> ThemeAppearance { Self.resolvedThemeAppearance() }

@@ -572,6 +572,10 @@ export interface CodePaneInitPayload {
   /** The workspace's configured base branch name, absent when it has none — drives the compare
    *  menu's one-click preset and the "Branch…" search dialog's first-sort and "base" badge. */
   baseBranch?: string;
+  /** Whether the workspace's project is a git repository. A non-git workspace has no diff to show:
+   *  Diff mode renders a neutral notice instead of fetching one, the compare control is omitted, and
+   *  the editor sidebar carries the Files tree alone. */
+  isGitRepository: boolean;
   /** Agents running in this workspace at startup, for the assigned-agent dropdown (see
    *  `reviewComments.ts`'s `selectDefaultAgentId`). Kept current after startup by `spaces:agents`. */
   agents: CodePaneAgentSummary[];
