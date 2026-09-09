@@ -19,6 +19,12 @@ struct TerminalDetailView: View {
     let onBack: () -> Void
 
     @State private var hasMountedTerminalSurface = false
+    /// Whether the on-screen keyboard is currently up, tracked here (rather than read fresh from each
+    /// notification) so `keyboardWillShow`/`keyboardWillHide` only forward an actual transition to the
+    /// model: iOS can post either notification more than once for the same visible/hidden state (e.g.
+    /// across an input-accessory-view swap), and only the transition itself is what
+    /// `DevicePerformanceLog`'s `keyboard_toggle` baseline event means to capture.
+    @State private var isKeyboardVisibleForPerformanceLog = false
     @State private var isBackNavigationInProgress = false
     @State private var isShowingComposer = false
     /// The row awaiting Stop confirmation from the toolbar menu. A separate state from `SpacesTabView`'s
@@ -57,7 +63,7 @@ struct TerminalDetailView: View {
 
     init(
         session: SpacesDeviceTerminalSessionSummary, settings: SpacesMobileConnectionSettings, appModel: SpacesMobileAppModel,
-        onAuthenticationRequired: @escaping @MainActor @Sendable (String) -> Void,
+        openSource: String = "list", onAuthenticationRequired: @escaping @MainActor @Sendable (String) -> Void,
         onSessionChanged: @escaping (SpacesDeviceTerminalSessionSummary) -> Void, onBack: @escaping () -> Void
     ) {
         self.session = session
@@ -71,7 +77,7 @@ struct TerminalDetailView: View {
             initialValue: TerminalViewerModel(
                 session: session, settings: settings, onAuthenticationRequired: onAuthenticationRequired,
                 onOpenTerminalDeepLink: { link in Task { await appModel.openTerminalDeepLink(link) } }, bridgeClient: appModel.deviceClient,
-                isDemoMode: appModel.isDemoModeEnabled))
+                isDemoMode: appModel.isDemoModeEnabled, openSource: openSource))
     }
 
     var body: some View {
@@ -149,6 +155,14 @@ struct TerminalDetailView: View {
             case .inactive: break
             @unknown default: break
             }
+        }.onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            guard !isKeyboardVisibleForPerformanceLog else { return }
+            isKeyboardVisibleForPerformanceLog = true
+            model.noteKeyboardToggled(visible: true)
+        }.onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            guard isKeyboardVisibleForPerformanceLog else { return }
+            isKeyboardVisibleForPerformanceLog = false
+            model.noteKeyboardToggled(visible: false)
         }.onChange(of: colorScheme) { newColorScheme in Task { await model.sendAppearance(newColorScheme == .dark ? .dark : .light) } }.sheet(
             item: Binding(get: { model.linkPreview }, set: { preview in if preview == nil { model.dismissLinkPreview() } })
         ) { preview in TerminalLinkPreviewSheet(preview: preview) }.fullScreenCover(

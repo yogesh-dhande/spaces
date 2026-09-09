@@ -499,6 +499,30 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-st
 6. On the Mac, allow the incoming-network prompt if macOS shows one. In the Mac app, open Devices, choose Pair iPhone on the target device's row, and scan the QR code that opens under it from the iPhone or iPad.
 7. The first connection attempt should trigger the iOS local-network permission prompt; accept it so the app can reach the daemon Device API.
 
+### iOS performance baseline lane
+
+The iOS performance baseline lane is an on-demand, fully automated performance lane: the iOS app runs in a simulator, driven by XCUITest, talking to a live Spaces daemon (this worktree's local dev daemon, or this worktree's remote Linux dev profile) through a Mac-side shaping proxy. It is not part of `scripts/verify.sh` or any CI lane; run it by hand when a change might move device-side timing, payload size, or connection recovery behavior and needs a real number. It measures only and fixes nothing: a slow number never fails the run, only a broken precondition (simulator unavailable, daemon unreachable, pairing failure) stops it.
+
+Nine scenarios run under each of three shaped network profiles, both directions:
+
+| profile | one-way delay | bandwidth (each direction) |
+|---|---|---|
+| good | 10 ms (20 ms RTT) | 50 Mbit/s |
+| constrained | 40 ms (80 ms RTT) | 8 Mbit/s |
+| poor | 200 ms (400 ms RTT) | 1 Mbit/s |
+
+The scenarios: `cold-open`, `back-and-forth`, `keyboard`, `streaming`, `scrollback`, `background-terminal`, `background-list`, `reconnect` (the only scenario that scripts a dead link, through the shaping proxy's control port), and `idle`.
+
+```bash
+apps/macos/.build/debug/spacese2e mobile-baseline
+```
+
+`--remote` targets this worktree's remote Linux dev profile instead of the local dev daemon; deploy to it first with `scripts/dev-build-and-launch.sh` (without `--local`), since the lane does not deploy the daemon itself. `--profile <name>` and `--scenario <name>` (both repeatable) narrow a run to a subset of profiles or scenarios for iterating on the lane, and `--idle-seconds N` (default 120) sets the `idle` scenario's hold.
+
+Two measurement details worth knowing when reading a report. The runner turns Simulator's "Connect Hardware Keyboard" setting off for the run and restores it afterwards: with it on, the terminal's accessory keyboard toggle cannot bring the software keyboard back after the first hide, which is the exact transition the `keyboard` scenario measures. Only the `streaming` scenario enables the app's E2E render dump (the sole way to see the fixture's `AGENT_SCREEN_READY` and `BURST_DONE` markers on a Metal-rendered surface), so its frame timings include one file write per frame that no other scenario pays.
+
+Each run gets its own root under `~/.spaces-dev/ios-baseline/<UTC timestamp>/`, holding the iOS app's own performance log (`device-perf.jsonl`, app events plus lane markers written by the UI test), the shaping proxy's log (`shaper.jsonl`, byte accounting, connection lifecycle, link state, profile), scenario bookkeeping (`sessions.json`), one `xcodebuild-<profile>-<scenario>.log` per scenario, `runner.log`, and the rendered `report.md`. To compare before and after a change, run the lane in two worktrees (or two commits of the same worktree) with the identical flags and read the two `report.md` files side by side; the lane itself has no compare mode and stores no baseline.
+
 For a disposable one-command demo stack that launches the macOS app, uses the daemon-hosted Device API, pairs both the iPad and iPhone simulators, and opens the mobile app on each:
 
 ```bash

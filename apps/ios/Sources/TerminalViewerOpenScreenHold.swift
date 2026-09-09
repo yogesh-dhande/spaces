@@ -47,6 +47,11 @@ final class TerminalViewerOpenScreenHold: @unchecked Sendable {
     /// `releasePendingAfterSubmit`, which is what keeps that call a no-op unless `noteReducedFrame` is the
     /// reason it is being called.
     private var isReleasePendingSubmit = false
+    /// The grid of the frame `noteReducedFrame` marked pending, read back by `releasePendingAfterSubmit`
+    /// so a caller logging the release (the on-device performance baseline's `terminal_first_paint`) knows
+    /// what it painted without the pipeline's `didSubmit` hook, which takes no parameters, having to carry
+    /// the frame through itself. Only meaningful alongside `isReleasePendingSubmit`.
+    private var pendingFrameSize: (columns: Int, rows: Int)?
     /// Stops the pipeline holding. Non-nil exactly while the hold is armed, so it doubles as that state.
     private var release: (@Sendable () -> Void)?
 
@@ -104,6 +109,7 @@ final class TerminalViewerOpenScreenHold: @unchecked Sendable {
         }
         hasFrameForViewport = true
         isReleasePendingSubmit = true
+        pendingFrameSize = (frame.columns, frame.rows)
         lock.unlock()
     }
 
@@ -111,17 +117,21 @@ final class TerminalViewerOpenScreenHold: @unchecked Sendable {
     /// reached the apply mailbox. A no-op unless `noteReducedFrame` is the reason this is being called:
     /// nothing else sets `isReleasePendingSubmit`, and `takeRelease` returning nil covers the case where
     /// another path (`end()`, a newer `setViewport`, `releaseIfNoMatchingFrameArrived`) already ended the
-    /// hold in between.
-    func releasePendingAfterSubmit() {
+    /// hold in between. Returns the released frame's grid exactly when this call is what performed the
+    /// release (the same one-shot every other release method here reports via its own `Bool`), so a caller
+    /// can log the release without needing to already know the frame.
+    @discardableResult func releasePendingAfterSubmit() -> (columns: Int, rows: Int)? {
         lock.lock()
         guard isReleasePendingSubmit else {
             lock.unlock()
-            return
+            return nil
         }
         isReleasePendingSubmit = false
+        let size = pendingFrameSize
         let pending = takeRelease()
         lock.unlock()
         pending?()
+        return pending != nil ? size : nil
     }
 
     /// Called from the main actor while it applies a frame, with that frame's grid. Ends the hold only
@@ -162,12 +172,14 @@ final class TerminalViewerOpenScreenHold: @unchecked Sendable {
     }
 
     /// Ends the hold from the main actor. Safe to call after something else already ended it: the
-    /// release closure runs at most once whichever path gets there first.
-    func end() {
+    /// release closure runs at most once whichever path gets there first. True when this call is what
+    /// ended the hold, the same one-shot signal every other release method here reports.
+    @discardableResult func end() -> Bool {
         lock.lock()
         let pending = takeRelease()
         lock.unlock()
         pending?()
+        return pending != nil
     }
 
     /// Claims the release closure under the caller's lock. Running it is left to the caller, outside the

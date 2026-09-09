@@ -339,7 +339,19 @@ enum SpacesMobileDeviceStore {
     /// the pre-backfill list (e.g. `SpacesMobileAppModel`, mid-refresh) knows to rebuild it — otherwise a
     /// newly learned address sits in the persisted record until the app relaunches or the device is
     /// reselected, silently defeating the point of backfilling without a rescan.
-    @discardableResult static func mergeAdvertisedHosts(_ hosts: [String], certificateFingerprint: String) -> Bool {
+    @discardableResult static func mergeAdvertisedHosts(
+        _ hosts: [String], certificateFingerprint: String, environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        #if DEBUG
+            // The performance lane pairs the app against a Mac-side shaping proxy bound to 127.0.0.1 and
+            // seeds that address as the paired device's only host (SPACES_MOBILE_TEST_DEVICE_SEED_JSON).
+            // If the daemon's own advertised LAN/tailnet addresses were merged in here, they would become
+            // extra candidates in `SpacesDeviceEndpointResolver`'s race and the unshaped direct address
+            // would win against the deliberately delayed proxy, silently bypassing the shaping the lane
+            // exists to measure. `SPACES_MOBILE_TEST_FIXED_HOSTS=1` keeps the seeded proxy host the only
+            // candidate for the life of the run.
+            if environment["SPACES_MOBILE_TEST_FIXED_HOSTS"] == "1" { return false }
+        #endif
         guard !hosts.isEmpty else { return false }
         let fingerprint = certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var devices = loadDevices()
@@ -352,9 +364,7 @@ enum SpacesMobileDeviceStore {
         let merged = unionPreservingDaemonOrder(daemonReported: hosts, previouslyStored: devices[index].hosts)
         guard merged != devices[index].hosts else { return false }
         devices[index].hosts = merged
-        if let activeHost = devices[index].activeHost, !merged.contains(activeHost) {
-            devices[index].activeHost = nil
-        }
+        if let activeHost = devices[index].activeHost, !merged.contains(activeHost) { devices[index].activeHost = nil }
         saveDevices(devices)
         return true
     }
@@ -396,9 +406,8 @@ enum SpacesMobileDeviceStore {
     private static func record(from settings: SpacesMobileConnectionSettings, name: String) -> SpacesMobilePairedDeviceRecord {
         let now = ISO8601DateFormatter().string(from: Date())
         return SpacesMobilePairedDeviceRecord(
-            id: deviceID(certificateFingerprint: settings.certificateFingerprint, port: settings.port), name: name,
-            hosts: settings.trimmedHosts, port: settings.port, certificateFingerprint: settings.certificateFingerprint, createdAt: now,
-            updatedAt: now, lastSelectedAt: now)
+            id: deviceID(certificateFingerprint: settings.certificateFingerprint, port: settings.port), name: name, hosts: settings.trimmedHosts,
+            port: settings.port, certificateFingerprint: settings.certificateFingerprint, createdAt: now, updatedAt: now, lastSelectedAt: now)
     }
 
     private static func settings(from device: SpacesMobilePairedDeviceRecord, installationID: String) -> SpacesMobileConnectionSettings {
