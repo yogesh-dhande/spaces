@@ -141,7 +141,7 @@ struct TerminalDetailView: View {
             if scenePhase != .active { model.prepareForBackgrounding() }
             model.start()
             if scenePhase == .active { model.resumeAfterBackgrounding() }
-        }.task(id: session.id) { await refreshRuntimeRowsWhileVisible() }.task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }.task(
+        }.task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }.task(
             id: e2eCommandRequestPath
         ) { await consumeE2ECommandRequestsIfNeeded() }.onChange(of: model.showsTerminalSurface) { showsTerminalSurface in
             if showsTerminalSurface { hasMountedTerminalSurface = true }
@@ -412,15 +412,6 @@ struct TerminalDetailView: View {
 
     private func restartRuntime(_ row: SpacesMobileWorkspaceRuntimeRow) async {
         if let session = await appModel.restart(row: row) { onSessionChanged(session) }
-    }
-
-    private func refreshRuntimeRowsWhileVisible() async {
-        await appModel.refresh()
-        while !Task.isCancelled {
-            do { try await Task.sleep(for: .seconds(2)) } catch { return }
-            guard !Task.isCancelled else { return }
-            await appModel.refresh()
-        }
     }
 
     private func beginBackNavigation() {

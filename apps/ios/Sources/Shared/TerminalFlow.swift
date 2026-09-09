@@ -232,33 +232,52 @@ enum StopConfirmationCopy {
 
 // MARK: - Overview polling
 
-/// Refreshes the overview every two seconds while the app is active, the owning tab is
-/// selected, this device is paired, and no detail route (terminal or browser session) is open.
+/// Refreshes the overview while the app is active, the owning tab is selected, and this device is
+/// paired. Refreshes at once when the list comes on screen, then polls every two seconds while it stays there, every thirty seconds while a detail
+/// route (terminal or browser session) is open on top of it, and not at all while a nested list route
+/// (an automation's detail, the recent-runs list) is open on top of it, per `OverviewPollingPolicy`: a
+/// detail route has no poller of its own and only needs the runtime-row menu kept roughly current; a
+/// nested list route installs its own `overviewPolling` modifier, so this one stops to keep exactly one
+/// poller running.
 struct OverviewPollingModifier: ViewModifier {
     @Environment(\.scenePhase) private var scenePhase
     let model: SpacesMobileAppModel
     let tab: SpacesMobileTab
-    let activeDetailRouteID: String?
+    let route: OverviewPollingRoute?
     var refreshGeneration = 0
+
+    private var routeDescription: String {
+        switch route {
+        case .detail(let id): "detail:\(id)"
+        case .nestedList(let id): "nested:\(id)"
+        case nil: "list"
+        }
+    }
 
     private var taskID: String {
         [
-            scenePhase == .active ? "active" : "inactive", model.selectedTab == tab ? "visible" : "hidden", activeDetailRouteID ?? "list",
+            scenePhase == .active ? "active" : "inactive", model.selectedTab == tab ? "visible" : "hidden", routeDescription,
             model.activeDeviceID ?? "no-device", model.settings.isPaired ? "paired" : "unpaired", "\(refreshGeneration)",
         ].joined(separator: "|")
     }
 
     func body(content: Content) -> some View {
         content.task(id: taskID) {
-            // Every end of this task is a boundary where the connection stops being watched from here —
-            // a detail route opening, another tab taking over, the app leaving the foreground, the device
-            // going unpaired. The connection-error alert times how long refreshes have been failing, so
-            // that clock must not keep running across a gap in which nothing refreshed at all.
-            defer { model.noteConnectionMonitoringPaused() }
-            guard shouldPoll else { return }
-            if !isPaused { await model.refresh() }
+            // A task that starts and does not poll is the boundary where the connection stops being
+            // watched from here: another tab taking over, the app leaving the foreground, the device going
+            // unpaired, a nested list taking over the polling. The connection-error alert times how long
+            // refreshes have been failing, so that clock must not keep running across a gap in which
+            // nothing refreshed at all. The note is made by the task that stops, not by the one that ends:
+            // a route change replaces this task with one that keeps polling, and a note from the ending
+            // task would land after its in-flight refresh returns and wipe the failure run the successor
+            // is already timing.
+            guard shouldPoll else { return model.noteConnectionMonitoringPaused() }
+            // The list refreshes at once (returning from a detail, switching to this tab); a detail route
+            // does not, since the list's last poll is at most one list interval old and an overview fetch
+            // on the open path would only contend with the terminal's own open requests (issue #674).
+            if !isPaused, route == nil { await model.refresh() }
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
+                try? await Task.sleep(for: OverviewPollingPolicy.interval(route: route, refreshFailing: model.isRefreshFailing))
                 guard !Task.isCancelled, shouldPoll else { return }
                 if isPaused { continue }
                 await model.refresh()
@@ -266,7 +285,9 @@ struct OverviewPollingModifier: ViewModifier {
         }
     }
 
-    private var shouldPoll: Bool { scenePhase == .active && model.selectedTab == tab && activeDetailRouteID == nil && model.settings.isPaired }
+    private var shouldPoll: Bool {
+        OverviewPollingPolicy.shouldPoll(scenePhase: scenePhase, isSelectedTab: model.selectedTab == tab, isPaired: model.settings.isPaired, route: route)
+    }
 
     /// A daemon update deliberately takes its device offline mid-handoff, and `requestDaemonUpdate()`
     /// runs its own poll across that outage, treating the unreachable window as expected rather than as
@@ -280,7 +301,7 @@ struct OverviewPollingModifier: ViewModifier {
 }
 
 extension View {
-    func overviewPolling(model: SpacesMobileAppModel, tab: SpacesMobileTab, activeDetailRouteID: String?, refreshGeneration: Int = 0) -> some View {
-        modifier(OverviewPollingModifier(model: model, tab: tab, activeDetailRouteID: activeDetailRouteID, refreshGeneration: refreshGeneration))
+    func overviewPolling(model: SpacesMobileAppModel, tab: SpacesMobileTab, route: OverviewPollingRoute?, refreshGeneration: Int = 0) -> some View {
+        modifier(OverviewPollingModifier(model: model, tab: tab, route: route, refreshGeneration: refreshGeneration))
     }
 }

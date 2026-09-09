@@ -73,12 +73,14 @@
 		8D7BDE377CE95CEA15E0F28F /* AgentsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70794A5FB7ED310FA4568364 /* AgentsTabView.swift */; };
 		8FB9A76DA91E3C93B4E48CE5 /* BaselineLaneMarkers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B22CB448437015A0C6FDB35 /* BaselineLaneMarkers.swift */; };
 		913DCFD3AD91359729209DC2 /* SpacesDeviceAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03832ADD9E34BC981F089A96 /* SpacesDeviceAPIClient.swift */; };
+		923BA02890A8D05058F840B0 /* OverviewPollingPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20D588E345834AF146D4D4F6 /* OverviewPollingPolicyTests.swift */; };
 		9261D2604F3E18C26DDE8817 /* TerminalSelectionCopyPill.swift in Sources */ = {isa = PBXBuildFile; fileRef = E53FFF8DEBBE16CAD6A99B6C /* TerminalSelectionCopyPill.swift */; };
 		97C8F1FB9702650BC7FB37BC /* BrowserSessionDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07AE33B363649D6D32B8D2D8 /* BrowserSessionDetailView.swift */; };
 		97C94F004F2B01CCDC2EF33A /* DevicePerformanceEventsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C5AF063FE28A266B60AB3C1 /* DevicePerformanceEventsTests.swift */; };
 		9D468643EDDB619AC44A5356 /* TerminalImageAttachmentsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E710F27AEEACD124B4C5ED8 /* TerminalImageAttachmentsTests.swift */; };
 		9E4E70FE0BB5C7F3F710F316 /* DaemonVersionHeroView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5D30357B101A99C39E09E4C /* DaemonVersionHeroView.swift */; };
 		9FE76441EB7F3AA2798D2995 /* SpacesMobileDemoModeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8FE2BBCE61C8A226A4E5C39 /* SpacesMobileDemoModeUITests.swift */; };
+		A09A4D613B28E0100FE07FCE /* OverviewPollingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A05973CC4B88D0208958E04A /* OverviewPollingPolicy.swift */; };
 		A09A88A72DBD3C5715B03A0D /* spacesterminalcore in Frameworks */ = {isa = PBXBuildFile; productRef = 496FCCD383CAF3E9BD137D1B /* spacesterminalcore */; };
 		A0B00F369D92DC61A53BA173 /* AutomationRunRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0E658EA8EFBEBFC2356558E /* AutomationRunRow.swift */; };
 		A11F506966A475621F925041 /* SpacesTabSmokeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 798B7FC0202A9E32DB5E072E /* SpacesTabSmokeUITests.swift */; };
@@ -181,6 +183,7 @@
 		1C309F3F3FB565542BD0E2BF /* BaselineLaneConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BaselineLaneConfiguration.swift; sourceTree = "<group>"; };
 		1D9E8E0FBC4750AB7C917D62 /* ShaperControlClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShaperControlClient.swift; sourceTree = "<group>"; };
 		1F212A2A4F1C77A98126476E /* WorkspaceDeleteSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDeleteSheet.swift; sourceTree = "<group>"; };
+		20D588E345834AF146D4D4F6 /* OverviewPollingPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverviewPollingPolicyTests.swift; sourceTree = "<group>"; };
 		287FA9ABE17A92D0A80A6BCA /* CreateWorkspaceConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreateWorkspaceConfig.swift; sourceTree = "<group>"; };
 		2A942269988694E66C1CA6F4 /* SpacesMobile.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SpacesMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		2CF67C175137536FB11A2A77 /* PairingScannerSmokeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingScannerSmokeUITests.swift; sourceTree = "<group>"; };
@@ -239,6 +242,7 @@
 		99364D0D95BDF6680EFCD26D /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		9EE032F140BCCC7196186C4F /* TerminalSelectionCopyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSelectionCopyTests.swift; sourceTree = "<group>"; };
 		9FE5D9FFF657B6A463220FCC /* StagedScreenshotStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StagedScreenshotStoreTests.swift; sourceTree = "<group>"; };
+		A05973CC4B88D0208958E04A /* OverviewPollingPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverviewPollingPolicy.swift; sourceTree = "<group>"; };
 		A169D605A2F2531FCFBF185B /* PendingDaemonUpdateCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingDaemonUpdateCardView.swift; sourceTree = "<group>"; };
 		A1A372295C55536AC3E9F7E8 /* SpacesMobile.storekit */ = {isa = PBXFileReference; path = SpacesMobile.storekit; sourceTree = "<group>"; };
 		A1A8A24AA9252CFEE41B435E /* SpacesMobileApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileApp.swift; sourceTree = "<group>"; };
@@ -411,6 +415,7 @@
 				89218A663F7CADB785794197 /* GhosttyMobileAppServiceTests.swift */,
 				68621C6469CFDB965239753C /* GhosttyRemoteTerminalSelectionMarshallingTests.swift */,
 				B466DE357E5A7A50DD0CD0EA /* GhosttyTerminalCellMetricsCacheTests.swift */,
+				20D588E345834AF146D4D4F6 /* OverviewPollingPolicyTests.swift */,
 				5E02383690BCB874939E2463 /* PinnedTLSLoopbackServer.swift */,
 				F9E6C2EA4A8629D32905544D /* ScreenshotStagingFlowTests.swift */,
 				A9AE7E061996534CE9D4C699 /* SpacesDeviceAPIBackendTests.swift */,
@@ -572,6 +577,7 @@
 			children = (
 				E211844B3CD4B88CDE16411F /* BandPrimitives.swift */,
 				4CFED1B900F0AA0A0967B7BC /* DevicePerformanceLog.swift */,
+				A05973CC4B88D0208958E04A /* OverviewPollingPolicy.swift */,
 				573064C6726817E7F264E9C5 /* RootTabView.swift */,
 				9653B3B66E0DCF0C0583B3B5 /* TerminalFlow.swift */,
 				8A446E68361CD59FD3DC262A /* TerminalStatusPlaceholder.swift */,
@@ -794,6 +800,7 @@
 				6639CD70C766813E4C86DC7B /* DevicePerformanceLog.swift in Sources */,
 				330DB982EA27EAC4042CD210 /* DismissedAlertsStore.swift in Sources */,
 				8D4631F6072D0D6F5FB8FC01 /* MobileAppVersion.swift in Sources */,
+				A09A4D613B28E0100FE07FCE /* OverviewPollingPolicy.swift in Sources */,
 				176185E3BF08620DB51E8901 /* PaywallView.swift in Sources */,
 				F511A2B7894644697179FA8D /* PendingDaemonUpdateCardView.swift in Sources */,
 				788325853D6047915FC13115 /* QRCodeScannerView.swift in Sources */,
@@ -847,6 +854,7 @@
 				4073E59B929A6A3937DC57A8 /* GhosttyMobileAppServiceTests.swift in Sources */,
 				A689FBD78BB4F03E56B97D3C /* GhosttyRemoteTerminalSelectionMarshallingTests.swift in Sources */,
 				25F6B8E74C6F4DE2BFBB03E1 /* GhosttyTerminalCellMetricsCacheTests.swift in Sources */,
+				923BA02890A8D05058F840B0 /* OverviewPollingPolicyTests.swift in Sources */,
 				19CB3BB175BE0D56E2CAC609 /* PinnedTLSLoopbackServer.swift in Sources */,
 				8C4445C0E3B95A44BA7EEE21 /* ScreenshotStagingFlowTests.swift in Sources */,
 				D9779D2EE653AD02A715A6CE /* SpacesDeviceAPIBackendTests.swift in Sources */,

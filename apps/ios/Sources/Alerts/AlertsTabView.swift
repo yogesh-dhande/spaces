@@ -15,7 +15,7 @@ struct AlertsTabView: View {
                         .accessibilityIdentifier("alerts.clear")
                 }
             }.terminalSessionNavigation(model: model, selectedSession: $selectedSession, pendingTerminalLaunch: $pendingTerminalLaunch)
-        }.accessibilityIdentifier("tab.alerts").overviewPolling(model: model, tab: .alerts, activeDetailRouteID: selectedSession?.id)
+        }.accessibilityIdentifier("tab.alerts").overviewPolling(model: model, tab: .alerts, route: selectedSession.map { .detail($0.id) })
     }
 
     @ViewBuilder private var content: some View {

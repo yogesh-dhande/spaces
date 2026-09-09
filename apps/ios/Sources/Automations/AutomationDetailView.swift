@@ -30,7 +30,7 @@ struct AutomationDetailView: View {
 
     var body: some View {
         content.navigationTitle(automation?.name ?? "Automation").tint(Theme.accent).overviewPolling(
-            model: model, tab: .automations, activeDetailRouteID: selectedSession?.id
+            model: model, tab: .automations, route: selectedSession.map { .detail($0.id) }
         ).task { await loadRuns() }
     }
 
