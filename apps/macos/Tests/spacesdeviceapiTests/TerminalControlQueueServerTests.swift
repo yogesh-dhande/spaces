@@ -96,7 +96,7 @@
                 let pairingStore = AlwaysAuthorizedControlQueuePairingStore()
                 let server = SpacesDeviceAPIServer(
                     host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore,
-                    liveTerminalSessionStateProvider: { _ in
+                    liveTerminalSessionStateProvider: { _, _ in
                         stateRequestArrived.signal()
                         releaseStateRequest.wait()
                         return statePayload

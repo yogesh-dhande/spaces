@@ -143,7 +143,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     typealias AgentHookInstallHandler = @Sendable ([CodingAgent]) throws -> AgentHookInstallOutcome
     /// Exports the current state of a session this daemon hosts live, or nil when it hosts no live core for
     /// that session id (the reader then falls through to the persisted/socket read).
-    public typealias LiveTerminalSessionStateProvider = @Sendable (String) -> GhosttyRemoteSessionStatePayload?
+    /// Answers a one-shot state read for a session this process hosts. `heldFrame` is the frame the
+    /// asking client already displays, which the core uses to omit a render update the client would
+    /// only drop.
+    public typealias LiveTerminalSessionStateProvider = @Sendable (String, TerminalHeldFrameIdentity?) -> GhosttyRemoteSessionStatePayload?
 
     static let pongResponse = SpacesDeviceAPIResponse(ok: true, message: "pong")
     private static let streamRelayReadBufferSize = 256 * 1024
@@ -3419,7 +3422,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         TerminalPerformance.logMetric(
             "device_api_\(payload.action.rawValue)", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: response.ok)
-        let sessionState = response.ok && terminalCommand.includesSessionStateOnSuccess ? try? loadCurrentState(sessionID: sessionID) : nil
+        // The Device API answers a heartbeat with session state, which the local control-socket contract
+        // (`TerminalControlCommand.includesSessionStateOnSuccess`) does not: a remote viewer's heartbeat is
+        // the round trip it makes when it returns from the background, so carrying state on it is what lets
+        // that resume skip a second request. Local panes heartbeat on a timer and want no state at all.
+        //
+        // Every Device API heartbeat answers with state; there is no request-side opt-in, because the only
+        // Device API heartbeat caller is the iOS foreground resume, which always consumes it. The wire
+        // version gate keeps a client that would ignore it from pairing at all.
+        let includesSessionState = terminalCommand.includesSessionStateOnSuccess || payload.action == .heartbeat
+        let sessionState =
+            response.ok && includesSessionState ? try? loadCurrentState(sessionID: sessionID, heldFrame: payload.heldFrameIdentity) : nil
         responseAttributes["include_session_state"] = sessionState == nil ? "0" : "1"
         logDeviceAPIPerformance(
             sessionID: sessionID, name: "terminal_control_response_ready", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
@@ -6807,10 +6820,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return address
     }
 
-    private func loadCurrentState(sessionID: String) throws -> GhosttyRemoteSessionStatePayload {
+    /// - Parameter heldFrame: The frame the asking client already displays, when it named one. A session
+    ///   this process hosts answers a matching identity with a frameless payload; the subscription-socket
+    ///   read below has no way to say it, so it exports its usual full frame.
+    private func loadCurrentState(sessionID: String, heldFrame: TerminalHeldFrameIdentity? = nil) throws -> GhosttyRemoteSessionStatePayload {
         // A session this daemon hosts is in this process, so read its state from the live core instead of
         // connecting to that core's own subscription socket and having it export the same frame back.
-        if let livePayload = liveTerminalSessionStateProvider?(sessionID) { return livePayload }
+        if let livePayload = liveTerminalSessionStateProvider?(sessionID, heldFrame) { return livePayload }
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive {
             if let finalState = try? TerminalSessionPersistence.readRemoteSessionState(paths: paths) { return finalState }

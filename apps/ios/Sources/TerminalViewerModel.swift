@@ -367,6 +367,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// view keeps something to draw while stopped. This stamp is how a hold-release decision on restart
     /// can tell that snapshot apart from one the new lifecycle actually produced.
     private var latestStateLifecycle: UInt64 = 0
+    /// The render frame this viewer currently displays, quoted to the daemon on the foreground resume so
+    /// an unchanged screen costs no frame bytes (see `TerminalHeldFrameIdentity`). Moves only for a
+    /// payload whose own render update decoded and was taken onto the screen, the same rule the
+    /// reducer's own `retainedFrameOrdering` follows, and for the same reason: a frame the model vetoed
+    /// or refused never reached the screen, so claiming it would suppress the very frame that repairs it.
+    private var heldFrameIdentity: TerminalHeldFrameIdentity?
     @ObservationIgnored private var viewerAttachmentOperation: ViewerAttachmentOperation?
     private var automaticTakeoverGeneration: UInt64 = 0
     @ObservationIgnored private var automaticTakeoverTask: Task<Void, Never>?
@@ -988,15 +994,32 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         Task { [weak self] in
             guard let self else { return }
             guard self.isCurrentForegroundResume(lifecycle: lifecycle, clientID: clientID, resumeCycle: resumeCycle) else { return }
+            let isCurrent = { self.isCurrentForegroundResume(lifecycle: lifecycle, clientID: clientID, resumeCycle: resumeCycle) }
+            // The heartbeat is this resume's state read. It renews the lease and answers with the session's
+            // state, quoting the frame this viewer already displays so a screen that did not change while
+            // the app was away comes back as metadata with no render update at all: one round trip, no
+            // frame bytes. Only the two responses that carry no state fall through to a separate read
+            // below: a lease the daemon expired while the app was away, and a session that has exited.
+            var heartbeatState: GhosttyRemoteSessionStatePayload?
             var hasLiveAttachment = true
+            // Set by the two heartbeat failures that carry on below: their responses carry no state at all,
+            // so the resume still owes itself a read.
+            var needsFollowUpStateRead = false
+            self.trace(
+                "fetch_state_begin timeout_ms=\(Self.traceDurationMilliseconds(Self.stateRequestTimeout)) reason=\(Self.foregroundResumeStateReason)")
+            self.logPerformanceEvent(name: "explicit_state_refresh_begin", attributes: ["reason": Self.foregroundResumeStateReason])
+            let readStartedAt = Date()
+            let appliedGenerationBeforeRead = self.appliedStateCount
             do {
-                try await self.bridgeClient.heartbeat(
-                    sessionID: self.session.id, clientID: self.remoteClient.id, timeout: Self.stateRequestTimeout, commandChannel: self.commandChannel
-                )
-                self.trace("foreground_resume_heartbeat_success cycle=\(resumeCycle)")
+                heartbeatState = try await self.bridgeClient.heartbeat(
+                    sessionID: self.session.id, clientID: self.remoteClient.id, heldFrame: self.heldFrameIdentity,
+                    timeout: Self.stateRequestTimeout, commandChannel: self.commandChannel)
+                self.trace("foreground_resume_heartbeat_success cycle=\(resumeCycle) state=\(heartbeatState == nil ? 0 : 1)")
             } catch {
+                self.logForegroundResumeStateReadFailure(startedAt: readStartedAt)
+                needsFollowUpStateRead = true
                 if Self.isAttachmentNotFound(error) {
-                    guard self.isCurrentForegroundResume(lifecycle: lifecycle, clientID: clientID, resumeCycle: resumeCycle) else { return }
+                    guard isCurrent() else { return }
                     self.hasAttachedToSession = false
                     do {
                         try await self.attachViewerForCurrentLifecycle()
@@ -1015,11 +1038,29 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                     return
                 }
             }
-            guard self.isCurrentForegroundResume(lifecycle: lifecycle, clientID: clientID, resumeCycle: resumeCycle) else { return }
+            guard isCurrent() else { return }
             if hasLiveAttachment { self.hasAttachedToSession = true }
-            let refreshOutcome = await self.refreshLatestStateOutcome(
-                timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "foreground_resume", lifecycle: lifecycle,
-                clientID: clientID, isCurrent: { self.isCurrentForegroundResume(lifecycle: lifecycle, clientID: clientID, resumeCycle: resumeCycle) })
+            let refreshOutcome: StateRefreshOutcome
+            if needsFollowUpStateRead {
+                refreshOutcome = await self.refreshLatestStateOutcome(
+                    timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: Self.foregroundResumeStateReason,
+                    lifecycle: lifecycle, clientID: clientID, isCurrent: isCurrent)
+            } else if let heartbeatState {
+                refreshOutcome = await self.applyOutOfBandState(
+                    heartbeatState, reason: Self.foregroundResumeStateReason, startedAt: readStartedAt,
+                    appliedGenerationBeforeFetch: appliedGenerationBeforeRead, applyToLatestState: true, refreshLifecycle: lifecycle,
+                    refreshIsCurrent: { self.isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) && isCurrent() })
+            } else {
+                // The daemon renewed the lease but could not read the session's state, which is the one
+                // failure a repeat of the same question cannot answer differently.
+                //
+                // The wire version gate (`SpacesWireProtocol`, exact match at pairing and on every daemon
+                // status check) means a compatible daemon always answers a successful heartbeat with
+                // state, so an ok reply without state is not a version skew to fall back from: the
+                // evaluation reports unavailable and no second read is made.
+                self.logForegroundResumeStateReadFailure(startedAt: readStartedAt)
+                refreshOutcome = .unavailable
+            }
             let acceptedState: GhosttyRemoteSessionStatePayload?
             switch refreshOutcome {
             case .accepted(let payload), .superseded(let payload): acceptedState = payload
@@ -1027,6 +1068,18 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             }
             self.finishForegroundStateEvaluation(resumeCycle: resumeCycle, acceptedState: acceptedState)
         }
+    }
+
+    /// The reason attribute every performance event this resume's state read emits is stamped with. The
+    /// baseline lane settles the background metric on the `explicit_state_refresh_end` that carries it.
+    private static let foregroundResumeStateReason = "foreground_resume"
+
+    /// Closes the `explicit_state_refresh_begin` the resume opened when its heartbeat came back without
+    /// state, so the begin/end pairing holds whether the resume ends here or applies a payload.
+    private func logForegroundResumeStateReadFailure(startedAt: Date) {
+        logPerformanceEvent(
+            name: "explicit_state_refresh_failure", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+            attributes: ["reason": Self.foregroundResumeStateReason])
     }
 
     func stop() {
@@ -2601,73 +2654,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let appliedGenerationBeforeFetch = appliedStateCount
         do {
             let fetchedState = try await fetchTerminalState(timeout: timeout)
-            guard refreshIsCurrent() else {
-                trace("fetch_state_stale_lifecycle reason=\(reason)")
-                return .unavailable
-            }
-            trace(
-                "fetch_state_success reason=\(fetchedState.reason) runtime=\(traceSize(columns: fetchedState.runtimeState?.columns, rows: fetchedState.runtimeState?.rows)) frame=\(traceSize(columns: fetchedState.renderSnapshot?.columns, rows: fetchedState.renderSnapshot?.rows)) owner=\(traceOwnerID(fetchedState.attachmentSnapshot))"
-            )
-            logPerformanceEvent(
-                name: "explicit_state_refresh_end", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: fetchedState.outputByteCount,
-                attributes: ["reason": reason, "render_update": fetchedState.renderUpdate == nil ? "0" : "1"])
-            // Same trade as the takeover apply: this await rides the reduction pipeline's strict FIFO
-            // behind whatever the live subscription queued ahead of it — for the connect bootstrap fetch,
-            // behind whatever the subscription flushed while the fetch was in flight — rather than jumping
-            // the queue, because reduction is off-main, keeps up with a single subscription's rate, and
-            // depends on seeing every payload in submission order to keep its delta baseline valid. Callers
-            // hold their own transitional flag across the wait by design (`isConnecting` for the connect
-            // bootstrap, `isBusy` for takeover confirmation), so the UI does not settle out of that state
-            // until the fetched payload has actually landed.
-            //
-            // Out-of-band: every fetch that reaches here — the connect bootstrap, a resync, the ownership
-            // handshake's owner-bootstrap read, the ended/stopped-state recovery refreshes — is a response
-            // describing the session as it was when it was asked, re-entering beside a subscription that
-            // never stopped. The reducer orders it against what it has already reduced, so one that was
-            // overtaken by the stream refuses rather than regressing the screen or the metadata.
-            if applyToLatestState {
-                let output = await applyLatestState(fetchedState, isOutOfBand: true, lifecycle: refreshLifecycle)
-                // A response the reducer refused whole judged its raw payload stale against a newer state
-                // the stream has already delivered. Returning the raw payload is what let callers derive
-                // state the apply itself refuses to derive — the ownership handshake seeding the owner
-                // render epoch (and with it the epoch every input and resize request quotes) from a
-                // superseded session generation, and the ended-state recovery reading a delayed exit
-                // report from a run that has already been relaunched as this session being dead. The
-                // ordinary wrapper therefore still answers nil. Foreground ownership is the sole caller
-                // that can use the accepted stored payload, and only when a stream output actually landed
-                // after this read started.
-                if output.reduction?.isRefusedOutOfBandPayload == true {
-                    trace("fetch_state_refused reason=\(reason)")
-                    guard let storedPayload = output.reduction?.storedPayload, appliedStateCount > appliedGenerationBeforeFetch + 1 else {
-                        return .unavailable
-                    }
-                    return .superseded(storedPayload)
-                }
-                // What a caller gets back is the reduction's own payload, not the response as it arrived:
-                // it is the response as the reducer actually admitted it, its render update resolved to
-                // the materialized frame where the frame applied and stripped where it did not. A partial
-                // refusal is what makes that distinction load-bearing. A frame at or below the revision
-                // this client already retains in the same owner epoch is refused on its own while the
-                // payload's metadata is ordered separately and genuinely merges, so
-                // `isRefusedOutOfBandPayload` stays false and the check above lets the response through —
-                // with the refused frame still on it. Read from the raw response, that frame is what the
-                // ownership handshake would seed the owner render epoch's bootstrap snapshot from; read
-                // from the reduced payload there is no screen on it at all, and the handshake falls back
-                // to `latestState`, which holds the newer frame the refusal was measured against.
-                //
-                // A nil reduction is no more readable than a refusal, so it answers the same way. The
-                // pipeline reduces every payload it is handed except a `clipboard_write`, which carries an
-                // event and no state — and no `.state` response is stamped with that reason (see
-                // `applyLatestState`), so this is unreachable rather than a fallback. Returning the
-                // unreduced response here would be the one way back to handing out a frame nothing
-                // admitted.
-                guard let reducedPayload = output.reduction?.payload else {
-                    trace("fetch_state_unreduced reason=\(reason)")
-                    return .unavailable
-                }
-                return .accepted(reducedPayload)
-            }
-            return .accepted(fetchedState)
+            return await applyOutOfBandState(
+                fetchedState, reason: reason, startedAt: startedAt, appliedGenerationBeforeFetch: appliedGenerationBeforeFetch,
+                applyToLatestState: applyToLatestState, refreshLifecycle: refreshLifecycle, refreshIsCurrent: refreshIsCurrent)
         } catch {
             guard refreshIsCurrent() else {
                 trace("fetch_state_stale_lifecycle_failure reason=\(reason)")
@@ -2700,6 +2689,93 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             errorMessage = error.localizedDescription
             return .unavailable
         }
+    }
+
+    /// The tail every explicit, out-of-band state read shares: report the read's completion, order the
+    /// payload into the reduction pipeline beside the live subscription, and translate the reducer's
+    /// verdict into the outcome the caller acts on.
+    ///
+    /// Two routes reach it with a payload the daemon answered a direct request with. A `.state` read is
+    /// one; the foreground resume's heartbeat is the other, which carries the session's state on its own
+    /// response so that resume costs a single round trip. Both were captured at request time and re-enter
+    /// beside a stream that never stopped, so both are ordered the same way.
+    ///
+    /// - Parameters:
+    ///   - startedAt: When the request that produced `fetchedState` was sent, so the reported elapsed time
+    ///     covers the whole round trip whichever request carried it.
+    ///   - appliedGenerationBeforeFetch: `appliedStateCount` as it stood before that request was sent,
+    ///     which is how a refusal tells "the stream overtook this read" from "nothing else landed".
+    private func applyOutOfBandState(
+        _ fetchedState: GhosttyRemoteSessionStatePayload, reason: String, startedAt: Date, appliedGenerationBeforeFetch: UInt64,
+        applyToLatestState: Bool, refreshLifecycle: UInt64, refreshIsCurrent: () -> Bool
+    ) async -> StateRefreshOutcome {
+        guard refreshIsCurrent() else {
+            trace("fetch_state_stale_lifecycle reason=\(reason)")
+            return .unavailable
+        }
+        trace(
+            "fetch_state_success reason=\(fetchedState.reason) runtime=\(traceSize(columns: fetchedState.runtimeState?.columns, rows: fetchedState.runtimeState?.rows)) frame=\(traceSize(columns: fetchedState.renderSnapshot?.columns, rows: fetchedState.renderSnapshot?.rows)) owner=\(traceOwnerID(fetchedState.attachmentSnapshot))"
+        )
+        logPerformanceEvent(
+            name: "explicit_state_refresh_end", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: fetchedState.outputByteCount,
+            attributes: ["reason": reason, "render_update": fetchedState.renderUpdate == nil ? "0" : "1"])
+        // Same trade as the takeover apply: this await rides the reduction pipeline's strict FIFO
+        // behind whatever the live subscription queued ahead of it — for the connect bootstrap fetch,
+        // behind whatever the subscription flushed while the fetch was in flight — rather than jumping
+        // the queue, because reduction is off-main, keeps up with a single subscription's rate, and
+        // depends on seeing every payload in submission order to keep its delta baseline valid. Callers
+        // hold their own transitional flag across the wait by design (`isConnecting` for the connect
+        // bootstrap, `isBusy` for takeover confirmation), so the UI does not settle out of that state
+        // until the fetched payload has actually landed.
+        //
+        // Out-of-band: every response that reaches here — the connect bootstrap, a resync, the ownership
+        // handshake's owner-bootstrap read, the ended/stopped-state recovery refreshes, the foreground
+        // resume's heartbeat — describes the session as it was when it was asked, re-entering beside a
+        // subscription that never stopped. The reducer orders it against what it has already reduced, so
+        // one that was overtaken by the stream refuses rather than regressing the screen or the metadata.
+        if applyToLatestState {
+            let output = await applyLatestState(fetchedState, isOutOfBand: true, lifecycle: refreshLifecycle)
+            // A response the reducer refused whole judged its raw payload stale against a newer state
+            // the stream has already delivered. Returning the raw payload is what let callers derive
+            // state the apply itself refuses to derive — the ownership handshake seeding the owner
+            // render epoch (and with it the epoch every input and resize request quotes) from a
+            // superseded session generation, and the ended-state recovery reading a delayed exit
+            // report from a run that has already been relaunched as this session being dead. The
+            // ordinary wrapper therefore still answers nil. Foreground ownership is the sole caller
+            // that can use the accepted stored payload, and only when a stream output actually landed
+            // after this read started.
+            if output.reduction?.isRefusedOutOfBandPayload == true {
+                trace("fetch_state_refused reason=\(reason)")
+                guard let storedPayload = output.reduction?.storedPayload, appliedStateCount > appliedGenerationBeforeFetch + 1 else {
+                    return .unavailable
+                }
+                return .superseded(storedPayload)
+            }
+            // What a caller gets back is the reduction's own payload, not the response as it arrived:
+            // it is the response as the reducer actually admitted it, its render update resolved to
+            // the materialized frame where the frame applied and stripped where it did not. A partial
+            // refusal is what makes that distinction load-bearing. A frame at or below the revision
+            // this client already retains in the same owner epoch is refused on its own while the
+            // payload's metadata is ordered separately and genuinely merges, so
+            // `isRefusedOutOfBandPayload` stays false and the check above lets the response through —
+            // with the refused frame still on it. Read from the raw response, that frame is what the
+            // ownership handshake would seed the owner render epoch's bootstrap snapshot from; read
+            // from the reduced payload there is no screen on it at all, and the handshake falls back
+            // to `latestState`, which holds the newer frame the refusal was measured against.
+            //
+            // A nil reduction is no more readable than a refusal, so it answers the same way. The
+            // pipeline reduces every payload it is handed except a `clipboard_write`, which carries an
+            // event and no state — and no `.state` response is stamped with that reason (see
+            // `applyLatestState`), so this is unreachable rather than a fallback. Returning the
+            // unreduced response here would be the one way back to handing out a frame nothing
+            // admitted.
+            guard let reducedPayload = output.reduction?.payload else {
+                trace("fetch_state_unreduced reason=\(reason)")
+                return .unavailable
+            }
+            return .accepted(reducedPayload)
+        }
+        return .accepted(fetchedState)
     }
 
     private func fetchTerminalState(timeout: Duration) async throws -> GhosttyRemoteSessionStatePayload {
@@ -3697,7 +3773,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // A frameless or refused reduce carries the prior snapshot forward untouched, so it must not
         // refresh the snapshot's provenance: only a payload whose own render update decoded and applied
         // (`frameToApply != nil`) gets credit for this lifecycle, matching `latestStateLifecycle`'s doc.
-        if reduction.frameToApply != nil { latestStateLifecycle = viewerAttachmentLifecycle }
+        if let appliedFrame = reduction.frameToApply {
+            latestStateLifecycle = viewerAttachmentLifecycle
+            heldFrameIdentity = TerminalHeldFrameIdentity(frame: appliedFrame)
+        }
         // A payload the reducer refused whole carries the attachment snapshot as it was when the `.state`
         // read was answered, which is before whatever superseded it — a handoff, or this device's own
         // attach. Reading it here would rewrite this client's attachment from that pre-handoff snapshot
@@ -3821,6 +3900,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // epoch this client's baseline never saw throws `ownerEpochMismatch` and drives a resync
             // instead of drawing it.
             if wasOwner, !isEndedState, let latestState { self.latestState = payloadByClearingScreenState(latestState) }
+            // The screen this model was holding went with the ownership, so it holds no frame to confirm.
+            heldFrameIdentity = nil
             hasConfirmedOwnerInputReadiness = false
             isInputSurfaceReady = false
             lastSentResizeSize = nil

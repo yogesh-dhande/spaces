@@ -2845,9 +2845,13 @@
         /// arms the next broadcast to carry a full render update when this export could not produce one, so
         /// a reader left without a baseline still converges. Serving a Device API `.state` from here lets the
         /// daemon skip dialing its own session's unix socket to ask itself a question it can answer directly.
-        public func currentOneShotStatePayload() -> GhosttyRemoteSessionStatePayload? {
+        /// - Parameter heldFrame: The frame the reader already displays. When it names this session's
+        ///   current frame the payload carries no render update at all, so a client confirming an unchanged
+        ///   screen pays no frame bytes.
+        public func currentOneShotStatePayload(heldFrame: TerminalHeldFrameIdentity? = nil) -> GhosttyRemoteSessionStatePayload? {
             currentRemoteSessionState(
-                reason: .initial, outputByteCount: nil, exportMode: .selfContained, markNextBroadcastFullWhenMissingRenderUpdate: true)
+                reason: .initial, outputByteCount: nil, exportMode: .selfContained, markNextBroadcastFullWhenMissingRenderUpdate: true,
+                heldFrame: heldFrame)
         }
 
         /// Typed convenience over the raw-string core below: every production broadcast names one of the
@@ -2933,20 +2937,21 @@
             reason: TerminalRemoteSessionStateReason, outputByteCount: Int?, outputEndByteOffset: Int? = nil,
             exportMode: RenderStateExportMode = .selfContained, markNextBroadcastFull: Bool = false,
             markNextBroadcastFullWhenMissingRenderUpdate: Bool = false, clipboardWrite: TerminalClipboardWritePayload? = nil,
-            preCapturedScreenState: LiveSessionScreenState? = nil, payloadPublishStartedAt: Date? = nil
+            preCapturedScreenState: LiveSessionScreenState? = nil, payloadPublishStartedAt: Date? = nil,
+            heldFrame: TerminalHeldFrameIdentity? = nil
         ) -> GhosttyRemoteSessionStatePayload? {
             currentRemoteSessionState(
                 reason: reason.rawValue, outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset, exportMode: exportMode,
                 markNextBroadcastFull: markNextBroadcastFull,
                 markNextBroadcastFullWhenMissingRenderUpdate: markNextBroadcastFullWhenMissingRenderUpdate, clipboardWrite: clipboardWrite,
-                preCapturedScreenState: preCapturedScreenState, payloadPublishStartedAt: payloadPublishStartedAt)
+                preCapturedScreenState: preCapturedScreenState, payloadPublishStartedAt: payloadPublishStartedAt, heldFrame: heldFrame)
         }
 
         private func currentRemoteSessionState(
             reason: String, outputByteCount: Int?, outputEndByteOffset: Int? = nil, exportMode: RenderStateExportMode = .selfContained,
             markNextBroadcastFull: Bool = false, markNextBroadcastFullWhenMissingRenderUpdate: Bool = false,
             clipboardWrite: TerminalClipboardWritePayload? = nil, preCapturedScreenState: LiveSessionScreenState? = nil,
-            payloadPublishStartedAt: Date? = nil
+            payloadPublishStartedAt: Date? = nil, heldFrame: TerminalHeldFrameIdentity? = nil
         ) -> GhosttyRemoteSessionStatePayload? {
             // Serve runtime state from memory: this core is the sole writer of a live session's runtime
             // state and advances `latestRuntimeState` the moment it computes a new one, so the in-memory copy
@@ -2976,14 +2981,35 @@
                     runtimeState: runtimeState, reason: reason, ownerKind: ownerClient?.kind, preCapturedScreenState: preCapturedScreenState)
                 let snapshot = resolvedScreenState.snapshot
                 let frame = snapshot.map { GhosttyRenderFrame(sessionRevision: renderFrameRevision(for: $0), ownerEpoch: ownerEpoch, snapshot: $0) }
-                let renderUpdateConstructionStartedAt = Date()
-                let renderUpdateValue = frame.map {
-                    makeRenderUpdate(
-                        for: $0, reason: reason, nativeScrollRects: resolvedScreenState.scrollRects,
-                        nativeScrollRectsOverflowed: resolvedScreenState.scrollRectsOverflowed, exportMode: exportMode)
+                // The reader already displays this exact frame, so exporting it would spend a full-grid
+                // encode on bytes the reader drops. Skipping `makeRenderUpdate` leaves the stream's delta
+                // baseline exactly where it was, which is correct: the reader's picture and the baseline
+                // still agree, so the next broadcast's delta applies as it would have.
+                let readerHoldsCurrentFrame = frame.map { heldFrame?.matches($0) == true } ?? false
+                if readerHoldsCurrentFrame {
+                    // The omission still owes the stream the rects this capture just drained out of ghostty,
+                    // exactly as the self-contained `makeRenderUpdate` below would have folded them into the
+                    // carry (a held frame only ever reaches here on a one-shot `.selfContained` read).
+                    // Dropping them would leave the next stream frame under-reporting how far content moved,
+                    // and a mirror rebasing a drag against that lands on the wrong rows.
+                    streamScrollRectCarry.fold(rects: resolvedScreenState.scrollRects, overflowed: resolvedScreenState.scrollRectsOverflowed)
                 }
+                let renderUpdateConstructionStartedAt = Date()
+                let renderUpdateValue =
+                    readerHoldsCurrentFrame
+                    ? nil
+                    : frame.map {
+                        makeRenderUpdate(
+                            for: $0, reason: reason, nativeScrollRects: resolvedScreenState.scrollRects,
+                            nativeScrollRectsOverflowed: resolvedScreenState.scrollRectsOverflowed, exportMode: exportMode)
+                    }
                 if renderUpdateValue != nil, markNextBroadcastFull { forceNextBroadcastFullRenderUpdate = true }
-                if renderUpdateValue == nil, markNextBroadcastFullWhenMissingRenderUpdate { forceNextBroadcastFullRenderUpdate = true }
+                // Deliberately not armed when the omission was the held-frame match above: that arm exists
+                // for a reader left with no baseline at all, and forcing the next broadcast full would make
+                // every subscriber of this session pay a full frame for a reader that needed none.
+                if renderUpdateValue == nil, !readerHoldsCurrentFrame, markNextBroadcastFullWhenMissingRenderUpdate {
+                    forceNextBroadcastFullRenderUpdate = true
+                }
                 let renderUpdateConstructionMS = TerminalPerformance.elapsedMS(since: renderUpdateConstructionStartedAt)
                 if renderUpdateValue != nil, let lastScreenStateRevision, exportMode == .streamDeltaAllowed {
                     lastExportedScreenStateRevision = lastScreenStateRevision

@@ -847,7 +847,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         let catchUpPayload = runningStatePayload(sessionID: sessionID)
         let server = SpacesDeviceAPIServer(
             host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore,
-            liveTerminalSessionStateProvider: { requestedSessionID in requestedSessionID == sessionID ? catchUpPayload : nil })
+            liveTerminalSessionStateProvider: { requestedSessionID, _ in requestedSessionID == sessionID ? catchUpPayload : nil })
         try server.start()
         defer { server.stop() }
 
@@ -1209,7 +1209,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         let catchUpPayload = runningStatePayload(sessionID: sessionID)
         let server = SpacesDeviceAPIServer(
             host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore,
-            liveTerminalSessionStateProvider: { requestedSessionID in requestedSessionID == sessionID ? catchUpPayload : nil })
+            liveTerminalSessionStateProvider: { requestedSessionID, _ in requestedSessionID == sessionID ? catchUpPayload : nil })
         try server.start()
         defer { server.stop() }
 

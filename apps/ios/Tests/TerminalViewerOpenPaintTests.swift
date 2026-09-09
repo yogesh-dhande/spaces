@@ -505,7 +505,6 @@
             model.prepareForBackgrounding()
             model.resumeAfterBackgrounding()
             await waitUntil("the foreground heartbeat to run") { backend.sentCommands.contains("terminal:heartbeat") }
-            await waitUntil("the foreground state read to run") { backend.sentCommands.contains("state") }
             await model.takeOver()
 
             XCTAssertTrue(backend.sentCommands.contains("terminal:takeover"))

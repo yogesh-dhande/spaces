@@ -401,6 +401,73 @@ class BackgroundMetricTests(unittest.TestCase):
         metrics = report.metric_background(window, "terminal")
         self.assertEqual(metrics["resume_p50"], 400.0)
 
+    def test_terminal_mode_settles_on_the_resume_read_when_no_frame_is_owed(self) -> None:
+        """An unchanged screen is confirmed with no render update at all, so the resume's own state
+        read completing is the settle point."""
+        events = [
+            *scenario_bracket("good", "background-terminal", "2026-09-08T10:00:00.000Z", "2026-09-08T10:00:20.000Z"),
+            lane_marker("ios-uitest", "2026-09-08T10:00:01.000Z", 0, "good", "background-terminal", "background", {"iteration": "1"}),
+            lane_marker("ios-uitest", "2026-09-08T10:00:06.000Z", 0, "good", "background-terminal", "foreground", {"iteration": "1"}),
+            app_event(
+                "s1",
+                "ios-viewer",
+                "explicit_state_refresh_end",
+                "2026-09-08T10:00:06.300Z",
+                0,
+                elapsed_ms=300,
+                attributes={"reason": "foreground_resume", "render_update": "0"},
+            ),
+        ]
+        window = window_for(events, [], "good", "background-terminal")
+        metrics = report.metric_background(window, "terminal")
+        self.assertEqual(metrics["resume_p50"], 300.0)
+        self.assertEqual(metrics["frames_p50"], 0)
+        self.assertEqual(metrics["kb_p50"], 0.0)
+
+    def test_terminal_mode_settles_on_the_frame_when_the_resume_read_carries_an_update(self) -> None:
+        """A resume heartbeat that carries a changed screen fires its own refresh-end event before
+        the frame is decoded and applied, so the settle point stays the frame, not the refresh end."""
+        events = [
+            *scenario_bracket("good", "background-terminal", "2026-09-08T10:00:00.000Z", "2026-09-08T10:00:20.000Z"),
+            lane_marker("ios-uitest", "2026-09-08T10:00:01.000Z", 0, "good", "background-terminal", "background", {"iteration": "1"}),
+            lane_marker("ios-uitest", "2026-09-08T10:00:06.000Z", 0, "good", "background-terminal", "foreground", {"iteration": "1"}),
+            app_event(
+                "s1",
+                "ios-viewer",
+                "explicit_state_refresh_end",
+                "2026-09-08T10:00:06.300Z",
+                0,
+                elapsed_ms=300,
+                attributes={"reason": "foreground_resume", "render_update": "1"},
+            ),
+            app_event(
+                "s1", "ios-viewer", "render_frame_payload_receive", "2026-09-08T10:00:06.450Z", 0,
+                elapsed_ms=450, count=1024, attributes={"render_update": "1"},
+            ),
+        ]
+        window = window_for(events, [], "good", "background-terminal")
+        metrics = report.metric_background(window, "terminal")
+        self.assertEqual(metrics["resume_p50"], 450.0)
+
+    def test_terminal_mode_ignores_a_state_refresh_end_from_another_reason(self) -> None:
+        events = [
+            *scenario_bracket("good", "background-terminal", "2026-09-08T10:00:00.000Z", "2026-09-08T10:00:20.000Z"),
+            lane_marker("ios-uitest", "2026-09-08T10:00:01.000Z", 0, "good", "background-terminal", "background", {"iteration": "1"}),
+            lane_marker("ios-uitest", "2026-09-08T10:00:06.000Z", 0, "good", "background-terminal", "foreground", {"iteration": "1"}),
+            app_event(
+                "s1",
+                "ios-viewer",
+                "explicit_state_refresh_end",
+                "2026-09-08T10:00:06.100Z",
+                0,
+                attributes={"reason": "state_refresh"},
+            ),
+            app_event("s1", "ios-viewer", "stream_first_frame", "2026-09-08T10:00:06.400Z", 0, elapsed_ms=400, attributes={"host": "h"}),
+        ]
+        window = window_for(events, [], "good", "background-terminal")
+        metrics = report.metric_background(window, "terminal")
+        self.assertEqual(metrics["resume_p50"], 400.0)
+
     def test_list_mode_resumes_to_successful_overview_refresh(self) -> None:
         events = [
             *scenario_bracket("good", "background-list", "2026-09-08T10:00:00.000Z", "2026-09-08T10:00:20.000Z"),
