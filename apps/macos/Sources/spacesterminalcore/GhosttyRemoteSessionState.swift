@@ -9,6 +9,12 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
     public var reasonKind: TerminalRemoteSessionStateReason? { TerminalRemoteSessionStateReason(rawValue: reason) }
     public let emittedAt: String
     public let sessionStateRevision: UInt64?
+    /// The session's ownership generation, which the live core bumps on every transfer and never lowers.
+    /// Every payload a live session builds carries it, screenless ones included, so a client can order a
+    /// payload against an ownership transfer without a screen and without a wall clock (see
+    /// `TerminalRemoteStateReducer.reduce`). Nil only for a payload no live session built: a terminated
+    /// session's final state, reconstructed from what was persisted.
+    public let ownerEpoch: UInt64?
     public let sessionStateFlags: UInt32?
     public let screenStateRevision: UInt64?
     public let runtimeState: TerminalSessionRuntimeState?
@@ -30,10 +36,11 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
     public init(
         sessionID: String, reason: String, emittedAt: String, sessionStateRevision: UInt64?, sessionStateFlags: UInt32?, screenStateRevision: UInt64?,
         runtimeState: TerminalSessionRuntimeState?, attachmentSnapshot: TerminalSessionAttachmentSnapshot?, title: String, workingDirectory: String,
-        outputByteCount: Int?, outputEndByteOffset: Int? = nil, renderUpdate: Data? = nil, clipboardWrite: TerminalClipboardWritePayload? = nil
+        outputByteCount: Int?, outputEndByteOffset: Int? = nil, renderUpdate: Data? = nil, clipboardWrite: TerminalClipboardWritePayload? = nil,
+        ownerEpoch: UInt64? = nil
     ) {
         self.init(
-            sessionID: sessionID, reason: reason, emittedAt: emittedAt, sessionStateRevision: sessionStateRevision,
+            sessionID: sessionID, reason: reason, emittedAt: emittedAt, sessionStateRevision: sessionStateRevision, ownerEpoch: ownerEpoch,
             sessionStateFlags: sessionStateFlags, screenStateRevision: screenStateRevision, runtimeState: runtimeState,
             attachmentSnapshot: attachmentSnapshot, title: title, workingDirectory: workingDirectory, outputByteCount: outputByteCount,
             outputEndByteOffset: outputEndByteOffset, renderUpdateBody: renderUpdate.map(GhosttyRenderUpdateBody.init(encoded:)),
@@ -41,14 +48,16 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
     }
 
     private init(
-        sessionID: String, reason: String, emittedAt: String, sessionStateRevision: UInt64?, sessionStateFlags: UInt32?, screenStateRevision: UInt64?,
-        runtimeState: TerminalSessionRuntimeState?, attachmentSnapshot: TerminalSessionAttachmentSnapshot?, title: String, workingDirectory: String,
-        outputByteCount: Int?, outputEndByteOffset: Int?, renderUpdateBody: GhosttyRenderUpdateBody?, clipboardWrite: TerminalClipboardWritePayload?
+        sessionID: String, reason: String, emittedAt: String, sessionStateRevision: UInt64?, ownerEpoch: UInt64?, sessionStateFlags: UInt32?,
+        screenStateRevision: UInt64?, runtimeState: TerminalSessionRuntimeState?, attachmentSnapshot: TerminalSessionAttachmentSnapshot?,
+        title: String, workingDirectory: String, outputByteCount: Int?, outputEndByteOffset: Int?, renderUpdateBody: GhosttyRenderUpdateBody?,
+        clipboardWrite: TerminalClipboardWritePayload?
     ) {
         self.sessionID = sessionID
         self.reason = reason
         self.emittedAt = emittedAt
         self.sessionStateRevision = sessionStateRevision
+        self.ownerEpoch = ownerEpoch
         self.sessionStateFlags = sessionStateFlags
         self.screenStateRevision = screenStateRevision
         self.runtimeState = runtimeState
@@ -86,7 +95,7 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
         let mergedRenderUpdateBody = update.renderUpdateBody ?? (ownerChanged ? nil : renderUpdateBody)
         return .init(
             sessionID: update.sessionID, reason: update.reason, emittedAt: update.emittedAt,
-            sessionStateRevision: update.sessionStateRevision ?? sessionStateRevision,
+            sessionStateRevision: update.sessionStateRevision ?? sessionStateRevision, ownerEpoch: update.ownerEpoch ?? ownerEpoch,
             sessionStateFlags: update.sessionStateFlags ?? sessionStateFlags, screenStateRevision: update.screenStateRevision ?? screenStateRevision,
             runtimeState: update.runtimeState ?? runtimeState, attachmentSnapshot: update.attachmentSnapshot ?? attachmentSnapshot,
             title: update.title, workingDirectory: update.workingDirectory, outputByteCount: update.outputByteCount,
@@ -100,6 +109,7 @@ extension GhosttyRemoteSessionStatePayload {
         case reason
         case emittedAt
         case sessionStateRevision
+        case ownerEpoch
         case sessionStateFlags
         case screenStateRevision
         case runtimeState
@@ -129,7 +139,8 @@ extension GhosttyRemoteSessionStatePayload {
             outputByteCount: try container.decodeIfPresent(Int.self, forKey: .outputByteCount),
             outputEndByteOffset: try container.decodeIfPresent(Int.self, forKey: .outputEndByteOffset),
             renderUpdate: try container.decodeIfPresent(Data.self, forKey: .renderUpdate),
-            clipboardWrite: try container.decodeIfPresent(TerminalClipboardWritePayload.self, forKey: .clipboardWrite))
+            clipboardWrite: try container.decodeIfPresent(TerminalClipboardWritePayload.self, forKey: .clipboardWrite),
+            ownerEpoch: try container.decodeIfPresent(UInt64.self, forKey: .ownerEpoch))
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -138,6 +149,7 @@ extension GhosttyRemoteSessionStatePayload {
         try container.encode(reason, forKey: .reason)
         try container.encode(emittedAt, forKey: .emittedAt)
         try container.encodeIfPresent(sessionStateRevision, forKey: .sessionStateRevision)
+        try container.encodeIfPresent(ownerEpoch, forKey: .ownerEpoch)
         try container.encodeIfPresent(sessionStateFlags, forKey: .sessionStateFlags)
         try container.encodeIfPresent(screenStateRevision, forKey: .screenStateRevision)
         try container.encodeIfPresent(runtimeState, forKey: .runtimeState)
@@ -201,7 +213,7 @@ extension GhosttyRemoteSessionStatePayload {
     public func withLiveWireAttachmentProjection() -> Self {
         guard let attachmentSnapshot else { return self }
         return .init(
-            sessionID: sessionID, reason: reason, emittedAt: emittedAt, sessionStateRevision: sessionStateRevision,
+            sessionID: sessionID, reason: reason, emittedAt: emittedAt, sessionStateRevision: sessionStateRevision, ownerEpoch: ownerEpoch,
             sessionStateFlags: sessionStateFlags, screenStateRevision: screenStateRevision, runtimeState: runtimeState,
             attachmentSnapshot: attachmentSnapshot.liveWireProjection(), title: title, workingDirectory: workingDirectory,
             outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset, renderUpdateBody: renderUpdateBody,
@@ -210,7 +222,7 @@ extension GhosttyRemoteSessionStatePayload {
 
     private func replacingRenderUpdateBody(_ body: GhosttyRenderUpdateBody?, screenStateRevision: UInt64?) -> Self {
         .init(
-            sessionID: sessionID, reason: reason, emittedAt: emittedAt, sessionStateRevision: sessionStateRevision,
+            sessionID: sessionID, reason: reason, emittedAt: emittedAt, sessionStateRevision: sessionStateRevision, ownerEpoch: ownerEpoch,
             sessionStateFlags: sessionStateFlags, screenStateRevision: screenStateRevision ?? self.screenStateRevision, runtimeState: runtimeState,
             attachmentSnapshot: attachmentSnapshot, title: title, workingDirectory: workingDirectory, outputByteCount: outputByteCount,
             outputEndByteOffset: outputEndByteOffset, renderUpdateBody: body, clipboardWrite: nil)

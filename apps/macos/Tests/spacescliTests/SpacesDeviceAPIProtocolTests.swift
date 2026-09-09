@@ -219,7 +219,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         let requests = [
             SpacesDeviceAPIRequest(command: .ping, authToken: "SECRET"), SpacesDeviceAPIRequest(command: .overview, authToken: "SECRET"),
             SpacesDeviceAPIRequest(command: .workspaceCreateOptions(.init(projectID: "project-1")), authToken: "SECRET"),
-            SpacesDeviceAPIRequest(command: .state(.init(sessionID: "session-1")), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(command: .state(.init(sessionID: "session-1", includesRenderUpdate: true)), authToken: "SECRET"),
             SpacesDeviceAPIRequest(command: .resolveTerminalLink(.init(sessionID: "session-1", terminalLink: "file:///tmp/a")), authToken: "SECRET"),
             SpacesDeviceAPIRequest(
                 command: .readTerminalLinkChunk(.init(sessionID: "session-1", terminalLinkID: "link-1", offset: 0, limit: 128)), authToken: "SECRET"),

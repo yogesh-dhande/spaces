@@ -1275,13 +1275,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // that raced it refuse the snapshot on `emittedAt` alone and leave a successful takeover
             // reading as unconfirmed.
             //
-            // The accepted residual of applying in band: output the session emitted after it captured
-            // this response, but delivered before the response is submitted, is overwritten by this apply,
-            // which walks the delta baseline back to the screen the takeover was answered with. The next
-            // delta then fails its base-revision check and the paced resync repairs it, so what this costs
-            // is a transient stale window, not a stuck pane. It is preferred to the alternative: ordering
-            // the acknowledgment out of band would let those same racing payloads refuse the snapshot the
-            // lines below read the takeover's outcome from.
+            // Applying it in band costs no screen either: the daemon answers a takeover with the session's
+            // metadata alone, so this payload carries no render update, touches no delta baseline, and
+            // changes nothing but the attachment. The frame for the epoch the transfer opens comes down the
+            // subscription instead, as the `attachment_state` broadcast every subscriber receives.
             if let takeoverState { await applyLatestState(takeoverState, isOutOfBand: false, lifecycle: lifecycle) }
             guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
             guard automaticContext.map(isCurrentAutomaticTakeover) ?? true else { return }
@@ -2474,14 +2471,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 trace("connect_attach_success")
             }
             guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
-            // Every connect bootstraps from a direct read, an owner's included. `isOwner` can only be true
-            // here on a reconnect (at first connect `latestState` is nil and the fallback snapshot cannot
-            // name this model's freshly minted client ID as the owner), and that is exactly the case that
-            // needs the read: an owner whose stream dropped and reconnected silently would otherwise resume
-            // the new subscription's deltas on the frame it still holds, with nothing confirming that
-            // baseline is still the one the daemon is sending deltas against. The reducer's guards would
-            // catch a divergent delta and drive a resync, but only after a wrong-frame window plus a round
-            // trip this read avoids. The response is ordered out-of-band, so one that lands behind the new
+            // Every connect bootstraps from a direct read, an owner's included, and that read asks for no
+            // screen. Its job is this session's ownership and runtime metadata, ahead of the stream: who
+            // owns the session, whether this client is attached, and whether the session has ended, which
+            // is what settles the viewer's connecting state and routes an ended session to its own load.
+            // The screen is the subscription's job. A subscriber's initial frame is self-contained
+            // whenever the session exports a screen at all, and when it exports none the session arms its
+            // next broadcast to carry a full one, so the baseline a subscriber paints from always comes
+            // down the stream. Asking for it here as well would move the identical frame twice on every
+            // open (#672). The response is ordered out-of-band, so one that lands behind the new
             // subscription's initial refuses instead of regressing what the stream already delivered.
             //
             // It is started here, before `subscribe`, and awaited after it: the read rides this viewer's
@@ -2578,7 +2576,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         -> GhosttyRemoteSessionStatePayload?
     {
         await refreshLatestState(
-            timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "connect_bootstrap", lifecycle: lifecycle, clientID: clientID,
+            timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, includesRenderUpdate: false, reason: "connect_bootstrap",
+            lifecycle: lifecycle, clientID: clientID,
             isCurrent: { self.isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) })
     }
 
@@ -2627,21 +2626,24 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         lastAppearanceSentToSession = operation.appearance
     }
 
+    /// - Parameter includesRenderUpdate: Whether this read asks the daemon for the session's screen. Only
+    ///   the connect bootstrap read passes false (the subscription started with it delivers the frame);
+    ///   every other read is the thing that brings the screen, so the default is what they all take.
     @discardableResult private func refreshLatestState(
-        timeout: Duration = .seconds(3), ignoreTransientTimeout: Bool = false, applyToLatestState: Bool = true, reason: String = "state_refresh",
-        lifecycle: UInt64? = nil, clientID: String? = nil, isCurrent: (() -> Bool)? = nil
+        timeout: Duration = .seconds(3), ignoreTransientTimeout: Bool = false, applyToLatestState: Bool = true, includesRenderUpdate: Bool = true,
+        reason: String = "state_refresh", lifecycle: UInt64? = nil, clientID: String? = nil, isCurrent: (() -> Bool)? = nil
     ) async -> GhosttyRemoteSessionStatePayload? {
         guard
             case .accepted(let payload) = await refreshLatestStateOutcome(
-                timeout: timeout, ignoreTransientTimeout: ignoreTransientTimeout, applyToLatestState: applyToLatestState, reason: reason,
-                lifecycle: lifecycle, clientID: clientID, isCurrent: isCurrent)
+                timeout: timeout, ignoreTransientTimeout: ignoreTransientTimeout, applyToLatestState: applyToLatestState,
+                includesRenderUpdate: includesRenderUpdate, reason: reason, lifecycle: lifecycle, clientID: clientID, isCurrent: isCurrent)
         else { return nil }
         return payload
     }
 
     private func refreshLatestStateOutcome(
-        timeout: Duration = .seconds(3), ignoreTransientTimeout: Bool = false, applyToLatestState: Bool = true, reason: String = "state_refresh",
-        lifecycle: UInt64? = nil, clientID: String? = nil, isCurrent: (() -> Bool)? = nil
+        timeout: Duration = .seconds(3), ignoreTransientTimeout: Bool = false, applyToLatestState: Bool = true, includesRenderUpdate: Bool = true,
+        reason: String = "state_refresh", lifecycle: UInt64? = nil, clientID: String? = nil, isCurrent: (() -> Bool)? = nil
     ) async -> StateRefreshOutcome {
         let refreshLifecycle = lifecycle ?? viewerAttachmentLifecycle
         let refreshClientID = clientID ?? remoteClient.id
@@ -2653,7 +2655,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let startedAt = Date()
         let appliedGenerationBeforeFetch = appliedStateCount
         do {
-            let fetchedState = try await fetchTerminalState(timeout: timeout)
+            let fetchedState = try await fetchTerminalState(timeout: timeout, includesRenderUpdate: includesRenderUpdate)
             return await applyOutOfBandState(
                 fetchedState, reason: reason, startedAt: startedAt, appliedGenerationBeforeFetch: appliedGenerationBeforeFetch,
                 applyToLatestState: applyToLatestState, refreshLifecycle: refreshLifecycle, refreshIsCurrent: refreshIsCurrent)
@@ -2744,7 +2746,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // ordinary wrapper therefore still answers nil. Foreground ownership is the sole caller
             // that can use the accepted stored payload, and only when a stream output actually landed
             // after this read started.
-            if output.reduction?.isRefusedOutOfBandPayload == true {
+            if output.reduction?.isRefusedPayload == true {
                 trace("fetch_state_refused reason=\(reason)")
                 guard let storedPayload = output.reduction?.storedPayload, appliedStateCount > appliedGenerationBeforeFetch + 1 else {
                     return .unavailable
@@ -2757,7 +2759,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // refusal is what makes that distinction load-bearing. A frame at or below the revision
             // this client already retains in the same owner epoch is refused on its own while the
             // payload's metadata is ordered separately and genuinely merges, so
-            // `isRefusedOutOfBandPayload` stays false and the check above lets the response through —
+            // `isRefusedPayload` stays false and the check above lets the response through —
             // with the refused frame still on it. Read from the raw response, that frame is what the
             // ownership handshake would seed the owner render epoch's bootstrap snapshot from; read
             // from the reduced payload there is no screen on it at all, and the handshake falls back
@@ -2778,8 +2780,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         return .accepted(fetchedState)
     }
 
-    private func fetchTerminalState(timeout: Duration) async throws -> GhosttyRemoteSessionStatePayload {
-        try await bridgeClient.fetchState(sessionID: session.id, timeout: timeout, commandChannel: commandChannel)
+    private func fetchTerminalState(timeout: Duration, includesRenderUpdate: Bool) async throws -> GhosttyRemoteSessionStatePayload {
+        try await bridgeClient.fetchState(
+            sessionID: session.id, includesRenderUpdate: includesRenderUpdate, timeout: timeout, commandChannel: commandChannel)
     }
 
     private func handleDisconnect(_ disconnect: SpacesDeviceAPIStreamDisconnect) async {
@@ -3783,7 +3786,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // (leaving the next dismissal with nothing to detach, and the next connect free to skip attaching)
         // and clear a takeover this payload has no say over. `storedPayload`, which every other line below
         // reads through `latestState`, is the previous state untouched, so the refusal changes nothing.
-        if !reduction.isRefusedOutOfBandPayload, payload.attachmentSnapshot != nil {
+        if !reduction.isRefusedPayload, payload.attachmentSnapshot != nil {
             // `isBusy` is not touched here, so this derives whichever case a concurrently in-flight
             // `takeOver()` currently holds instead of assuming the attempt is settled.
             takeoverAttemptState = TerminalViewerTakeoverAttemptState(isBusy: isBusy, isAwaitingTakeoverConfirmation: false)
@@ -3849,7 +3852,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // frame it cannot paint. Releasing on it would end the hold with no paint and cancel the bounded
         // timers, so such an apply leaves the hold alone and the viewport-report and timeout paths keep
         // covering it (both paint the stored frame when they release).
-        if !reduction.isRefusedOutOfBandPayload, payload.renderSnapshot != nil, let frame = reduction.frameToApply,
+        if !reduction.isRefusedPayload, payload.renderSnapshot != nil, let frame = reduction.frameToApply,
             openScreenHold.releaseForApplyingMatchingFrame(columns: frame.columns, rows: frame.rows)
         {
             trace("open_screen_hold_release reason=apply_matching_frame")
@@ -3865,7 +3868,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // candidate, and a quiet window (below) confirms nothing has superseded it before logging. A
         // refused out-of-band payload keeps its snapshot for diagnostics but never reaches the screen, so
         // it cannot arm a candidate.
-        if !reduction.isRefusedOutOfBandPayload, let target = pendingKeyboardResizeTargetSize, let snapshot = payload.renderSnapshot,
+        if !reduction.isRefusedPayload, let target = pendingKeyboardResizeTargetSize, let snapshot = payload.renderSnapshot,
             snapshot.columns == target.columns, snapshot.rows == target.rows
         {
             armKeyboardResizeQuietWindow(
@@ -3873,7 +3876,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 columns: target.columns, rows: target.rows)
         }
         let holdsFirstPaint = openScreenHold.isHolding && ownerRenderEpochState == nil
-        if !reduction.isRefusedOutOfBandPayload, isOwnerAfterMerge, payload.renderSnapshot != nil, !holdsFirstPaint {
+        if !reduction.isRefusedPayload, isOwnerAfterMerge, payload.renderSnapshot != nil, !holdsFirstPaint {
             if ownerRenderEpochState == nil || !wasOwner { beginOwnerRenderEpoch(from: payload) } else { updateOwnerRenderSnapshot(from: payload) }
         }
         // The reduce loop ends the hold without going through the main actor, so the bound armed with it is

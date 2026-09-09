@@ -97,9 +97,13 @@ final class SpacesMobileBaselineUITests: XCTestCase {
             "Timed out waiting for the terminal list")
     }
 
+    /// Waits without scrolling. The driver's scrolling wait swipes the screen while it polls, and once the
+    /// detail view is up those swipes land on the terminal surface as scroll gestures: each one becomes a
+    /// scroll round trip to the daemon and postpones the viewport report the first paint waits on, which
+    /// under the poor profile moves the measured open by seconds. The surface is never below the fold.
     private func waitForSurface(_ context: ScenarioContext, timeout: TimeInterval = 20) {
         XCTAssertTrue(
-            SpacesMobileUITestDriver.waitForElement(identifier: "terminal.surface", in: context.app, timeout: timeout),
+            context.app.descendants(matching: .any)["terminal.surface"].waitForExistence(timeout: timeout),
             "Timed out waiting for the terminal surface")
     }
 

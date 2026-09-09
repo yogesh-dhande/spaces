@@ -118,7 +118,7 @@
                 DispatchQueue.global().async {
                     _ = try? stateClient.send(
                         SpacesDeviceAPIRequest(
-                            command: .state(SpacesDeviceTerminalSessionRequest(sessionID: sessionID)), authToken: pairingStore.authToken,
+                            command: .state(SpacesDeviceTerminalSessionRequest(sessionID: sessionID, includesRenderUpdate: true)), authToken: pairingStore.authToken,
                             clientApp: clientApp))
                     stateFinished.fulfill()
                 }

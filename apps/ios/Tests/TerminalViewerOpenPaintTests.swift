@@ -527,6 +527,120 @@
             XCTAssertTrue(backend.sawStateReadBeforeAnsweringSubscribe, "the bootstrap read must overlap the stream's connect, not follow it")
         }
 
+        /// A cold open answered the way the daemon answers one: the subscription delivers the session's
+        /// initial frame, and the resize the ownership handshake sends brings the frame at the phone's
+        /// grid. The open pays for exactly one `.state` read, the bootstrap, and that read asks for no
+        /// screen. Nothing in the handshake needs a frame from it (the stream's frames satisfy both the
+        /// hold and the owner bootstrap), so no `owner_bootstrap_refresh` read is issued to make up for
+        /// the frame the bootstrap read no longer carries.
+        func testAColdOpenPaintsFromTheStreamAndPaysForOneScreenlessStateRead() async throws {
+            let backend = ColdOpenStreamBackend()
+            let model = makeModel(backend: backend)
+            defer { model.stop() }
+            let client = model.remoteClientForTesting
+            await backend.configure(
+                metadata: Self.otherOwnerState(emittedAt: "2026-06-04T14:23:30Z", state: .running, owner: client),
+                initialFrames: [
+                    try Self.framedState(
+                        columns: 80, rows: 24, revision: 1, emittedAt: "2026-06-04T14:23:31Z", owner: client,
+                        reason: TerminalRemoteSessionStateReason.attachmentState.rawValue)
+                ],
+                resizeFrame: { columns, rows in
+                    try? Self.framedState(columns: columns, rows: rows, revision: 2, emittedAt: "2026-06-04T14:23:32Z", owner: client)
+                })
+
+            model.start()
+            model.updateViewportSize(columns: 40, rows: 30)
+
+            await waitUntil("the open to paint at the phone's grid") { model.ownerRenderEpoch?.bootstrapSnapshot?.columns == 40 }
+            let reads = await backend.recordedStateReads()
+            XCTAssertEqual(reads.map(\.includesRenderUpdate), [false], "the open's one read is the bootstrap, and it asks for no frame")
+        }
+
+        /// A Mac-owned cold open on a slow link: the takeover's acknowledgment overtakes the
+        /// subscription's initial payload, so that initial arrives after the phone already owns the session
+        /// while carrying the attachment snapshot from before the transfer. It is stamped with the owner
+        /// epoch the transfer ended, and the reducer refuses it whole on that, so the phone keeps the
+        /// session, keeps holding its first paint, and paints once at its own grid. Applying it would
+        /// demote the phone, release the hold as a non-owner, and paint the Mac's grid before the
+        /// transfer's own broadcast put ownership back.
+        func testAStreamInitialFromTheOwnerEpochTheTakeoverEndedLeavesOwnershipAndTheOpenHoldAlone() async throws {
+            let backend = ColdOpenStreamBackend()
+            let model = makeModel(backend: backend)
+            defer { model.stop() }
+            let client = model.remoteClientForTesting
+            let mac = TerminalClient(
+                id: "mac-owner", kind: .localWindow, identity: TerminalClientIdentity(label: "mac"), connectedAt: "2026-06-04T14:23:29Z")
+            await backend.configure(
+                metadata: Self.otherOwnerState(emittedAt: "2026-06-04T14:23:30Z", state: .running, owner: mac, ownerEpoch: 1), initialFrames: [],
+                // The resize is accepted with no frame behind it, which is what leaves the open hold armed
+                // for the assertions below rather than released by the handshake settling empty-handed.
+                resizeFrame: { _, _ in nil })
+            // The transfer bumps the session's ownership generation, and the screenless acknowledgment
+            // carries it: that is what tells this viewer which generation it is looking at with no frame.
+            await backend.setTakeoverState(Self.otherOwnerState(emittedAt: "2026-06-04T14:23:33Z", state: .running, owner: client, ownerEpoch: 2))
+
+            model.start()
+            model.updateViewportSize(columns: 40, rows: 30)
+            await waitUntil("the automatic takeover to be confirmed") { model.isOwner }
+
+            let supersededInitial = try Self.framedState(
+                columns: 80, rows: 24, revision: 1, emittedAt: "2026-06-04T14:23:31Z", owner: mac,
+                reason: TerminalRemoteSessionStateReason.initial.rawValue, ownerEpoch: 1)
+            await model.applyLatestState(supersededInitial, isOutOfBand: false)
+
+            XCTAssertTrue(model.isOwner, "a payload from the generation the transfer ended must not hand the session back to the Mac")
+            XCTAssertTrue(model.isHoldingOpenScreenUpdatesForTesting, "the open hold must still be waiting for a frame at the phone's grid")
+            XCTAssertNil(model.ownerRenderEpoch?.bootstrapSnapshot, "nothing may paint from the generation the takeover ended")
+
+            // The broadcast the daemon sends after every transfer, at the new owner epoch and the grid the
+            // resize asked for.
+            let transferBroadcast = try Self.framedState(
+                columns: 40, rows: 30, revision: 2, emittedAt: "2026-06-04T14:23:34Z", owner: client,
+                reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, ownerEpoch: 2)
+            await model.applyLatestState(transferBroadcast, isOutOfBand: false)
+
+            XCTAssertEqual(model.ownerRenderEpoch?.bootstrapSnapshot?.columns, 40, "the transfer's own frame is what the open paints")
+            XCTAssertFalse(model.isHoldingOpenScreenUpdatesForTesting, "the frame at the reported grid releases the hold")
+        }
+
+        /// An owner whose stream drops reconnects silently, and the screen that reconnect ends on comes
+        /// down the new subscription: the reconnect's bootstrap read asks for no frame exactly as a first
+        /// open's does, and the frame the new subscription delivers is what the viewer paints.
+        func testAnOwnersSilentReconnectPaintsTheFrameTheStreamDelivers() async throws {
+            let backend = ColdOpenStreamBackend()
+            let model = makeModel(backend: backend)
+            defer { model.stop() }
+            let client = model.remoteClientForTesting
+            await backend.configure(
+                metadata: Self.otherOwnerState(emittedAt: "2026-06-04T14:23:30Z", state: .running, owner: client),
+                initialFrames: [
+                    try Self.framedState(
+                        columns: 80, rows: 24, revision: 1, emittedAt: "2026-06-04T14:23:31Z", owner: client,
+                        reason: TerminalRemoteSessionStateReason.attachmentState.rawValue),
+                    try Self.framedState(
+                        columns: 40, rows: 30, revision: 3, emittedAt: "2026-06-04T14:23:40Z", owner: client,
+                        reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, marker: "y"),
+                ],
+                resizeFrame: { columns, rows in
+                    try? Self.framedState(columns: columns, rows: rows, revision: 2, emittedAt: "2026-06-04T14:23:32Z", owner: client)
+                })
+
+            model.start()
+            model.updateViewportSize(columns: 40, rows: 30)
+            await waitUntil("the open to paint at the phone's grid") { model.ownerRenderEpoch?.bootstrapSnapshot?.columns == 40 }
+
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+
+            await waitUntil("the reconnect's own frame to paint", timeout: .seconds(15)) {
+                model.ownerRenderEpoch?.bootstrapSnapshot?.cells.first?.codepoint == UInt32(UnicodeScalar("y").value)
+            }
+            let reads = await backend.recordedStateReads()
+            XCTAssertEqual(
+                reads.map(\.includesRenderUpdate), [false, false],
+                "a reconnect bootstraps the same way a first open does: metadata from the read, screen from the stream")
+        }
+
         /// Leaving the terminal while the connect bootstrap read is still on the wire cancels that read
         /// with the attempt that issued it. The read rides this viewer's command channel, which serves one
         /// request at a time and gives a cancelled caller's turn up immediately, so a read left to settle
@@ -690,11 +804,14 @@
         /// `owner`, when given, is named as the session's owner-mode attachment, which is how a payload from
         /// the daemon hands this viewer ownership. Without it the payload names no attachments and the
         /// ownership the reduction chain already carries rides forward untouched.
+        /// `marker` is the single non-blank cell the grid carries, so a test can tell one frame's screen
+        /// from another's at the same grid.
         private nonisolated static func framedState(
             columns: Int, rows: Int, revision: UInt64, emittedAt: String, state: TerminalSessionState = .running, owner: TerminalClient? = nil,
-            reason: String = TerminalRemoteSessionStateReason.stateChange.rawValue
+            reason: String = TerminalRemoteSessionStateReason.stateChange.rawValue, marker: UnicodeScalar = "x", ownerEpoch: UInt64 = 1
         ) throws -> GhosttyRemoteSessionStatePayload {
-            let frame = GhosttyRenderFrame(sessionRevision: revision, ownerEpoch: 1, snapshot: gridSnapshot(columns: columns, rows: rows))
+            let frame = GhosttyRenderFrame(
+                sessionRevision: revision, ownerEpoch: ownerEpoch, snapshot: gridSnapshot(columns: columns, rows: rows, marker: marker))
             return GhosttyRemoteSessionStatePayload(
                 sessionID: sessionID, reason: reason, emittedAt: emittedAt, sessionStateRevision: revision, sessionStateFlags: 1,
                 screenStateRevision: revision,
@@ -705,15 +822,15 @@
                         clients: [client],
                         attachments: [TerminalAttachment(sessionID: sessionID, clientID: client.id, mode: .owner, attachedAt: emittedAt)])
                 }, title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0,
-                renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
+                renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)), ownerEpoch: ownerEpoch)
         }
 
         /// A payload naming `owner` as the session's active owner and carrying no screen, the shape the
         /// daemon reports for a session some other client holds. `owner` defaults to a client on another
         /// device; a test about this app's own previous viewer passes that viewer's client instead.
-        private nonisolated static func otherOwnerState(emittedAt: String, state: TerminalSessionState, owner: TerminalClient? = nil)
-            -> GhosttyRemoteSessionStatePayload
-        {
+        private nonisolated static func otherOwnerState(
+            emittedAt: String, state: TerminalSessionState, owner: TerminalClient? = nil, ownerEpoch: UInt64? = nil
+        ) -> GhosttyRemoteSessionStatePayload {
             let ownerClient =
                 owner ?? TerminalClient(id: "mac-owner", kind: .localWindow, identity: TerminalClientIdentity(label: "mac"), connectedAt: emittedAt)
             return GhosttyRemoteSessionStatePayload(
@@ -723,7 +840,7 @@
                 attachmentSnapshot: TerminalSessionAttachmentSnapshot(
                     clients: [ownerClient],
                     attachments: [TerminalAttachment(sessionID: sessionID, clientID: ownerClient.id, mode: .owner, attachedAt: emittedAt)]),
-                title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0)
+                title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0, ownerEpoch: ownerEpoch)
         }
 
         /// A bare frame at `columns`x`rows`, for exercising `TerminalViewerOpenScreenHold` directly
@@ -732,10 +849,9 @@
             GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: gridSnapshot(columns: columns, rows: rows))
         }
 
-        private nonisolated static func gridSnapshot(columns: Int, rows: Int) -> GhosttyTerminalSnapshot {
+        private nonisolated static func gridSnapshot(columns: Int, rows: Int, marker: UnicodeScalar = "x") -> GhosttyTerminalSnapshot {
             let cells = (0..<(columns * rows)).map { index in
-                GhosttyTerminalSnapshot.Cell(
-                    codepoint: index == 0 ? UInt32(UnicodeScalar("x").value) : 32, foregroundRGB: 0xFFFFFF, backgroundRGB: 0, flags: 0)
+                GhosttyTerminalSnapshot.Cell(codepoint: index == 0 ? UInt32(marker.value) : 32, foregroundRGB: 0xFFFFFF, backgroundRGB: 0, flags: 0)
             }
             return GhosttyTerminalSnapshot(
                 columns: columns, rows: rows, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
@@ -769,6 +885,98 @@
                 try? await Task.sleep(for: .milliseconds(5))
             }
             XCTFail("Timed out waiting for \(description).")
+        }
+
+        /// Serves an open the way the daemon serves one: the subscription delivers the session's initial
+        /// frame, an accepted resize is answered with a frame at the requested grid, and a `.state` read
+        /// answers with the session's metadata and no screen, which is what the daemon returns for the
+        /// read the connect bootstrap issues. Records those reads so a test can see what an open actually
+        /// asked the daemon for.
+        private actor ColdOpenStreamBackend: SpacesDeviceAPIBackend {
+            private var onEvent: (@MainActor (GhosttyRemoteSessionStatePayload) -> Void)?
+            private var onDisconnect: (@MainActor (SpacesDeviceAPIStreamDisconnect) -> Void)?
+            private var stateReads: [SpacesDeviceTerminalSessionRequest] = []
+            private var metadata: GhosttyRemoteSessionStatePayload?
+            /// One frame per subscription, in connect order: the first open takes the first, a reconnect
+            /// the next. A subscription past the end delivers nothing.
+            private var initialFrames: [GhosttyRemoteSessionStatePayload] = []
+            private var resizeFrame: (@Sendable (Int, Int) -> GhosttyRemoteSessionStatePayload?)?
+            /// What a `.takeover` control answers with. Nil leaves it answering a bare success, which is
+            /// what an open whose session this client already owns never asks for.
+            private var takeoverState: GhosttyRemoteSessionStatePayload?
+            private var subscribeCount = 0
+
+            func configure(
+                metadata: GhosttyRemoteSessionStatePayload, initialFrames: [GhosttyRemoteSessionStatePayload],
+                resizeFrame: @escaping @Sendable (Int, Int) -> GhosttyRemoteSessionStatePayload?
+            ) {
+                self.metadata = metadata
+                self.initialFrames = initialFrames
+                self.resizeFrame = resizeFrame
+            }
+
+            func setTakeoverState(_ payload: GhosttyRemoteSessionStatePayload) { takeoverState = payload }
+
+            func recordedStateReads() -> [SpacesDeviceTerminalSessionRequest] { stateReads }
+
+            /// Ends the current subscription with `error`, exactly as a transport failure would.
+            func fireDisconnect(_ error: any Error) async {
+                let handler = onDisconnect
+                await MainActor.run { handler?(SpacesDeviceAPIStreamDisconnect(error: error)) }
+            }
+
+            nonisolated func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { Transport(backend: self) }
+
+            nonisolated func openSessionStream(
+                request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
+            ) async throws -> SpacesDeviceAPIStreamHandle { await recordSubscribe(onEvent: onEvent, onDisconnect: onDisconnect) }
+
+            private func recordSubscribe(
+                onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
+            ) async -> SpacesDeviceAPIStreamHandle {
+                self.onEvent = onEvent
+                self.onDisconnect = onDisconnect
+                let frame = subscribeCount < initialFrames.count ? initialFrames[subscribeCount] : nil
+                subscribeCount += 1
+                if let frame { await MainActor.run { onEvent(frame) } }
+                return SpacesDeviceAPIStreamHandle(host: "127.0.0.1") {}
+            }
+
+            fileprivate func answer(_ request: SpacesDeviceAPIRequest) async -> SpacesDeviceAPIResponse {
+                switch request.command {
+                case .state(let payload):
+                    stateReads.append(payload)
+                    guard let metadata else { return SpacesDeviceAPIResponse(ok: false, message: "no state configured", errorCode: .notFound) }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .terminalState(metadata))
+                case .terminalControl(let payload):
+                    // The daemon broadcasts the resized screen before it answers the resize; delivering it
+                    // here keeps that order, so the viewer's post-resize wait can only ever find a frame
+                    // that already reflects the grid it asked for.
+                    if payload.action == .resize, let columns = payload.columns, let rows = payload.rows, let frame = resizeFrame?(columns, rows) {
+                        let handler = onEvent
+                        await MainActor.run { handler?(frame) }
+                    }
+                    // A takeover is answered with the session's metadata and no screen, exactly as the
+                    // Device API answers one.
+                    if payload.action == .takeover, let takeoverState {
+                        return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .terminalState(takeoverState))
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+
+            private struct Transport: SpacesDeviceAPIRequestTransport {
+                let backend: ColdOpenStreamBackend
+
+                func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                    await backend.answer(request)
+                }
+
+                func close() async {}
+            }
         }
 
         /// Answers every request in memory while counting how many request transports the client asked it

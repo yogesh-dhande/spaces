@@ -387,8 +387,8 @@ enum SpacesDaemonErrorClassification {
         // Same queue guarantee as the closures above (the Device API's own connection-handling queue, never
         // main), so the engine hop is deadlock-safe. Lets a Device API `.state` read — one per pane attach —
         // be answered from the live core instead of dialing that core's own subscription socket.
-        liveTerminalSessionStateProvider: { [weak self] sessionID, heldFrame in
-            TerminalEngineActor.runSynchronously { self?.liveCoreOneShotStatePayload(sessionID: sessionID, heldFrame: heldFrame) }
+        liveTerminalSessionStateProvider: { [weak self] sessionID, read in
+            TerminalEngineActor.runSynchronously { self?.liveCoreOneShotStatePayload(sessionID: sessionID, read: read) }
         },
         // Same queue guarantee again: runs on the Device API's own queues, never main, so the engine hop
         // is deadlock-safe. In-memory cores are the authority for a session's existence (lifecycle rows
@@ -2811,13 +2811,14 @@ enum SpacesDaemonErrorClassification {
         return liveCore.currentRemoteStatePayload(reason: .stateChange)
     }
 
-    /// The live core's answer to a Device API `.state` read: the same payload a fresh subscriber's initial
-    /// frame carries, so bypassing the subscription socket changes nothing the reader observes. Nil when no
-    /// live core hosts the session, which sends the reader down the persisted/socket read.
-    @TerminalEngineActor private func liveCoreOneShotStatePayload(sessionID: String, heldFrame: TerminalHeldFrameIdentity?)
+    /// The live core's answer to a Device API `.state` read: for a `.screen` read, the same payload a fresh
+    /// subscriber's initial frame carries, so bypassing the subscription socket changes nothing the reader
+    /// observes. Nil when no live core hosts the session, which sends the reader down the persisted/socket
+    /// read.
+    @TerminalEngineActor private func liveCoreOneShotStatePayload(sessionID: String, read: TerminalOneShotStateRead)
         -> GhosttyRemoteSessionStatePayload?
     {
-        sessionCores[sessionID]?.currentOneShotStatePayload(heldFrame: heldFrame)
+        sessionCores[sessionID]?.currentOneShotStatePayload(read)
     }
 
     /// The non-live state read: persisted final/ended state, or a live unix-socket connect+read against the
@@ -3157,7 +3158,7 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil,
         onRestartRequested: (@Sendable () -> Void)? = nil,
-        liveTerminalSessionStateProvider: (@Sendable (String, TerminalHeldFrameIdentity?) -> GhosttyRemoteSessionStatePayload?)? = nil,
+        liveTerminalSessionStateProvider: (@Sendable (String, TerminalOneShotStateRead) -> GhosttyRemoteSessionStatePayload?)? = nil,
         liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])? = nil
     ) {
         #if canImport(spacesdeviceapi)

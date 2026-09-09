@@ -227,14 +227,14 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertFalse(staleReduction.didRequestResync)
         // The refused payload rides along on the result for its metrics, so consumers are told that
         // nothing on it — its pre-handoff attachment snapshot most of all — describes current state.
-        XCTAssertTrue(staleReduction.isRefusedOutOfBandPayload)
+        XCTAssertTrue(staleReduction.isRefusedPayload)
 
         // Newer epoch, and a revision that would have been refused within one epoch.
         let handoffResponse = try payload(text: "charl", sessionRevision: 1, ownerEpoch: 5, emittedAt: "2026-08-09T00:00:04Z")
         let handoffReduction = reducer.reduce(
             incomingPayload: handoffResponse, previousPayload: staleReduction.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
         XCTAssertEqual(handoffReduction.frameToApply?.snapshot, snapshot(text: "charl"), "a handoff's own epoch machinery owns this case")
-        XCTAssertFalse(handoffReduction.isRefusedOutOfBandPayload, "a payload that applied refused nothing")
+        XCTAssertFalse(handoffReduction.isRefusedPayload, "a payload that applied refused nothing")
     }
 
     /// A frameless response still carries runtime state, ownership, title and working directory, and
@@ -249,7 +249,7 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
             incomingPayload: response, previousPayload: streamedReduction.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
 
         XCTAssertEqual(reduction.dropReason, "stale_out_of_band_state")
-        XCTAssertTrue(reduction.isRefusedOutOfBandPayload, "nothing on this payload moved, so no consumer may read state off it")
+        XCTAssertTrue(reduction.isRefusedPayload, "nothing on this payload moved, so no consumer may read state off it")
         XCTAssertEqual(reduction.storedPayload.title, "current")
         XCTAssertEqual(reduction.storedPayload.renderText, "bravo", "refusing the metadata must not disturb the screen either")
         XCTAssertFalse(reduction.didRequestResync)
@@ -331,7 +331,7 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertEqual(reduction.dropReason, "stale_out_of_band_frame")
         XCTAssertFalse(reduction.didRequestResync, "the retained frame is current; nothing is owed")
         XCTAssertFalse(
-            reduction.isRefusedOutOfBandPayload, "a partial refusal is not a refusal: this payload's metadata genuinely merged, so it still applies")
+            reduction.isRefusedPayload, "a partial refusal is not a refusal: this payload's metadata genuinely merged, so it still applies")
         XCTAssertEqual(reduction.storedPayload.title, "renamed", "metadata that moved on must still land")
         XCTAssertEqual(reduction.storedPayload.renderText, "bravo", "and the retained screen is carried forward untouched")
     }
@@ -459,15 +459,138 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertNil(reduction.dropReason)
     }
 
+    /// `ownerEpoch` stamps both the frame and the payload, which is what a live core does: one counter
+    /// feeds both. `sessionOwnerEpoch` overrides the payload's alone, for the persisted final state that
+    /// carries none.
     private func payload(
         text: String, sessionRevision: UInt64, ownerEpoch: UInt64, emittedAt: String, title: String = "t",
-        reason: String = TerminalRemoteSessionStateReason.initial.rawValue, runtimeState: TerminalSessionRuntimeState? = nil
+        reason: String = TerminalRemoteSessionStateReason.initial.rawValue, runtimeState: TerminalSessionRuntimeState? = nil,
+        attachmentSnapshot: TerminalSessionAttachmentSnapshot? = nil, sessionOwnerEpoch: UInt64?? = nil
     ) throws -> GhosttyRemoteSessionStatePayload {
         let frame = GhosttyRenderFrame(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot(text: text))
         return GhosttyRemoteSessionStatePayload(
             sessionID: "session-1", reason: reason, emittedAt: emittedAt, sessionStateRevision: sessionRevision, sessionStateFlags: 1,
-            screenStateRevision: sessionRevision, runtimeState: runtimeState, attachmentSnapshot: nil, title: title, workingDirectory: "/tmp/alpha",
-            outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
+            screenStateRevision: sessionRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot, title: title,
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)),
+            ownerEpoch: sessionOwnerEpoch ?? ownerEpoch)
+    }
+
+    /// The takeover's acknowledgment as the daemon answers it: the session's owner epoch and the
+    /// attachment snapshot naming the new owner, and no screen.
+    private func ownershipPayload(ownerID: String, emittedAt: String, ownerEpoch: UInt64?) -> GhosttyRemoteSessionStatePayload {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, emittedAt: emittedAt,
+            sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil,
+            attachmentSnapshot: attachmentSnapshot(ownerID: ownerID), title: "t", workingDirectory: "/tmp/alpha", outputByteCount: nil,
+            ownerEpoch: ownerEpoch)
+    }
+
+    /// A payload from an older owner epoch describes a session generation that is over. Its attachment
+    /// snapshot names the owner this device displaced and its frame is that owner's screen, so merging it
+    /// would hand the session back and repaint the grid that owner ran at. The refusal is keyed on the
+    /// epoch alone: this payload is stamped NEWER than the acknowledgment that superseded it, which a
+    /// timestamp rule would let straight through.
+    func testReducerRefusesAnInBandPayloadFromAnOlderOwnerEpoch() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let macFrame = try payload(
+            text: "alpha", sessionRevision: 1, ownerEpoch: 1, emittedAt: "2026-08-09T00:00:00Z",
+            attachmentSnapshot: attachmentSnapshot(ownerID: "mac-window"))
+        let macReduction = reducer.reduce(incomingPayload: macFrame, previousPayload: nil)
+        let takeover = ownershipPayload(ownerID: "phone", emittedAt: "2026-08-09T00:00:02Z", ownerEpoch: 2)
+        let takeoverReduction = reducer.reduce(incomingPayload: takeover, previousPayload: macReduction.storedPayload)
+        XCTAssertEqual(
+            TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: takeoverReduction.storedPayload.attachmentSnapshot), "phone",
+            "the takeover's acknowledgment establishes the new generation")
+
+        let supersededInitial = try payload(
+            text: "bravo", sessionRevision: 2, ownerEpoch: 1, emittedAt: "2026-08-09T00:00:09Z",
+            attachmentSnapshot: attachmentSnapshot(ownerID: "mac-window"))
+        let reduction = reducer.reduce(
+            incomingPayload: supersededInitial, previousPayload: takeoverReduction.storedPayload, requestResyncOnApplyFailure: true)
+
+        XCTAssertNil(reduction.frameToApply, "the frame belongs to the generation the transfer ended")
+        XCTAssertEqual(reduction.dropReason, "stale_ownership_generation")
+        XCTAssertTrue(reduction.isRefusedPayload, "no consumer may read ownership off a payload from a generation that is over")
+        XCTAssertFalse(reduction.didRequestResync, "the transfer's own broadcast brings the frame, so nothing is owed")
+        XCTAssertEqual(
+            TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: reduction.storedPayload.attachmentSnapshot), "phone",
+            "the refusal must leave the new owner in place")
+        XCTAssertEqual(reduction.storedPayload.ownerEpoch, 2, "the refusal must leave the stored generation where it is")
+        XCTAssertNil(reduction.storedPayload.renderSnapshot, "the takeover cleared the displaced owner's screen and the refusal keeps it clear")
+
+        // The delta chain is what the refusal must not disturb: this delta is computed against the frame
+        // reduced before the transfer, so it only applies if the refusal left that baseline alone.
+        let baselineFrame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: snapshot(text: "alpha"))
+        let nextFrame = GhosttyRenderFrame(sessionRevision: 3, ownerEpoch: 1, snapshot: snapshot(text: "charl"))
+        let delta = GhosttyRenderUpdateFactory.makeUpdate(target: nextFrame, baseline: GhosttyRenderUpdateBaseline(frame: baselineFrame))
+        XCTAssertEqual(delta.kind, .delta)
+        let deltaPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output.rawValue, emittedAt: "2026-08-09T00:00:03Z",
+            sessionStateRevision: 3, sessionStateFlags: 1, screenStateRevision: 3, runtimeState: nil, attachmentSnapshot: nil, title: "t",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(delta), ownerEpoch: 2)
+        let deltaReduction = reducer.reduce(
+            incomingPayload: deltaPayload, previousPayload: reduction.storedPayload, requestResyncOnApplyFailure: true)
+        XCTAssertEqual(deltaReduction.frameToApply?.snapshot, snapshot(text: "charl"), "the refused payload must not have moved the delta baseline")
+    }
+
+    /// Within one generation nothing is ordered here at all. A stream initial older than the direct read
+    /// that answered ahead of it carries the frame that heads the delta chain, and nothing else re-heads
+    /// it, so it applies however it is stamped.
+    func testReducerAppliesAnOlderStampedPayloadWithinTheSameOwnerEpoch() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let bootstrap = ownershipPayload(ownerID: "phone", emittedAt: "2026-08-09T00:00:02Z", ownerEpoch: 2)
+        let bootstrapReduction = reducer.reduce(incomingPayload: bootstrap, previousPayload: nil)
+
+        let streamInitial = try payload(
+            text: "alpha", sessionRevision: 1, ownerEpoch: 2, emittedAt: "2026-08-09T00:00:01Z",
+            attachmentSnapshot: attachmentSnapshot(ownerID: "phone"))
+        let reduction = reducer.reduce(
+            incomingPayload: streamInitial, previousPayload: bootstrapReduction.storedPayload, requestResyncOnApplyFailure: true)
+
+        XCTAssertEqual(reduction.frameToApply?.snapshot, snapshot(text: "alpha"), "the stream's initial frame heads the chain and must land")
+        XCTAssertNil(reduction.dropReason)
+        XCTAssertFalse(reduction.isRefusedPayload)
+    }
+
+    /// The daemon's wall clock can step backwards, and a transfer that lands during that window is stamped
+    /// older than what the client already holds. Ordering ownership by `emittedAt` would refuse every such
+    /// transfer until the clock caught up and strand the viewer as a non-owner; the epoch only advances, so
+    /// the transfer applies.
+    func testReducerAppliesANewerOwnerEpochStampedOlderThanTheStoredPayload() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let macFrame = try payload(
+            text: "alpha", sessionRevision: 1, ownerEpoch: 1, emittedAt: "2026-08-09T00:00:30Z",
+            attachmentSnapshot: attachmentSnapshot(ownerID: "mac-window"))
+        let macReduction = reducer.reduce(incomingPayload: macFrame, previousPayload: nil)
+
+        let takeover = ownershipPayload(ownerID: "phone", emittedAt: "2026-08-09T00:00:01Z", ownerEpoch: 2)
+        let reduction = reducer.reduce(incomingPayload: takeover, previousPayload: macReduction.storedPayload, requestResyncOnApplyFailure: true)
+
+        XCTAssertNil(reduction.dropReason)
+        XCTAssertFalse(reduction.isRefusedPayload)
+        XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: reduction.storedPayload.attachmentSnapshot), "phone")
+        XCTAssertEqual(reduction.storedPayload.ownerEpoch, 2)
+    }
+
+    /// A terminated session's persisted final state is the one payload no live core built, so it carries no
+    /// epoch and nothing about it can be ordered against a generation. The rule leaves it, and anything
+    /// reduced before an epoch was ever seen, alone.
+    func testReducerNeverRefusesAnInBandPayloadWithNoOwnerEpoch() throws {
+        for (storedEpoch, incomingEpoch) in [(UInt64?.some(2), UInt64?.none), (UInt64?.none, UInt64?.some(1))] {
+            var reducer = TerminalRemoteStateReducer()
+            let stored = try payload(
+                text: "alpha", sessionRevision: 1, ownerEpoch: 2, emittedAt: "2026-08-09T00:00:00Z",
+                attachmentSnapshot: attachmentSnapshot(ownerID: "phone"), sessionOwnerEpoch: .some(storedEpoch))
+            let storedReduction = reducer.reduce(incomingPayload: stored, previousPayload: nil)
+
+            let incoming = ownershipPayload(ownerID: "mac-window", emittedAt: "2026-08-09T00:00:01Z", ownerEpoch: incomingEpoch)
+            let reduction = reducer.reduce(
+                incomingPayload: incoming, previousPayload: storedReduction.storedPayload, requestResyncOnApplyFailure: true)
+
+            XCTAssertNil(reduction.dropReason, "stored=\(String(describing: storedEpoch)) incoming=\(String(describing: incomingEpoch))")
+            XCTAssertFalse(reduction.isRefusedPayload)
+            XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: reduction.storedPayload.attachmentSnapshot), "mac-window")
+        }
     }
 
     private func metadataPayload(emittedAt: String, title: String) -> GhosttyRemoteSessionStatePayload {

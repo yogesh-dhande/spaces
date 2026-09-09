@@ -495,7 +495,12 @@ import workspacecore
             mousePointerX: request.mousePointerX, mousePointerY: request.mousePointerY, mousePointerMods: request.mousePointerMods,
             appendNewline: request.appendNewline, asPaste: request.asPaste, appearance: request.appearance,
             selectionStartColumn: request.selectionStartColumn, selectionStartRow: request.selectionStartRow,
-            selectionEndColumn: request.selectionEndColumn, selectionEndRow: request.selectionEndRow, selectionRectangle: request.selectionRectangle)
+            selectionEndColumn: request.selectionEndColumn, selectionEndRow: request.selectionEndRow, selectionRectangle: request.selectionRectangle,
+            // The Mac's paired-device pane always wants the screen on an acknowledgment that carries state.
+            // `DeviceTerminalSessionStateModel.apply` orders every payload by `emittedAt`, so a frameless
+            // acknowledgment that outran the transfer's own broadcast would make the pane discard that
+            // broadcast as older and leave it holding no frame for the new owner epoch.
+            includesRenderUpdate: true)
     }
 
     /// Issues a terminal control request to the session's owning device and returns

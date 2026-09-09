@@ -1471,16 +1471,17 @@ private struct DemoRecorder {
         if plan.isInteractive {
             let attachResponse = try sendControl(
                 SpacesDeviceTerminalControlRequest(
-                    action: .attach, sessionID: sessionID, client: recorderClient, attachmentMode: .viewer, appearance: .dark))
+                    action: .attach, sessionID: sessionID, client: recorderClient, attachmentMode: .viewer, appearance: .dark,
+                    includesRenderUpdate: true))
             guard attachResponse.ok else { throw ValidationError("attach failed for \(plan.slug): \(attachResponse.message)") }
             let takeoverResponse = try sendControl(
-                SpacesDeviceTerminalControlRequest(action: .takeover, sessionID: sessionID, clientID: recorderClientID))
+                SpacesDeviceTerminalControlRequest(action: .takeover, sessionID: sessionID, clientID: recorderClientID, includesRenderUpdate: true))
             guard takeoverResponse.ok else { throw ValidationError("takeover failed for \(plan.slug): \(takeoverResponse.message)") }
-            var ownerEpoch = takeoverResponse.sessionState?.renderOwnerEpoch
-            if ownerEpoch == nil {
-                ownerEpoch = try? SpacesDeviceAPICodec.decodeResponse(request(command: .state(.init(sessionID: sessionID)))).sessionState?
-                    .renderOwnerEpoch
-            }
+            // The takeover request asks for a render update, so its acknowledgment already carries the
+            // screen and the owner epoch the resize below has to be stamped with. A nil epoch means the
+            // session could export no frame (nothing rendered yet); the resize is sent without one, which
+            // the daemon accepts from the owner.
+            let ownerEpoch = takeoverResponse.sessionState?.renderOwnerEpoch
             let resizeResponse = try sendControl(
                 SpacesDeviceTerminalControlRequest(
                     action: .resize, sessionID: sessionID, clientID: recorderClientID, columns: columns, rows: rows, ownerEpoch: ownerEpoch,
@@ -1492,7 +1493,8 @@ private struct DemoRecorder {
             // subscription below can only ever start from a post-resize frame.
             try waitUntilSessionServesGrid(sessionID: sessionID, columns: columns, rows: rows, slug: plan.slug)
             let payload = try collectSteadyState(sessionID: sessionID)
-            _ = try? sendControl(SpacesDeviceTerminalControlRequest(action: .detach, sessionID: sessionID, clientID: recorderClientID))
+            _ = try? sendControl(
+                SpacesDeviceTerminalControlRequest(action: .detach, sessionID: sessionID, clientID: recorderClientID, includesRenderUpdate: true))
             return payload
         }
         return try collectSteadyState(sessionID: sessionID)
@@ -1501,8 +1503,8 @@ private struct DemoRecorder {
     private func waitUntilSessionServesGrid(sessionID: String, columns: Int, rows: Int, slug: String) throws {
         let deadline = Date().addingTimeInterval(15)
         while Date() < deadline {
-            if let state = try? SpacesDeviceAPICodec.decodeResponse(request(command: .state(.init(sessionID: sessionID)))).sessionState,
-                let update = state.decodedRenderUpdate, let applied = try? GhosttyRenderUpdateApplier.apply(update, to: nil),
+            if let state = try? SpacesDeviceAPICodec.decodeResponse(request(command: .state(.init(sessionID: sessionID, includesRenderUpdate: true))))
+                .sessionState, let update = state.decodedRenderUpdate, let applied = try? GhosttyRenderUpdateApplier.apply(update, to: nil),
                 applied.snapshot.columns == columns, applied.snapshot.rows == rows
             {
                 return

@@ -70,7 +70,7 @@ import spacesterminalcore
         .restartWorkspaceProcess(SpacesDeviceWorkspaceProcessMutationRequest(workspaceID: "workspace-1", processID: "process-1")),
         .stopCodingAgent(SpacesDeviceCodingAgentMutationRequest(workspaceID: "workspace-1", agentID: "agent-1")),
         .renameAgentSession(SpacesDeviceAgentSessionRenameRequest(workspaceID: "workspace-1", agentID: "agent-1", title: "New Title")),
-        .state(SpacesDeviceTerminalSessionRequest(sessionID: "session-1")),
+        .state(SpacesDeviceTerminalSessionRequest(sessionID: "session-1", includesRenderUpdate: true)),
         .terminalControl(SpacesDeviceTerminalControlRequest(action: .attach, sessionID: "session-1")),
         .terminalPasteImage(
             SpacesDeviceTerminalPasteImageRequest(

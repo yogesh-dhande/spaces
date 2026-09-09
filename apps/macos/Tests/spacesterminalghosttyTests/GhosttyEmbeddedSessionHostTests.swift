@@ -1419,20 +1419,73 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
 
             host.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
-            let openingPayload = try XCTUnwrap(host.core.currentOneShotStatePayload())
+            let openingPayload = try XCTUnwrap(host.core.currentOneShotStatePayload(.screen(heldFrame: nil)))
             let openingFrame = try XCTUnwrap(openingPayload.decodedRenderUpdate?.fullFrame)
             let heldFrame = try XCTUnwrap(TerminalHeldFrameIdentity(frame: openingFrame))
 
-            let confirmation = try XCTUnwrap(host.core.currentOneShotStatePayload(heldFrame: heldFrame))
+            let confirmation = try XCTUnwrap(host.core.currentOneShotStatePayload(.screen(heldFrame: heldFrame)))
             XCTAssertNil(confirmation.renderUpdate, "the reader already displays this exact frame, so it is owed no bytes")
             XCTAssertEqual(confirmation.title, openingPayload.title, "the read still reports the session's metadata")
             XCTAssertEqual(confirmation.screenStateRevision, openingPayload.screenStateRevision)
 
             let stalerFrame = TerminalHeldFrameIdentity(ownerEpoch: heldFrame.ownerEpoch, sessionRevision: heldFrame.sessionRevision - 1)
-            let repaint = try XCTUnwrap(host.core.currentOneShotStatePayload(heldFrame: stalerFrame))
+            let repaint = try XCTUnwrap(host.core.currentOneShotStatePayload(.screen(heldFrame: stalerFrame)))
             let repaintUpdate = try XCTUnwrap(repaint.decodedRenderUpdate)
             XCTAssertEqual(repaintUpdate.kind, .full, "a reader holding some other frame still gets the whole screen")
             XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: try XCTUnwrap(repaintUpdate.fullFrame).snapshot), "held frame")
+        }
+    }
+
+    /// The connect bootstrap read asks for the session's metadata and nothing else, because the
+    /// subscription it is issued alongside delivers the screen. It must come back with the ownership and
+    /// runtime state the ownership handshake reads and no render update at all, while the same read asking
+    /// for a screen still exports the whole frame.
+    func testMetadataOnlyOneShotStateReadCarriesTheSessionsMetadataWithNoScreen() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-metadata-only-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+                shell: "/bin/zsh", command: nil, createdAt: "2026-09-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            let owner = TerminalClient(
+                id: "remote-ipad", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
+                connectedAt: "2026-09-09T00:00:00Z")
+            try TerminalSessionPersistence.attachClient(
+                sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-09-09T00:00:00Z")
+
+            let captureCount = MutableBox(0)
+            GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in
+                captureCount.value += 1
+                return Self.snapshot(text: "metadata only")
+            }
+            defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
+
+            host.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
+            let metadataRead = try XCTUnwrap(host.core.currentOneShotStatePayload(.metadataOnly))
+            XCTAssertNil(metadataRead.renderUpdate, "a read that asked for no screen must carry no render update")
+            XCTAssertEqual(captureCount.value, 0, "a read that asked for no screen must not capture one either")
+            XCTAssertEqual(
+                TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: metadataRead.attachmentSnapshot), owner.id,
+                "the ownership the connect handshake reads must still be on the response")
+            XCTAssertEqual(metadataRead.sessionID, launchConfiguration.sessionID)
+            XCTAssertEqual(metadataRead.title, "shell")
+
+            let screenRead = try XCTUnwrap(host.core.currentOneShotStatePayload(.screen(heldFrame: nil)))
+            let update = try XCTUnwrap(screenRead.decodedRenderUpdate)
+            XCTAssertEqual(update.kind, .full, "a read that asked for the screen still gets the whole frame")
+            XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: try XCTUnwrap(update.fullFrame).snapshot), "metadata only")
+
+            // The ownership generation rides on the payload itself, not inside the render update, so a
+            // screenless read still tells a client which generation it is looking at. That is what lets the
+            // client refuse a payload from a generation an ownership transfer has already ended.
+            XCTAssertEqual(metadataRead.ownerEpoch, update.ownerEpoch, "a screenless read carries the same generation the frame is stamped with")
+            XCTAssertEqual(metadataRead.ownerEpoch, screenRead.ownerEpoch, "both reads describe one session, so both name one generation")
         }
     }
 
@@ -1441,6 +1494,25 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     /// spending it here would make every subscriber of this session pay a full frame, and defer the
     /// screen by a broadcast, for a reader that needed nothing at all.
     func testAHeldFrameOmissionLeavesTheNextBroadcastADelta() async throws {
+        try await assertAFramelessOneShotReadLeavesTheNextBroadcastADelta(sessionIDPrefix: "session-held-frame-arm") { displayedFrame in
+            .screen(heldFrame: TerminalHeldFrameIdentity(frame: displayedFrame))
+        }
+    }
+
+    /// A metadata-only read is the connect bootstrap's read: it asked for no screen because the
+    /// subscription opened alongside it is bringing the frame. It must not arm the promise either, for the
+    /// same reason the held-frame omission must not: this reader has a baseline coming, and arming would
+    /// charge every subscriber of the session a full frame for it.
+    func testAMetadataOnlyOneShotReadLeavesTheNextBroadcastADelta() async throws {
+        try await assertAFramelessOneShotReadLeavesTheNextBroadcastADelta(sessionIDPrefix: "session-metadata-only-arm") { _ in .metadataOnly }
+    }
+
+    /// Drives a session with a live subscriber that already holds a baseline, answers one one-shot read
+    /// built by `makeRead` from the frame that subscriber displays, and asserts that read carried no
+    /// render update and left the session's delta chain alone.
+    private func assertAFramelessOneShotReadLeavesTheNextBroadcastADelta(
+        sessionIDPrefix: String, makeRead: (GhosttyRenderFrame) -> TerminalOneShotStateRead
+    ) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1448,7 +1520,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
         let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: "session-held-frame-arm-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+            sessionID: "\(sessionIDPrefix)-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
             shell: "/bin/zsh", command: nil, createdAt: "2026-09-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
 
@@ -1496,12 +1568,13 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             previousPayload = reduction.storedPayload
             if let frame = reduction.frameToApply { displayedFrame = frame }
         }
-        let heldFrame = try XCTUnwrap(TerminalHeldFrameIdentity(frame: try XCTUnwrap(displayedFrame)))
+        let read = makeRead(try XCTUnwrap(displayedFrame))
         XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: try XCTUnwrap(displayedFrame).snapshot), "bravo")
 
-        // The resume's read: the screen did not change, so it carries no frame.
-        let confirmation = try await TerminalEngineActor.run { host.core.currentOneShotStatePayload(heldFrame: heldFrame) }
-        XCTAssertNil(try XCTUnwrap(confirmation).renderUpdate)
+        // The read itself: it either names the frame the reader already displays or wants no screen at
+        // all, so either way it carries no frame.
+        let confirmation = try await TerminalEngineActor.run { host.core.currentOneShotStatePayload(read) }
+        XCTAssertNil(try XCTUnwrap(confirmation).renderUpdate, "the read asked for no frame bytes")
 
         receivedPayloads.removeAll()
         capturedSnapshotBox.value = Self.snapshot(text: "charl")

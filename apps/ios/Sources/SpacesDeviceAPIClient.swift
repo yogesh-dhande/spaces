@@ -505,11 +505,15 @@ struct SpacesDeviceAPIClient: Sendable {
         return response.automationRuns ?? []
     }
 
-    func fetchState(sessionID: String, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
-        -> GhosttyRemoteSessionStatePayload
-    {
+    /// - Parameter includesRenderUpdate: Whether the response should carry the session's screen. The
+    ///   connect bootstrap read passes false because the subscription it is issued alongside delivers the
+    ///   frame it would otherwise duplicate; every other read paints from what it gets back and passes true.
+    func fetchState(
+        sessionID: String, includesRenderUpdate: Bool, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> GhosttyRemoteSessionStatePayload {
         let request = SpacesDeviceAPIRequest(
-            command: .state(.init(sessionID: sessionID)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
+            command: .state(.init(sessionID: sessionID, includesRenderUpdate: includesRenderUpdate)), authToken: settings.trimmedAuthToken,
+            clientApp: clientAppIdentity)
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
         guard let sessionState = response.sessionState else {
@@ -523,8 +527,10 @@ struct SpacesDeviceAPIClient: Sendable {
         commandChannel: SpacesDeviceAPICommandChannel? = nil
     ) async throws {
         let request = SpacesDeviceAPIRequest(
-            command: .terminalControl(.init(action: .attach, sessionID: sessionID, client: client, attachmentMode: mode, appearance: appearance)),
-            authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
+            command: .terminalControl(
+                .init(
+                    action: .attach, sessionID: sessionID, client: client, attachmentMode: mode, appearance: appearance,
+                    includesRenderUpdate: true)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
         let response = try await sendRequest(request, commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
@@ -533,8 +539,8 @@ struct SpacesDeviceAPIClient: Sendable {
         async throws
     {
         let request = SpacesDeviceAPIRequest(
-            command: .terminalControl(.init(action: .detach, sessionID: sessionID, clientID: clientID)), authToken: settings.trimmedAuthToken,
-            clientApp: clientAppIdentity)
+            command: .terminalControl(.init(action: .detach, sessionID: sessionID, clientID: clientID, includesRenderUpdate: true)),
+            authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
@@ -554,7 +560,8 @@ struct SpacesDeviceAPIClient: Sendable {
         commandChannel: SpacesDeviceAPICommandChannel? = nil
     ) async throws -> GhosttyRemoteSessionStatePayload? {
         let request = SpacesDeviceAPIRequest(
-            command: .terminalControl(.init(action: .heartbeat, sessionID: sessionID, clientID: clientID, heldFrameIdentity: heldFrame)),
+            command: .terminalControl(
+                .init(action: .heartbeat, sessionID: sessionID, clientID: clientID, heldFrameIdentity: heldFrame, includesRenderUpdate: true)),
             authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
@@ -565,8 +572,11 @@ struct SpacesDeviceAPIClient: Sendable {
         async throws -> GhosttyRemoteSessionStatePayload?
     {
         let request = SpacesDeviceAPIRequest(
-            command: .terminalControl(.init(action: .takeover, sessionID: sessionID, clientID: clientID)), authToken: settings.trimmedAuthToken,
-            clientApp: clientAppIdentity)
+            // No screen on the acknowledgment: this viewer holds its first paint until a frame at its own
+            // grid arrives, and the frame for the epoch the transfer opens reaches it as the
+            // `attachment_state` broadcast the daemon sends every subscriber after the handoff.
+            command: .terminalControl(.init(action: .takeover, sessionID: sessionID, clientID: clientID, includesRenderUpdate: false)),
+            authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
         return response.sessionState

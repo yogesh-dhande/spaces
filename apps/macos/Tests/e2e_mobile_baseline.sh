@@ -15,10 +15,13 @@ source "$ROOT_DIR/scripts/spaces-e2e-env.sh"
 source "$SCRIPT_DIR/e2e_fixture_repos.sh"
 # shellcheck source=/dev/null
 source "$ROOT_DIR/scripts/ios-simulator-lifecycle.sh"
+# shellcheck source=/dev/null
+source "$ROOT_DIR/scripts/spaces-profile-helpers.sh"
 
 BUNDLE_ID="dev.usespaces.spacesmobile"
 SPACES_E2E_BIN="$ROOT_DIR/apps/macos/.build/debug/spacese2e"
 SPACES_BIN="$ROOT_DIR/apps/macos/.build/debug/spaces"
+SPACES_APP_BIN="$ROOT_DIR/apps/macos/.build/debug/SpacesApp"
 SHAPER_SCRIPT="$SCRIPT_DIR/ios_baseline_shaper.py"
 FIXTURE_SCRIPT="$SCRIPT_DIR/terminal_stress_fixture.py"
 REPORT_SCRIPT="$SCRIPT_DIR/ios_device_baseline_report.py"
@@ -29,7 +32,7 @@ FIXTURE_TEMPLATE_DIR="$ROOT_DIR/apps/macos/Tests/fixtures/e2e_demo"
 
 ALL_PROFILES=(good constrained poor)
 ALL_SCENARIOS=(
-  cold-open back-and-forth keyboard streaming scrollback background-terminal background-list reconnect idle
+  cold-open cold-open-owned back-and-forth keyboard streaming scrollback background-terminal background-list reconnect idle
 )
 
 scenario_test_method() {
@@ -39,6 +42,7 @@ scenario_test_method() {
   # before main() ever calls this, and every ALL_SCENARIOS member is mapped below.
   case "$1" in
     cold-open) printf 'testColdOpen' ;;
+    cold-open-owned) printf 'testColdOpen' ;;
     back-and-forth) printf 'testBackAndForth' ;;
     keyboard) printf 'testKeyboard' ;;
     streaming) printf 'testStreaming' ;;
@@ -108,7 +112,15 @@ if [[ ${#SELECTED_PROFILES[@]} -eq 0 ]]; then
   SELECTED_PROFILES=("${ALL_PROFILES[@]}")
 fi
 if [[ ${#SELECTED_SCENARIOS[@]} -eq 0 ]]; then
-  SELECTED_SCENARIOS=("${ALL_SCENARIOS[@]}")
+  # A remote run's default list leaves out cold-open-owned, which no remote session can satisfy: no Mac
+  # window can own one. Asking for it explicitly is still an error, so a run that names it hears why.
+  if [[ "$REMOTE" -eq 1 ]]; then
+    for scenario in "${ALL_SCENARIOS[@]}"; do
+      [[ "$scenario" == "cold-open-owned" ]] || SELECTED_SCENARIOS+=("$scenario")
+    done
+  else
+    SELECTED_SCENARIOS=("${ALL_SCENARIOS[@]}")
+  fi
 fi
 for requested in "${SELECTED_PROFILES[@]}"; do
   [[ " ${ALL_PROFILES[*]} " == *" $requested "* ]] || { echo "Unknown profile: $requested" >&2; exit 1; }
@@ -116,6 +128,12 @@ done
 for requested in "${SELECTED_SCENARIOS[@]}"; do
   [[ " ${ALL_SCENARIOS[*]} " == *" $requested "* ]] || { echo "Unknown scenario: $requested" >&2; exit 1; }
 done
+if [[ "$REMOTE" -eq 1 ]]; then
+  for requested in "${SELECTED_SCENARIOS[@]}"; do
+    [[ "$requested" == "cold-open-owned" ]] \
+      && { echo "cold-open-owned cannot run with --remote: no Mac window can own a remote session" >&2; exit 1; }
+  done
+fi
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -156,6 +174,7 @@ SHAPER_CONTROL_PORT=""
 SHAPER_PID=""
 CURRENT_SESSION_ID=""
 SCENARIO_FAILURES=()
+LANE_LAUNCHED_MAC_APP_PID=""
 
 # A session left running by an interrupted scenario is the only daemon-side state this trap ever
 # touches; it never stops or restarts the daemon itself.
@@ -172,6 +191,20 @@ cleanup() {
   stop_shaper
   rm -f "$BASELINE_CONFIG_HANDOFF_PATH"
   restore_simulator_hardware_keyboard
+  if [[ -n "$LANE_LAUNCHED_MAC_APP_PID" ]]; then
+    # Re-check the lease right before signalling: only quit the app if it still holds the
+    # profile's owner lease under this pid, so a pid the OS has since reused for an unrelated
+    # process is never signalled.
+    local current_owner_pid
+    current_owner_pid="$(spaces_profile_app_owner_pid "$SPACES_E2E_BIN" 2>/dev/null || true)"
+    if [[ "$current_owner_pid" == "$LANE_LAUNCHED_MAC_APP_PID" ]]; then
+      kill "$LANE_LAUNCHED_MAC_APP_PID" >/dev/null 2>&1 || true
+      local quit_deadline=$((SECONDS + 10))
+      while [[ $SECONDS -lt $quit_deadline ]] && kill -0 "$LANE_LAUNCHED_MAC_APP_PID" >/dev/null 2>&1; do
+        sleep 0.2
+      done
+    fi
+  fi
   exit "$exit_code"
 }
 trap cleanup EXIT
@@ -313,6 +346,14 @@ build_workspace_terminal_payload() {
     "$1" "$2"
 }
 
+# True when this run will hit ensure_mac_app_for_owned_session's stage, i.e. cold-open-owned
+# needs a native Mac window and only a local run can supply one. Shared by require_preconditions
+# (so the SpacesApp product is staged before that scenario runs) and main (so the staging call
+# itself only fires when it is needed).
+owned_scenario_selected() {
+  [[ "$REMOTE" -eq 0 && " ${SELECTED_SCENARIOS[*]} " == *" cold-open-owned "* ]]
+}
+
 require_preconditions() {
   command -v python3 >/dev/null 2>&1 || fail "python3 is required."
   command -v xcodebuild >/dev/null 2>&1 || fail "xcodebuild is required."
@@ -323,6 +364,11 @@ require_preconditions() {
     log "building spaces and spacese2e..."
     (cd "$ROOT_DIR" && swift build --package-path apps/macos --product spacese2e --product spaces) \
       || fail "failed to build spaces and spacese2e"
+  fi
+  if owned_scenario_selected && [[ ! -x "$SPACES_APP_BIN" ]]; then
+    log "building SpacesApp..."
+    (cd "$ROOT_DIR" && swift build --package-path apps/macos --product SpacesApp) \
+      || fail "failed to build SpacesApp"
   fi
 }
 
@@ -810,6 +856,96 @@ run_streaming_scenario() {
   [[ $ok -eq 1 ]]
 }
 
+# True (exit 0) when the daemon's overview reports an active (never-detached) owner attachment on
+# $2 within the overview snapshot at $1, matching the shape TerminalSessionAttachmentSnapshot puts
+# on the wire (SpacesDeviceTerminalSessionSummary.attachmentSnapshot.attachments[].mode/detachedAt).
+session_has_owner_attachment() {
+  python3 - "$1" "$2" <<'PY'
+import json
+import sys
+
+overview_path, session_id = sys.argv[1:3]
+overview = json.load(open(overview_path))["result"]["overview"]
+session = next((s for s in overview["sessions"] if s["id"] == session_id), None)
+if session is None:
+    sys.exit(1)
+attachments = (session.get("attachmentSnapshot") or {}).get("attachments") or []
+has_owner = any(a.get("mode") == "owner" and a.get("detachedAt") is None for a in attachments)
+sys.exit(0 if has_owner else 1)
+PY
+}
+
+# Polls the daemon overview (the same command fetch_overview already uses) for an active owner
+# attachment on session $1, bounded to ~20s at 0.5s intervals. `spaces terminal show` only posts an
+# IPC notification to the running Mac app and returns; the window's open and its attach round trip
+# to the daemon land asynchronously, so cold-open-owned waits here rather than assuming the app's
+# window is already the owner by the time the UI test starts.
+wait_for_owner_attachment() {
+  local session_id="$1"
+  local overview_out="$RUN_ROOT/overview-cold-open-owned.json"
+  local deadline=$((SECONDS + 20))
+  while [[ $SECONDS -lt $deadline ]]; do
+    if python3 "$DEVICE_API_HELPER" overview --host "$DAEMON_HOST" --port "$DAEMON_PORT" \
+        --certificate-fingerprint "$CERTIFICATE_FINGERPRINT" --spacese2e "$SPACES_E2E_BIN" \
+        --auth-token "$AUTH_TOKEN" --installation-id "$INSTALLATION_ID" --out "$overview_out" --require-ok >/dev/null 2>&1 \
+        && session_has_owner_attachment "$overview_out" "$session_id"; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+# `spaces terminal show` (open_owned_session's precondition step) requires a running Mac app that
+# holds this profile's app-owner lease; without one it fails outright with "No Spaces app instance
+# is running for this profile". A local lane run with only the daemon up has no such app, so this
+# stages this worktree's app before the first cold-open-owned scenario runs. It only launches the
+# app when no instance already owns the profile, and records the pid it launched so cleanup() can
+# quit exactly that instance and leave an already-running app alone.
+ensure_mac_app_for_owned_session() {
+  local existing_pid
+  existing_pid="$(spaces_profile_app_owner_pid "$SPACES_E2E_BIN")"
+  if [[ -n "$existing_pid" ]]; then
+    log "cold-open-owned: profile app already running (pid $existing_pid)"
+    return 0
+  fi
+
+  local app_log="$RUN_ROOT/mac-app.log"
+  log "cold-open-owned: no Mac app owns this profile; launching $SPACES_APP_BIN"
+  nohup "$SPACES_APP_BIN" >"$app_log" 2>&1 &
+  # Detached from job control so quitting it from `cleanup` prints no "Terminated" job notice.
+  disown
+
+  local deadline=$((SECONDS + 30))
+  local owner_pid=""
+  while [[ $SECONDS -lt $deadline ]]; do
+    owner_pid="$(spaces_profile_app_owner_pid "$SPACES_E2E_BIN")"
+    [[ -n "$owner_pid" ]] && break
+    sleep 0.5
+  done
+  [[ -n "$owner_pid" ]] || fail "cold-open-owned: staged Mac app never took the profile owner lease; see $app_log"
+
+  LANE_LAUNCHED_MAC_APP_PID="$owner_pid"
+  log "cold-open-owned: staged Mac app pid $owner_pid owns the profile"
+}
+
+# The cold-open-owned scenario's precondition: opens the just-started session in a native Mac
+# window before the UI test runs, so the iPhone's cold open lands on a session a localWindow owner
+# already holds (GitHub issue #672's common case) rather than the ownerless session every other
+# cold-open scenario measures.
+open_owned_session() {
+  local session_id="$1"
+  log "cold-open-owned: opening session $session_id in a native Mac window"
+  if ! "$SPACES_BIN" terminal show "$session_id" >/dev/null; then
+    log "cold-open-owned: failed to open session $session_id in a native Mac window"
+    return 1
+  fi
+  if ! wait_for_owner_attachment "$session_id"; then
+    log "cold-open-owned: timed out waiting for session $session_id to report an active owner attachment"
+    return 1
+  fi
+}
+
 run_scenario() {
   local profile="$1" scenario="$2"
   local test_method
@@ -843,7 +979,9 @@ run_scenario() {
 
   local xcodebuild_log="$RUN_ROOT/xcodebuild-$profile-$scenario.log"
   local status="ok"
-  if [[ "$scenario" == "streaming" ]]; then
+  if [[ "$scenario" == "cold-open-owned" ]] && ! open_owned_session "$session_id"; then
+    status="failed"
+  elif [[ "$scenario" == "streaming" ]]; then
     run_streaming_scenario "$profile" "$scenario" "$test_method" "$session_id" "$xcodebuild_log" || status="failed"
   else
     run_ui_test "$test_method" "$xcodebuild_log" || status="failed"
@@ -868,6 +1006,9 @@ run_scenario() {
 main() {
   write_device_api_helper
   require_preconditions
+  if owned_scenario_selected; then
+    ensure_mac_app_for_owned_session
+  fi
   choose_simulator
   disconnect_simulator_hardware_keyboard
   spaces_ios_simulator_boot_if_needed "$MOBILE_UDID" || fail "failed to boot simulator $MOBILE_UDID"

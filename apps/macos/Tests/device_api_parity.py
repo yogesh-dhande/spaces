@@ -59,10 +59,15 @@ def client_app(args: argparse.Namespace) -> dict:
 
 
 def typed_request(command: str, payload: dict | None, args: argparse.Namespace, app: dict) -> dict:
+    body = dict(payload or {})
+    # The Swift decoder is synthesized Codable with a non-optional Bool for this field, so state and
+    # terminalControl payloads must always carry it; setdefault keeps a caller-supplied value intact.
+    if command in ("state", "terminalControl"):
+        body.setdefault("includesRenderUpdate", True)
     return {
         "authToken": args.auth_token,
         "clientApp": app,
-        "command": {command: payload or {}},
+        "command": {command: body},
     }
 
 

@@ -1629,7 +1629,8 @@
             do {
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .state(SpacesDeviceTerminalSessionRequest(sessionID: sessionID)), authToken: authToken, clientApp: clientApp))
+                        command: .state(SpacesDeviceTerminalSessionRequest(sessionID: sessionID, includesRenderUpdate: true)), authToken: authToken,
+                        clientApp: clientApp))
                 guard response.ok else { throw StateFetchError.rejected(message: response.message, code: response.errorCode) }
                 guard let payload = response.sessionState else { throw StateFetchError.missingState }
                 return .success(payload)
@@ -1692,7 +1693,8 @@
             case .state(let payload):
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .state(SpacesDeviceTerminalSessionRequest(sessionID: payload.sessionID)), authToken: authToken, clientApp: clientApp)
+                        command: .state(SpacesDeviceTerminalSessionRequest(sessionID: payload.sessionID, includesRenderUpdate: true)),
+                        authToken: authToken, clientApp: clientApp)
                 )
                 return TerminalServiceResponse(ok: response.ok, message: response.message, sessionState: response.sessionState)
             case .control(let payload):
