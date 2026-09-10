@@ -561,6 +561,73 @@ class ReconnectMetricTests(unittest.TestCase):
         self.assertEqual(metrics["connection_error_alerts"], 0)
 
 
+class MacReconnectMetricTests(unittest.TestCase):
+    def test_full_cycle(self) -> None:
+        # The mac-reconnect scenario has no ios-uitest scenario_begin/scenario_end markers: its
+        # window comes from the runner's own start/finish stamps, same as any other runner-driven
+        # scenario. The iOS app is still running and emitting its own events (source "ios-viewer")
+        # into the same log during this window; those decoys would win every "first" search and
+        # inflate the frame/KB counts if metric_reconnect did not scope to the Mac's own sources.
+        events = [
+            lane_marker("lane-runner", "2026-09-08T10:00:00.000Z", 0, "poor", "mac-reconnect", "runner_scenario_start"),
+            lane_marker("lane-runner", "2026-09-08T10:00:10.000Z", 0, "poor", "mac-reconnect", "link_down"),
+            app_event(
+                "s1", "ios-viewer", "connection_stage", "2026-09-08T10:00:10.500Z", 0,
+                attributes={"stage": "reconnecting", "banner": "1"},
+            ),
+            app_event(
+                "s2", "mac-pane", "connection_stage", "2026-09-08T10:00:11.500Z", 0,
+                attributes={"stage": "reconnecting", "banner": "1", "device": "mac"},
+            ),
+            app_event(
+                "s1", "ios-viewer", "render_frame_payload_receive", "2026-09-08T10:00:15.000Z", 0,
+                count=2048, attributes={"render_update": "1"},
+            ),
+            lane_marker("lane-runner", "2026-09-08T10:00:20.000Z", 0, "poor", "mac-reconnect", "link_up"),
+            app_event(
+                "s1", "ios-viewer", "stream_first_frame", "2026-09-08T10:00:20.500Z", 0, elapsed_ms=500,
+                attributes={"host": "h"},
+            ),
+            app_event(
+                "s1", "ios-viewer", "connection_stage", "2026-09-08T10:00:21.000Z", 0,
+                attributes={"stage": "connected", "banner": "0"},
+            ),
+            app_event(
+                "s2", "mac-pane", "stream_first_frame", "2026-09-08T10:00:22.000Z", 0, elapsed_ms=2000,
+                attributes={"device": "mac"},
+            ),
+            app_event(
+                "s2", "mac-mirror", "render_frame_payload_receive", "2026-09-08T10:00:22.100Z", 0,
+                count=1024, attributes={"render_update": "1"},
+            ),
+            app_event(
+                "s2", "mac-pane", "connection_stage", "2026-09-08T10:00:22.500Z", 0,
+                attributes={"stage": "connected", "banner": "0", "device": "mac"},
+            ),
+            lane_marker("lane-runner", "2026-09-08T10:00:23.000Z", 0, "poor", "mac-reconnect", "recovered"),
+            lane_marker("lane-runner", "2026-09-08T10:01:00.000Z", 0, "poor", "mac-reconnect", "runner_scenario_finish"),
+        ]
+        window = window_for(events, [], "poor", "mac-reconnect")
+        self.assertEqual(window.source, "runner")
+
+        mac_metrics = report.metric_reconnect(window, sources=("mac-pane", "mac-mirror"))
+        self.assertAlmostEqual(mac_metrics["link_down_to_banner_ms"], 1500.0)
+        self.assertAlmostEqual(mac_metrics["link_up_to_first_frame_ms"], 2000.0)
+        self.assertAlmostEqual(mac_metrics["link_up_to_banner_clear_ms"], 2500.0)
+        self.assertEqual(mac_metrics["recovery_frames"], 1)
+        self.assertAlmostEqual(mac_metrics["recovery_kb"], 1.0)
+        self.assertEqual(mac_metrics["connection_error_alerts"], 0)
+
+        # Without the source filter, the earlier iOS decoys win every "first" search and the extra
+        # iOS frame inflates the recovery counts, proving the filter is what excludes them.
+        unfiltered_metrics = report.metric_reconnect(window)
+        self.assertAlmostEqual(unfiltered_metrics["link_down_to_banner_ms"], 500.0)
+        self.assertAlmostEqual(unfiltered_metrics["link_up_to_first_frame_ms"], 500.0)
+        self.assertAlmostEqual(unfiltered_metrics["link_up_to_banner_clear_ms"], 1000.0)
+        self.assertEqual(unfiltered_metrics["recovery_frames"], 2)
+        self.assertAlmostEqual(unfiltered_metrics["recovery_kb"], 3.0)
+
+
 class IdleMetricTests(unittest.TestCase):
     def test_bytes_per_second_and_frame_count_over_the_idle_window(self) -> None:
         events = [
@@ -619,6 +686,7 @@ class FullRenderSmokeTest(unittest.TestCase):
                 "## Background/foreground: terminal",
                 "## Background/foreground: list",
                 "## Reconnect",
+                "## Mac reconnect",
                 "## Idle",
             ):
                 self.assertIn(heading, report_text)

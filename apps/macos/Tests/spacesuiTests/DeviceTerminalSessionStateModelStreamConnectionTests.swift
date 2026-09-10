@@ -1,12 +1,12 @@
 import Foundation
 import XCTest
 import spacesclientcore
-import spacesterminalcore
 
 @testable import spacesdeviceapi
 // Testable for `SpacesDeviceAPIRequestSessionClient.openedConnectionCountForTesting`, which is how the
 // corroboration-probe test proves the probe never dials through the shared session client.
 @testable import spacesdevicecore
+@testable import spacesterminalcore
 @testable import spacesui
 
 /// Guards how a device-backed session publishes the health of its state subscription.
@@ -236,6 +236,68 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
 
         XCTAssertEqual(model.connectionStageTracker.stage, .connected)
         XCTAssertFalse(model.connectionStageTracker.isBannerVisible)
+    }
+
+    /// A measurement lane times a Mac outage out of the pane's own performance log, so the banner
+    /// transitions the user sees have to reach that log with the same names and attribute values the
+    /// iOS viewer emits. The grace is driven through `GraceGate` so the banner-raising transition is
+    /// deterministic rather than racing the real one-second wait.
+    @MainActor func testStreamOutageEmitsTheBannerStageEventsAMeasurementLaneReads() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let deviceID = "remote-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID, deviceID: deviceID)
+        let gate = GraceGate()
+        model.graceWaitForTesting = { await gate.wait() }
+        let generation = model.installStreamClientForTesting(FakeStreamClient())
+
+        let events = try await capturedPerformanceEvents {
+            model.handleStreamDisconnect(nil, generation: generation)
+            let armedGraceTask = model.graceTaskForTesting
+            gate.release()
+            await armedGraceTask?.value
+        }
+
+        let stageEvents = events.filter { $0.name == "connection_stage" && $0.sessionID == sessionID }
+        XCTAssertEqual(
+            stageEvents.map { [$0.attributes["stage"], $0.attributes["banner"]] }, [["reconnecting", "0"], ["reconnecting", "1"]],
+            "the loss and the grace expiring are two separate transitions, and the banner interval is the gap between them")
+        XCTAssertEqual(Set(stageEvents.map(\.source)), ["mac-pane"])
+        XCTAssertEqual(Set(stageEvents.compactMap { $0.attributes["device"] }), [deviceID], "a report groups an outage by the device that went away")
+    }
+
+    /// `stream_first_frame` marks the moment a stream proved itself, which happens once per installed
+    /// stream: emitting it per payload would turn a connect-timing event into a per-frame one and make
+    /// every recovery interval unreadable.
+    @MainActor func testFirstAcceptedPayloadEmitsOneStreamFirstFrameEvent() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        let generation = model.installStreamClientForTesting(FakeStreamClient(), connectedHost: "10.0.0.7")
+
+        let events = try await capturedPerformanceEvents {
+            model.applyStreamEvent(runningStatePayload(sessionID: sessionID), generation: generation)
+            model.applyStreamEvent(runningStatePayload(sessionID: sessionID), generation: generation)
+        }
+
+        let firstFrameEvents = events.filter { $0.name == "stream_first_frame" && $0.sessionID == sessionID }
+        XCTAssertEqual(firstFrameEvents.count, 1, "a second payload on the same stream proves nothing new about the connection")
+        XCTAssertEqual(firstFrameEvents.first?.source, "mac-pane")
+        XCTAssertEqual(firstFrameEvents.first?.attributes["host"], "10.0.0.7")
+        XCTAssertEqual(firstFrameEvents.first?.attributes["generation"], String(generation))
+    }
+
+    /// A payload from a stream the model already retired is not evidence about anything, so it must
+    /// leave the log alone: counted as a first frame it would end an outage the report is still timing.
+    @MainActor func testPayloadFromARetiredStreamEmitsNoFirstFrameEvent() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        let retiredGeneration = model.installStreamClientForTesting(FakeStreamClient())
+        model.handleStreamDisconnect(nil, generation: retiredGeneration)
+
+        let events = try await capturedPerformanceEvents {
+            model.applyStreamEvent(runningStatePayload(sessionID: sessionID), generation: retiredGeneration)
+        }
+
+        XCTAssertEqual(events.filter { $0.sessionID == sessionID }, [], "a retired stream's late payload must not report a healthy connection")
     }
 
     /// Stage 2 is entered only on hard evidence (every candidate address refused to dial), with the
@@ -2080,9 +2142,26 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertFalse(model.hasArmedLivenessRecheckForTesting, "the liveness recheck never settled", file: file, line: line)
     }
 
-    @MainActor private func makeModel(sessionID: String) throws -> DeviceTerminalSessionStateModel {
+    /// Runs `body` with the device-terminal performance logger pointed at a file inside this test's own
+    /// temporary profile, and returns the events it wrote. The log path is process-global, so it is
+    /// configured for exactly the duration of `body` and reset afterward; `flush()` drains the logger's
+    /// serial write queue so the file is complete before it is parsed.
+    @MainActor private func capturedPerformanceEvents(_ body: () async throws -> Void) async throws -> [SpacesDeviceTerminalPerformanceEvent] {
+        let logPath = profileRoot.appendingPathComponent("device-perf-\(UUID().uuidString).jsonl").path
+        SpacesDeviceTerminalPerformanceLogger.configureDefaultLogPath(logPath)
+        defer { SpacesDeviceTerminalPerformanceLogger.resetDefaultLogPathForTesting() }
+        try await body()
+        SpacesDeviceTerminalPerformanceLogger.flush()
+        guard let contents = try? String(contentsOfFile: logPath, encoding: .utf8) else { return [] }
+        let decoder = JSONDecoder()
+        return try contents.split(separator: "\n").map { try decoder.decode(SpacesDeviceTerminalPerformanceEvent.self, from: Data($0.utf8)) }
+    }
+
+    /// `deviceID` is a parameter so a test asserting on an emitted event's `device` attribute can name
+    /// the device it expects; every other caller takes the default fresh identity.
+    @MainActor private func makeModel(sessionID: String, deviceID: String = "remote-\(UUID().uuidString)") throws -> DeviceTerminalSessionStateModel {
         let device = SpacesPairedDeviceRecord(
-            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: 1,
+            id: deviceID, name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: 1,
             certificateFingerprint: "SHA256:" + String(repeating: "0", count: 64), createdAt: "2026-07-24T00:00:00Z",
             updatedAt: "2026-07-24T00:00:00Z", lastSelectedAt: "2026-07-24T00:00:00Z")
         return try DeviceTerminalSessionStateModel(

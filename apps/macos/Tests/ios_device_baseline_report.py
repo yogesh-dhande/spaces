@@ -21,7 +21,7 @@ import argparse
 import json
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -38,6 +38,7 @@ SCENARIOS = [
     "background-terminal",
     "background-list",
     "reconnect",
+    "mac-reconnect",
     "idle",
 ]
 
@@ -408,6 +409,18 @@ def shaper_kb(window, direction):
     return shaper_bytes_in_range(window, window.begin, window.end, direction) / 1024.0
 
 
+def restrict_to_sources(window, sources):
+    """Returns a copy of `window` whose app-event lists hold only events from `sources`, leaving
+    markers, shaper_bytes, and every other field untouched. Lets a metric scope itself to one
+    client's own events when another client can be emitting into the same run root at the same
+    time (e.g. the iOS app still running during a macOS-driven scenario window)."""
+    return replace(
+        window,
+        app_events=[e for e in window.app_events if e.get("source") in sources],
+        app_events_by_uptime=[e for e in window.app_events_by_uptime if e.get("source") in sources],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Per-scenario metrics: each function takes the scenario's ScenarioWindow (or None for "no
 # data") and returns a small dict of raw values; rendering (formatting, table layout) happens
@@ -744,9 +757,11 @@ def metric_background(window, mode):
     }
 
 
-def metric_reconnect(window):
+def metric_reconnect(window, *, sources=None):
     if window is None:
         return None
+    if sources is not None:
+        window = restrict_to_sources(window, sources)
     link_down, link_up, recovered = marker(window, "link_down"), marker(window, "link_up"), marker(window, "recovered")
 
     banner_event = None
@@ -976,8 +991,10 @@ def build_report_sections(run_root: Path):
     sessions = load_sessions(run_root)
     windows = build_scenario_windows(device_events, shaper_events)
 
-    def metrics_for(scenario, metric_fn, *extra_args):
-        return {profile: metric_fn(windows.get((profile, scenario)), *extra_args) for profile in PROFILES}
+    def metrics_for(scenario, metric_fn, *extra_args, **extra_kwargs):
+        return {
+            profile: metric_fn(windows.get((profile, scenario)), *extra_args, **extra_kwargs) for profile in PROFILES
+        }
 
     return [
         build_header(run_root, device_events, shaper_events, sessions, windows),
@@ -1000,6 +1017,16 @@ def build_report_sections(run_root: Path):
             "Background/foreground: list", BACKGROUND_COLUMNS, metrics_for("background-list", metric_background, "list")
         ),
         render_table("Reconnect", RECONNECT_COLUMNS, metrics_for("reconnect", metric_reconnect)),
+        # Same procedure and columns as "Reconnect" (link-down/link-up against the same shaping
+        # proxy), driven through the macOS app's paired-device terminal pane instead of the iOS
+        # app, into the same device-perf.jsonl. Scoped to the Mac client's own event sources
+        # (mac-pane, mac-mirror) because the iOS app can still be emitting into that log during
+        # this window.
+        render_table(
+            "Mac reconnect",
+            RECONNECT_COLUMNS,
+            metrics_for("mac-reconnect", metric_reconnect, sources=("mac-pane", "mac-mirror")),
+        ),
         render_table("Idle", IDLE_COLUMNS, metrics_for("idle", metric_idle)),
     ]
 

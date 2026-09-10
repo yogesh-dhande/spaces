@@ -125,6 +125,10 @@
         // when one is retired, so comparing against it can reject a drop from the very client still
         // installed and leave it there dead forever (issue #537).
         private var installedStreamClientGeneration: UInt64?
+        // True once the installed stream has had a payload accepted, so `stream_first_frame` reports the
+        // moment this stream proved itself rather than firing on every payload. Reset by
+        // `installStreamClient`, which is the only place a stream becomes the installed one.
+        private var installedStreamDeliveredPayload = false
         // Owns the liveness recheck a stream loss starts when the cached runtime state claims the session
         // needs no stream (see `recheckLivenessAfterStreamLoss`). One task, which both asks and waits, so
         // there is a single place the question can be open and no second timer can pace it.
@@ -443,6 +447,7 @@
         private func installStreamClient(_ client: any TerminalRemoteStateStreamClient, generation: UInt64) {
             streamClient = client
             installedStreamClientGeneration = generation
+            installedStreamDeliveredPayload = false
         }
 
         /// Detaches the installed subscription and returns it so the caller can stop it. The stop is the
@@ -1130,6 +1135,16 @@
             // `handleStreamDisconnect` cleared `streamClient`, clearing the banner and resetting backoff
             // for a stream that is no longer installed.
             guard generation == installedStreamClientGeneration else { return }
+            if !installedStreamDeliveredPayload {
+                installedStreamDeliveredPayload = true
+                // `lastSubscriptionAttemptAt` is stamped when the attempt that produced this stream was
+                // allowed to start dialing (`ensureSubscriptionStarted`), so this is the dial-to-proven
+                // interval an outage measurement reads. Nil only for a stream installed through the
+                // testing seam, which never went through an attempt.
+                emitPerformanceEvent(
+                    name: "stream_first_frame", elapsedMS: lastSubscriptionAttemptAt.map { TerminalPerformance.elapsedMS(since: $0) },
+                    attributes: ["host": streamConnectedHost ?? "", "generation": String(generation)])
+            }
             // A frame actually arriving over the stream is the proof the connect succeeding in
             // `openStateStream` alone is not: it is what the tracker's contract means by
             // `frameReceived()`, and what `TerminalConnectionNotice`'s banner promises the user.
@@ -1425,8 +1440,31 @@
             let result = mutate(&connectionStageTracker)
             if connectionStageTracker.stage != before.stage || connectionStageTracker.isBannerVisible != before.isBannerVisible {
                 TerminalSessionNotification.post(.spacesTerminalStateStreamConnectionDidChange, sessionID: sessionID)
+                // Banner visibility earns an event of its own alongside the stage: the grace expiring
+                // raises the banner without moving the stage, and the interval the user actually saw the
+                // banner is what a measurement lane reads out of these events. Same attribute names and
+                // values the iOS viewer emits, so one report covers both clients.
+                emitPerformanceEvent(
+                    name: "connection_stage",
+                    attributes: [
+                        "stage": String(describing: connectionStageTracker.stage), "banner": connectionStageTracker.isBannerVisible ? "1" : "0",
+                        "device": device.id,
+                    ])
             }
             return result
+        }
+
+        /// Source label every event from a Mac paired-device pane carries, distinguishing it from the
+        /// `mac-mirror` render host in the same process and from the `ios-viewer` client.
+        private static let performanceEventSource = "mac-pane"
+
+        /// Emits one device-terminal performance event for this session, or nothing at all when no
+        /// measurement lane configured a log path. `elapsedMS` and `attributes` are autoclosures so a
+        /// disabled logger (every ordinary run) pays only the boolean check, never the formatting.
+        private func emitPerformanceEvent(name: String, elapsedMS: @autoclosure () -> Int? = nil, attributes: @autoclosure () -> [String: String]) {
+            guard SpacesDeviceTerminalPerformanceLogger.isEnabled() else { return }
+            SpacesDeviceTerminalPerformanceLogger.emit(
+                .init(sessionID: sessionID, source: Self.performanceEventSource, name: name, elapsedMS: elapsedMS(), attributes: attributes()))
         }
 
         /// Declares the stream lost: moves the tracker to stage 1 (a no-op if it is already past stage 1;
