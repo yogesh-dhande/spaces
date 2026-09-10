@@ -146,8 +146,9 @@ public final class RemoteWorkspaceGitClient: Sendable {
         process.standardOutput = Pipe()
         let err = Pipe()
         process.standardError = err
-        try process.run()
-        try waitForProcess(process, timeout: metadataCommandTimeout, arguments: arguments)
+        let termination = try launch(process)
+        defer { process.terminationHandler = nil }
+        try waitForProcess(process, termination: termination, timeout: metadataCommandTimeout, arguments: arguments)
         switch process.terminationStatus {
         case 0: return .exists
         case 2: return .missing
@@ -217,24 +218,28 @@ public final class RemoteWorkspaceGitClient: Sendable {
     /// "0 = success" every other caller relies on; the default keeps every existing call site unchanged.
     ///
     /// `maxOutputBytes`, when set, bounds how much of stdout is captured: once more than that many bytes
-    /// have been read, `PipeDrain` stops draining and reports the overflow rather than reading to EOF. A
-    /// process whose remaining output would exceed the cap is then still writing into a pipe nobody is
-    /// draining, so it is terminated and reaped here rather than risking a hang; the throw carries no exit
+    /// have been read, the capture closes its end of stdout and reports the overflow rather than reading to
+    /// EOF. A process whose remaining output would exceed the cap is then writing into a pipe with no
+    /// reader, so it is terminated and reaped here rather than risking a hang; the throw carries no exit
     /// code because the termination made one meaningless. Passing `nil` (the default) keeps the unbounded
     /// behavior every existing call site relies on.
     ///
-    /// The process deadline is enforced before anything blocks on the drains reaching EOF:
-    /// `awaitProcessExitOrCapOverflow` polls `process.isRunning`, `outDrain.didExceedCap`, and `timeout`
-    /// concurrently, so a subprocess that stops producing output without exiting or closing its pipes is
-    /// still caught by `timeout` rather than hanging the caller waiting for `PipeDrain.waitForData(timeout:)`
-    /// to reach EOF on its own — and every wait on a drain below is itself bounded for the same reason a
-    /// straggler descendant of the process can hold a pipe's write end open past the process's own exit or
-    /// kill (see `Self.drainGrace` and the per-branch comments below). The drains themselves start reading
-    /// in the background the moment each
-    /// `PipeDrain` is created, well before this wait begins, so this reordering does not reintroduce the
-    /// large-output deadlock `PipeDrain` exists to avoid: a big `git diff` keeps draining concurrently while
-    /// this method waits for the process (or the cap, or the deadline), and `waitForData()` is only called
-    /// once the child is already dead or dying, at which point both pipes hit EOF promptly.
+    /// Both pipes are read on the calling thread by `readCapturedStreams`, one `poll(2)` loop over stdout,
+    /// stderr, and the termination waiter's own descriptor. Nothing here sleeps, polls a process state, or
+    /// hands a pipe to a background thread, because both of those cost a thread hop per command: a drain
+    /// thread has to be scheduled before its first read, and a `Thread.sleep` loop watching
+    /// `Process.isRunning` wakes late under load, which together made a captured command that finishes in
+    /// about 13 ms take about 290 ms end to end while the same client's file-output path took 6 ms. Reading
+    /// inline keeps both streams drained concurrently (which is what the pipe buffer requires: a child that
+    /// writes more than 64 KiB to one pipe blocks until it is read, so waiting on either stream alone
+    /// deadlocks against the child) and returns as soon as the kernel says the data is there.
+    ///
+    /// Every wait is bounded, because a descendant the process spawns and detaches (git's
+    /// `fsmonitor--daemon`, which `git status` can launch under `core.fsmonitor`, is the observed case)
+    /// inherits the pipes' write ends and can hold them open long after git itself exits, so EOF alone is
+    /// not something a caller can be made to wait for. `timeout` bounds the whole capture; once the child's
+    /// exit is observed, the loop allows at least `Self.drainGrace` past that point for output already in
+    /// flight, which is what lets a command that exits at the deadline's edge still report what it wrote.
     /// `environmentOverrides` here (distinct from the per-instance `environmentOverrides` set at `init`) is
     /// a per-call addition, for the one caller (the workspace-diff engine's temp-index coalescing of a
     /// deleted-but-recreated-untracked path) that needs a scratch `GIT_INDEX_FILE` scoped to a single
@@ -260,91 +265,129 @@ public final class RemoteWorkspaceGitClient: Sendable {
         let err = Pipe()
         process.standardOutput = out
         process.standardError = err
-        try process.run()
-        let outDrain = PipeDrain(out, maxBytes: maxOutputBytes)
-        let errDrain = PipeDrain(err)
+        let termination = try launch(process)
+        defer { process.terminationHandler = nil }
         let commandDescription = ([gitExecutable] + arguments).joined(separator: " ")
-        // Every post-observation drain wait below is bounded, never unconditional: a descendant the git
-        // process spawns and detaches (the concrete case is `fsmonitor--daemon`, which `git status` can
-        // launch under `core.fsmonitor`, and which does not exit when its parent does) inherits the pipes'
-        // write ends and can hold them open indefinitely, so EOF never arrives on the read end `PipeDrain`
-        // is blocked in. Before this fix `waitForData()` was unconditional, so a straggler like that made
-        // even the *timeout* branch below hang forever waiting on a process nobody was timing out anymore.
-        // `deadline` mirrors the same request-wide deadline `awaitProcessExitOrCapOverflow`'s poll loop
-        // uses, so the `.exited` branch's drain wait cannot itself outlive the time budget the caller
-        // already agreed to wait for this command.
         let deadline = timeout.map { Date().addingTimeInterval($0) }
+        var stdout = CapturedStream(out.fileHandleForReading)
+        var stderr = CapturedStream(err.fileHandleForReading)
 
-        switch awaitProcessExitOrCapOverflow(process, outDrain: outDrain, timeout: timeout) {
+        switch try readCapturedStreams(
+            stdout: &stdout, stderr: &stderr, termination: termination, deadline: deadline, maxOutputBytes: maxOutputBytes)
+        {
         case .capExceeded:
-            // Stdout drain stopped as soon as the cap was hit and closed its end; the child may still be
-            // blocked mid-`write()`, so it must be killed rather than waited on. `errDrain` is safe to drain
-            // fully here: a process this far over its stdout cap emits little stderr. Bounded to a short,
-            // fixed grace regardless of the request's own timeout — the cap overflow is already a decided
-            // outcome, so a straggler holding stderr open must not turn "report the overflow" into another
-            // indefinite wait for stderr text nobody ends up reading anyway.
+            // Our end of stdout is closed, so the child's next write fails instead of blocking on a pipe with
+            // no reader, and it is killed rather than waited on. Its stderr is deliberately not drained
+            // first: the overflow is the outcome being reported and that text is never read by anyone.
             terminateThenKill(process)
-            _ = errDrain.waitForData(timeout: Self.drainGrace)
             process.waitUntilExit()
             throw SpacesRuntimeError.outputExceededCap
-        case .timedOut:
+        case .deadlineWhileRunning:
             terminateThenKill(process)
             process.waitUntilExit()
-            // The child is dead now, so both pipes hit EOF promptly *unless* a surviving descendant still
-            // holds them — bounded to a short, fixed grace so that straggler cannot turn the timeout path
-            // itself into a second, unbounded hang. Neither drain's content is used below (the timeout
-            // message never quotes stderr), so an expired grace here changes nothing about what is thrown.
-            _ = outDrain.waitForData(timeout: Self.drainGrace)
-            _ = errDrain.waitForData(timeout: Self.drainGrace)
             throw SpacesRuntimeError.gitCommandFailed(message: "Git command timed out after \(timeout ?? 0)s: \(commandDescription)")
-        case .exited:
-            // This wait is not a latency floor on successful commands: `Process` closes the parent-side
-            // copies of the child's pipe fds at spawn (the same behavior the canonical
-            // `readDataToEndOfFile` pattern relies on), so once the child exits with no surviving writer,
-            // EOF arrives immediately and this returns in the time it takes the drain thread to finish its
-            // final read — measured at ~50-90ms per captured command end to end, spawn included. The bound
-            // below is only ever *reached* when a straggler holds a pipe open.
-            // The child has already exited, so both pipes have hit (or are about to hit) EOF *unless* a
-            // surviving descendant inherited a write end (same `fsmonitor--daemon` case). Bound the wait to
-            // whatever remains of the request's own deadline, floored at `Self.drainGrace` so a process that
-            // exits right at the deadline's edge still gets a minimal chance to drain, and using
-            // `Self.drainGrace` outright when the call has no deadline at all (`timeout == nil`): git itself
-            // already finished either way, so a wait for its output outliving the caller's own budget is
-            // waiting on nothing the caller still cares about.
-            process.waitUntilExit()
-            let drainTimeout = deadline.map { max(Self.drainGrace, $0.timeIntervalSinceNow) } ?? Self.drainGrace
-            guard let outputData = outDrain.waitForData(timeout: drainTimeout) else {
-                // git exited, but something it spawned still holds a pipe open; the output would be
-                // indeterminate anyway (we cannot tell how much more, if any, git itself had written before
-                // exiting), so this is reported the same way an outright process timeout is.
-                throw SpacesRuntimeError.gitCommandFailed(
-                    message:
-                        "Git command timed out after \(timeout ?? 0)s: \(commandDescription) (a spawned descendant kept a pipe open after exit)")
-            }
-            // The stdout wait above may itself have consumed most of the remaining deadline (a straggler
-            // holding stdout open, released late); reusing `drainTimeout` here would let a straggler
-            // holding stderr stretch the total post-exit drain to ~2x the caller's budget, retaining the
-            // per-workspace git queue for work the caller has already abandoned. Recomputed from the same
-            // deadline with the same `drainGrace` floor so a command that exits at the deadline's edge
-            // still gets the minimal stderr chance.
-            let errDrainTimeout = deadline.map { max(Self.drainGrace, $0.timeIntervalSinceNow) } ?? Self.drainGrace
-            let errData = errDrain.waitForData(timeout: errDrainTimeout) ?? Data()
-            // `awaitProcessExitOrCapOverflow`'s poll loop can observe `!process.isRunning` a beat before the
-            // drain thread finishes appending its final chunk and sets `didExceedCap` — the process exiting
-            // and the drain thread noticing the cap is crossed are two independent, unsynchronized events,
-            // so `.exited` can win that race even though the output truly did exceed the cap. `waitForData()`
-            // above blocks until the drain thread finishes (EOF or cap), which happens after it sets
-            // `didExceedCap`, so this read is guaranteed final: a bounded caller must not receive a silently
-            // truncated (rather than reported) result just because the process happened to exit first.
-            if outDrain.didExceedCap {
-                throw SpacesRuntimeError.outputExceededCap
-            }
-            if !allowedExitCodes.contains(process.terminationStatus) {
-                let message = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
-                throw SpacesRuntimeError.gitCommandFailed(message: message)
-            }
-            return outputData
+        case .stdoutHeldOpenAfterExit:
+            // git exited but something it spawned still holds stdout open, so the output would be
+            // indeterminate anyway (there is no way to tell how much more, if any, git itself had written
+            // before exiting). Reported the same way an outright process timeout is.
+            throw SpacesRuntimeError.gitCommandFailed(
+                message:
+                    "Git command timed out after \(timeout ?? 0)s: \(commandDescription) (a spawned descendant kept a pipe open after exit)")
+        case .finished:
+            break
         }
+
+        // stdout reached EOF, which a child normally does by exiting, so this returns immediately. The
+        // bound covers the child that closes its pipes and keeps running: it gets the rest of its deadline,
+        // floored at one `drainGrace` so a command finishing at the deadline's edge is not killed for it.
+        guard termination.wait(timeout: deadline.map { max(Self.drainGrace, $0.timeIntervalSinceNow) }) else {
+            terminateThenKill(process)
+            process.waitUntilExit()
+            throw SpacesRuntimeError.gitCommandFailed(message: "Git command timed out after \(timeout ?? 0)s: \(commandDescription)")
+        }
+        process.waitUntilExit()
+        guard allowedExitCodes.contains(process.terminationStatus) else {
+            let message = String(data: stderr.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
+            throw SpacesRuntimeError.gitCommandFailed(message: message)
+        }
+        return stdout.data
+    }
+
+    /// How a capture's read loop ended. Each case is one of the outcomes `runGitAndCaptureData` reports; the
+    /// loop itself never kills or reaps the process, so the decision and the cleanup stay in one place.
+    private enum CaptureOutcome {
+        /// Both streams reached EOF, or stdout did and the bounded window for stderr expired.
+        case finished
+        /// Stdout went past `maxOutputBytes`; the capture has already closed its end of it.
+        case capExceeded
+        /// The window expired while the child was still running.
+        case deadlineWhileRunning
+        /// The child exited, but stdout never reached EOF inside the window that followed.
+        case stdoutHeldOpenAfterExit
+    }
+
+    /// Reads both pipes until they reach EOF, the byte cap trips, or the window runs out, waking on exactly
+    /// three things: stdout readable, stderr readable, and the child's exit (the termination waiter's
+    /// descriptor becomes readable, so no state has to be polled to notice it).
+    ///
+    /// The window is the caller's `deadline` until the exit is observed, and from then on whichever is later
+    /// of the deadline and one `drainGrace` past the exit. Stdout and stderr are then treated differently
+    /// when that window expires, which is the asymmetry the callers need: stdout is the command's result, so
+    /// a stdout that never reaches EOF is reported rather than silently truncated, while stderr only
+    /// decorates a rejected exit status, so a straggler holding it open leaves the message short instead of
+    /// failing a command that otherwise succeeded.
+    private func readCapturedStreams(
+        stdout: inout CapturedStream, stderr: inout CapturedStream, termination: ProcessTerminationWaiter, deadline: Date?, maxOutputBytes: Int?
+    ) throws -> CaptureOutcome {
+        var postExitDeadline: Date?
+        while !(stdout.isClosed && stderr.isClosed) {
+            let now = Date()
+            if let window = postExitDeadline ?? deadline, now >= window {
+                guard termination.hasTerminated else { return .deadlineWhileRunning }
+                return stdout.isClosed ? .finished : .stdoutHeldOpenAfterExit
+            }
+            var descriptors: [pollfd] = []
+            if !stdout.isClosed { descriptors.append(pollfd(fd: stdout.descriptor, events: Int16(POLLIN), revents: 0)) }
+            if !stderr.isClosed { descriptors.append(pollfd(fd: stderr.descriptor, events: Int16(POLLIN), revents: 0)) }
+            // Dropped from the set once the exit has been observed: the byte it carries is never read, so a
+            // descriptor left in the set would report readable forever and spin this loop.
+            if postExitDeadline == nil { descriptors.append(pollfd(fd: termination.exitDescriptor, events: Int16(POLLIN), revents: 0)) }
+            let milliseconds = (postExitDeadline ?? deadline).map { Int32(max(0, ($0.timeIntervalSince(now) * 1000).rounded(.up))) } ?? -1
+            let ready = descriptors.withUnsafeMutableBufferPointer { poll($0.baseAddress, nfds_t($0.count), milliseconds) }
+            if ready < 0 {
+                if errno == EINTR { continue }
+                throw SpacesRuntimeError.gitCommandFailed(message: "Waiting for a git command's output failed: errno \(errno)")
+            }
+            for descriptor in descriptors where descriptor.revents != 0 {
+                if descriptor.fd == stdout.descriptor {
+                    try stdout.readAvailable()
+                } else if descriptor.fd == stderr.descriptor {
+                    try stderr.readAvailable()
+                } else {
+                    postExitDeadline = max(Date().addingTimeInterval(Self.drainGrace), deadline ?? .distantPast)
+                }
+            }
+            if let maxOutputBytes, stdout.data.count > maxOutputBytes {
+                stdout.close()
+                return .capExceeded
+            }
+        }
+        return .finished
+    }
+
+    /// Spawns `process` with a termination waiter already attached, which is how every path in this client
+    /// learns a child exited: the handler must be installed before the process runs, or a child that exits
+    /// immediately can finish before anything is listening.
+    private func launch(_ process: Process) throws -> ProcessTerminationWaiter {
+        let termination = try ProcessTerminationWaiter()
+        process.terminationHandler = { _ in termination.signal() }
+        do {
+            try process.run()
+        } catch {
+            process.terminationHandler = nil
+            throw error
+        }
+        return termination
     }
 
     /// Runs a Git command whose useful payload is written to a file by the command itself (for example,
@@ -366,29 +409,20 @@ public final class RemoteWorkspaceGitClient: Sendable {
         let err = Pipe()
         process.standardOutput = FileHandle.nullDevice
         process.standardError = err
-        let errDrain: PipeDrain
-        let termination = ProcessTerminationWaiter()
-        process.terminationHandler = { _ in termination.signal() }
-        do {
-            try process.run()
-            errDrain = PipeDrain(err)
-        } catch {
-            process.terminationHandler = nil
-            throw error
-        }
+        let termination = try launch(process)
+        defer { process.terminationHandler = nil }
+        let errDrain = PipeDrain(err)
 
         guard termination.wait(timeout: timeout) else {
             terminateThenKill(process)
             process.waitUntilExit()
             _ = errDrain.waitForData(timeout: Self.drainGrace)
-            process.terminationHandler = nil
             let commandDescription = ([gitExecutable] + arguments).joined(separator: " ")
             throw SpacesRuntimeError.gitCommandFailed(
                 message: "Git command timed out after \(timeout ?? 0)s: \(commandDescription)")
         }
 
         process.waitUntilExit()
-        process.terminationHandler = nil
         let errData = errDrain.waitForData(timeout: Self.drainGrace) ?? Data()
         guard allowedExitCodes.contains(process.terminationStatus) else {
             let message = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
@@ -400,8 +434,9 @@ public final class RemoteWorkspaceGitClient: Sendable {
         let process = makeGitProcess(arguments)
         process.standardOutput = Pipe()
         process.standardError = Pipe()
-        try process.run()
-        try waitForProcess(process, timeout: timeout, arguments: arguments)
+        let termination = try launch(process)
+        defer { process.terminationHandler = nil }
+        try waitForProcess(process, termination: termination, timeout: timeout, arguments: arguments)
         return process.terminationStatus
     }
 
@@ -411,8 +446,9 @@ public final class RemoteWorkspaceGitClient: Sendable {
         process.standardOutput = Pipe()
         process.standardError = err
 
-        try process.run()
-        try waitForProcess(process, timeout: nil, arguments: arguments)
+        let termination = try launch(process)
+        defer { process.terminationHandler = nil }
+        try waitForProcess(process, termination: termination, timeout: nil, arguments: arguments)
 
         if process.terminationStatus != 0 {
             // Same exposure as `remoteBranchLookupStatus` above: the process has already exited by the time
@@ -516,22 +552,18 @@ public final class RemoteWorkspaceGitClient: Sendable {
         return environment
     }
 
-    private func waitForProcess(_ process: Process, timeout: TimeInterval?, arguments: [String]) throws {
-        guard let timeout else {
+    /// Waits for a process whose stdout nobody captures (the status-only probes and the refresh commands).
+    /// The wait is the termination waiter's condition variable rather than a `Thread.sleep` loop on
+    /// `Process.isRunning`: a sleeping thread is woken late under load, which put roughly 0.15 s of pure
+    /// scheduling wait on every one of these probes, and `isRepoStrict` runs one per file listing.
+    private func waitForProcess(_ process: Process, termination: ProcessTerminationWaiter, timeout: TimeInterval?, arguments: [String]) throws {
+        guard termination.wait(timeout: timeout) else {
+            terminateThenKill(process)
             process.waitUntilExit()
-            return
+            let commandDescription = ([gitExecutable] + arguments).joined(separator: " ")
+            throw SpacesRuntimeError.gitCommandFailed(message: "Git command timed out after \(timeout ?? 0)s: \(commandDescription)")
         }
-
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning {
-            if Date() >= deadline {
-                terminateThenKill(process)
-                process.waitUntilExit()
-                let commandDescription = ([gitExecutable] + arguments).joined(separator: " ")
-                throw SpacesRuntimeError.gitCommandFailed(message: "Git command timed out after \(timeout)s: \(commandDescription)")
-            }
-            Thread.sleep(forTimeInterval: 0.01)
-        }
+        process.waitUntilExit()
     }
 
     private static func resolveGitExecutable(environment: [String: String]) -> String? {
@@ -554,30 +586,6 @@ public final class RemoteWorkspaceGitClient: Sendable {
     }
 }
 
-/// Outcome of racing a process's exit against a capture-cap overflow and a deadline; see
-/// `awaitProcessExitOrCapOverflow`.
-private enum ProcessWaitOutcome {
-    case exited
-    case timedOut
-    case capExceeded
-}
-
-/// Polls `process.isRunning`, `outDrain.didExceedCap`, and (when `timeout` is set) the deadline, returning as
-/// soon as any one of them is satisfied. This is deliberately a genuine race rather than "wait for exit, then
-/// check the cap" or "wait for the cap, then check for exit": a cap overflow can occur while the process is
-/// still very much alive (blocked mid-`write()` into a pipe `PipeDrain` stopped draining), and a normal, fast
-/// exit can occur well before any cap trips, so checking only one condition first can miss the other for an
-/// arbitrarily long time — including forever, for a process that stops producing output without exiting.
-private func awaitProcessExitOrCapOverflow(_ process: Process, outDrain: PipeDrain, timeout: TimeInterval?) -> ProcessWaitOutcome {
-    let deadline = timeout.map { Date().addingTimeInterval($0) }
-    while true {
-        if outDrain.didExceedCap { return .capExceeded }
-        if !process.isRunning { return .exited }
-        if let deadline, Date() >= deadline { return .timedOut }
-        Thread.sleep(forTimeInterval: 0.01)
-    }
-}
-
 /// `Process.terminate()` sends SIGTERM, which a wedged or SIGTERM-ignoring child may never act on; escalating
 /// to SIGKILL after a brief grace period guarantees the child is actually gone before a caller blocks on its
 /// pipes reaching EOF, rather than trading one indefinite wait (the original deadline) for another
@@ -597,15 +605,63 @@ private func terminateThenKill(_ process: Process, gracePeriod: TimeInterval = 0
 /// Receives `Process.terminationHandler` without polling or relying on a semaphore whose signal can race
 /// the caller abandoning a timed wait. A condition variable permits a late termination signal after a
 /// timeout without retaining a dispatch primitive in an unmatched state.
+///
+/// Termination is also published as a readable file descriptor, so `readCapturedStreams` can wait for the
+/// child's exit in the same `poll(2)` call that waits for its output instead of checking a flag on a timer.
+/// The descriptor is the read end of a pipe whose write end is written to and closed exactly once, by
+/// `signal`; the byte is never read, so the descriptor stays readable from then on and a caller that has
+/// already seen the exit simply stops asking about it.
 private final class ProcessTerminationWaiter: @unchecked Sendable {
     private let condition = NSCondition()
     private var terminated = false
+    private let notificationLock = NSLock()
+    private let readDescriptor: Int32
+    private var writeDescriptor: Int32
+
+    /// Throws when the process cannot get its notification pipe, which means the daemon is out of file
+    /// descriptors: a command that cannot observe its own child's exit has no honest way to run.
+    init() throws {
+        var descriptors: [Int32] = [-1, -1]
+        guard pipe(&descriptors) == 0 else {
+            throw SpacesRuntimeError.gitCommandFailed(message: "Could not create a pipe to observe a git command's exit: errno \(errno)")
+        }
+        readDescriptor = descriptors[0]
+        writeDescriptor = descriptors[1]
+        // The child inherits open descriptors, and a copy of the write end in the child would keep the pipe
+        // alive past the parent's own close; close-on-exec keeps both ends out of it entirely.
+        _ = fcntl(readDescriptor, F_SETFD, FD_CLOEXEC)
+        _ = fcntl(writeDescriptor, F_SETFD, FD_CLOEXEC)
+    }
+
+    deinit {
+        close(readDescriptor)
+        notificationLock.lock()
+        if writeDescriptor >= 0 { close(writeDescriptor) }
+        notificationLock.unlock()
+    }
+
+    /// Readable once the process has terminated, for a `poll` set that is already waiting on its pipes.
+    var exitDescriptor: Int32 { readDescriptor }
+
+    var hasTerminated: Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return terminated
+    }
 
     func signal() {
         condition.lock()
         terminated = true
         condition.broadcast()
         condition.unlock()
+        notificationLock.lock()
+        if writeDescriptor >= 0 {
+            var byte: UInt8 = 1
+            _ = write(writeDescriptor, &byte, 1)
+            close(writeDescriptor)
+            writeDescriptor = -1
+        }
+        notificationLock.unlock()
     }
 
     func wait(timeout: TimeInterval?) -> Bool {
@@ -628,18 +684,70 @@ private final class ProcessTerminationWaiter: @unchecked Sendable {
     }
 }
 
-/// Drains one `Pipe`'s read end on a background queue starting immediately after the process launches,
+/// One of a captured command's two pipes, read on the calling thread. `poll` says when there is something
+/// to read and this reads it, so nothing waits on a thread that has to be scheduled first.
+///
+/// The descriptor is switched to non-blocking: `poll` reporting readable is not a promise that a read of any
+/// particular size can complete, and one blocking read on a pipe the child has gone quiet on would stall the
+/// whole capture, deadline included. Exactly one read happens per readiness, so a stream with a lot to say
+/// comes back through the loop rather than being drained in place while its sibling waits.
+private struct CapturedStream {
+    let descriptor: Int32
+    private let handle: FileHandle
+    private(set) var data = Data()
+    /// Set when the writer closed its end (EOF) or this capture closed its own, which is the only reason the
+    /// loop stops asking about a stream.
+    private(set) var isClosed = false
+
+    init(_ handle: FileHandle) {
+        self.handle = handle
+        descriptor = handle.fileDescriptor
+        let flags = fcntl(descriptor, F_GETFL)
+        _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK)
+    }
+
+    mutating func readAvailable() throws {
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { read(descriptor, $0.baseAddress, $0.count) }
+            if count > 0 {
+                buffer.withUnsafeBufferPointer { data.append($0.baseAddress!, count: count) }
+                return
+            }
+            if count == 0 {
+                isClosed = true
+                return
+            }
+            if errno == EINTR { continue }
+            // Nothing left for now, which is the normal end of a readiness: the loop waits again.
+            if errno == EAGAIN || errno == EWOULDBLOCK { return }
+            throw SpacesRuntimeError.gitCommandFailed(message: "Reading a git command's output failed: errno \(errno)")
+        }
+    }
+
+    /// Closes this end so the child's next write fails rather than blocking on a pipe with no reader. Used by
+    /// the byte cap, which is the one case where a capture stops reading a stream the child is still writing.
+    mutating func close() {
+        handle.closeFile()
+        isClosed = true
+    }
+}
+
+/// Drains one `Pipe`'s read end on a background thread starting immediately after the process launches,
 /// rather than after it exits. `Process.waitUntilExit()` blocks until the child closes its stdout/stderr
 /// fds (normally at exit); a child that writes more than the pipe's kernel buffer (64 KiB on macOS) to a
 /// pipe nobody is reading blocks on that `write()` until it is drained, so a caller that waits for exit
-/// before reading deadlocks against its own child for any output past that size. A `git diff` of a large
-/// file crosses it easily — the Editor permits arbitrarily large patches over bounded file chunks — so every
-/// `RemoteWorkspaceGitClient` call reads concurrently with the wait instead of after it.
+/// before reading deadlocks against its own child for any output past that size.
 ///
-/// `@unchecked Sendable`: `data`/`didExceedCap` are only mutated inside the one background read and only
-/// read after `waitForData(timeout:)` observes `finished`, which happens-after the drain thread's final
-/// write to both by way of the same `condition` lock both sides take — that hand-off is the synchronization
-/// the compiler cannot see.
+/// This serves the paths whose payload is not captured, where stderr is read only to quote a failure: the
+/// file-output command, the status-only probes, and the refresh commands. A capture reads its pipes inline
+/// instead (see `CapturedStream`), since a thread that has to be scheduled before its first read costs more
+/// than the commands themselves take.
+///
+/// `@unchecked Sendable`: `data` is only mutated inside the one background read and only read after
+/// `waitForData(timeout:)` observes `finished`, which happens-after the drain thread's final write by way of
+/// the same `condition` lock both sides take, and that hand-off is the synchronization the compiler cannot
+/// see.
 private final class PipeDrain: @unchecked Sendable {
     private var data = Data()
     /// Guards `finished`, and (by the happens-before edge any lock/unlock pair provides) orders the drain
@@ -657,60 +765,16 @@ private final class PipeDrain: @unchecked Sendable {
     /// finish and let this object deinit normally with no special-casing required at the call site.
     private let condition = NSCondition()
     private var finished = false
-    /// Guards `_didExceedCap`: `awaitProcessExitOrCapOverflow`'s poll loop reads `didExceedCap` from the
-    /// caller's thread concurrently with the drain thread writing it below — an unsynchronized read/write
-    /// race on a `Bool` without this lock. (The *value* read after `waitForData(timeout:)` observes
-    /// `finished` is still safe without this lock too, by the same `condition`-lock ordering as `data`
-    /// above; a separate lock exists for the concurrent poll, and is used uniformly by both readers for one
-    /// obviously-correct access pattern rather than only where strictly required.)
-    private let capLock = NSLock()
-    private var _didExceedCap = false
-    /// Set once `maxBytes` is exceeded, in bounded mode only. The caller (`runGitAndCapture`) is
-    /// responsible for terminating and reaping the process when this is true — this class only stops
-    /// reading, since draining a pipe has no way to make its writer stop.
-    var didExceedCap: Bool {
-        capLock.lock()
-        defer { capLock.unlock() }
-        return _didExceedCap
-    }
-
-    /// `maxBytes == nil` reads to EOF exactly as before. `maxBytes` set switches to an incremental
-    /// `availableData` loop that stops (and closes its end of the pipe) as soon as more than that many
-    /// bytes have been read, rather than blocking until the writer closes the pipe — a writer producing
-    /// more than the cap would otherwise never be observed to finish. Reading one chunk past the cap is
-    /// intentional: output exactly equal to the cap is valid and must still be returned normally.
-    ///
     /// The drain runs on a dedicated `Thread`, never a GCD queue: `waitForData(timeout:)` blocks its caller
-    /// on a condition variable, and when many `runGitAndCapture` calls run concurrently those blocked
-    /// callers occupy dispatch's worker threads, at which point GCD can stop granting threads to
-    /// global-queue work items — including the drain closures whose signals would unblock them. That
-    /// starvation deadlocked a parallel test run indefinitely (every worker parked waiting, both drain
-    /// closures never scheduled). A dedicated thread is guaranteed to run regardless of dispatch pool
-    /// pressure.
-    init(_ pipe: Pipe, maxBytes: Int? = nil) {
+    /// on a condition variable, and when many of these run concurrently those blocked callers occupy
+    /// dispatch's worker threads, at which point GCD can stop granting threads to global-queue work items,
+    /// including the drain closures whose signals would unblock them. That starvation deadlocked a parallel
+    /// test run indefinitely (every worker parked waiting, both drain closures never scheduled). A dedicated
+    /// thread is guaranteed to run regardless of dispatch pool pressure.
+    init(_ pipe: Pipe) {
         let handle = pipe.fileHandleForReading
         let thread = Thread { [self] in
-            if let maxBytes {
-                while true {
-                    let chunk = handle.availableData
-                    if chunk.isEmpty { break }  // EOF: writer closed its end without exceeding the cap.
-                    data.append(chunk)
-                    if data.count > maxBytes {
-                        capLock.lock()
-                        _didExceedCap = true
-                        capLock.unlock()
-                        break
-                    }
-                }
-                if didExceedCap {
-                    // Stop draining and close our end so the writer's next `write()` fails fast instead of
-                    // blocking forever; `runGitAndCapture` still terminates the process itself since closing
-                    // the pipe does not guarantee the writer notices before its next write attempt.
-                    handle.closeFile()
-                }
-            } else {
-                data = handle.readDataToEndOfFile()
-            }
+            data = handle.readDataToEndOfFile()
             condition.lock()
             finished = true
             condition.signal()
@@ -720,12 +784,11 @@ private final class PipeDrain: @unchecked Sendable {
         thread.start()
     }
 
-    /// Waits until the drain thread finishes (EOF, or the cap was hit and this drain closed its own end) or
-    /// `timeout` elapses, whichever comes first. Returns the captured data if the drain finished within the
+    /// Waits until the drain thread reaches EOF or `timeout` elapses, whichever comes first. Returns the captured data if the drain finished within the
     /// window, or `nil` on expiry.
     ///
     /// On expiry the drain thread is deliberately left running rather than torn down: it is blocked in a
-    /// blocking read on the pipe's read end (`readDataToEndOfFile()` or `availableData`), and closing that
+    /// blocking read on the pipe's read end (`readDataToEndOfFile()`), and closing that
     /// fd out from under a thread blocked reading it is the racy alternative this rejects — a closed fd
     /// number can be reused by an unrelated file or socket opened concurrently elsewhere in the process, so
     /// a `close()` from another thread while a `read()` on the same fd is in flight risks tearing down that
