@@ -5,6 +5,7 @@ import {
   DiffFileManifestEntry,
   DiffScope,
   WorkspaceRefListResult,
+  WorkspaceSubmodule,
 } from "./types";
 
 /**
@@ -94,6 +95,44 @@ index 0000000..2a4b6c8
 +- Wire up Phase 4 comment surface.
 `;
 
+/** A file nested inside the `sbc_hal` submodule fixture. */
+const SBC_HAL_BUMPVERSION_PATCH = `diff --git a/.bumpversion.cfg b/.bumpversion.cfg
+index 2b1c3d4..5e6f7a8 100644
+--- a/.bumpversion.cfg
++++ b/.bumpversion.cfg
+@@ -1,3 +1,3 @@
+ [bumpversion]
+-current_version = 1.4.2
++current_version = 1.4.3
+ commit = True
+`;
+
+/** A file nested inside the `sbc_hal/api_commands` submodule fixture, itself nested inside `sbc_hal`. */
+const UART_C_PATCH = `diff --git a/uart.c b/uart.c
+index 1a2b3c4..4d5e6f7 100644
+--- a/uart.c
++++ b/uart.c
+@@ -8,6 +8,7 @@ int uart_init(uint32_t baud_rate) {
+   uart_set_baud(baud_rate);
+   uart_enable_tx();
+   uart_enable_rx();
++  uart_flush();
+   return 0;
+ }
+`;
+
+/** An untracked file nested inside the `sbc_hal` submodule fixture. */
+const EXAMPLE_PINOUT_PATCH = `diff --git a/example_pinout.md b/example_pinout.md
+new file mode 100644
+index 0000000..9f8e7d6
+--- /dev/null
++++ b/example_pinout.md
+@@ -0,0 +1,3 @@
++# Example Pinout
++
++See schematic.pdf for pin assignments.
+`;
+
 /** The full fixture file set, as returned for `scope: { kind: "uncommitted" }`. */
 const UNCOMMITTED_FILES: DiffFileEntry[] = [
   {
@@ -140,9 +179,12 @@ const UNCOMMITTED_FILES: DiffFileEntry[] = [
     oldSHA: "b5a4c3d",
     newSHA: "d3c4a5b",
   },
-  // A submodule (gitlink) entry: no patch, a pointer-commit pair instead. Exercises the
-  // dev harness's read-only placeholder row (see diffView.ts's `submoduleLabel`) alongside every
-  // other fixture status.
+  // A nested submodule set: `sbc_hal`'s pointer row, its own changed files, a nested submodule
+  // (`sbc_hal/api_commands`) checked out inside it with its own changed file, and a second
+  // top-level pointer (`documentation`) that is not checked out. Exercises the dev harness's
+  // read-only placeholder rows (see diffView.ts's `submoduleLabel`) and nested-file rendering
+  // alongside every other fixture status. Order matters: nested entries immediately follow their
+  // enclosing pointer row, matching the daemon's manifest contract.
   {
     path: "sbc_hal",
     status: "modified",
@@ -152,6 +194,60 @@ const UNCOMMITTED_FILES: DiffFileEntry[] = [
       newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca",
       dirty: true,
       unmerged: false,
+      checkedOut: true,
+    },
+  },
+  {
+    path: "sbc_hal/.bumpversion.cfg",
+    status: "modified",
+    isBinary: false,
+    submodulePath: "sbc_hal",
+    patch: SBC_HAL_BUMPVERSION_PATCH,
+    oldSHA: "2b1c3d4",
+    newSHA: "5e6f7a8",
+  },
+  {
+    path: "sbc_hal/api_commands",
+    status: "modified",
+    isBinary: false,
+    submodulePath: "sbc_hal",
+    submodule: {
+      oldCommit: "9c1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e",
+      newCommit: "0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b",
+      dirty: false,
+      unmerged: false,
+      checkedOut: true,
+    },
+  },
+  {
+    path: "sbc_hal/api_commands/uart.c",
+    status: "modified",
+    isBinary: false,
+    submodulePath: "sbc_hal/api_commands",
+    patch: UART_C_PATCH,
+    oldSHA: "1a2b3c4",
+    newSHA: "4d5e6f7",
+  },
+  {
+    path: "sbc_hal/example_pinout.md",
+    status: "untracked",
+    isBinary: false,
+    submodulePath: "sbc_hal",
+    patch: EXAMPLE_PINOUT_PATCH,
+  },
+  // A pointer the diff nested nothing under (never initialized, missing the comparison commit, or
+  // deeper than the depth guard): a sha pair with the ", not checked out" suffix and no nested
+  // entries. Its flags are reported independently of that, so this fixture leaves them clear.
+  {
+    path: "documentation",
+    status: "modified",
+    isBinary: false,
+    submodule: {
+      oldCommit: "3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a",
+      newCommit: "4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b",
+      dirty: false,
+      unmerged: false,
+      checkedOut: false,
     },
   },
 ];
@@ -210,13 +306,14 @@ export function fixtureDiffFiles(scope: DiffScope, version: number): DiffFileEnt
 /** Metadata-first counterpart to `fixtureDiffFiles`: the mock deliberately strips patch bodies so
  * dev mode exercises the same immediate-sidebar / deferred-file rendering path as production. */
 export function fixtureDiffManifest(scope: DiffScope, version: number): DiffFileManifestEntry[] {
-  return fixtureDiffFiles(scope, version).map(({ path, oldPath, status, submodule }) => ({
+  return fixtureDiffFiles(scope, version).map(({ path, oldPath, status, submodule, submodulePath }) => ({
     path,
     oldPath,
     status,
     // `isSubmodule` is a manifest-only flag: present (true) only for a gitlink entry, absent for
     // every ordinary file, matching the wire contract's "absent otherwise" (`DiffFileManifestEntry`).
     ...(submodule !== undefined ? { isSubmodule: true as const } : {}),
+    ...(submodulePath !== undefined ? { submodulePath } : {}),
   }));
 }
 
@@ -269,7 +366,8 @@ export const NEW_FEATURE_FLAG = "new-feature-enabled";
 
 /** The mock's full workspace listing (`workspaceFileList`'s `paths`), backing Editor mode's Files
  *  tree and the ⌘P quick-open overlay — broader than just the files that already have diffs or
- *  open content above. */
+ *  open content above. Includes the nested submodule files inline, matching the daemon's contract
+ *  that `paths` carries checked-out submodule contents rather than listing them separately. */
 export const FIXTURE_ALL_PATHS: string[] = [
   ...Object.keys(FIXTURE_FILE_CONTENTS),
   "src/app/editorView.ts",
@@ -279,6 +377,18 @@ export const FIXTURE_ALL_PATHS: string[] = [
   "src/bridge/mockBridge.ts",
   "README.md",
   "package.json",
+  "sbc_hal/.bumpversion.cfg",
+  "sbc_hal/api_commands/uart.c",
+  "sbc_hal/example_pinout.md",
+];
+
+/** The mock's checked-out submodules, nested ones included, backing
+ *  `WorkspaceFileListResult.submodules`. Each `commit` matches the pointer the corresponding
+ *  fixture diff entry moved to, so the Files tree's chip and the Changes list's chip name the same
+ *  commit. `documentation` is deliberately absent: its fixture pointer row is not checked out. */
+export const FIXTURE_SUBMODULES: WorkspaceSubmodule[] = [
+  { path: "sbc_hal", commit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca" },
+  { path: "sbc_hal/api_commands", commit: "0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b" },
 ];
 
 /** Two running agents by default so the harness demonstrates the manual-pick dropdown state;

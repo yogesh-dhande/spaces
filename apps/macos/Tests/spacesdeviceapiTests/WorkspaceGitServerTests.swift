@@ -1366,8 +1366,8 @@
             try withWorkspaceFixture { _, _, server, _, _, _ in
                 let plans = (0..<30_000).map { index in
                     SpacesDeviceWorkspaceDiffEngine.DiffFilePlan(
-                        path: "Sources/\(String(repeating: "x", count: 180))/file-\(index).swift", oldPath: nil, status: .modified, source: .untracked
-                    )
+                        path: "Sources/\(String(repeating: "x", count: 180))/file-\(index).swift", oldPath: nil, status: .modified,
+                        source: .untracked, repoDir: "/workspace")
                 }
                 let snapshot = SpacesDeviceWorkspaceDiffEngine.DiffPlanSnapshot(scopeSignature: "signature", plans: plans)
                 let firstResponse = try server.workspaceDiffManifestChunkResponse(manifestID: "manifest", snapshot: snapshot, fileIndex: 0)
@@ -1602,7 +1602,7 @@
             let start = Date(timeIntervalSince1970: 1_000)
             let scope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace", refName: nil)
             let manifestID = store.createManifest(
-                scope: scope, workspaceDir: directory.path, snapshot: .init(scopeSignature: "signature", plans: []), now: start
+                scope: scope, snapshot: .init(scopeSignature: "signature", plans: []), now: start
             ).manifestID
             _ = store.createPatch(
                 manifestID: manifestID, scope: scope, relativePath: "README.md", scopeSignature: "signature",
@@ -1619,17 +1619,16 @@
             let store = SpacesDeviceAPIServer.WorkspaceDiffTransferStore(ttl: 120, clock: { clock.now() }, reaper: ManualDiffTransferExpiryReaper())
             let targetScope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "target", refName: nil)
             let created = store.createManifest(
-                scope: targetScope, workspaceDir: "/target", snapshot: .init(scopeSignature: "target-signature", plans: []), now: clock.now())
+                scope: targetScope, snapshot: .init(scopeSignature: "target-signature", plans: []), now: clock.now())
 
             for index in 1..<16 {
                 clock.advance(by: 1)
                 _ = store.createManifest(
-                    scope: .init(workspaceID: "other-\(index)", refName: nil), workspaceDir: "/other",
-                    snapshot: .init(scopeSignature: "other", plans: []), now: clock.now())
+                    scope: .init(workspaceID: "other-\(index)", refName: nil), snapshot: .init(scopeSignature: "other", plans: []), now: clock.now())
             }
             clock.advance(by: 1)
             _ = store.createManifest(
-                scope: .init(workspaceID: "evictor", refName: nil), workspaceDir: "/evictor", snapshot: .init(scopeSignature: "evictor", plans: []),
+                scope: .init(workspaceID: "evictor", refName: nil), snapshot: .init(scopeSignature: "evictor", plans: []),
                 now: clock.now())
 
             XCTAssertEqual(created.session.scope, targetScope)
@@ -1651,7 +1650,7 @@
             XCTAssertNotNil(reaper.scheduledInterval, "the store must schedule autonomous expiry at construction")
             let scope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace", refName: nil)
             let manifestID = store.createManifest(
-                scope: scope, workspaceDir: directory.path, snapshot: .init(scopeSignature: "signature", plans: []), now: clock.now()
+                scope: scope, snapshot: .init(scopeSignature: "signature", plans: []), now: clock.now()
             ).manifestID
             _ = store.createPatch(
                 manifestID: manifestID, scope: scope, relativePath: "README.md", scopeSignature: "signature",
@@ -3255,7 +3254,312 @@
             func stop() { source?.cancel() }
         }
 
+        // A diff row inside a submodule names an object id in that submodule's repository, so the read has
+        // to run there. The request carries nothing but the workspace-relative path, so the server is what
+        // works out which repository owns it.
+        func testWorkspaceRevisionFileReadResolvesTheSubmoduleThatOwnsThePath() throws {
+            try withNestedSubmoduleWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let submodule = repo.appendingPathComponent("A")
+                try "a v2".write(to: submodule.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+                try commitAllForFixture(submodule, message: "a v2")
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: submodule.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                // Last Commit reviews the pointer the workspace's own last commit recorded, so the bump is
+                // committed there too: without it this revision names no row the scope shows.
+                try runGit(["add", "A"], cwd: repo.path)
+                try commitAllForFixture(repo, message: "bump A")
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "A/FILE.txt")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceRevisionFileRead)
+                XCTAssertTrue(result.isWorktreeEquivalentToRevision)
+                XCTAssertEqual(Data(base64Encoded: result.worktreeFile.base64Data), Data("a v2".utf8))
+
+                try "a v3".write(to: submodule.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+                let divergedResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "A/FILE.txt")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(divergedResponse.ok, divergedResponse.message)
+                XCTAssertEqual(divergedResponse.workspaceRevisionFileRead?.isWorktreeEquivalentToRevision, false)
+
+                // The workspace's own commits are meaningless inside the submodule, so a read that ran in
+                // the wrong repository would answer this one instead of rejecting it.
+                let workspaceRevision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                let wrongRepository = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(
+                            .init(workspaceID: workspaceID, revision: workspaceRevision, relativePath: "A/FILE.txt")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertFalse(wrongRepository.ok)
+                XCTAssertEqual(wrongRepository.errorCode, .invalidArgument)
+            }
+        }
+
+        // A nested submodule's path is not a gitlink in the workspace's own index, so the owning repository
+        // is found by proving one gitlink level at a time.
+        func testWorkspaceRevisionFileReadResolvesANestedSubmodule() throws {
+            try withNestedSubmoduleWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let nested = repo.appendingPathComponent("A/B")
+                let revision = try runGit(["rev-parse", "HEAD"], cwd: nested.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "A/B/DEEP.txt")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertEqual(response.workspaceRevisionFileRead?.isWorktreeEquivalentToRevision, true)
+                XCTAssertEqual(Data(base64Encoded: try XCTUnwrap(response.workspaceRevisionFileRead).worktreeFile.base64Data), Data("deep v1".utf8))
+            }
+        }
+
+        // An ordinary directory is not a repository boundary: a path under one still belongs to the
+        // workspace's own repository and reads the workspace's own commits.
+        func testWorkspaceRevisionFileReadUnderAPlainDirectoryStaysInTheWorkspaceRepository() throws {
+            try withNestedSubmoduleWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try FileManager.default.createDirectory(at: repo.appendingPathComponent("plain"), withIntermediateDirectories: true)
+                try "plain".write(to: repo.appendingPathComponent("plain/FILE.txt"), atomically: true, encoding: .utf8)
+                try runGit(["add", "plain/FILE.txt"], cwd: repo.path)
+                try commitAllForFixture(repo, message: "add plain directory")
+                let workspaceRevision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(
+                            .init(workspaceID: workspaceID, revision: workspaceRevision, relativePath: "plain/FILE.txt")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertEqual(response.workspaceRevisionFileRead?.isWorktreeEquivalentToRevision, true)
+            }
+        }
+
+        // Last Commit compares the two pointers the workspace's own last commit moved a submodule between,
+        // and a pointer bump is free to skip commits, so the old side is not the reviewed commit's parent.
+        // The daemon derives it from the pointer the parent recorded, which is why the request carries no
+        // base revision of its own.
+        func testWorkspaceRevisionFileReadUsesTheRecordedPointerAsTheLastCommitOldSide() throws {
+            try withNestedSubmoduleWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let submodule = repo.appendingPathComponent("A")
+                // Two commits inside the submodule before the workspace records the bump, so the reviewed
+                // commit's own parent holds "a v2" while the pointer the workspace moved from holds "a v1".
+                try "a v2".write(to: submodule.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+                try commitAllForFixture(submodule, message: "a v2")
+                try "a v3".write(to: submodule.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+                try commitAllForFixture(submodule, message: "a v3")
+                let bumped = try runGit(["rev-parse", "HEAD"], cwd: submodule.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                try runGit(["add", "A"], cwd: repo.path)
+                try commitAllForFixture(repo, message: "bump A by two commits")
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: bumped, relativePath: "A/FILE.txt")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.workspaceRevisionFileRead)
+                XCTAssertTrue(result.isWorktreeEquivalentToRevision)
+                XCTAssertEqual(Data(base64Encoded: result.worktreeFile.base64Data), Data("a v3".utf8))
+                XCTAssertEqual(Data(base64Encoded: try XCTUnwrap(result.comparisonOldBase64Data)), Data("a v1".utf8))
+            }
+        }
+
+        // A commit of the submodule that the workspace's own last commit does not record is not part of the
+        // comparison the daemon serves for that scope, so the row is refused rather than answered from a
+        // comparison the client never saw.
+        func testWorkspaceRevisionFileReadRejectsASubmoduleCommitTheLastCommitDoesNotRecord() throws {
+            try withNestedSubmoduleWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let submodule = repo.appendingPathComponent("A")
+                try "a v2".write(to: submodule.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+                try commitAllForFixture(submodule, message: "a v2")
+                let skipped = try runGit(["rev-parse", "HEAD"], cwd: submodule.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                try "a v3".write(to: submodule.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+                try commitAllForFixture(submodule, message: "a v3")
+                try runGit(["add", "A"], cwd: repo.path)
+                try commitAllForFixture(repo, message: "bump A by two commits")
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: skipped, relativePath: "A/FILE.txt")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+            }
+        }
+
+        // The Uncommitted and ref scopes take their inline-edit baseline from `workspaceFileRead` with the
+        // diff row's `comparisonBaseRevision`. Inside a submodule that revision is one of the submodule's
+        // own commits, so the comparison side has to be read from the submodule's repository while the
+        // worktree side is read from disk exactly as before.
+        func testWorkspaceFileReadComparisonBaseInsideASubmoduleReadsThatSubmodulesCommit() throws {
+            try withNestedSubmoduleWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let submodule = repo.appendingPathComponent("A")
+                let recorded = try runGit(["rev-parse", "HEAD"], cwd: submodule.path).trimmingCharacters(in: .whitespacesAndNewlines)
+                try "a v2 uncommitted".write(to: submodule.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(
+                            .init(workspaceID: workspaceID, relativePath: "A/FILE.txt", comparisonBaseRevision: recorded)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(response.ok, response.message)
+                let read = try XCTUnwrap(response.workspaceFileRead)
+                XCTAssertEqual(Data(base64Encoded: read.base64Data), Data("a v2 uncommitted".utf8))
+                XCTAssertEqual(Data(base64Encoded: try XCTUnwrap(read.comparisonOldBase64Data)), Data("a v1".utf8))
+            }
+        }
+
+        // A submodule checkout is an ordinary directory to the worktree read/write path, so the Editor can
+        // open and save its files with no submodule-specific request field at all.
+        func testWorkspaceFileReadAndWriteInsideASubmoduleUseTheOrdinaryWorkspacePath() throws {
+            try withNestedSubmoduleWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let readResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(.init(workspaceID: workspaceID, relativePath: "A/B/DEEP.txt")), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertTrue(readResponse.ok, readResponse.message)
+                let read = try XCTUnwrap(readResponse.workspaceFileRead)
+                XCTAssertEqual(Data(base64Encoded: read.base64Data), Data("deep v1".utf8))
+
+                let updated = Data("deep v2".utf8)
+                let writeResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            .init(
+                                workspaceID: workspaceID, relativePath: "A/B/DEEP.txt", base64Data: updated.base64EncodedString(),
+                                expectedSHA256: read.sha256)), authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(writeResponse.ok, writeResponse.message)
+                XCTAssertEqual(writeResponse.workspaceFileWrite?.didWrite, true)
+                XCTAssertEqual(try Data(contentsOf: repo.appendingPathComponent("A/B/DEEP.txt")), updated)
+            }
+        }
+
+        // Review comments key off the workspace-relative path the diff row carries, so a submodule file's
+        // path round-trips like any other without the store or the handler knowing about submodules.
+        func testWorkspaceReviewCommentUpsertKeepsASubmoduleFilePath() throws {
+            try withNestedSubmoduleWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceReviewCommentUpsert(
+                            .init(
+                                workspaceID: workspaceID, filePath: "A/B/DEEP.txt", side: .new, lineNumber: 1, lineText: "deep v1",
+                                body: "why bump this?")), authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertEqual(response.workspaceReviewCommentUpsert?.comment.filePath, "A/B/DEEP.txt")
+
+                let listResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceReviewCommentList(.init(workspaceID: workspaceID)), authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(listResponse.ok, listResponse.message)
+                XCTAssertEqual(listResponse.workspaceReviewCommentList?.comments.map(\.filePath), ["A/B/DEEP.txt"])
+            }
+        }
+
+        // The manifest is what the client renders its change tree from before any patch arrives, so the
+        // nesting has to be legible there: a submodule's entries follow its pointer row and name it.
+        func testWorkspaceDiffManifestChunkCarriesSubmodulePathForNestedEntries() throws {
+            try withNestedSubmoduleWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                try "a v2".write(to: repo.appendingPathComponent("A/FILE.txt"), atomically: true, encoding: .utf8)
+                try "deep v2".write(to: repo.appendingPathComponent("A/B/DEEP.txt"), atomically: true, encoding: .utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, fileIndex: 0)), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertTrue(response.ok, response.message)
+                let files = try XCTUnwrap(response.workspaceDiffManifestChunk?.files)
+                XCTAssertEqual(files.map(\.path), ["A", "A/B", "A/B/DEEP.txt", "A/FILE.txt"])
+
+                let pointer = try XCTUnwrap(files.first { $0.path == "A" })
+                XCTAssertTrue(pointer.isSubmodule)
+                XCTAssertNil(pointer.submodulePath)
+                XCTAssertEqual(files.first { $0.path == "A/FILE.txt" }?.submodulePath, "A")
+                XCTAssertEqual(files.first { $0.path == "A/B/DEEP.txt" }?.submodulePath, "A/B")
+                // A nested submodule's pointer row is a file of the repository ABOVE it, so it carries that
+                // repository's path, not its own: the client nests the `A/B` row inside `A`, and only the
+                // files under `A/B` carry `A/B`.
+                XCTAssertEqual(files.first { $0.path == "A/B" }?.submodulePath, "A")
+                XCTAssertEqual(files.first { $0.path == "A/B" }?.isSubmodule, true)
+            }
+        }
+
         // MARK: - Fixture helpers
+
+        /// `withWorkspaceFixture` plus an initialized submodule `A` that itself holds an initialized
+        /// submodule at `A/B`. The source repositories live in their own container so nothing inside the
+        /// workspace is a clone source. `protocol.file.allow=always` is required for a local filesystem
+        /// submodule URL since git 2.38.1 (CVE-2022-39253 hardening); real users add submodules from
+        /// https/ssh remotes, where this default does not apply, and git propagates the override to the
+        /// clones the recursive update spawns for each nested level.
+        /// A submodule checkout replaced by a symlink to a repository elsewhere on the machine still has its
+        /// gitlink in the index and a `.git` reachable through the link, so nothing about the index says the
+        /// path stopped being that submodule's checkout. This pins the end-to-end answer: a read under it is
+        /// refused rather than served from the outside repository. Three independent rules refuse it, and
+        /// this asserts the outcome rather than which one gets there first: ownership resolution will not
+        /// descend through a symlink, the worktree side's path resolver rejects a symlinked component, and
+        /// the revision does not match the pointer the workspace's own commit records.
+        func testWorkspaceRevisionFileReadDoesNotFollowASymlinkedSubmoduleCheckout() throws {
+            try withNestedSubmoduleWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let outside = FileManager.default.temporaryDirectory.appendingPathComponent(
+                    "spaces-workspace-git-server-outside-\(UUID().uuidString)", isDirectory: true)
+                try makeSourceRepository(at: outside, file: "OUTSIDE.txt", contents: "not this workspace")
+                defer { try? FileManager.default.removeItem(at: outside) }
+                let outsideRevision = try runGit(["rev-parse", "HEAD"], cwd: outside.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let checkout = repo.appendingPathComponent("A")
+                try FileManager.default.removeItem(at: checkout)
+                try FileManager.default.createSymbolicLink(atPath: checkout.path, withDestinationPath: outside.path)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRevisionFileRead(
+                            .init(workspaceID: workspaceID, revision: outsideRevision, relativePath: "A/OUTSIDE.txt")),
+                        authToken: authToken, clientApp: clientApp))
+                // The path resolves to the workspace's own repository, which holds neither that commit nor
+                // that file, so the read is refused rather than answered from the outside repository.
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+            }
+        }
+
+        private func withNestedSubmoduleWorkspaceFixture(
+            _ body: (
+                _ workspaceID: String, _ repo: URL, _ server: SpacesDeviceAPIServer, _ requestClient: WorkspaceGitRequestClient,
+                _ clientApp: SpacesDeviceClientApp, _ authToken: String
+            ) throws -> Void
+        ) throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let sources = FileManager.default.temporaryDirectory.appendingPathComponent(
+                    "spaces-workspace-git-server-submodules-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: sources) }
+
+                let deepSource = sources.appendingPathComponent("deep-source", isDirectory: true)
+                try makeSourceRepository(at: deepSource, file: "DEEP.txt", contents: "deep v1")
+                let middleSource = sources.appendingPathComponent("middle-source", isDirectory: true)
+                try makeSourceRepository(at: middleSource, file: "FILE.txt", contents: "a v1")
+                try runGit(["-c", "protocol.file.allow=always", "submodule", "add", "-q", deepSource.path, "B"], cwd: middleSource.path)
+                try commitAllForFixture(middleSource, message: "add B")
+
+                try runGit(["-c", "protocol.file.allow=always", "submodule", "add", "-q", middleSource.path, "A"], cwd: repo.path)
+                try commitAllForFixture(repo, message: "add A")
+                try runGit(["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"], cwd: repo.path)
+
+                try body(workspaceID, repo, server, requestClient, clientApp, authToken)
+            }
+        }
+
+        private func makeSourceRepository(at url: URL, file: String, contents: String) throws {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            try runGit(["init", "--initial-branch", "main"], cwd: url.path)
+            try contents.write(to: url.appendingPathComponent(file), atomically: true, encoding: .utf8)
+            try commitAllForFixture(url, message: "initial")
+        }
+
+        private func commitAllForFixture(_ repo: URL, message: String) throws {
+            try runGit(["add", "-A"], cwd: repo.path)
+            try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", message], cwd: repo.path)
+        }
 
         /// Seeds a real git repo, a matching `ProjectRecord`/`WorkspaceRecord` pointed at it, and a live
         /// TLS server/client pair, then runs `body`. Modeled on `TerminalTranscriptServerTests`'

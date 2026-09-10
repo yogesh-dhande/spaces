@@ -18,16 +18,26 @@ import Foundation
 /// status `UU`/`AA`/`DD`/`AU`/`UA`/`DU`/`UD`); the reported commits are then the pointer the worktree
 /// currently holds (HEAD's side until the user resolves), not a merged result. While `unmerged` is true,
 /// `dirty` is always false: the checkout's own dirtiness is not reported until the conflict is resolved.
+///
+/// `checkedOut` is whether the diff looked inside the submodule's own repository, and so whether this
+/// pointer row has the submodule's changed files nested beneath it. It is false for a submodule the user
+/// never initialized (`git submodule update` was never run, so the directory is empty), for one whose
+/// checkout does not hold a commit this comparison records (a shallow or unfetched clone), for a removed
+/// submodule, whose worktree is gone by definition, and for one nested deeper than the eight levels the
+/// diff descends, whose checkout may be perfectly readable but whose contents are not enumerated. The
+/// pointer row still reports its commits in every case; what is absent is the nesting.
 public struct SpacesDeviceWorkspaceDiffSubmoduleChange: Codable, Equatable, Sendable {
     public let oldCommit: String?
     public let newCommit: String?
     public let dirty: Bool
     public let unmerged: Bool
+    public let checkedOut: Bool
 
-    public init(oldCommit: String?, newCommit: String?, dirty: Bool, unmerged: Bool) {
+    public init(oldCommit: String?, newCommit: String?, dirty: Bool, unmerged: Bool, checkedOut: Bool) {
         self.oldCommit = oldCommit
         self.newCommit = newCommit
         self.dirty = dirty
         self.unmerged = unmerged
+        self.checkedOut = checkedOut
     }
 }

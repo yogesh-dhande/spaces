@@ -1775,7 +1775,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     final class WorkspaceDiffTransferStore: @unchecked Sendable {
         struct ManifestSession {
             let scope: WorkspaceDiffScope
-            let workspaceDir: String
             let snapshot: SpacesDeviceWorkspaceDiffEngine.DiffPlanSnapshot
             var expiresAt: Date
         }
@@ -1871,9 +1870,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             removeAll()
         }
 
-        func createManifest(
-            scope: WorkspaceDiffScope, workspaceDir: String, snapshot: SpacesDeviceWorkspaceDiffEngine.DiffPlanSnapshot, now: Date = Date()
-        ) -> CreatedManifest {
+        func createManifest(scope: WorkspaceDiffScope, snapshot: SpacesDeviceWorkspaceDiffEngine.DiffPlanSnapshot, now: Date = Date())
+            -> CreatedManifest
+        {
             lock.lock()
             defer { lock.unlock() }
             reapExpiredLocked(now: now)
@@ -1881,7 +1880,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 removeManifestLocked(oldest)
             }
             let manifestID = UUID().uuidString.lowercased()
-            let session = ManifestSession(scope: scope, workspaceDir: workspaceDir, snapshot: snapshot, expiresAt: now.addingTimeInterval(ttl))
+            let session = ManifestSession(scope: scope, snapshot: snapshot, expiresAt: now.addingTimeInterval(ttl))
             manifests[manifestID] = session
             createdManifestCount += 1
             return CreatedManifest(manifestID: manifestID, session: session)
@@ -2668,12 +2667,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
         let streamQueue = DispatchQueue(label: "spaces.workspace-file-list-signature.\(workspaceID)")
-        let indexCache = SpacesDeviceWorkspaceFileListEngine.GitMembershipIndexCache()
+        let membershipCaches = SpacesDeviceWorkspaceFileListEngine.MembershipCaches()
         let subscription = WorkspaceFileListSignatureSubscription(
             workspaceID: workspaceID, socketPath: socketPath, streamQueue: streamQueue,
             signatureProvider: { [weak self] workspaceID in try? self?.computeWorkspaceFileListSignature(workspaceID: workspaceID) },
             detectorProvider: { [weak self] workspaceID in
-                try? self?.computeWorkspaceFileListChangeDetector(workspaceID: workspaceID, indexCache: indexCache)
+                try? self?.computeWorkspaceFileListChangeDetector(workspaceID: workspaceID, caches: membershipCaches)
             })
         try subscription.start()
         subscription.subscriberCount = 1
@@ -2704,17 +2703,22 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// and a parent-directory mtime misses nested changes and 10 MiB/symlink openability crossings. Its
     /// exact listing signature is therefore the smallest correct detector rather than a lossy shortcut.
     private func computeWorkspaceFileListChangeDetector(
-        workspaceID: String, indexCache: SpacesDeviceWorkspaceFileListEngine.GitMembershipIndexCache? = nil
+        workspaceID: String, caches: SpacesDeviceWorkspaceFileListEngine.MembershipCaches? = nil
     ) throws -> String {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         guard let workspace = try store.workspace(id: workspaceID) else {
             throw NSError(
                 domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(workspaceID)' was not found."])
         }
+        // One clock for the whole tick: the workspace's repository and every submodule below it draw their
+        // git timeouts from this single window, so a tick cannot grow a fresh budget per repository.
+        let tickStart = Date()
         if let context = try SpacesDeviceWorkspaceFileListEngine.gitMembershipContext(
-            workspaceDir: workspace.dir, gitClient: workspaceGitClient, indexCache: indexCache)
+            workspaceDir: workspace.dir, gitClient: workspaceGitClient, caches: caches, deadlineStart: tickStart)
         {
-            return "git:\(try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: workspaceGitClient))"
+            let token = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(
+                context: context, gitClient: workspaceGitClient, deadlineStart: tickStart)
+            return "git:\(token)"
         }
         let result = try SpacesDeviceWorkspaceFileListEngine.listFiles(workspaceDir: workspace.dir, gitClient: workspaceGitClient)
         return "filesystem:\(SpacesDeviceWorkspaceFileListSignature.value(for: result))"
@@ -4427,8 +4431,22 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
             do {
                 try SpacesDeviceWorkspaceDiffEngine.assertIsGitRepository(workspaceDir: workspaceDir, gitClient: workspaceGitClient)
-                let comparisonPath = oldPath ?? relativePath
-                switch try gitTreePath(at: comparisonBaseRevision, relativePath: comparisonPath, workspaceDir: workspaceDir) {
+                // An inline edit started from a diff row inside a submodule carries that submodule's own
+                // commit as its comparison base, so the comparison side is read from the repository that
+                // holds it. The worktree bytes read above need no adjustment: the file sits at the same
+                // place on disk whichever repository tracks it.
+                let owner = try owningRepository(relativePath: relativePath, workspaceDir: workspaceDir)
+                let comparisonPath: String
+                if let oldPath {
+                    guard let mapped = owner.repoRelativeCompanion(oldPath) else {
+                        return SpacesDeviceAPIResponse(
+                            ok: false, message: "Comparison path must be in the same repository as the file.", errorCode: .invalidArgument)
+                    }
+                    comparisonPath = mapped
+                } else {
+                    comparisonPath = owner.relativePath
+                }
+                switch try gitTreePath(at: comparisonBaseRevision, relativePath: comparisonPath, workspaceDir: owner.repoDir) {
                 case .missing: comparisonOldData = nil
                 // A submodule replaced by a regular file at the same path (the reverse type change, source
                 // mode 160000, destination a blob) is listed as an ordinary text patch by
@@ -4441,7 +4459,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     return SpacesDeviceAPIResponse(ok: false, message: "Comparison file is not a regular file.", errorCode: .invalidArgument)
                 case .regularBlob:
                     comparisonOldData = try workspaceGitClient.runGitAndCaptureData(
-                        ["-C", workspaceDir, "cat-file", "--filters", "\(comparisonBaseRevision):./\(comparisonPath)"], timeout: 10,
+                        ["-C", owner.repoDir, "cat-file", "--filters", "\(comparisonBaseRevision):./\(comparisonPath)"], timeout: 10,
                         maxOutputBytes: Self.workspaceFileMaxBytes)
                 }
             } catch SpacesRuntimeError.outputExceededCap {
@@ -4482,17 +4500,42 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
         try SpacesDeviceWorkspaceDiffEngine.assertIsGitRepository(workspaceDir: workspaceDir, gitClient: workspaceGitClient)
+        // A file inside a checked-out submodule belongs to that submodule's repository, and so does the
+        // revision the diff row named, so every object read below runs there. The worktree side keeps
+        // working from the workspace root and the full path: its symlink and containment guards must see
+        // the submodule prefix too, and the file is at the same place on disk either way.
+        let owner = try owningRepository(relativePath: request.relativePath, workspaceDir: workspaceDir)
+        let repoDir = owner.repoDir
+        let oldRepoPath: String?
+        if let oldPath = request.oldPath {
+            guard let mapped = owner.repoRelativeCompanion(oldPath) else {
+                return SpacesDeviceAPIResponse(
+                    ok: false, message: "Comparison path must be in the same repository as the file.", errorCode: .invalidArgument)
+            }
+            oldRepoPath = mapped
+        } else {
+            oldRepoPath = nil
+        }
 
         // A full-hex revision cannot be parsed as an option. The path is one object-expression argument
         // following the revision and `:./`, never a separate pathspec or command-line option.
         let resolved = try workspaceGitClient.runGitAndCapture(
-            ["-C", workspaceDir, "rev-parse", "--verify", "--quiet", "\(request.revision)^{commit}"], timeout: 2, allowedExitCodes: [0, 1])
+            ["-C", repoDir, "rev-parse", "--verify", "--quiet", "\(request.revision)^{commit}"], timeout: 2, allowedExitCodes: [0, 1])
         guard !resolved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return SpacesDeviceAPIResponse(ok: false, message: "Revision was not found in this workspace.", errorCode: .invalidArgument)
         }
+        let oldSideCommit: String?
+        switch try lastCommitOldSide(owner: owner, revision: request.revision, workspaceDir: workspaceDir) {
+        // A row whose revision the workspace's last commit no longer records is not part of the comparison
+        // being served, which the client learns the same way it learns about a revision that is not there.
+        case .revisionNotInLastCommit:
+            return SpacesDeviceAPIResponse(ok: false, message: "Revision was not found in this workspace.", errorCode: .invalidArgument)
+        case .none: oldSideCommit = nil
+        case .commit(let commit): oldSideCommit = commit
+        }
         let targetHash: String
         let targetIsExecutable: Bool
-        switch try gitTreePath(at: request.revision, relativePath: request.relativePath, workspaceDir: workspaceDir) {
+        switch try gitTreePath(at: request.revision, relativePath: owner.relativePath, workspaceDir: repoDir) {
         case .missing: return SpacesDeviceAPIResponse(ok: false, message: "File was not found at this revision.", errorCode: .notFound)
         case .nonRegular:
             return SpacesDeviceAPIResponse(ok: false, message: "File at this revision is not a regular file.", errorCode: .invalidArgument)
@@ -4523,31 +4566,28 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let filteredWorktreeHash: String?
         if worktreeIsExecutable == targetIsExecutable {
             let baselineData = Data(base64Encoded: worktreeFile.base64Data)!
-            filteredWorktreeHash = try gitFilteredHash(data: baselineData, relativePath: request.relativePath, workspaceDir: workspaceDir)
+            filteredWorktreeHash = try gitFilteredHash(data: baselineData, relativePath: owner.relativePath, workspaceDir: repoDir)
         } else {
             filteredWorktreeHash = nil
         }
-        let parent = try workspaceGitClient.runGitAndCapture(
-            ["-C", workspaceDir, "rev-parse", "--verify", "--quiet", "\(request.revision)^"], timeout: 2, allowedExitCodes: [0, 1]
-        ).trimmingCharacters(in: .whitespacesAndNewlines)
         let comparisonOldData: Data?
-        if parent.isEmpty {
-            comparisonOldData = nil
-        } else {
-            let oldPath = request.oldPath ?? request.relativePath
+        if let parent = oldSideCommit {
+            let oldPath = oldRepoPath ?? owner.relativePath
             do {
-                switch try gitTreePath(at: parent, relativePath: oldPath, workspaceDir: workspaceDir) {
+                switch try gitTreePath(at: parent, relativePath: oldPath, workspaceDir: repoDir) {
                 case .missing: comparisonOldData = nil
                 case .nonRegular:
                     return SpacesDeviceAPIResponse(ok: false, message: "Comparison file is not a regular file.", errorCode: .invalidArgument)
                 case .regularBlob:
                     comparisonOldData = try workspaceGitClient.runGitAndCaptureData(
-                        ["-C", workspaceDir, "cat-file", "--filters", "\(parent):./\(oldPath)"], timeout: 10,
+                        ["-C", repoDir, "cat-file", "--filters", "\(parent):./\(oldPath)"], timeout: 10,
                         maxOutputBytes: Self.workspaceFileMaxBytes)
                 }
             } catch SpacesRuntimeError.outputExceededCap {
                 return SpacesDeviceAPIResponse(ok: false, message: "File exceeds the 10 MiB read limit.", errorCode: .payloadTooLarge)
             }
+        } else {
+            comparisonOldData = nil
         }
         return SpacesDeviceAPIResponse(
             ok: true, message: "Read workspace revision file.",
@@ -4568,6 +4608,180 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: input) }
         return try workspaceGitClient.runGitAndCapture(["-C", workspaceDir, "hash-object", "--path=\(relativePath)", input.path], timeout: 10)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The repository that owns a workspace-relative path, and that path rewritten relative to it. A path
+    /// outside every submodule is owned by the workspace's own repository, where `submoduleComponents` is
+    /// empty and `relativePath` is the requested path itself.
+    private struct OwningRepository {
+        /// The directory git object commands for this path must run in.
+        let repoDir: String
+        /// Path components of `repoDir` relative to the workspace, empty at the top level.
+        let submoduleComponents: [String]
+        /// One entry per submodule descended into, each the gitlink path relative to the repository above
+        /// it. Empty at the top level. This keeps the boundaries the flattened components lose: for
+        /// `vendor/lib/src/file.c` where `vendor/lib` is one submodule, this holds a single `vendor/lib`.
+        let gitlinkChain: [String]
+        /// The requested path, relative to `repoDir`.
+        let relativePath: String
+
+        /// A second workspace-relative path (a rename's old path) rewritten relative to `repoDir`, or nil
+        /// when it names something outside this repository. Git detects renames within one repository, so a
+        /// pair that straddles a submodule boundary is a malformed request rather than a state to serve.
+        func repoRelativeCompanion(_ path: String) -> String? {
+            let components = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+            guard components.count > submoduleComponents.count, Array(components.prefix(submoduleComponents.count)) == submoduleComponents
+            else { return nil }
+            return components.dropFirst(submoduleComponents.count).joined(separator: "/")
+        }
+    }
+
+    /// Resolves which repository owns a workspace-relative file path: the deepest checked-out submodule
+    /// whose gitlink is a prefix of the path, or the workspace's own repository when there is none.
+    ///
+    /// Clients only ever send workspace-relative paths, for every read and write, so this is where a
+    /// submodule's own object ids (the revisions a nested diff row carries) get read from the repository
+    /// that actually holds them. The chain is walked one component prefix at a time because a nested
+    /// submodule's path is not a gitlink in the workspace's own index: for `A/B`, the workspace records
+    /// `A`, and only `A`'s index records `B`. Each descent therefore has to be proven against the index of
+    /// the level above it.
+    ///
+    /// Two conditions gate a descent, and a prefix that fails either is treated as an ordinary directory of
+    /// the repository above it: the prefix is a checkout this daemon may run git in at all (the shared
+    /// `isContainedGitlinkCheckout` rule, which every other submodule descent asks first, so a directory
+    /// replaced by a symlink to an outside repository never becomes the owner of a path), and the index of
+    /// the level above records the prefix as a gitlink (mode `160000`). The containment check is also what
+    /// keeps this walk cheap: it is a stat, it runs first, and an ordinary directory fails it, so a path
+    /// with no submodule above it spawns no git process at all. The index lookup then rejects a nested
+    /// repository git does not track as a submodule. The final path component is never tested, since the
+    /// file being read is not itself a repository.
+    private func owningRepository(relativePath: String, workspaceDir: String) throws -> OwningRepository {
+        let components = relativePath.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        var repoDir = workspaceDir
+        var descendedCount = 0
+        var gitlinkChain: [String] = []
+        var pending: [String] = []
+        for (index, component) in components.dropLast().enumerated() {
+            pending.append(component)
+            let candidate = pending.joined(separator: "/")
+            // Accepted: ownership is read from the LIVE index, so staging `git rm --cached <sub>` while a
+            // Last Commit manifest still lists that submodule's nested files makes their revision reads
+            // resolve to the superproject, which does not hold those object ids, and they fail as invalid
+            // arguments until the removal is committed or restored. Staging a submodule removal in the
+            // middle of reviewing a commit is rare, and the manifest is replaced on the next HEAD change
+            // anyway. The alternative, reading ownership from the reviewed HEAD tree, would make the
+            // Uncommitted and Last Commit scopes disagree about which repository a path even belongs to,
+            // which is a worse thing to be wrong about than one scope's reads during a staged removal.
+            guard SpacesDeviceWorkspacePathResolver.isContainedGitlinkCheckout(repoDir: repoDir, repoRelativePath: candidate),
+                try isTrackedGitlink(repoDir: repoDir, relativePath: candidate)
+            else { continue }
+            repoDir = (repoDir as NSString).appendingPathComponent(candidate)
+            descendedCount = index + 1
+            gitlinkChain.append(candidate)
+            pending = []
+        }
+        return OwningRepository(
+            repoDir: repoDir, submoduleComponents: Array(components.prefix(descendedCount)), gitlinkChain: gitlinkChain,
+            relativePath: components.dropFirst(descendedCount).joined(separator: "/"))
+    }
+
+    /// The old side of the Last Commit comparison for a file, expressed as the commit whose tree holds the
+    /// file's previous content.
+    private enum LastCommitOldSide {
+        case commit(String)
+        /// The file's repository has no previous state in this comparison: the workspace's own commit is a
+        /// root commit, or the submodule holding the file was added by it. The comparison side is empty,
+        /// exactly as it is for a newly added file.
+        case none
+        /// `revision` is not the commit the workspace's last commit moved this file's repository to, so the
+        /// row being asked about is not part of the comparison the daemon streams for this scope.
+        case revisionNotInLastCommit
+    }
+
+    /// Derives the Last Commit comparison's old side for `revision` at `owner`'s path.
+    ///
+    /// The request deliberately carries no base revision. The scope defines it: Last Commit compares the
+    /// workspace's `HEAD^` against its `HEAD`, so the daemon can always compute the base itself, and
+    /// accepting one from the client would let a caller request a comparison the daemon never streamed.
+    ///
+    /// For a file the workspace's own repository tracks, that base is simply the reviewed commit's parent.
+    /// For a file inside a submodule it is not: `revision` is then the commit the parent's `HEAD` records
+    /// for that submodule, and the previous state is whatever `HEAD^` recorded there, which a pointer bump
+    /// is free to skip past, rewind to, or take from another branch. So the pointer pair is walked one
+    /// gitlink level at a time, starting from the workspace's own `HEAD`/`HEAD^` pair, with each level's
+    /// pointers read out of the level above. A submodule absent from the old side was added by this commit
+    /// and has no old side at all.
+    ///
+    /// The walk also proves the request belongs to the comparison being served: the pointer `HEAD` records
+    /// at the deepest level must be exactly `revision`. When it is not, the client is holding a row from a
+    /// diff the workspace has since moved past, which is the same situation as naming a revision that is
+    /// not there.
+    private func lastCommitOldSide(owner: OwningRepository, revision: String, workspaceDir: String) throws -> LastCommitOldSide {
+        guard !owner.gitlinkChain.isEmpty else {
+            let parent = try workspaceGitClient.runGitAndCapture(
+                ["-C", workspaceDir, "rev-parse", "--verify", "--quiet", "\(revision)^"], timeout: 2, allowedExitCodes: [0, 1]
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            return parent.isEmpty ? .none : .commit(parent)
+        }
+        var repoDir = workspaceDir
+        var newTreeish = "HEAD"
+        // Accepted: the walk starts from the live `HEAD`/`HEAD^` pair, not from the superproject commit the
+        // open manifest was built at. If an unrelated commit lands in the superproject after that manifest
+        // streamed and before the client refreshes, a nested revision read issued inside that window still
+        // passes the check below (the new `HEAD` records the same pointer the untouched submodule had), but
+        // derives the old side from the new `HEAD^`, which is the commit the manifest called `HEAD`, so the
+        // pointer pair can come out as S2 to S2 instead of S1 to S2. The window closes on its own: the Last
+        // Commit signature moves with `HEAD`, so the refresh that replaces the whole manifest is already on
+        // its way within the 2s poll. The cost while it is open is one open of the inline editor showing an
+        // empty or wrong comparison side; the streamed patch is unaffected (it was produced against the
+        // manifest's own refs) and the worktree write is still guarded by its compare-and-swap baseline.
+        // Pinning this read to the manifest's superproject commit would mean adding a client-carried
+        // revision to a request that otherwise needs only a path and a target, and letting a client name
+        // the comparison, to close a sub-2s race.
+        let workspaceParent = try workspaceGitClient.runGitAndCapture(
+            ["-C", workspaceDir, "rev-parse", "--verify", "--quiet", "HEAD^"], timeout: 2, allowedExitCodes: [0, 1]
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        var oldTreeish: String? = workspaceParent.isEmpty ? nil : workspaceParent
+        for gitlink in owner.gitlinkChain {
+            guard
+                let newPointer = try SpacesDeviceWorkspaceDiffEngine.recordedGitlinkCommit(
+                    repoDir: repoDir, treeish: newTreeish, repoRelativePath: gitlink, gitClient: workspaceGitClient, timeout: 10)
+            else {
+                return .revisionNotInLastCommit
+            }
+            // Accepted: the old side is looked up by the submodule's CURRENT path, so a commit that both
+            // renamed a submodule and moved its pointer finds no gitlink at that path in `HEAD^` and the
+            // level reads as newly added. An inline edit opened under such a submodule in Last Commit then
+            // gets an added-file comparison side (no old text) even though the file existed under the old
+            // name. The streamed patch itself is unaffected, because the plan builder resolves the rename
+            // when it enumerates the diff, and the worktree write is still guarded by its own
+            // compare-and-swap baseline, so nothing is lost or overwritten: only the inline editor's old
+            // side is empty for that one review. Mapping each level back to its pre-rename path would mean
+            // a `diff-tree -M` per level on every nested revision read, paid by every ordinary edit, for a
+            // shape that is rare and that the row's own pointer text already describes.
+            let oldPointer = try oldTreeish.flatMap {
+                try SpacesDeviceWorkspaceDiffEngine.recordedGitlinkCommit(
+                    repoDir: repoDir, treeish: $0, repoRelativePath: gitlink, gitClient: workspaceGitClient, timeout: 10)
+            }
+            repoDir = (repoDir as NSString).appendingPathComponent(gitlink)
+            newTreeish = newPointer
+            oldTreeish = oldPointer
+        }
+        guard newTreeish == revision else { return .revisionNotInLastCommit }
+        guard let oldTreeish else { return .none }
+        return .commit(oldTreeish)
+    }
+
+    /// Whether `relativePath` is recorded as a gitlink (git object mode `160000`) in `repoDir`'s index.
+    private func isTrackedGitlink(repoDir: String, relativePath: String) throws -> Bool {
+        let output = try workspaceGitClient.runGitAndCapture(
+            ["-C", repoDir, "ls-files", "--stage", "-z", "--", ":(literal)\(relativePath)"], timeout: 10)
+        for record in output.split(separator: "\0", omittingEmptySubsequences: true) {
+            guard let tab = record.firstIndex(of: "\t") else { continue }
+            let fields = record[..<tab].split(separator: " ", omittingEmptySubsequences: true)
+            if fields.first == "160000" { return true }
+        }
+        return false
     }
 
     private enum GitTreePath {
@@ -4856,7 +5070,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             let snapshot = try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(
                 workspaceDir: workspaceDir, refName: scope.refName, lastCommit: scope.lastCommit, gitClient: workspaceGitClient,
                 deadlineStart: deadlineStart)
-            let createdManifest = workspaceDiffTransfers.createManifest(scope: scope, workspaceDir: workspaceDir, snapshot: snapshot)
+            let createdManifest = workspaceDiffTransfers.createManifest(scope: scope, snapshot: snapshot)
             manifestID = createdManifest.manifestID
             let session = createdManifest.session
             // The store may evict this manifest as another workspace request creates a generation before
@@ -4891,7 +5105,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             let plan = snapshot.plans[nextIndex]
             let file = SpacesDeviceWorkspaceDiffManifestFile(
                 path: plan.path, oldPath: plan.oldPath, status: plan.status, comparisonBaseRevision: plan.comparisonBaseRevision,
-                isSubmodule: plan.isSubmodule)
+                isSubmodule: plan.isSubmodule, submodulePath: plan.submodulePath)
             let encodedFileByteCount = try metadataEncoder.encode(file).count
             let delimiterByteCount = chunk.isEmpty ? 0 : 1
             guard encodedByteCount + delimiterByteCount + encodedFileByteCount <= Self.workspaceDiffManifestChunkByteCap else { break }
@@ -4999,8 +5213,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             defer { if !retainedByTransfer { try? FileManager.default.removeItem(at: outputURL.deletingLastPathComponent()) } }
             guard
                 let transfer = try SpacesDeviceWorkspaceDiffEngine.writeDiffFilePatch(
-                    snapshot: manifest.snapshot, workspaceDir: manifest.workspaceDir, relativePath: request.relativePath, outputURL: outputURL,
-                    gitClient: workspaceGitClient, deadlineStart: Date())
+                    snapshot: manifest.snapshot, relativePath: request.relativePath, outputURL: outputURL, gitClient: workspaceGitClient,
+                    deadlineStart: Date())
             else {
                 return SpacesDeviceAPIResponse(
                     ok: false, message: "The requested file is not changed in this workspace diff manifest.", errorCode: .notFound)

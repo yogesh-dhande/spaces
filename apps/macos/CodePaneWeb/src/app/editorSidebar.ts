@@ -1,3 +1,4 @@
+import { WorkspaceSubmodule } from "../bridge/types";
 import { FilesTreeHandle, renderFilesTree } from "./filesTree";
 import { WorkspaceFileListCache } from "./workspaceFileListCache";
 
@@ -38,6 +39,9 @@ export class EditorSidebar {
   private readonly changesAvailable: boolean;
   private selectedPath: string | undefined;
   private paths: readonly string[] = [];
+  /** The checked-out submodules of the same listing `paths` came from, always updated together
+   *  with it, so the Files tree's submodule chips can never describe a listing it is not showing. */
+  private submodules: readonly WorkspaceSubmodule[] = [];
   private truncated = false;
   /** Handle from the last full `renderFilesTreeNow()` render — lets `setSelectedPath` move the
    *  highlight in place instead of rebuilding the whole tree (see its own doc comment). `undefined`
@@ -206,6 +210,7 @@ export class EditorSidebar {
     const snapshot = this.fileListCache.snapshot();
     if (snapshot) {
       this.paths = snapshot.paths;
+      this.submodules = snapshot.submodules;
       this.truncated = snapshot.truncated;
     }
     this.renderFilesTreeNow();
@@ -234,6 +239,7 @@ export class EditorSidebar {
       .then((result) => {
         if (token !== this.fetchToken) return; // superseded by a later fetch, or the tab moved off Files
         this.paths = result.paths;
+        this.submodules = result.submodules;
         this.truncated = result.truncated;
         this.renderFilesTreeNow();
         this.noteEl.hidden = !this.truncated;
@@ -248,7 +254,7 @@ export class EditorSidebar {
   }
 
   private renderFilesTreeNow(): void {
-    this.filesTreeHandle = renderFilesTree(this.filesTreeEl, this.paths, this.selectedPath, {
+    this.filesTreeHandle = renderFilesTree(this.filesTreeEl, this.paths, this.submodules, this.selectedPath, {
       onSelect: (path) => this.onSelectFile(path),
       onExpandedPathsChange: (expandedPaths) => {
         this.expandedPaths = expandedPaths;

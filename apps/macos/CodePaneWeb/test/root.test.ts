@@ -246,11 +246,14 @@ const hoisted = vi.hoisted(() => {
           // from whether the fixture `DiffFileEntry` carries `submodule` metadata) travels on the
           // manifest page: the gitlink's actual pointer commits/dirty flag arrive later, on its
           // chunk reply, same as `isBinary`'s file body arrives later for an ordinary file.
-          files: files.map(({ path, oldPath, status, submodule }) => ({
+          // `submodulePath` is a plain manifest field (present verbatim on the fixture entry, not
+          // derived), so it is carried straight through, mirroring the wire contract.
+          files: files.map(({ path, oldPath, status, submodule, submodulePath }) => ({
             path,
             oldPath,
             status,
             ...(submodule !== undefined ? { isSubmodule: true as const } : {}),
+            ...(submodulePath !== undefined ? { submodulePath } : {}),
           })),
           nextFileIndex: request.fileIndex + files.length < manifest.files.length ? request.fileIndex + files.length : undefined,
         };
@@ -383,7 +386,7 @@ function patchCoveringLine(path: string, line: number): string {
 /** A gitlink (submodule) manifest entry: like `makeFile`, has no patch. `workspaceDiffFileChunk`'s
  *  mock above sends its `submodule` metadata on the one chunk reply and no patch bytes, the same
  *  way it sends `isBinary` for `makeFile`'s entries. */
-function makeSubmoduleFile(path: string): DiffFileEntry {
+function makeSubmoduleFile(path: string, overrides: Partial<DiffFileEntry> = {}): DiffFileEntry {
   return {
     path,
     status: "modified",
@@ -393,7 +396,9 @@ function makeSubmoduleFile(path: string): DiffFileEntry {
       newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca",
       dirty: true,
       unmerged: false,
+      checkedOut: true,
     },
+    ...overrides,
   };
 }
 
@@ -1033,7 +1038,7 @@ describe("mountRoot's progressive patch scheduler — interrupted chunk recovery
 
   it("uses the sidebar selection, promotion, and reveal path when Quick Open picks a queued diff file", async () => {
     const files = [makeFile("1.ts"), makeFile("2.ts"), makeFile("50.ts")];
-    hoisted.workspaceFileList.mockResolvedValue({ paths: files.map((file) => file.path), truncated: false });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: files.map((file) => file.path), truncated: false, submodules: [] });
     let releaseFirst: ((value: WorkspaceDiffFileChunkResult) => void) | undefined;
     hoisted.workspaceDiffFileChunk.mockImplementationOnce(
       () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { releaseFirst = resolve; }),
@@ -5662,7 +5667,7 @@ describe("mountRoot's file-list-signature push — sidebar refresh gated to Edit
     hoisted.workspaceDiff.mockClear();
     hoisted.notifyModeChanged.mockClear();
     hoisted.workspaceFileList.mockClear();
-    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [] });
     container = document.createElement("div");
   });
 
@@ -5703,7 +5708,7 @@ describe("mountRoot's file-list-signature push — ⌘P overlay refresh is not m
     hoisted.fileListSignatureCallbacks.length = 0;
     hoisted.workspaceDiff.mockClear();
     hoisted.workspaceFileList.mockClear();
-    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [] });
     container = document.createElement("div");
   });
 
@@ -5746,7 +5751,7 @@ describe("mountRoot's editor-mode-only startup triggers the sidebar's first fetc
     hoisted.pendingDiffCalls.length = 0;
     hoisted.workspaceDiff.mockClear();
     hoisted.workspaceFileList.mockClear();
-    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [] });
     container = document.createElement("div");
   });
 
@@ -5779,7 +5784,7 @@ describe("mountRoot's init ordering — rehydrating into editor mode reads the r
     hoisted.notifyModeChanged.mockClear();
     hoisted.workspaceFileList.mockClear();
     hoisted.workspaceFileRead.mockClear();
-    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [] });
     hoisted.workspaceFileRead.mockResolvedValue({ content: "let x = 0;\n", sha256: "deadbeef", size: 11 });
     container = document.createElement("div");
   });
@@ -5856,6 +5861,7 @@ describe("mountRoot's Diff→Editor round trip re-attaches the sidebar's current
 
 describe("mountRoot: submodule (gitlink) entries (A3)", () => {
   let container: HTMLElement;
+  const defaultInitPayload = INIT_PAYLOAD;
 
   beforeEach(() => {
     hoisted.pendingDiffCalls.length = 0;
@@ -5866,6 +5872,23 @@ describe("mountRoot: submodule (gitlink) entries (A3)", () => {
     capturedCodeViewOptions.current = undefined;
     container = document.createElement("div");
   });
+
+  afterEach(() => {
+    INIT_PAYLOAD = defaultInitPayload;
+  });
+
+  /** The daemon's nested-submodule shape: a pointer entry, then every entry nested under it, in
+   *  that order: a submodule with a changed file of its own plus a second submodule checked out
+   *  inside it. */
+  function nestedSubmoduleFiles(): DiffFileEntry[] {
+    return [
+      makeSubmoduleFile("sbc_hal"),
+      // Every nested entry names its owner: the tree groups by `submodulePath`, not by path prefix.
+      { ...makeFile("sbc_hal/.bumpversion.cfg"), submodulePath: "sbc_hal" },
+      makeSubmoduleFile("sbc_hal/api_commands", { submodulePath: "sbc_hal" }),
+      { ...makeFile("sbc_hal/api_commands/uart.c"), submodulePath: "sbc_hal/api_commands" },
+    ];
+  }
 
   it("completes a submodule entry from its metadata-only chunk reply, with no patch bytes requested or needed", async () => {
     const mounted = mountRoot(container);
@@ -5880,6 +5903,27 @@ describe("mountRoot: submodule (gitlink) entries (A3)", () => {
     expect(hoisted.workspaceDiffFileChunk).toHaveBeenCalledTimes(1);
   });
 
+  it("carries a nested entry's submodulePath through the manifest mapping and the patch join", async () => {
+    const nestedFile: DiffFileEntry = {
+      path: "sbc_hal/api_commands/uart.c",
+      status: "modified",
+      isBinary: false,
+      submodulePath: "sbc_hal/api_commands",
+      patch: "diff --git a/uart.c b/uart.c\n--- a/uart.c\n+++ b/uart.c\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+    };
+    const updateFileSpy = vi.spyOn(DiffView.prototype, "updateFile");
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [nestedFile], "sig-nested");
+    await mounted;
+
+    await vi.waitFor(() =>
+      expect(updateFileSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ path: "sbc_hal/api_commands/uart.c", submodulePath: "sbc_hal/api_commands", patchState: "ready" }),
+      ),
+    );
+  });
+
   it("a click on a submodule row in Editor mode is a no-op: no workspaceFileRead call and no banner", async () => {
     const mounted = mountRoot(container);
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
@@ -5891,8 +5935,9 @@ describe("mountRoot: submodule (gitlink) entries (A3)", () => {
     clickButton(container, "Changes");
     await vi.waitFor(() => expect(container.querySelector(".editor-sidebar-list")!.textContent).toContain("sbc_hal"));
 
-    const row = container.querySelector<HTMLElement>('.row[data-path="sbc_hal"]')!;
-    row.click();
+    // The pointer is a folder row now, so the chip is what carries its selection.
+    const chip = container.querySelector<HTMLElement>('.dirrow[data-path="sbc_hal"] .submodule-badge')!;
+    chip.click();
 
     // Give any (wrongly) started async open a turn to actually call the bridge before asserting.
     await Promise.resolve();
@@ -5903,6 +5948,46 @@ describe("mountRoot: submodule (gitlink) entries (A3)", () => {
     // exactly as unshown as it started.
     expect((container.querySelector(".banner.conflict") as HTMLElement | null)?.style.display).toBe("none");
     expect(container.querySelector(".editor-path")?.textContent ?? "").not.toContain("sbc_hal");
+  });
+
+  it("clicking a pointer chip in Diff mode scrolls the diff to that pointer's placeholder", async () => {
+    const scrollToFile = vi.spyOn(DiffView.prototype, "scrollToFile");
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, nestedSubmoduleFiles(), "sig-nested");
+    await mounted;
+    await vi.waitFor(() => expect(container.querySelector('.dirrow[data-path="sbc_hal/api_commands"]')).not.toBeNull());
+
+    container.querySelector<HTMLElement>('.dirrow[data-path="sbc_hal/api_commands"] .submodule-badge')!.click();
+
+    // The pointer placeholder is the first item of the submodule's group in the diff, so selecting
+    // it is an ordinary in-diff jump, the same one a file row makes.
+    expect(scrollToFile.mock.calls.filter(([path]) => path === "sbc_hal/api_commands")).toHaveLength(1);
+    scrollToFile.mockRestore();
+  });
+
+  it("reveals a file nested two submodules deep by expanding both submodule folders", async () => {
+    INIT_PAYLOAD = {
+      ...defaultInitPayload,
+      workspaceState: {
+        ...defaultInitPayload.workspaceState,
+        // Everything collapsed: only the restored selection's own ancestor chain should open.
+        diffTreeExpandedPaths: [],
+        diffTreeSelectedPath: "sbc_hal/api_commands/uart.c",
+      },
+    };
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, nestedSubmoduleFiles(), "sig-nested");
+    await mounted;
+
+    await vi.waitFor(() => expect(container.querySelector('.row[data-path="sbc_hal/api_commands/uart.c"]')).not.toBeNull());
+    expect(container.querySelector('.row[data-path="sbc_hal/api_commands/uart.c"]')!.className).toContain("on");
+    for (const path of ["sbc_hal", "sbc_hal/api_commands"]) {
+      const group = container.querySelector<HTMLElement>(`.dirrow[data-path="${path}"]`)!.parentElement!;
+      expect(group.querySelector<HTMLElement>(".dir-children")!.style.display).toBe("");
+    }
   });
 });
 
@@ -5915,7 +6000,7 @@ describe("mountRoot's Diff-mode ⌘P jump records into recents (Finding E)", () 
     hoisted.notifyModeChanged.mockClear();
     hoisted.notifyEditorUIStateChanged.mockClear();
     hoisted.workspaceFileList.mockClear();
-    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [] });
     container = document.createElement("div");
   });
 
@@ -5958,7 +6043,7 @@ describe("mountRoot's Diff-mode ⌘P jump to an out-of-diff file opens it before
     hoisted.workspaceDiff.mockClear();
     hoisted.workspaceFileList.mockClear();
     hoisted.workspaceFileRead.mockClear();
-    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts", "b.ts"], truncated: false });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts", "b.ts"], truncated: false, submodules: [] });
     hoisted.workspaceFileRead.mockResolvedValueOnce({ content: "b content", sha256: "sha-b", size: 9 });
     container = document.createElement("div");
   });
@@ -6012,7 +6097,7 @@ describe("mountRoot's cross-mode Quick Open scope preservation", () => {
     hoisted.workspaceFileList.mockClear();
     hoisted.workspaceFileRead.mockClear();
     hoisted.notifyWorkspaceStateChanged.mockClear();
-    hoisted.workspaceFileList.mockResolvedValue({ paths: ["committed.ts", "untracked.ts"], truncated: false });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["committed.ts", "untracked.ts"], truncated: false, submodules: [] });
     hoisted.workspaceFileRead.mockResolvedValue({ content: "untracked content", sha256: "untracked-sha", size: 17 });
     container = document.createElement("div");
   });
@@ -6089,7 +6174,7 @@ describe("mountRoot's Editor mode — Files/Changes sidebar and recent-files rec
    *  the same test (e.g. a Diff→Editor round trip) would otherwise starve on an exhausted `-Once`
    *  queue — these tests want the same listing back every time, not to count individual calls. */
   async function mountWithFiles(paths: readonly string[]): Promise<void> {
-    hoisted.workspaceFileList.mockResolvedValue({ paths, truncated: false });
+    hoisted.workspaceFileList.mockResolvedValue({ paths, truncated: false, submodules: [] });
     const mounted = mountRoot(container);
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
     resolveDiff(0, [], "sig-a");
@@ -6362,7 +6447,7 @@ describe("mountRoot's diff line context menu", () => {
     hoisted.workspaceFileRead.mockReset();
     hoisted.workspaceFileRead.mockResolvedValue({ content: "alpha\ndelta\nepsilon\n", sha256: "sha-app", size: 22 });
     hoisted.workspaceFileList.mockReset();
-    hoisted.workspaceFileList.mockResolvedValue({ paths: [contextFile.path], truncated: false });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: [contextFile.path], truncated: false, submodules: [] });
     capturedCodeViewOptions.scrollCalls = [];
     INIT_PAYLOAD = defaultInitPayload;
     container = document.createElement("div");

@@ -456,18 +456,48 @@
   color: var(--del-fg);
 }
 
-/* Same chip treatment as the ref-search "base" badge: a fixed label, not a stat. */
-.file-list .row .submodule-badge {
+/* The commit chip on a submodule directory row, in both lists: the Changes list's pointer chip (a
+   button, fileList.ts) and the Files tree's inert checkout marker (a span, filesTree.ts). Same chip
+   treatment as the ref-search "base" badge, minus its uppercasing: this chip's text is a commit
+   sha, which reads wrong in capitals. Dimensions are fixed rather than content-derived so a row
+   with a chip lines up with the stat column of the file rows around it. `border`/`font` are set
+   explicitly because a button inherits neither. */
+.file-list .dirrow .submodule-badge {
   margin-left: auto;
   flex: 0 0 auto;
   padding: 1px 5px;
+  border: 0;
   border-radius: 4px;
   background: var(--chip);
   color: var(--fg3);
+  font-family: ui-monospace, Menlo, monospace;
   font-size: 9.5px;
   font-weight: 600;
   letter-spacing: 0.04em;
-  text-transform: uppercase;
+}
+
+/* A pointer with no checkout behind it: nothing is nested under this row, and the orange says the
+   commit named here is one the workspace cannot show the contents of. */
+.file-list .dirrow .submodule-badge.not-checked-out {
+  color: var(--orange);
+}
+
+/* The Changes list's chip is a button (it selects the pointer entry), so it needs the pointer
+   cursor its enclosing row (a disclosure toggle) does not use, and its own focus ring. */
+.file-list .dirrow button.submodule-badge {
+  cursor: pointer;
+}
+
+.file-list .dirrow button.submodule-badge:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* A submodule row stands in for the pointer entry a file row used to carry, so it takes the same
+   selected treatment `.row.on` gives a selected file. */
+.file-list .dirrow.on {
+  background: var(--row-sel);
+  color: var(--fg);
 }
 
 .file-list .empty {

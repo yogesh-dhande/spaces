@@ -46,6 +46,11 @@ export interface DiffFileManifestEntry {
    * `DiffFileEntry.submodule`), so the sidebar can render its read-only pointer row from the
    * manifest alone, before the metadata-only chunk arrives. */
   isSubmodule?: boolean;
+  /** Workspace-relative path of the nearest enclosing submodule, present only for an entry nested
+   * inside a checked-out submodule (including a nested submodule's own pointer row, which carries
+   * its parent submodule's path rather than its own). Absent for a top-level entry. Manifest order
+   * guarantees a submodule's nested entries immediately follow its pointer row. */
+  submodulePath?: string;
 }
 
 /** One completed file patch. `patch` is absent for a binary file or a submodule (gitlink) entry.
@@ -65,15 +70,21 @@ export interface DiffFileEntry {
    * Changes list can badge a gitlink row while its metadata-only chunk is still queued; the
    * pointer detail itself arrives later in `submodule`. */
   isSubmodule?: boolean;
+  /** Carried over from the manifest entry (see `DiffFileManifestEntry.submodulePath`). */
+  submodulePath?: string;
   /** Present only for a git submodule (gitlink, mode 160000) entry: the pointer commits either
    * side recorded, and whether the submodule's own worktree carried uncommitted changes. One of
    * `oldCommit`/`newCommit` is absent when the submodule was added or removed. Mirrors how
    * `isBinary` travels: repeated on every chunk reply's `file` metadata, with no patch bytes sent
    * for the entry. `unmerged` is true when a conflicting merge left the pointer in git's
    * unresolved-conflict index state; the reported commits are then the pointer the worktree
-   * currently holds (HEAD's side until the user resolves), not a merged result. The daemon never
-   * reports `dirty` together with `unmerged`. */
-  submodule?: { oldCommit?: string; newCommit?: string; dirty: boolean; unmerged: boolean };
+   * currently holds (HEAD's side until the user resolves), not a merged result. `checkedOut` is
+   * false when the diff did not nest this submodule's own files under the pointer row (never
+   * initialized, missing the comparison commit, or deeper than the daemon's depth guard). It says
+   * nothing about the checkout's condition: a readable dirty checkout sitting at the depth limit,
+   * or one missing the commit being compared against, arrives as `checkedOut: false` with `dirty`
+   * still set, so no client rule may drop a flag on the strength of `checkedOut`. */
+  submodule?: { oldCommit?: string; newCommit?: string; dirty: boolean; unmerged: boolean; checkedOut: boolean };
   /** Ephemeral client-side transfer state, never persisted with workspace recovery data. */
   patchState?: "queued" | "streaming" | "ready";
   oldSHA?: string;
@@ -176,6 +187,20 @@ export interface WorkspaceFileListResult {
   /** True when the daemon capped the listing before enumerating the whole tree. Callers surface a
    *  subtle note ("File list truncated") rather than presenting the list as complete. */
   truncated: boolean;
+  /** Every checked-out git submodule in the workspace, nested ones included. `paths` already
+   *  includes files nested inside these directories inline; this lets callers distinguish a
+   *  submodule's own directory from an ordinary one without re-deriving it from file paths, and
+   *  label it with the commit its checkout sits at. */
+  submodules: WorkspaceSubmodule[];
+}
+
+/** One checked-out git submodule in the workspace listing. `path` is the checkout's
+ *  workspace-relative directory path (`vendor/lib`, and `vendor/lib/api` for one nested inside it);
+ *  `commit` is the full object id that checkout's `HEAD` resolves to, which the Files tree shows
+ *  the first 7 characters of. */
+export interface WorkspaceSubmodule {
+  path: string;
+  commit: string;
 }
 
 /** Backs the compare menu's "Branch…" and "Commit or ref…" search dialog (`refSearchDialog.ts`).

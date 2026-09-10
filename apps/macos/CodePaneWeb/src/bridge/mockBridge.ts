@@ -4,6 +4,7 @@ import {
   FIXTURE_FILE_CONTENTS,
   FIXTURE_INIT_PAYLOAD,
   FIXTURE_REF_LIST,
+  FIXTURE_SUBMODULES,
   fixtureDiffFiles,
   fixtureDiffManifest,
   fixtureHash,
@@ -226,7 +227,11 @@ export class MockSpacesBridge implements SpacesBridge {
   }
 
   async workspaceFileList(): Promise<WorkspaceFileListResult> {
-    return delay({ paths: [...this.workspaceMembership].sort((a, b) => a.localeCompare(b)), truncated: false });
+    return delay({
+      paths: [...this.workspaceMembership].sort((a, b) => a.localeCompare(b)),
+      truncated: false,
+      submodules: FIXTURE_SUBMODULES,
+    });
   }
 
   async workspaceRefList(): Promise<WorkspaceRefListResult> {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FIXTURE_ALL_PATHS } from "../src/bridge/fixtures";
+import { FIXTURE_ALL_PATHS, FIXTURE_SUBMODULES } from "../src/bridge/fixtures";
 import { createRealBridge } from "../src/bridge/realBridge";
 import { createMockBridge } from "../src/bridge/mockBridge";
 import { SpacesBridgeError } from "../src/bridge/types";
@@ -224,6 +224,9 @@ describe("MockSpacesBridge", () => {
 
     const initial = await bridge.workspaceFileList();
     expect(initial.paths).toEqual([...FIXTURE_ALL_PATHS].sort((a, b) => a.localeCompare(b)));
+    // The submodule files are part of `paths` inline; `submodules` is what tells the Files tree
+    // which of those directories are checkouts, and which commit to chip each one with.
+    expect(initial.submodules).toEqual(FIXTURE_SUBMODULES);
 
     await bridge.workspaceFileRead("notes/TODO.md", "editor");
     bridge.simulateFileChange("# TODO\n\n- edited in place\n");

@@ -28,8 +28,10 @@ never requires node — only editing this web bundle does, which then requires r
 
 `npm run dev` runs against `MockSpacesBridge` (`src/bridge/mockBridge.ts`) instead of the real
 WKWebView bridge, seeded with a realistic fixture diff (`src/bridge/fixtures.ts`: a modified
-file, a rename, an addition, a deletion, an untracked file, a binary file, and a submodule
-gitlink entry). A floating "Simulate remote change" button
+file, a rename, an addition, a deletion, an untracked file, a binary file, a nested submodule
+(a checked-out pointer with its own changed and untracked files, plus a nested submodule
+checked out inside it), and a submodule pointer that is not checked out). A floating "Simulate
+remote change" button
 (`src/dev/harnessControls.ts`) fires a `spaces:diffSignature` event so the live-refresh path
 (preserve scroll, re-fetch, re-render) is exercisable without a real daemon or git repo. The
 harness controls and the mock bridge/fixtures are dev-only: `src/bridge/index.ts` dynamically
@@ -44,14 +46,20 @@ production build.
   requested `DiffScope`, plus its `manifestID` and `scopeSignature`. The initial page creates the
   manifest; later pages echo its id and semantic file-index cursor until no next cursor remains. The
   manifest freezes the file enumeration and comparison plan for one refresh; it does not contain patch bytes.
-  A manifest entry's `isSubmodule` flags a git submodule (gitlink) change.
+  A manifest entry's `isSubmodule` flags a git submodule (gitlink) change. Every entry carries a
+  full workspace-relative `path`; an entry nested inside a checked-out submodule also carries
+  `submodulePath`, the workspace-relative path of the nearest enclosing submodule (a nested
+  submodule's own pointer row carries its parent submodule's path, not its own). A submodule's
+  nested entries immediately follow its pointer row in manifest order.
 - `workspaceDiffFileChunk(scope, {manifestID, relativePath, byteOffset, transferID?})` — one bounded
   raw-byte range of a file's patch, returned as base64. A first request creates that file's transfer;
   later requests echo its `transferID` until EOF. `workspaceDiffFileChunkCancel` cancels an active
   transfer, and `workspaceDiffManifestRelease` releases the manifest and its transfers. A binary or
   submodule entry sends no patch bytes at all: its `file` metadata (`isBinary`, or `submodule` with
-  the pointer commits, dirty flag, and unmerged flag) arrives on the first reply and the transfer
-  completes there.
+  the pointer commits, dirty flag, unmerged flag, and `checkedOut`) arrives on the first reply and
+  the transfer completes there. `checkedOut: false` means the pointer row has nothing nested under
+  it (never initialized, missing commit, or deeper than the daemon's depth guard); such a pointer
+  is never `dirty` or `unmerged`.
 - `workspaceFileRead(path, purpose, comparison?)` — content, `sha256`, size. `editor` makes the
   native host's single file-signature watcher follow the standalone editor; `inlineDiff` does not
   retarget that watcher. An inline-diff request with an immutable `comparison.baseRevision` also
@@ -72,7 +80,10 @@ production build.
   `fileMissing:true` set instead when the file was deleted out from under the write). Never
   throws for a stale write — a conflict is a normal result, not an error.
 - `workspaceFileList()` — the full workspace file listing, backing Editor mode's Files tree and
-  the ⌘P quick-open overlay's fuzzy search. Callers (`editorSidebar.ts`, `quickOpen.ts`) fetch this
+  the ⌘P quick-open overlay's fuzzy search. `paths` includes nested submodule files inline;
+  `submodules` separately names every checked-out submodule (nested ones included) with the commit
+  its checkout sits at, so callers can distinguish a submodule's own directory from an ordinary one
+  without re-deriving it from file paths, and label it with that commit. Callers (`editorSidebar.ts`, `quickOpen.ts`) fetch this
   lazily through the shared `WorkspaceFileListCache`, which keeps at most one bridge call
   outstanding at a time across `get()` and `getFresh()` and does not cache a failed fetch. It runs
   on the daemon's per-workspace serial git queue (shared with file reads/saves/diffs), so a call
@@ -187,11 +198,30 @@ then arrive through per-file `workspaceDiffFileChunk` transfers: one file stream
 bounded 4 MiB chunks, the selected queued file can be promoted, and incoming UTF-8 bytes are
 decoded incrementally. A binary entry has an explicit non-commentable placeholder; textual
 patches have no daemon truncation or aggregate UI cap. A submodule (gitlink) entry renders the
-same way: a read-only pointer row naming its old/new commit shas (and whether the submodule's own
-worktree was dirty, or its pointer was left unresolved by a conflicting merge), with no gutter,
-comments, or edit affordance; the Changes list marks it with
-a "submodule" badge instead of a +/- stat, and selecting it in Editor mode is a no-op rather than
-opening it (it names a directory, not a file). Untracked files render as additions with
+same way: a read-only pointer row naming its old/new commit shas, then every flag the daemon
+reports in the fixed order dirty, unmerged, then `, not checked out` when `checkedOut` is false.
+`checkedOut` says only whether the diff nested this submodule's own files under the pointer, not
+whether the checkout is clean, so a readable dirty checkout at the daemon's depth limit arrives as
+`checkedOut: false, dirty: true` and keeps its `(dirty)`; no flag is dropped on the strength of
+another. The pointer row has no gutter, comments, or edit affordance. In the Changes list the pointer entry is not a file row at
+all: `fileTree.ts` makes it the directory node for its own path, holding the entries whose
+`submodulePath` names it as their owner (a nested submodule's pointer names its parent, so a chain
+groups one level at a time). Ownership, not path prefix, is what decides this: the two disagree
+when a submodule is replaced by ordinary files at the same path, and a superproject `A/foo` placed
+inside a removed pointer `A` would show another repository's file in it and make a pointer with no
+checkout behind it look expandable. A path can therefore carry both a pointer node and a plain
+directory node, as sibling rows; the pointer row is identified as a change entry
+(`code-pane-change-<path>`) rather than a directory so the two never share an element id. A
+submodule directory is also a compaction boundary in both directions, so its row is never folded
+into a chain. `fileList.ts` renders that row with a chip in place of the +/- stat, carrying the
+pointer's 7-character commit and the whole `submoduleLabel` string as its tooltip, orange when
+`checkedOut` is false (such a row has no children, so it gets no disclosure triangle and no toggle
+either). The chip reads "submodule" from the manifest's `isSubmodule` flag alone and is rebuilt by
+`updateFileListRow` when the metadata-only chunk lands. Clicking the row discloses the submodule's
+files; clicking the chip selects the pointer entry, which scrolls the diff to its placeholder and is
+a no-op in Editor mode (it names a directory, not a file). `pathTree.ts`/`filesTree.ts` mark the
+Files tree's submodule checkouts from `workspaceFileList`'s `submodules` with the same chip and the
+same compaction boundary. Untracked files render as additions with
 no old side. Scope/signature refreshes release the old manifest and replace it with a new
 metadata-first generation while preserving the relevant selection and scroll context. A refresh
 that preserves the viewport reveals no arriving patch at all until its stream finishes, the user

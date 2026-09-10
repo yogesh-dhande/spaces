@@ -137,74 +137,6 @@ describe("fileList — renderFileList (existing behavior)", () => {
       expect(row.querySelector(".st")).toBeNull();
     }
   });
-
-  it("shows a submodule badge instead of the stat span for a gitlink entry", () => {
-    const container = document.createElement("div");
-    const files = [
-      makeFile({
-        path: "sbc_hal",
-        patch: undefined,
-        submodule: { oldCommit: "a".repeat(40), newCommit: "b".repeat(40), dirty: true, unmerged: false },
-      }),
-    ];
-
-    renderFileList(container, files, undefined, makeCallbacks());
-
-    const row = container.querySelector(`.row[data-path="sbc_hal"]`)!;
-    expect(row.querySelector(".submodule-badge")?.textContent).toBe("submodule");
-    expect(row.querySelector(".st")).toBeNull();
-    expect(row.querySelector(".transfer")).toBeNull();
-  });
-
-  it("badges a gitlink row from the manifest flag alone, before its pointer metadata arrives", () => {
-    const container = document.createElement("div");
-    const files = [makeFile({ path: "sbc_hal", patch: undefined, patchState: "queued", isSubmodule: true })];
-
-    renderFileList(container, files, undefined, makeCallbacks());
-
-    const row = container.querySelector(`.row[data-path="sbc_hal"]`)!;
-    expect(row.querySelector(".submodule-badge")?.textContent).toBe("submodule");
-    expect(row.querySelector(".transfer")).toBeNull();
-    expect(row.querySelector(".st")).toBeNull();
-  });
-
-  it("keeps exactly one badge on a submodule row across patch-state updates", () => {
-    const container = document.createElement("div");
-    renderFileList(
-      container,
-      [makeFile({ path: "sbc_hal", patch: undefined, patchState: "queued", isSubmodule: true })],
-      undefined,
-      makeCallbacks(),
-    );
-
-    expect(updateFileListRow(container, makeFile({ path: "sbc_hal", patch: undefined, patchState: "streaming", isSubmodule: true }))).toBe("updated");
-    expect(
-      updateFileListRow(
-        container,
-        makeFile({
-          path: "sbc_hal",
-          patch: undefined,
-          patchState: "ready",
-          isSubmodule: true,
-          submodule: { oldCommit: "a".repeat(40), newCommit: "b".repeat(40), dirty: true, unmerged: false },
-        }),
-      ),
-    ).toBe("updated");
-
-    const row = container.querySelector(`.row[data-path="sbc_hal"]`)!;
-    expect(row.querySelectorAll(".submodule-badge")).toHaveLength(1);
-    expect(row.querySelector(".fn")?.textContent).toBe("sbc_hal");
-  });
-
-  it("keeps data-path and the row identifier on a submodule row", () => {
-    const container = document.createElement("div");
-    const files = [makeFile({ path: "sbc_hal", patch: undefined, submodule: { dirty: false, unmerged: false } })];
-
-    renderFileList(container, files, undefined, makeCallbacks());
-
-    const row = container.querySelector<HTMLElement>(`.row[data-path="sbc_hal"]`)!;
-    expect(row.id).toBe(`code-pane-change-${encodeURIComponent("sbc_hal")}`);
-  });
 });
 
 describe("fileList — directory tree (docs mockup 'G — Tree with compacted chains')", () => {
@@ -375,5 +307,322 @@ describe("fileList — directory tree (docs mockup 'G — Tree with compacted ch
     expect(container.querySelectorAll(".dirrow")).toHaveLength(1);
     const fnTexts = [...container.querySelectorAll(".row .fn")].map((el) => el.textContent);
     expect(fnTexts).toEqual(["README.md", "Foo.swift"]);
+  });
+});
+
+/** The nested-submodule shape the daemon sends: a pointer entry, then every entry nested under it
+ *  (a nested submodule's own pointer included), in that order. */
+function nestedSubmoduleFiles(): DiffFileEntry[] {
+  return [
+    makeFile({
+      path: "sbc_hal",
+      patch: undefined,
+      isSubmodule: true,
+      submodule: { oldCommit: "a".repeat(40), newCommit: "b".repeat(40), dirty: true, unmerged: false, checkedOut: true },
+    }),
+    makeFile({
+      path: "sbc_hal/.bumpversion.cfg",
+      submodulePath: "sbc_hal",
+      patch: ["@@ -1,2 +1,2 @@", "-current_version = 1.4.2", "+current_version = 1.4.3"].join("\n"),
+    }),
+  ];
+}
+
+describe("fileList: submodule pointer rows (PR D, nested submodules)", () => {
+  it("renders the pointer as a directory row chipped 'submodule' before its metadata arrives, and its commit after", () => {
+    const container = document.createElement("div");
+    renderFileList(container, [makeFile({ path: "sbc_hal", patch: undefined, patchState: "queued", isSubmodule: true })], undefined, makeCallbacks());
+
+    const dirrow = container.querySelector<HTMLElement>(`.dirrow[data-path="sbc_hal"]`)!;
+    expect(dirrow.querySelector(".dirlabel")?.textContent).toBe("sbc_hal");
+    expect(dirrow.querySelector(".submodule-badge")?.textContent).toBe("submodule");
+    // A gitlink has no patch bytes, so neither a transfer spinner nor a +/- stat ever belongs here.
+    expect(dirrow.querySelector(".transfer")).toBeNull();
+    expect(dirrow.querySelector(".st")).toBeNull();
+    // The pointer is no longer a leaf row at all.
+    expect(container.querySelector(`.row[data-path="sbc_hal"]`)).toBeNull();
+
+    expect(
+      updateFileListRow(
+        container,
+        makeFile({
+          path: "sbc_hal",
+          patch: undefined,
+          patchState: "ready",
+          isSubmodule: true,
+          submodule: { oldCommit: "a".repeat(40), newCommit: "b".repeat(40), dirty: true, unmerged: false, checkedOut: true },
+        }),
+      ),
+    ).toBe("updated");
+
+    expect(dirrow.querySelectorAll(".submodule-badge")).toHaveLength(1);
+    expect(dirrow.querySelector(".submodule-badge")?.textContent).toBe("bbbbbbb");
+  });
+
+  it("titles the chip with the whole pointer label the diff's placeholder row shows", () => {
+    const container = document.createElement("div");
+    renderFileList(container, nestedSubmoduleFiles(), undefined, makeCallbacks());
+
+    const chip = container.querySelector(`.dirrow[data-path="sbc_hal"] .submodule-badge`)!;
+    expect(chip.getAttribute("title")).toBe("Submodule aaaaaaa → bbbbbbb (dirty)");
+    expect(chip.getAttribute("aria-label")).toBe("Submodule pointer for sbc_hal");
+  });
+
+  it("shows the old side's commit for a submodule the comparison removed", () => {
+    const container = document.createElement("div");
+    renderFileList(
+      container,
+      [
+        makeFile({
+          path: "sbc_hal",
+          status: "deleted",
+          patch: undefined,
+          submodule: { oldCommit: "c".repeat(40), dirty: false, unmerged: false, checkedOut: true },
+        }),
+      ],
+      undefined,
+      makeCallbacks(),
+    );
+
+    expect(container.querySelector(`.dirrow[data-path="sbc_hal"] .submodule-badge`)?.textContent).toBe("ccccccc");
+  });
+
+  it("marks a pointer with no checkout behind it orange, and gives it no disclosure of its own", () => {
+    const container = document.createElement("div");
+    renderFileList(
+      container,
+      [
+        makeFile({
+          path: "documentation",
+          patch: undefined,
+          // `dirty` is reported independently of `checkedOut`, so the tooltip must carry both.
+          submodule: { oldCommit: "d".repeat(40), newCommit: "e".repeat(40), dirty: true, unmerged: false, checkedOut: false },
+        }),
+      ],
+      undefined,
+      makeCallbacks(),
+    );
+
+    const dirrow = container.querySelector<HTMLElement>(`.dirrow[data-path="documentation"]`)!;
+    const chip = dirrow.querySelector(".submodule-badge")!;
+    expect(chip.classList.contains("not-checked-out")).toBe(true);
+    expect(chip.getAttribute("title")).toBe("Submodule ddddddd → eeeeeee (dirty), not checked out");
+    // Nothing is nested under it, so the row is not a toggle: no triangle, no button semantics.
+    expect(dirrow.querySelector(".tri")).toBeNull();
+    expect(dirrow.getAttribute("role")).toBeNull();
+    expect(dirrow.hasAttribute("aria-expanded")).toBe(false);
+  });
+
+  it("clicking the folder row toggles the submodule's files without selecting the pointer", () => {
+    const container = document.createElement("div");
+    const callbacks = makeCallbacks();
+    renderFileList(container, nestedSubmoduleFiles(), undefined, callbacks);
+
+    const dirrow = container.querySelector<HTMLElement>(`.dirrow[data-path="sbc_hal"]`)!;
+    const childrenEl = dirrow.parentElement!.querySelector<HTMLElement>(".dir-children")!;
+    expect(childrenEl.style.display).toBe("");
+
+    dirrow.click();
+    expect(childrenEl.style.display).toBe("none");
+    dirrow.click();
+    expect(childrenEl.style.display).toBe("");
+    expect(callbacks.onSelect).not.toHaveBeenCalled();
+  });
+
+  it("collapses the submodule folder on a row click, persisting the drop and selecting nothing", () => {
+    const container = document.createElement("div");
+    const callbacks: FileListCallbacks = { onSelect: vi.fn(), onExpandedPathsChange: vi.fn() };
+    renderFileList(container, nestedSubmoduleFiles(), undefined, callbacks, ["sbc_hal"]);
+
+    const dirrow = container.querySelector<HTMLElement>(`.dirrow[data-path="sbc_hal"]`)!;
+    const childrenEl = dirrow.parentElement!.querySelector<HTMLElement>(".dir-children")!;
+    expect(dirrow.getAttribute("aria-expanded")).toBe("true");
+
+    dirrow.click();
+
+    // The one rule: the row is the disclosure, the chip is the selection. A click anywhere on the
+    // row other than the chip must behave exactly like a plain folder's row click.
+    expect(childrenEl.style.display).toBe("none");
+    expect(dirrow.getAttribute("aria-expanded")).toBe("false");
+    expect(callbacks.onExpandedPathsChange).toHaveBeenLastCalledWith([]);
+    expect(callbacks.onSelect).not.toHaveBeenCalled();
+  });
+
+  it("collapses on a triangle click even while the pointer path is the selected path", () => {
+    const container = document.createElement("div");
+    const callbacks: FileListCallbacks = { onSelect: vi.fn(), onExpandedPathsChange: vi.fn() };
+    // Selected AND expanded: the selected-path reveal must not put the expansion back, and the
+    // highlight must not turn the row into a second way of selecting the pointer.
+    renderFileList(container, nestedSubmoduleFiles(), "sbc_hal", callbacks, ["sbc_hal"]);
+
+    const dirrow = container.querySelector<HTMLElement>(`.dirrow[data-path="sbc_hal"]`)!;
+    expect(dirrow.classList.contains("on")).toBe(true);
+    const childrenEl = dirrow.parentElement!.querySelector<HTMLElement>(".dir-children")!;
+
+    dirrow.querySelector<HTMLElement>(".tri")!.click();
+
+    expect(childrenEl.style.display).toBe("none");
+    expect(dirrow.getAttribute("aria-expanded")).toBe("false");
+    expect(callbacks.onExpandedPathsChange).toHaveBeenLastCalledWith([]);
+    expect(callbacks.onSelect).not.toHaveBeenCalled();
+  });
+
+  it("clicking the chip selects the pointer path and leaves the folder open", () => {
+    const container = document.createElement("div");
+    const callbacks = makeCallbacks();
+    renderFileList(container, nestedSubmoduleFiles(), undefined, callbacks);
+
+    const dirrow = container.querySelector<HTMLElement>(`.dirrow[data-path="sbc_hal"]`)!;
+    const childrenEl = dirrow.parentElement!.querySelector<HTMLElement>(".dir-children")!;
+    dirrow.querySelector<HTMLElement>(".submodule-badge")!.click();
+
+    expect(callbacks.onSelect).toHaveBeenCalledWith("sbc_hal");
+    expect(childrenEl.style.display).toBe("");
+  });
+
+  it("activating the chip from the keyboard selects the pointer instead of toggling the folder", () => {
+    const container = document.createElement("div");
+    const callbacks = makeCallbacks();
+    renderFileList(container, nestedSubmoduleFiles(), undefined, callbacks);
+
+    const dirrow = container.querySelector<HTMLElement>(`.dirrow[data-path="sbc_hal"]`)!;
+    const childrenEl = dirrow.parentElement!.querySelector<HTMLElement>(".dir-children")!;
+    const chip = dirrow.querySelector<HTMLElement>(".submodule-badge")!;
+
+    // The chip sits inside the folder row, whose own Enter/Space handler toggles the disclosure and
+    // calls preventDefault. Left to bubble, that handler would swallow the button's activation: the
+    // folder would close and the pointer would never be selected.
+    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    chip.dispatchEvent(enter);
+
+    expect(enter.defaultPrevented).toBe(false);
+    expect(childrenEl.style.display).toBe("");
+    expect(callbacks.onSelect).not.toHaveBeenCalled();
+
+    // jsdom does not synthesize a button's click from a key press, so the browser's own follow-up is
+    // dispatched here: it must still reach the chip's selection handler and still leave the folder open.
+    chip.click();
+    expect(callbacks.onSelect).toHaveBeenCalledWith("sbc_hal");
+    expect(childrenEl.style.display).toBe("");
+  });
+
+  it("marks the submodule row selected when the pointer path is the selection", () => {
+    const container = document.createElement("div");
+    renderFileList(container, nestedSubmoduleFiles(), "sbc_hal", makeCallbacks());
+
+    expect(container.querySelector(`.dirrow[data-path="sbc_hal"]`)!.classList.contains("on")).toBe(true);
+  });
+
+  it("nests the submodule's own files under the pointer row with their full data-path and stat counts", () => {
+    const container = document.createElement("div");
+    renderFileList(container, nestedSubmoduleFiles(), undefined, makeCallbacks());
+
+    const dirrow = container.querySelector<HTMLElement>(`.dirrow[data-path="sbc_hal"]`)!;
+    const nested = dirrow.parentElement!.querySelector<HTMLElement>(`.row[data-path="sbc_hal/.bumpversion.cfg"]`)!;
+    expect(nested.querySelector(".fn")?.textContent).toBe(".bumpversion.cfg");
+    expect(statText(container, "sbc_hal/.bumpversion.cfg")).toEqual({ additions: "+1", deletions: " -1" });
+  });
+
+  it("renders a removed pointer as a childless chip row beside the plain folder holding the superproject files", () => {
+    const container = document.createElement("div");
+    renderFileList(
+      container,
+      [
+        makeFile({
+          path: "A",
+          status: "deleted",
+          patch: undefined,
+          isSubmodule: true,
+          submodule: { oldCommit: "a".repeat(40), dirty: false, unmerged: false, checkedOut: false },
+        }),
+        // A superproject file at the same prefix: no `submodulePath`, so it is not the submodule's.
+        makeFile({ path: "A/foo", patch: "@@ -1,1 +1,1 @@\n-old\n+new\n" }),
+      ],
+      undefined,
+      makeCallbacks(),
+    );
+
+    const rows = [...container.querySelectorAll<HTMLElement>(".dirrow")];
+    expect(rows).toHaveLength(2);
+    const pointerRow = container.querySelector<HTMLElement>(`.dirrow[data-path="A"]`)!;
+    expect(pointerRow.querySelector(".submodule-badge")?.textContent).toBe("aaaaaaa");
+    expect(pointerRow.querySelector(".tri")).toBeNull();
+    expect(pointerRow.getAttribute("role")).toBeNull();
+
+    const plainRow = rows.find((row) => row !== pointerRow)!;
+    expect(plainRow.querySelector(".dirlabel")?.textContent).toBe("A");
+    expect(plainRow.querySelector(".submodule-badge")).toBeNull();
+    expect(plainRow.querySelector(".tri")).not.toBeNull();
+    // The superproject file is in the plain folder, not under the pointer that no longer has a checkout.
+    expect(plainRow.parentElement!.querySelector(`.row[data-path="A/foo"]`)).not.toBeNull();
+    expect(pointerRow.parentElement!.querySelector(".row")).toBeNull();
+
+    // Two rows for one path, so their identifiers have to differ.
+    expect(pointerRow.id).toBe(`code-pane-change-${encodeURIComponent("A")}`);
+    expect(plainRow.id).toBe(`code-pane-diff-directory-${encodeURIComponent("A")}`);
+  });
+
+  it("identifies a submodule row as a change entry, not as a plain directory", () => {
+    const container = document.createElement("div");
+    renderFileList(container, nestedSubmoduleFiles(), undefined, makeCallbacks());
+
+    const dirrow = container.querySelector<HTMLElement>(`.dirrow[data-path="sbc_hal"]`)!;
+    expect(dirrow.id).toBe(`code-pane-change-${encodeURIComponent("sbc_hal")}`);
+  });
+
+  it("reports a pointer nested inside a collapsed submodule as hidden, then chips it when that folder opens", () => {
+    const container = document.createElement("div");
+    const nestedPointer = makeFile({
+      path: "sbc_hal/api_commands",
+      patch: undefined,
+      isSubmodule: true,
+      submodulePath: "sbc_hal",
+    });
+    // An empty expanded-paths array is meaningful persisted state: every directory starts collapsed.
+    renderFileList(container, [...nestedSubmoduleFiles(), nestedPointer], undefined, makeCallbacks(), []);
+
+    const resolved: DiffFileEntry = {
+      ...nestedPointer,
+      submodule: { newCommit: "f".repeat(40), dirty: false, unmerged: false, checkedOut: true },
+    };
+    expect(updateFileListRow(container, resolved)).toBe("hidden");
+
+    container.querySelector<HTMLElement>(`.dirrow[data-path="sbc_hal"]`)!.click();
+    expect(container.querySelector(`.dirrow[data-path="sbc_hal/api_commands"] .submodule-badge`)?.textContent).toBe("fffffff");
+  });
+
+  it("reveals a restored selection that is itself a nested pointer, by expanding the submodule above it", () => {
+    const container = document.createElement("div");
+    const files = [
+      ...nestedSubmoduleFiles(),
+      makeFile({ path: "sbc_hal/api_commands", patch: undefined, isSubmodule: true, submodulePath: "sbc_hal" }),
+    ];
+
+    // Everything collapsed, and the selection is a pointer path, which names a directory row rather
+    // than a file row: its enclosing submodule still has to open for that row to be on screen.
+    renderFileList(container, files, "sbc_hal/api_commands", makeCallbacks(), []);
+
+    const outer = container.querySelector<HTMLElement>(`.dirrow[data-path="sbc_hal"]`)!;
+    expect(outer.parentElement!.querySelector<HTMLElement>(".dir-children")!.style.display).toBe("");
+    const nested = container.querySelector<HTMLElement>(`.dirrow[data-path="sbc_hal/api_commands"]`)!;
+    expect(nested.classList.contains("on")).toBe(true);
+  });
+
+  it("expands both submodule folders for a restored selection nested two submodules deep", () => {
+    const container = document.createElement("div");
+    const files = [
+      ...nestedSubmoduleFiles(),
+      makeFile({ path: "sbc_hal/api_commands", patch: undefined, isSubmodule: true, submodulePath: "sbc_hal" }),
+      makeFile({ path: "sbc_hal/api_commands/uart.c", submodulePath: "sbc_hal/api_commands", patch: "@@ -1,1 +1,1 @@\n-old\n+new\n" }),
+    ];
+
+    renderFileList(container, files, "sbc_hal/api_commands/uart.c", makeCallbacks(), []);
+
+    const row = container.querySelector<HTMLElement>(`.row[data-path="sbc_hal/api_commands/uart.c"]`)!;
+    expect(row.className).toContain("on");
+    for (const path of ["sbc_hal", "sbc_hal/api_commands"]) {
+      const group = container.querySelector<HTMLElement>(`.dirrow[data-path="${path}"]`)!.parentElement!;
+      expect(group.querySelector<HTMLElement>(".dir-children")!.style.display).toBe("");
+    }
   });
 });

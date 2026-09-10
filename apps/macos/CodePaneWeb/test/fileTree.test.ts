@@ -117,3 +117,167 @@ describe("buildFileTree", () => {
     expect(buildFileTree([])).toEqual([]);
   });
 });
+
+/** A git submodule (gitlink) pointer entry, in the flat order the daemon sends: the pointer first,
+ *  then every entry nested under it. */
+function makeSubmodule(path: string, overrides: Partial<DiffFileEntry> = {}): DiffFileEntry {
+  return makeFile(path, {
+    isSubmodule: true,
+    submodule: { oldCommit: "a".repeat(40), newCommit: "b".repeat(40), dirty: false, unmerged: false, checkedOut: true },
+    ...overrides,
+  });
+}
+
+describe("buildFileTree: submodule pointer entries (PR D, nested submodules)", () => {
+  it("makes the pointer the directory node for its own path, with its changed files as children", () => {
+    const pointer = makeSubmodule("sbc_hal");
+    const tree = buildFileTree([pointer, makeFile("sbc_hal/.bumpversion.cfg", { submodulePath: "sbc_hal" })]);
+
+    expect(tree).toHaveLength(1);
+    const dir = tree[0] as FileTreeDirNode;
+    expect(dir.kind).toBe("dir");
+    expect(dir.path).toBe("sbc_hal");
+    expect(dir.label).toBe("sbc_hal");
+    expect(dir.submodule).toBe(pointer);
+    // The pointer contributes no leaf row of its own: it IS the directory row.
+    expect(files(dir.children).map((f) => f.name)).toEqual([".bumpversion.cfg"]);
+  });
+
+  it("nests a submodule checked out inside another under its parent submodule's node", () => {
+    const outer = makeSubmodule("sbc_hal");
+    const inner = makeSubmodule("sbc_hal/api_commands", { submodulePath: "sbc_hal" });
+    const tree = buildFileTree([
+      outer,
+      makeFile("sbc_hal/.bumpversion.cfg", { submodulePath: "sbc_hal" }),
+      inner,
+      makeFile("sbc_hal/api_commands/uart.c", { submodulePath: "sbc_hal/api_commands" }),
+    ]);
+
+    const outerDir = tree[0] as FileTreeDirNode;
+    expect(outerDir.submodule).toBe(outer);
+    const innerDir = dirs(outerDir.children)[0]!;
+    expect(innerDir.path).toBe("sbc_hal/api_commands");
+    expect(innerDir.label).toBe("api_commands");
+    expect(innerDir.submodule).toBe(inner);
+    expect(files(innerDir.children).map((f) => f.name)).toEqual(["uart.c"]);
+  });
+
+  it("does not fold a submodule directory into the single-child chain above it", () => {
+    const tree = buildFileTree([
+      makeSubmodule("vendor/lib"),
+      makeFile("vendor/lib/src/parser.c", { submodulePath: "vendor/lib" }),
+    ]);
+
+    // Without the boundary, `vendor` -> `lib` would compact into one "vendor/lib" row and the
+    // submodule would have no row of its own to carry its commit chip.
+    expect(tree).toHaveLength(1);
+    const vendor = tree[0] as FileTreeDirNode;
+    expect(vendor.label).toBe("vendor");
+    expect(vendor.submodule).toBeUndefined();
+    const lib = dirs(vendor.children)[0]!;
+    expect(lib.label).toBe("lib");
+    expect(lib.path).toBe("vendor/lib");
+    expect(lib.submodule?.path).toBe("vendor/lib");
+    expect(dirs(lib.children)[0]!.label).toBe("src");
+  });
+
+  it("does not fold a submodule's own single-child directory chain into the submodule row", () => {
+    const tree = buildFileTree([makeSubmodule("sbc_hal"), makeFile("sbc_hal/src/uart.c", { submodulePath: "sbc_hal" })]);
+
+    const sbcHal = tree[0] as FileTreeDirNode;
+    expect(sbcHal.label).toBe("sbc_hal"); // not "sbc_hal/src"
+    expect(dirs(sbcHal.children).map((d) => d.label)).toEqual(["src"]);
+  });
+
+  it("gives a pointer that was never checked out a directory node with nothing inside it", () => {
+    const pointer = makeSubmodule("documentation", {
+      submodule: { oldCommit: "c".repeat(40), newCommit: "d".repeat(40), dirty: false, unmerged: false, checkedOut: false },
+    });
+    const tree = buildFileTree([pointer]);
+
+    const dir = tree[0] as FileTreeDirNode;
+    expect(dir.path).toBe("documentation");
+    expect(dir.submodule).toBe(pointer);
+    expect(dir.children).toEqual([]);
+  });
+
+  it("gives a checked-out submodule whose own files are unchanged a childless directory node too", () => {
+    const pointer = makeSubmodule("sbc_hal");
+    const tree = buildFileTree([pointer, makeFile("src/main.ts")]);
+
+    const dir = tree[0] as FileTreeDirNode;
+    expect(dir.path).toBe("sbc_hal");
+    expect(dir.children).toEqual([]);
+    // The unrelated top-level file still lands beside it, in input order.
+    expect(dirs(tree).map((d) => d.path)).toEqual(["sbc_hal", "src"]);
+  });
+
+  it("keeps superproject files out of a removed pointer's folder, giving the path two rows", () => {
+    // A submodule removed and replaced by ordinary files at the same path: the pointer entry and the
+    // `A/foo` entry are in different repositories, which only `submodulePath` says. By path prefix
+    // alone `A/foo` would land inside the deleted pointer, making a pointer with no checkout behind
+    // it look expandable.
+    const pointer = makeSubmodule("A", {
+      status: "deleted",
+      submodule: { oldCommit: "a".repeat(40), dirty: false, unmerged: false, checkedOut: false },
+    });
+    const tree = buildFileTree([pointer, makeFile("A/foo")]);
+
+    const nodes = dirs(tree);
+    expect(nodes).toHaveLength(2);
+    const [pointerNode, plainNode] = nodes as [FileTreeDirNode, FileTreeDirNode];
+    expect(pointerNode.path).toBe("A");
+    expect(pointerNode.submodule).toBe(pointer);
+    expect(pointerNode.children).toEqual([]);
+    expect(plainNode.path).toBe("A");
+    expect(plainNode.submodule).toBeUndefined();
+    expect(files(plainNode.children).map((f) => f.name)).toEqual(["foo"]);
+  });
+
+  it("keeps an owned entry in the pointer's folder rather than splitting off a plain one", () => {
+    const pointer = makeSubmodule("A");
+    const tree = buildFileTree([pointer, makeFile("A/foo", { submodulePath: "A" })]);
+
+    // One node for the path: the entry declared the pointer as its owner, so nothing else is needed.
+    expect(dirs(tree)).toHaveLength(1);
+    const node = tree[0] as FileTreeDirNode;
+    expect(node.submodule).toBe(pointer);
+    expect(files(node.children).map((f) => f.name)).toEqual(["foo"]);
+  });
+
+  it("groups a nested chain by its declared owner at every level", () => {
+    const outer = makeSubmodule("A");
+    const inner = makeSubmodule("A/B", { submodulePath: "A" });
+    const tree = buildFileTree([
+      outer,
+      makeFile("A/own.c", { submodulePath: "A" }),
+      inner,
+      makeFile("A/B/deep.c", { submodulePath: "A/B" }),
+      // Same prefix, superproject-owned: it belongs beside the pointer, not inside it.
+      makeFile("A/B/stale.c"),
+    ]);
+
+    const outerNode = dirs(tree).find((d) => d.submodule === outer)!;
+    expect(files(outerNode.children).map((f) => f.name)).toEqual(["own.c"]);
+    const innerNode = dirs(outerNode.children).find((d) => d.submodule === inner)!;
+    expect(innerNode.path).toBe("A/B");
+    expect(files(innerNode.children).map((f) => f.name)).toEqual(["deep.c"]);
+
+    // The superproject-owned entry is not inside submodule `A` at any depth: it gets its own
+    // compacted chain, since for the workspace's repository `A` is a tree rather than a gitlink.
+    const plainChain = dirs(tree).find((d) => d.submodule === undefined)!;
+    expect(plainChain.label).toBe("A/B");
+    expect(plainChain.path).toBe("A/B");
+    expect(files(plainChain.children).map((f) => f.name)).toEqual(["stale.c"]);
+    expect(dirs(tree)).toHaveLength(2);
+  });
+
+  it("places the pointer from the manifest flag alone, before its metadata-only chunk arrives", () => {
+    const pointer = makeFile("sbc_hal", { isSubmodule: true, patchState: "queued" });
+    const tree = buildFileTree([pointer, makeFile("sbc_hal/.bumpversion.cfg", { submodulePath: "sbc_hal" })]);
+
+    const dir = tree[0] as FileTreeDirNode;
+    expect(dir.submodule).toBe(pointer);
+    expect(files(dir.children).map((f) => f.name)).toEqual([".bumpversion.cfg"]);
+  });
+});
