@@ -31,6 +31,12 @@ import Foundation
 /// a session whose directory has vanished, or whose root this profile no longer derives, still gets its
 /// phantom `.running` claim corrected rather than being skipped on every restart forever.
 ///
+/// The pass also reclaims per-session sockets. A session's control and subscription sockets are unlinked
+/// when it ends, but a daemon killed between the terminal-state write and the unlink leaves them behind,
+/// and their names are derived from this profile's root and the session id, so this profile's next daemon
+/// is the only party that can ever name them again. Every known session that is not live and not adopted
+/// therefore has its sockets removed here, whether or not its row needed repairing.
+///
 /// This sweep is a best-effort backstop, not a guarantee. The repair itself is a durable write, and a
 /// write that cannot commit within a bounded in-place retry — the same pathological writer-lock or
 /// storage fault that can drop a predecessor's exited-state write — leaves the row in its prior live
@@ -104,7 +110,15 @@ public enum TerminalSessionStaleRecovery {
             let launchConfiguration = knownSession.launchConfiguration
             let paths = knownSession.paths
             guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { continue }
-            guard runtimeState.state == .starting || runtimeState.state == .running else { continue }
+            guard runtimeState.state == .starting || runtimeState.state == .running else {
+                // An already-ended session, and not one this image adopted, so no core in this daemon owns
+                // it and no other daemon can: a profile is served by one daemon at a time. Its sockets are
+                // leftovers from a process that was killed between writing the terminal state and unlinking
+                // them, and only this profile's daemon can name them, so this is the last owner that could
+                // reclaim them.
+                if !adoptedSessionIDs.contains(launchConfiguration.sessionID) { removeSessionSockets(paths: paths) }
+                continue
+            }
 
             let terminalState: TerminalSessionState
             if runtimeState.servicePID == ownPID {
@@ -139,11 +153,18 @@ public enum TerminalSessionStaleRecovery {
                 unrepaired.append(launchConfiguration.sessionID)
                 continue
             }
-            try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
-            try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
+            removeSessionSockets(paths: paths)
             finalized.append(FinalizedSession(sessionID: launchConfiguration.sessionID, state: terminalState))
         }
         return ReconcileResult(finalized: finalized, unrepaired: unrepaired)
+    }
+
+    /// Unlinks a session's per-session sockets. Both are named from this profile's root and the session
+    /// id, so this only ever names an entry of this profile's own namespace inside the shared socket root
+    /// and can never reach one another daemon binds.
+    private static func removeSessionSockets(paths: TerminalSessionPaths) {
+        try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
+        try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
     }
 
     /// Writes the finalized runtime state and detaches active clients as one repair, retrying in place

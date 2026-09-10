@@ -199,8 +199,8 @@ final class SpacesCommandTests: XCTestCase {
     }
 
     func testDevicePairParsesSSHDestination() {
-        XCTAssertEqual(DevicePairCommand.parsedSSHDestination("yogesh@build-box").user, "yogesh")
-        XCTAssertEqual(DevicePairCommand.parsedSSHDestination("yogesh@build-box").host, "build-box")
+        XCTAssertEqual(DevicePairCommand.parsedSSHDestination("tester@build-box").user, "tester")
+        XCTAssertEqual(DevicePairCommand.parsedSSHDestination("tester@build-box").host, "build-box")
         XCTAssertNil(DevicePairCommand.parsedSSHDestination("build-box").user)
         XCTAssertEqual(DevicePairCommand.parsedSSHDestination("build-box").host, "build-box")
     }
@@ -526,10 +526,9 @@ final class SpacesCommandTests: XCTestCase {
         // rather than only surfacing as a client-visible schema/decoding mismatch.
         let expectedRequired: [String: [String]] = [
             "spaces_project_list": [], "spaces_workspace_list": [], "spaces_workspace_start": ["workspace"],
-            "spaces_workspace_restart": ["workspace"], "spaces_terminal_list": [], "spaces_agent_list": [],
-            "spaces_agent_status": [], "spaces_agent_annotate": ["note"], "spaces_agent_spawn": ["command"],
-            "spaces_agent_kill": ["session"], "spaces_agent_subscribe": ["session"], "spaces_agent_unsubscribe": ["session"],
-            "spaces_device_list": [],
+            "spaces_workspace_restart": ["workspace"], "spaces_terminal_list": [], "spaces_agent_list": [], "spaces_agent_status": [],
+            "spaces_agent_annotate": ["note"], "spaces_agent_spawn": ["command"], "spaces_agent_kill": ["session"],
+            "spaces_agent_subscribe": ["session"], "spaces_agent_unsubscribe": ["session"], "spaces_device_list": [],
         ]
         for (name, required) in expectedRequired {
             let tool = try XCTUnwrap(tools.first { ($0["name"] as? String) == name }, "missing tool \(name)")
@@ -588,8 +587,7 @@ final class SpacesCommandTests: XCTestCase {
     }
 
     func testMCPTerminalInputRejectsMissingAndBothArguments() {
-        XCTAssertThrowsError(try terminalInputPayload(from: [:])) { error in
-            XCTAssertEqual(error.localizedDescription, "text or bytes is required.")
+        XCTAssertThrowsError(try terminalInputPayload(from: [:])) { error in XCTAssertEqual(error.localizedDescription, "text or bytes is required.")
         }
         XCTAssertThrowsError(try terminalInputPayload(from: ["text": "hi", "bytes": [1]])) { error in
             XCTAssertEqual(error.localizedDescription, "Provide text or bytes, not both.")

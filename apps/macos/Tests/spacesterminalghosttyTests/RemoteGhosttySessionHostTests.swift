@@ -1082,7 +1082,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             openedURLs.append(url)
             return true
         }
-        let macRecordingPath = "/Users/yogesh/Desktop/Screen Recording 2026-05-07 at 10.11.01\u{202F}AM.mov"
+        let macRecordingPath = "/fixtures/recordings/Screen Recording 2026-05-07 at 10.11.01\u{202F}AM.mov"
 
         mirrorView.applyActionEvent(.openURL(kind: .unknown, value: "/tmp/screenshot.png"))
         mirrorView.applyActionEvent(.openURL(kind: .unknown, value: "file:///tmp/movie.mp4"))

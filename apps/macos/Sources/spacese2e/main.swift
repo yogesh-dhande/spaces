@@ -2696,8 +2696,9 @@ private struct AutomationCreateCommand: ParsableCommand {
     @Option(name: .long) var script: String
     @Option(name: .long) var trigger: String = "manual"
     @Option(name: .long) var cron: String?
-    /// `script` or `agent` — plumbed through so a later commit can e2e agent-kind automations; the daemon's
-    /// scheduler does not yet execute an agent-kind run (see `AutomationService`'s launch guard).
+    /// `script` or `agent`. Both kinds execute: `AutomationService.startRun` dispatches on the kind and an
+    /// agent-kind run spawns its coding agent and delivers the seed prompt. The `e2e_automations.sh`
+    /// real-provider scenario drives an agent-kind run end to end through this command.
     @Option(name: .long) var kind: String = "script"
     @Option(name: .long) var agentCommand: String?
     @Option(name: .long) var agentPrompt: String?

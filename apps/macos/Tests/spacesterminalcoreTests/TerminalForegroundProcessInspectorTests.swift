@@ -52,7 +52,7 @@ final class TerminalForegroundProcessInspectorTests: XCTestCase {
 
     func testClassifiesClaudeVersionedBinaryFromInvokedCommandName() {
         let process = TerminalForegroundProcessSnapshot(
-            pid: 104, executablePath: "/Users/yogesh/.local/share/claude/versions/2.1.168", argv: ["claude", "--dangerously-skip-permissions"])
+            pid: 104, executablePath: "/fixtures/agents/claude/versions/2.1.168", argv: ["claude", "--dangerously-skip-permissions"])
 
         let detected = TerminalForegroundProcessInspector.classify(process)
 
