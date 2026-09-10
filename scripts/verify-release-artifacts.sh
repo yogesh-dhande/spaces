@@ -22,15 +22,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ $# -ne 1 ]]; then
-  echo "Usage: $0 [--require-notarization] <dmg-path>" >&2
+if [[ $# -ne 2 ]]; then
+  echo "Usage: $0 [--require-notarization] <dmg-path> <zip-path>" >&2
   exit 1
 fi
 
 DMG_PATH="$1"
+ZIP_PATH="$2"
 
 if [[ ! -f "$DMG_PATH" ]]; then
   echo "Error: DMG not found at $DMG_PATH" >&2
+  exit 1
+fi
+
+if [[ ! -f "$ZIP_PATH" ]]; then
+  echo "Error: Sparkle archive not found at $ZIP_PATH" >&2
   exit 1
 fi
 
@@ -45,13 +51,33 @@ fi
 
 mountpoint="$(mktemp -d "${TMPDIR%/}/spaces-release-verify-XXXXXX")"
 mountpoint="$(cd "$mountpoint" && pwd -P)"
+zip_extract_dir="$(mktemp -d "${TMPDIR%/}/spaces-release-verify-zip-XXXXXX")"
 cleanup() {
   if mount | grep -q "on $mountpoint "; then
     hdiutil detach "$mountpoint" >/dev/null
   fi
-  rm -rf "$mountpoint"
+  rm -rf "$mountpoint" "$zip_extract_dir"
 }
 trap cleanup EXIT
+
+echo "Extracting Sparkle archive to inspect its app bundle..."
+ditto -x -k "$ZIP_PATH" "$zip_extract_dir"
+zip_app="$zip_extract_dir/Spaces.app"
+if [[ ! -d "$zip_app" ]]; then
+  echo "Error: Missing app bundle at $zip_app" >&2
+  exit 1
+fi
+echo "Verifying Spaces.app inside the Sparkle archive..."
+codesign --verify --verbose=2 "$zip_app"
+if [[ $require_notarization -eq 1 ]]; then
+  # A zip carries no notarization ticket of its own (only DMGs and PKGs do); what makes the
+  # updater-delivered app trustworthy is that Spaces.app was notarized and stapled before it was
+  # zipped (create-dmg.sh and create-sparkle-archive.sh both build from that one stapled bundle),
+  # so validate the extracted copy the same way the mounted DMG's copy is validated below (#696).
+  spctl -a -vvv -t exec "$zip_app"
+  echo "Validating Sparkle archive app notarization ticket..."
+  xcrun stapler validate "$zip_app"
+fi
 
 echo "Mounting DMG to inspect bundled apps..."
 # GitHub-hosted macOS runners occasionally hit hdiutil resource contention ("Resource temporarily

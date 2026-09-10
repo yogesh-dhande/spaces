@@ -874,11 +874,11 @@ This workflow:
 - code-signs the app, CLI, spacesd daemon, and bundled Caddy executable
 - builds and smoke-tests Ubuntu 24.04 `x86_64` and `arm64` remote daemon artifacts, including a reinstall leg that pokes the running daemon (`apply-update`) and asserts the exec-in-place handoff preserves the daemon pid and its live session
 - signs `spaces-remote-artifacts.json` with the remote artifact Ed25519 key that the Linux installer uses to verify the Linux artifact download
-- creates a signed manual-download DMG
-- creates a Sparkle-served `Spaces.app` zip archive
+- builds and signs `Spaces.app` exactly once, then optionally notarizes and staples that one app bundle when `NOTARIZE=1`
+- packages the manual-download DMG and the Sparkle-served `Spaces.app` zip archive from that same (stapled, when notarized) app bundle, so both artifacts ship byte-for-byte the same signed app instead of two independently signed copies
 - updates `dist/updates/appcast.xml` plus any Sparkle delta files
-- optionally notarizes the DMG when `NOTARIZE=1`
-- verifies the final DMG signature plus the bundled installer, app, CLI, and spacesd daemon before publish
+- optionally notarizes and staples the DMG itself when `NOTARIZE=1`, on top of the app-bundle notarization above; the DMG is a distinct artifact Gatekeeper evaluates on its own when a user downloads and opens it, while the zip carries no notarization ticket of its own and relies entirely on the stapled app inside it
+- verifies the final DMG signature plus the bundled installer, app, CLI, and spacesd daemon, and the Sparkle zip's own extracted app, before publish
 - publishes the DMG, the Sparkle zip, and `appcast.xml` to GitHub Releases
 - publishes `spacesd-ubuntu-24.04-x86_64.tar.gz`, `spacesd-ubuntu-24.04-arm64.tar.gz`, their `.sha256` checksum files, `spaces-remote-artifacts.json`, and `spaces-remote-artifacts.json.sig` to the same GitHub Release
 - builds the static site last, since the site's `prebuild` stages the Sparkle feed back out of the release it just published

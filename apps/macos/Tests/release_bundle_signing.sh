@@ -90,24 +90,33 @@ assert_caddy_signature() {
 }
 
 mkdir -p "$MOUNT_POINT"
-CODESIGN_IDENTITY=- "$REPO_ROOT/scripts/create-dmg.sh" \
+
+# Build and sign Spaces.app once, the same way the release pipeline does (#696), then hand that
+# one signed bundle to both create-dmg.sh and create-sparkle-archive.sh below.
+APP_BUNDLE="$WORK_ROOT/Spaces.app"
+"$REPO_ROOT/scripts/create-app-bundle.sh" \
   "$APP_ROOT/.build/debug/SpacesApp" \
   "$APP_ROOT/.build/debug/spaces" \
   "$APP_ROOT/.build/debug/spacesd" \
-  "$VERSION"
+  "$APP_BUNDLE"
+CODESIGN_IDENTITY=- "$REPO_ROOT/scripts/codesign-spaces-app.sh" "$APP_BUNDLE"
+
+CODESIGN_IDENTITY=- "$REPO_ROOT/scripts/create-dmg.sh" "$APP_BUNDLE" "$VERSION"
 
 DMG_PATH="$RELEASE_DIR/Spaces-$VERSION.dmg"
 attach_mount
 assert_caddy_signature "$MOUNT_POINT/Spaces.app/Contents/Resources/caddy"
+# The DMG must package the exact bundle that was built and signed once above, not a separately
+# signed copy: two independent signing passes embed different secure timestamps, which is how
+# #696 let only one of the two shipped containers ever carry a notarization ticket that matches
+# its contents.
+diff "$MOUNT_POINT/Spaces.app/Contents/MacOS/SpacesApp" "$APP_BUNDLE/Contents/MacOS/SpacesApp"
 detach_mount
 
-CODESIGN_IDENTITY=- "$REPO_ROOT/scripts/create-sparkle-archive.sh" \
-  "$APP_ROOT/.build/debug/SpacesApp" \
-  "$APP_ROOT/.build/debug/spaces" \
-  "$APP_ROOT/.build/debug/spacesd" \
-  "$VERSION"
+CODESIGN_IDENTITY=- "$REPO_ROOT/scripts/create-sparkle-archive.sh" "$APP_BUNDLE" "$VERSION"
 
 ditto -x -k "$RELEASE_DIR/Spaces-$VERSION.zip" "$WORK_ROOT/sparkle"
 assert_caddy_signature "$WORK_ROOT/sparkle/Spaces.app/Contents/Resources/caddy"
+diff "$WORK_ROOT/sparkle/Spaces.app/Contents/MacOS/SpacesApp" "$APP_BUNDLE/Contents/MacOS/SpacesApp"
 
 echo "release bundle signing test passed"
