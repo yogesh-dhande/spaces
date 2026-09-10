@@ -64,10 +64,7 @@
         private static let maxScrollbackBytes = TerminalScrollbackBudget.defaultMaxBytes
         nonisolated static let outputReplayChunkByteCount = 1024 * 1024
 
-        private enum RenderStateExportMode {
-            case selfContained
-            case streamDeltaAllowed
-        }
+        private typealias RenderStateExportMode = GhosttyRenderUpdateProducer.ExportMode
 
         public let launchConfiguration: TerminalSessionLaunchConfiguration
         public let paths: TerminalSessionPaths
@@ -213,12 +210,9 @@
         /// Byte offset where renderer-disconnected output begins. Failed handoff streams
         /// this persisted suffix back through the existing VT without duplicating it.
         private var handoffTranscriptReplayOffset: UInt64?
-        private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
-        private var forceNextBroadcastFullRenderUpdate = false
-        /// Scroll rects a `.selfContained` export drained from Ghostty but could not ship (a self-contained
-        /// export always forces a full frame, and a full frame never carries rects). See
-        /// `TerminalStreamScrollRectCarry` for why this exists; folded/drained in `makeRenderUpdate`.
-        private var streamScrollRectCarry = TerminalStreamScrollRectCarry()
+        /// The shared full-vs-delta policy, the stream's delta baseline, the pending subscriber-baseline
+        /// promise, and the scroll-rect carry. Identical to what the macOS embedded host runs.
+        private var renderUpdateProducer = GhosttyRenderUpdateProducer()
         /// Set when `renderFrame()` discovers a scrollback-garbaged selection pin and clears it.
         /// Broadcasting synchronously from inside `renderFrame()` would reenter `makeStatePayload`
         /// while it is still building the very payload that just observed the clear, so this defers
@@ -654,8 +648,7 @@
             // Advance past the recorded revision and force the first broadcast to a full
             // render update so reconnecting clients rebuild from a self-contained baseline.
             screenStateRevision = record.screenStateRevision &+ 1
-            renderUpdateBaseline = nil
-            forceNextBroadcastFullRenderUpdate = true
+            renderUpdateProducer.resetBaselineAndForceNextFull()
 
             try startControlServer()
             try startStateStreamServer()
@@ -1097,8 +1090,7 @@
             }
             // The reflow rewrote every row: drop the diff baseline and force the next
             // broadcast to a self-contained full frame, the same way a renderer swap does.
-            renderUpdateBaseline = nil
-            forceNextBroadcastFullRenderUpdate = true
+            renderUpdateProducer.resetBaselineAndForceNextFull()
             screenStateRevision &+= 1
             terminalSize = (columns, rows)
             recordAcceptedResizeSerial(from: request)
@@ -1279,12 +1271,10 @@
             guard spaces_ghostty_vt_session_set_selection(vtSession, startColumn, startRow, endColumn, endRow, request.selectionRectangle ?? false)
             else { return TerminalControlResponse(ok: false, message: "Unable to set terminal selection.") }
             let text = selectionText(session: vtSession)
-            // A selection mutation writes no output, so nothing else advances the screen revision.
-            // Without a bump, this broadcast's frame would carry the baseline's own revision and
-            // `makeRenderUpdate` would force a full frame ("baseline_already_current"); a full frame
-            // invalidates a mirror's scroll carry, canceling the local drag that is replacing an
-            // existing selection. (The macOS host covers this in `renderFrameRevision`, which bumps
-            // when the baseline revision matches but the snapshot content moved.)
+            // A selection mutation writes no output, so nothing else advances the screen revision, and
+            // the revision is what names the screen state a client is holding. (The macOS host covers
+            // this in `renderFrameRevision`, which bumps when the baseline revision matches but the
+            // snapshot content moved.)
             screenStateRevision &+= 1
             broadcastCurrentState(reason: .selection)
             return TerminalControlResponse(ok: true, message: "Set terminal selection.", selectionText: text)
@@ -1296,8 +1286,8 @@
             }
             // Not owner-gated for the same reason as `setSelection` above.
             spaces_ghostty_vt_session_clear_selection(vtSession)
-            // Same revision bump as `setSelection` above: the clear that a mouse-down sends while
-            // replacing a selection must ship as a delta, not a carry-invalidating full frame.
+            // Same revision bump as `setSelection` above: the clear a mouse-down sends while replacing a
+            // selection changes the screen state and must be named by a revision of its own.
             screenStateRevision &+= 1
             broadcastCurrentState(reason: .selection)
             return TerminalControlResponse(ok: true, message: "Cleared terminal selection.")
@@ -1668,8 +1658,7 @@
                 // The replayed transcript may carry a newer title/pwd than the cache; adopt those, but
                 // keep the cached values when the replay never re-emits the escape sequences.
                 seedMetadataFromVTSession()
-                renderUpdateBaseline = nil
-                forceNextBroadcastFullRenderUpdate = true
+                renderUpdateProducer.resetBaselineAndForceNextFull()
                 if replayedOutput { screenStateRevision &+= 1 }
             } catch {
                 spaces_ghostty_vt_session_free(replacementSession)
@@ -1717,7 +1706,7 @@
             let applied = withUnsafePointer(to: &theme) { spaces_ghostty_vt_session_set_theme(vtSession, $0) }
             guard applied else { return }
             screenStateRevision &+= 1
-            forceNextBroadcastFullRenderUpdate = true
+            renderUpdateProducer.armSubscriberBaselineReset()
         }
 
         private func writeRuntimeState(state: TerminalSessionState) { persistRuntimeState(makeRuntimeStateSnapshot(state: state)) }
@@ -2028,7 +2017,7 @@
                 // far content moved. See `TerminalHeldFrameIdentity`.
                 let readerHoldsCurrentFrame = frame.map { oneShotRead?.heldFrame?.matches($0) == true } ?? false
                 if readerHoldsCurrentFrame, let capturedFrame {
-                    streamScrollRectCarry.fold(rects: capturedFrame.scrollRects, overflowed: capturedFrame.scrollRectsOverflowed)
+                    renderUpdateProducer.foldScrollRects(capturedFrame.scrollRects, overflowed: capturedFrame.scrollRectsOverflowed)
                 }
                 // `renderFrame()` may have just cleared a scrollback-garbaged selection pin. Broadcasting
                 // that clear from here would reenter this very method (`broadcastCurrentState` calls back
@@ -2096,7 +2085,7 @@
                 frame = nil
                 renderUpdateValue = nil
             }
-            if renderUpdateValue != nil, markNextBroadcastFull { forceNextBroadcastFullRenderUpdate = true }
+            if renderUpdateValue != nil, markNextBroadcastFull { renderUpdateProducer.armSubscriberBaselineReset() }
             let payload = GhosttyRemoteSessionStatePayload(
                 sessionID: launchConfiguration.sessionID, reason: reason.rawValue, emittedAt: nowISO8601(), sessionStateRevision: nil,
                 sessionStateFlags: nil, screenStateRevision: screenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
@@ -2108,58 +2097,14 @@
             return payload.replacingRenderUpdate(materialized: renderUpdateValue)
         }
 
+        /// Runs the shared render-update policy (`GhosttyRenderUpdateProducer`) for this export.
         private func makeRenderUpdate(
-            for frame: GhosttyRenderFrame, reason: TerminalRemoteSessionStateReason,
-            nativeScrollRects capturedScrollRects: [GhosttyRenderScrollRectOperation] = [],
-            nativeScrollRectsOverflowed capturedScrollRectsOverflowed: Bool = false, exportMode: RenderStateExportMode
+            for frame: GhosttyRenderFrame, reason: TerminalRemoteSessionStateReason, nativeScrollRects: [GhosttyRenderScrollRectOperation] = [],
+            nativeScrollRectsOverflowed: Bool = false, exportMode: RenderStateExportMode
         ) -> GhosttyRenderUpdate {
-            // A `.selfContained` export always forces a full frame below (`forceFullForSelfContainedExport`),
-            // and a full frame never carries scroll rects, so the rects Ghostty just drained for this export
-            // would otherwise vanish. Carry them for the next stream export instead. A `.streamDeltaAllowed`
-            // export that itself ends up emitting a full frame (baseline reset, delta-apply failure, etc.) is
-            // still correct to drain here: a client poisons its own carry on any full frame it receives, so
-            // the rects this drain hands it are moot the moment the full frame lands.
-            let nativeScrollRects: [GhosttyRenderScrollRectOperation]
-            let nativeScrollRectsOverflowed: Bool
-            switch exportMode {
-            case .selfContained:
-                streamScrollRectCarry.fold(rects: capturedScrollRects, overflowed: capturedScrollRectsOverflowed)
-                nativeScrollRects = []
-                nativeScrollRectsOverflowed = false
-            case .streamDeltaAllowed:
-                (nativeScrollRects, nativeScrollRectsOverflowed) = streamScrollRectCarry.drain(
-                    mergingWith: capturedScrollRects, overflowed: capturedScrollRectsOverflowed)
-            }
-            let forceFullForSelfContainedExport = exportMode == .selfContained
-            let hasPendingSubscriberBaselineReset = exportMode == .streamDeltaAllowed && forceNextBroadcastFullRenderUpdate
-            let forceFullForSubscriberBaseline = hasPendingSubscriberBaselineReset && reason != .scroll
-            let forceFullForExplicitResync = reason == .initial || reason == .resize || reason == .terminated
-            let forceFull =
-                forceFullForSelfContainedExport || forceFullForSubscriberBaseline || forceFullForExplicitResync
-                || renderUpdateBaseline?.sessionRevision == frame.sessionRevision
-            let forceFullReason =
-                if reason == .initial { "initial_baseline" } else if reason == .resize { "resize_self_contained" } else if reason == .terminated {
-                    "explicit_resync"
-                } else if forceFullForSubscriberBaseline { "subscriber_baseline_reset" } else if forceFullForSelfContainedExport {
-                    "self_contained_state_export"
-                } else { "baseline_already_current" }
-            let update = GhosttyRenderUpdateFactory.makeUpdate(
-                target: frame, baseline: renderUpdateBaseline, forceFull: forceFull, forceFullReason: forceFullReason,
-                nativeScrollRects: nativeScrollRects, nativeScrollRectsOverflowed: nativeScrollRectsOverflowed)
-            let shouldUpdateStreamBaseline = exportMode == .streamDeltaAllowed
-            switch update.kind {
-            case .full: if shouldUpdateStreamBaseline { renderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: frame) }
-            case .delta:
-                if let baseline = try? GhosttyRenderUpdateApplier.apply(update, to: renderUpdateBaseline) {
-                    renderUpdateBaseline = baseline
-                } else {
-                    if shouldUpdateStreamBaseline { renderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: frame) }
-                    return GhosttyRenderUpdate.full(frame, fallbackReason: "linux_delta_apply_failed")
-                }
-            case .resyncRequired: if shouldUpdateStreamBaseline { renderUpdateBaseline = nil }
-            }
-            if hasPendingSubscriberBaselineReset { forceNextBroadcastFullRenderUpdate = false }
-            return update
+            renderUpdateProducer.makeUpdate(
+                for: frame, reason: reason, nativeScrollRects: nativeScrollRects, nativeScrollRectsOverflowed: nativeScrollRectsOverflowed,
+                exportMode: exportMode)
         }
 
         private func renderFrame() throws -> (frame: GhosttyRenderFrame, scrollRects: [GhosttyRenderScrollRectOperation], scrollRectsOverflowed: Bool)
@@ -2192,9 +2137,9 @@
             guard state.valid else {
                 spaces_ghostty_vt_session_clear_selection(session)
                 // The clear is a screen-state mutation with no output attached, so bump the
-                // revision here for the same delta-vs-full reason as the control handlers: the
-                // frame this very export is building reads `screenStateRevision` after this
-                // returns, so it already carries the cleared selection under the new revision.
+                // revision here for the same reason as the control handlers: the frame this very
+                // export is building reads `screenStateRevision` after this returns, so it already
+                // carries the cleared selection under the new revision.
                 screenStateRevision &+= 1
                 pendingSelectionGarbagePinBroadcast = true
                 return nil

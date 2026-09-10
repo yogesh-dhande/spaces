@@ -1362,7 +1362,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
-    func testInputOutputRenderUpdateStaysExplicitResyncForOneShotExport() async throws {
+    /// A one-shot state read is self-contained by definition: nobody applied the last frame this core
+    /// exported, so there is no baseline to diff against. The reason on the wire says exactly that, and
+    /// `input_output` gets no separate resync of its own.
+    func testInputOutputRenderUpdateStaysSelfContainedForOneShotExport() async throws {
         try await TerminalEngineActor.run {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1388,7 +1391,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let update = try XCTUnwrap(payload.decodedRenderUpdate)
 
             XCTAssertEqual(update.kind, .full)
-            XCTAssertEqual(update.fallbackReason, "explicit_resync")
+            XCTAssertEqual(update.fallbackReason, "self_contained_state_export")
 
         }
     }
@@ -1658,6 +1661,160 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: applied.snapshot), "frame two")
 
         }
+    }
+
+    /// One render-update policy, both hosts: a scroll that moves the viewport ships the movement as a
+    /// delta (scroll rects plus the newly revealed row), and a scroll that hits the scrollback boundary
+    /// moves nothing and so publishes nothing at all. Before this, every scroll step of a flick published
+    /// a full grid, because an unmoved snapshot left the frame revision where the baseline already was.
+    func testScrollPublishesADeltaOnlyWhenTheViewportMoves() async throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+
+        let columns = 40
+        let rows = 8
+        let boxes = try await TerminalEngineActor.run { () -> (Box<GhosttyEmbeddedSessionHost>, Box<GhosttyHeadlessRendererHost>) in
+            let host = GhosttyEmbeddedSessionHost(
+                launchConfiguration: TerminalSessionLaunchConfiguration(
+                    sessionID: "scroll-delta-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
+                    workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh",
+                    command: "sleep 0.2; i=1; while [ $i -le 40 ]; do printf \"line$i\\n\"; i=$((i+1)); done; sleep 120",
+                    createdAt: "2026-09-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+            let remoteOwner = TerminalClient(
+                id: "remote-ipad", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
+                connectedAt: "2026-09-09T00:00:00Z")
+            try host.attach(client: remoteOwner, mode: .owner, into: nil)
+            try host.startIfNeeded()
+            let rendererHost = try XCTUnwrap(host.rendererHost as? GhosttyHeadlessRendererHost)
+            XCTAssertTrue(rendererHost.resizeCellGrid(columns: columns, rows: rows))
+            return (Box(host), Box(rendererHost))
+        }
+        let host = boxes.0.value
+        let rendererHost = boxes.1.value
+        defer { TerminalEngineActor.runSynchronously { host.terminate() } }
+
+        try await waitUntil(timeout: 60) {
+            rendererHost.requestSurfaceRefresh()
+            GhosttyEmbeddedAppService.shared.tick()
+            guard let snapshot = rendererHost.sessionRenderStateSnapshot()?.snapshot else { return false }
+            return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot).contains("line40")
+        }
+
+        let receivedPayloads = RemoteSessionStatePayloadCollector()
+        let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
+        try client.start()
+        defer { client.stop() }
+        try await waitUntil(timeout: 30) {
+            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue && $0.renderUpdate != nil }
+        }
+
+        // The viewport sits at the bottom of the scrollback, so scrolling further down moves nothing.
+        let boundaryResponse = TerminalEngineActor.runSynchronously {
+            host.core.handleControlRequest(
+                TerminalControlRequest(
+                    command: .scroll(
+                        TerminalControlScrollPayload(
+                            clientID: nil, ownerEpoch: nil, scrollHorizontal: 0, scrollVertical: -3, scrollMods: 0))))
+        }
+        XCTAssertTrue(boundaryResponse.ok, boundaryResponse.message)
+        XCTAssertEqual(boundaryResponse.message, "Already at scroll boundary.")
+
+        let movedResponse = TerminalEngineActor.runSynchronously {
+            host.core.handleControlRequest(
+                TerminalControlRequest(
+                    command: .scroll(
+                        TerminalControlScrollPayload(
+                            clientID: nil, ownerEpoch: nil, scrollHorizontal: 0, scrollVertical: 3, scrollMods: 0))))
+        }
+        XCTAssertTrue(movedResponse.ok, movedResponse.message)
+        XCTAssertEqual(movedResponse.message, "Scrolled terminal.")
+
+        try await waitUntil(timeout: 30) {
+            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.scroll.rawValue }
+        }
+        let scrollPayloads = receivedPayloads.snapshot.filter { $0.reason == TerminalRemoteSessionStateReason.scroll.rawValue }
+        XCTAssertEqual(scrollPayloads.count, 1, "the boundary scroll must publish nothing")
+        let scrollUpdate = try XCTUnwrap(scrollPayloads[0].decodedRenderUpdate)
+        XCTAssertEqual(scrollUpdate.kind, .delta)
+        XCTAssertNil(scrollUpdate.fallbackReason)
+        XCTAssertLessThan(
+            scrollUpdate.changedCellCount, columns * rows / 2,
+            "a viewport scroll ships the rows ghostty moved as scroll rects, not the whole grid")
+    }
+
+    /// A keystroke echo costs one screen frame, not two. The `output` broadcast exports the frame Ghostty
+    /// holds after the bytes are processed and claims the screen revision Ghostty had raised for them, so
+    /// the coalesced `state_change` broadcast trailing it finds that revision already shipped and publishes
+    /// nothing. Ghostty still raises the occasional extra revision of its own from a later tick, so the
+    /// property is measured across a run of echoes rather than asserted on any single one: without the
+    /// claim a screen broadcast trails every echo, with it far fewer than one per echo do.
+    func testKeystrokeEchoPublishesOneScreenFrameNotTwo() async throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+
+        let readyMarker = "echo frame ready"
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "single-screen-frame-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "echo",
+            workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh",
+            command: "stty -echo; printf '\(readyMarker)\\n'; cat", createdAt: "2026-09-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let owner = TerminalClient(
+            id: "remote-ipad", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
+            connectedAt: "2026-09-09T00:00:00Z")
+
+        let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try host.attach(client: owner, mode: .owner, into: nil)
+            return Box(host)
+        }
+        let host = hostBox.value
+        defer { TerminalEngineActor.runSynchronously { host.terminate() } }
+
+        let receivedPayloads = RemoteSessionStatePayloadCollector()
+        let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
+        try client.start()
+        defer { client.stop() }
+        let readyCursor = RenderUpdateCursorBox()
+        try await waitUntil(timeout: 60) { readyCursor.applyingUpdates(receivedPayloads.snapshot).contains(readyMarker) }
+        // Let the session settle so the startup frames are behind the measurement window. The cursor keeps
+        // its own index into the collector, so the window is an offset rather than a clear.
+        try await Task.sleep(for: .seconds(1))
+        let measuredFrom = receivedPayloads.snapshot.count
+
+        let echoCount = 10
+        for index in 0..<echoCount {
+            XCTAssertTrue(
+                TerminalEngineActor.runSynchronously {
+                    host.handleControlRequest(.init(command: "send", text: "echo line \(index)\n", clientID: owner.id)).ok
+                })
+            try await waitUntil(timeout: 30) { readyCursor.applyingUpdates(receivedPayloads.snapshot).contains("echo line \(index)") }
+        }
+        // The trailing screen-revision broadcast is a coalesced engine turn behind the output export, so
+        // give the last echo's room to arrive before reading what did and did not go out.
+        try await Task.sleep(for: .seconds(1))
+
+        let measured = receivedPayloads.snapshot[measuredFrom...]
+        let outputCount = measured.filter { $0.reason == TerminalRemoteSessionStateReason.output.rawValue && $0.renderUpdate != nil }.count
+        let stateChangeCount = measured.filter { $0.reason == TerminalRemoteSessionStateReason.stateChange.rawValue && $0.renderUpdate != nil }.count
+        // The output count is not pinned to echoCount: under load the export tick can fold two adjacent
+        // echoes' bytes into one `output` frame, so fewer `output` frames than echoes can still be correct.
+        // Every echo's arrival is already proven by the per-echo wait above. The gate here is the ratio of
+        // trailing `state_change` frames to `output` frames, since the bug publishes one `state_change` per echo.
+        XCTAssertLessThan(
+            stateChangeCount, outputCount,
+            "echoes=\(echoCount) output=\(outputCount) state_change=\(stateChangeCount): a screen revision an `output` export already "
+                + "shipped must not publish a second frame")
     }
 
     func testRemoteScreenStateVisibleContentIgnoresBlankSnapshotsAndText() async {
@@ -2241,7 +2398,14 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue } }
+        try await waitUntil(timeout: 30) {
+            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue && $0.renderUpdate != nil }
+        }
+        var baseline: GhosttyRenderUpdateBaseline?
+        for payload in receivedPayloads.snapshot where payload.renderUpdate != nil {
+            baseline = try Self.renderBaseline(from: payload, baseline: baseline)
+        }
+        let initialBaseline = try XCTUnwrap(baseline)
         receivedPayloads.removeAll()
 
         let output = Data("e".utf8)
@@ -2264,11 +2428,17 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let inputOutputIndex = try XCTUnwrap(
             receivedPayloads.snapshot.firstIndex { $0.reason == TerminalRemoteSessionStateReason.inputOutput.rawValue })
         XCTAssertLessThan(outputIndex, inputOutputIndex)
+        // The resync rides the same delta chain every other broadcast does: a subscriber that applied the
+        // `output` frame ahead of it is already current, so re-sending the whole grid would cost a
+        // full-grid encode per keystroke cycle for a picture the phone already holds.
         let inputOutputUpdate = try XCTUnwrap(receivedPayloads.snapshot[inputOutputIndex].decodedRenderUpdate)
-        XCTAssertEqual(inputOutputUpdate.kind, .full)
-        XCTAssertEqual(inputOutputUpdate.fallbackReason, "explicit_resync")
-        let inputOutputFrame = try XCTUnwrap(inputOutputUpdate.fullFrame)
-        XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: inputOutputFrame.snapshot), "echo hello")
+        XCTAssertEqual(inputOutputUpdate.kind, .delta)
+        XCTAssertNil(inputOutputUpdate.fallbackReason)
+        var resyncBaseline = initialBaseline
+        for payload in receivedPayloads.snapshot[...inputOutputIndex] where payload.renderUpdate != nil {
+            resyncBaseline = try Self.renderBaseline(from: payload, baseline: resyncBaseline)
+        }
+        XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: resyncBaseline.snapshot), "echo hello")
     }
 
     func testBulkLocalOwnerOutputPublishesSnapshotBeforeInputOutputResync() async throws {
@@ -2327,7 +2497,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         baseline = try Self.renderBaseline(from: receivedPayloads.snapshot[outputIndex], baseline: baseline)
         XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: baseline.snapshot), "echo hello")
         XCTAssertNotNil(receivedPayloads.snapshot[inputOutputIndex].renderUpdate)
-        baseline = try Self.renderBaseline(from: receivedPayloads.snapshot[inputOutputIndex], baseline: baseline)
+        // The resync rides the delta chain, so every frame between the two indices has to be applied to
+        // reach the picture it reports.
+        for payload in receivedPayloads.snapshot[(outputIndex + 1)...inputOutputIndex] where payload.renderUpdate != nil {
+            baseline = try Self.renderBaseline(from: payload, baseline: baseline)
+        }
         XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: baseline.snapshot), "echo hello")
     }
 
