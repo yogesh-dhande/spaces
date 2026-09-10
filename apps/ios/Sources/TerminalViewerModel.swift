@@ -305,19 +305,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// production run without `SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH`/the DEBUG default configured
     /// never spins up a timer nobody reads.
     private var batterySampleTimerTask: Task<Void, Never>?
-    /// Uptime anchor + target grid for `viewport_resize_frame_visible`, armed by `noteKeyboardToggled` and
-    /// filled in by the next `updateViewportSize` call the keyboard transition causes. `nil` whenever no
-    /// keyboard-caused resize is outstanding, which is most of the time.
-    private var pendingKeyboardResizeBeginUptimeNanoseconds: UInt64?
-    private var pendingKeyboardResizeTargetSize: (columns: Int, rows: Int)?
-    /// Quiet window for `viewport_resize_frame_visible`: the keyboard animation can produce several
-    /// viewport grids in a row, and a frame for an intermediate grid can arrive before the final
-    /// `updateViewportSize` call, so a frame matching the current target is held here as a candidate rather
-    /// than logged immediately. `pendingKeyboardResizeQuietWindowTask` fires 500 ms later and logs the
-    /// candidate only if nothing has cleared it by then; a later `updateViewportSize` call (a new target)
-    /// clears the candidate and cancels the task, so the new target has to be matched again.
-    private var pendingKeyboardResizeCandidate: (elapsedMS: Int?, columns: Int, rows: Int)?
-    private var pendingKeyboardResizeQuietWindowTask: Task<Void, Never>?
+    /// Uptime anchor for `keyboard_shift_applied`, armed by `noteKeyboardToggled` and closed out by the
+    /// first rendered window the toggle produces (`noteRenderedViewportChanged`). `nil` whenever no
+    /// keyboard transition is outstanding, which is most of the time.
+    private var pendingKeyboardToggle: (beginUptimeNanoseconds: UInt64, visible: Bool)?
     /// Only a test overrides this (`connectionBannerGraceSecondsForTesting`), so a suite can drive the
     /// grace period to its boundary instead of waiting out the real one.
     var connectionBannerGraceSecondsForTesting: TimeInterval?
@@ -342,6 +333,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private let inputSendQueue = TerminalInputSerialQueue()
     private var ownershipSynchronizationTask: Task<Void, Never>?
     private var viewportSize: (columns: Int, rows: Int)?
+    /// The exact window `GhosttyRemoteTerminalHostView` last rendered out of `viewportSize`'s grid:
+    /// smaller than the grid whenever the software keyboard is up, and shifted down by its row offset
+    /// whenever the frame is scrolled back. This is what the Copy pill crops against (see
+    /// `TerminalSelectionCopyPillLayout.anchor(snapshot:window:...)`); reusing the host view's own window
+    /// rather than recomputing one from columns/rows is what keeps the pill's crop and the surface's own
+    /// crop from disagreeing while a retained scrollback offset is in play.
+    private(set) var renderedViewportWindow: GhosttyTerminalSnapshotViewport.Window?
     private var lastSentResizeSize: (columns: Int, rows: Int)?
     private var resizeSerial: UInt64 = 0
     private var needsOwnershipSynchronizationAfterCurrentRun = false
@@ -846,39 +844,36 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     /// Called when `TerminalDetailView` observes the keyboard show/hide notification. Arms
-    /// `viewport_resize_frame_visible`'s anchor: the terminal surface (owned by `spacesterminalmobileghostty`,
-    /// outside this file) resizes in response, and the next `updateViewportSize` call this causes records
-    /// the grid that resize settles at.
+    /// `keyboard_shift_applied`'s anchor: the keyboard never resizes the session, so what follows a toggle
+    /// is the terminal surface re-cropping the grid it already holds into the area the keyboard leaves,
+    /// and the first rendered window that produces closes the measurement out.
     func noteKeyboardToggled(visible: Bool) {
         var attributes = DevicePerformanceLog.batteryAttributes()
         attributes["visible"] = visible ? "1" : "0"
         logPerformanceEvent(name: "keyboard_toggle", attributes: attributes)
-        pendingKeyboardResizeBeginUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
-        pendingKeyboardResizeTargetSize = nil
+        pendingKeyboardToggle = (beginUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds, visible: visible)
     }
 
-    /// Records a frame matching the current keyboard-resize target as a candidate and (re)starts the 500 ms
-    /// quiet window that confirms it: `updateViewportSize` clears the candidate and cancels this task if a
-    /// later, different target arrives first, so only a candidate nothing has superseded within the window
-    /// gets logged.
-    private func armKeyboardResizeQuietWindow(elapsedMS: Int?, columns: Int, rows: Int) {
-        // First match wins: every later payload at the settled grid carries the same snapshot, and
-        // re-arming on each would push the event out for as long as output keeps flowing. Only a viewport
-        // change clears the candidate (see `updateViewportSize`), and that is what re-arms it.
-        guard pendingKeyboardResizeCandidate == nil else { return }
-        pendingKeyboardResizeCandidate = (elapsedMS, columns, rows)
-        pendingKeyboardResizeQuietWindowTask?.cancel()
-        pendingKeyboardResizeQuietWindowTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(500))
-            guard !Task.isCancelled, let self, let candidate = self.pendingKeyboardResizeCandidate else { return }
-            self.logPerformanceEvent(
-                name: "viewport_resize_frame_visible", elapsedMS: candidate.elapsedMS,
-                attributes: ["columns": String(candidate.columns), "rows": String(candidate.rows)])
-            self.pendingKeyboardResizeCandidate = nil
-            self.pendingKeyboardResizeTargetSize = nil
-            self.pendingKeyboardResizeBeginUptimeNanoseconds = nil
-            self.pendingKeyboardResizeQuietWindowTask = nil
-        }
+    /// Called from the terminal surface's layout and crop pass with the exact window it rendered out of
+    /// the session's grid.
+    ///
+    /// Two jobs. It is where the Copy pill learns what is actually on screen, so the pill can crop against
+    /// the same window the surface painted rather than recomputing one that can disagree with it (see
+    /// `TerminalSelectionCopyPillLayout.anchor(snapshot:window:...)`). And it closes out a pending keyboard
+    /// toggle with `keyboard_shift_applied`, whose elapsed time is the whole cost of a keyboard transition
+    /// for the terminal: no resize goes out, so there is no round trip, no full frame, and no reflow for
+    /// other clients to wait on.
+    func noteRenderedViewportChanged(window: GhosttyTerminalSnapshotViewport.Window) {
+        renderedViewportWindow = window
+        guard let toggle = pendingKeyboardToggle else { return }
+        pendingKeyboardToggle = nil
+        logPerformanceEvent(
+            name: "keyboard_shift_applied", elapsedMS: DevicePerformanceLog.elapsedMS(sinceUptimeNanoseconds: toggle.beginUptimeNanoseconds),
+            attributes: [
+                "offset_rows": String(window.rowOffset), "visible_rows": String(window.rows),
+                "columns": String(viewportSize?.columns ?? window.columns), "rows": String(viewportSize?.rows ?? window.rows),
+                "visible": toggle.visible ? "1" : "0",
+            ])
     }
 
     /// Holds this viewer's screen updates until a frame at its own grid has reduced, so opening a
@@ -1146,13 +1141,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard !hasSentStopDetach else { return nil }
         batterySampleTimerTask?.cancel()
         batterySampleTimerTask = nil
-        // A toggle whose frame never arrived before the detail stopped is not a sample: a retained detail's
+        // A toggle whose shift never landed before the detail stopped is not a sample: a retained detail's
         // next lifecycle would otherwise close it out with the time away from the terminal included.
-        pendingKeyboardResizeTargetSize = nil
-        pendingKeyboardResizeBeginUptimeNanoseconds = nil
-        pendingKeyboardResizeCandidate = nil
-        pendingKeyboardResizeQuietWindowTask?.cancel()
-        pendingKeyboardResizeQuietWindowTask = nil
+        pendingKeyboardToggle = nil
         runState = .stopped(detachSent: true)
         let pendingAttachment = viewerAttachmentOperation
         let pendingAutomaticTakeover = automaticTakeoverTask
@@ -1354,18 +1345,6 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     func updateViewportSize(columns: Int, rows: Int) {
         let resolved = (columns: max(columns, 1), rows: max(rows, 1))
         guard viewportSize?.columns != resolved.columns || viewportSize?.rows != resolved.rows else { return }
-        // Every viewport change after a keyboard toggle moves the measurement's target to that grid: the
-        // surface can report intermediate grids while the keyboard animates, and the frame that matters is
-        // the one at the grid the transition settles at. `applyReducedState` clears both once the quiet
-        // window closes out a frame at the current target, which also ends the window a later, unrelated
-        // resize could enter. A candidate already armed for the previous target no longer applies to this
-        // one, so it is cleared here too: the new target has to be matched again from scratch.
-        if pendingKeyboardResizeBeginUptimeNanoseconds != nil {
-            pendingKeyboardResizeTargetSize = resolved
-            pendingKeyboardResizeCandidate = nil
-            pendingKeyboardResizeQuietWindowTask?.cancel()
-            pendingKeyboardResizeQuietWindowTask = nil
-        }
         if isDemoMode {
             // Demo Mode never takes ownership, so the owner resize handshake below never runs and the
             // in-memory backend would only ever serve its smallest (phone) recording. Report the viewport
@@ -4059,21 +4038,6 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             trace("open_screen_hold_release reason=apply_matching_frame")
             logFirstPaint(
                 holdReleasedBy: "matching_frame", columns: frame.columns, rows: frame.rows, frame: reduction.decodedUpdate?.kind.rawValue ?? "full")
-        }
-        // The keyboard-caused resize `noteKeyboardToggled` armed reached the surface: this is a frame at
-        // the grid that resize's most recent target names, regardless of whether the open hold above also
-        // matched (the two are independent: this fires for every keyboard toggle, that fires once per
-        // open). It does not close the measurement immediately: the keyboard animation can still produce a
-        // later, different target before settling, so the elapsed time and grid are only recorded as a
-        // candidate, and a quiet window (below) confirms nothing has superseded it before logging. A
-        // refused out-of-band payload keeps its snapshot for diagnostics but never reaches the screen, so
-        // it cannot arm a candidate.
-        if !reduction.isRefusedPayload, let target = pendingKeyboardResizeTargetSize, let snapshot = payload.renderSnapshot,
-            snapshot.columns == target.columns, snapshot.rows == target.rows
-        {
-            armKeyboardResizeQuietWindow(
-                elapsedMS: DevicePerformanceLog.elapsedMS(sinceUptimeNanoseconds: pendingKeyboardResizeBeginUptimeNanoseconds),
-                columns: target.columns, rows: target.rows)
         }
         let holdsFirstPaint = openScreenHold.isHolding && ownerRenderEpochState == nil
         if !reduction.isRefusedPayload, isOwnerAfterMerge, payload.renderSnapshot != nil, !holdsFirstPaint {

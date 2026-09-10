@@ -17,17 +17,24 @@ enum TerminalSelectionCopyPillLayout {
         let flipsBelow: Bool
     }
 
-    /// Crops `snapshot`'s selection into the viewport this client is currently showing, the same
-    /// `.leading`-aligned window `GhosttyRemoteTerminalHostView` renders through, and turns the result
-    /// into a pill anchor point. Nil when the snapshot carries no selection or the crop leaves none
-    /// visible. Skips the crop (an O(grid) copy) entirely when the snapshot carries no selection, since
-    /// that is the common case on every frame while nothing is selected.
+    /// Crops `snapshot`'s selection into `window`, the exact window `GhosttyRemoteTerminalHostView`
+    /// reported rendering, and turns the result into a pill anchor point. Nil when the snapshot carries no
+    /// selection or the crop leaves none visible. Skips the crop (an O(grid) copy) entirely when the
+    /// snapshot carries no selection, since that is the common case on every frame while nothing is
+    /// selected.
+    ///
+    /// `window` comes from the host view rather than being recomputed here: while the user is scrolled
+    /// back, the row offset a fresh `GhosttyTerminalSnapshotViewport.window(for:...)` call would produce
+    /// depends on a retained offset that only the surface which actually rendered the last frame holds.
+    /// Recomputing a window here independently of that state can land on a different row offset than the
+    /// one on screen, which would anchor the pill against rows the surface isn't showing, or drop the
+    /// selection from the crop entirely. Taking the surface's own window keeps the two in agreement by
+    /// construction.
     static func anchor(
-        snapshot: GhosttyTerminalSnapshot, viewportColumns: Int, viewportRows: Int, contentOrigin: CGPoint, cellWidth: CGFloat, cellHeight: CGFloat
+        snapshot: GhosttyTerminalSnapshot, window: GhosttyTerminalSnapshotViewport.Window, contentOrigin: CGPoint, cellWidth: CGFloat,
+        cellHeight: CGFloat
     ) -> Anchor? {
-        guard snapshot.selection != nil, viewportColumns > 0, viewportRows > 0 else { return nil }
-        let window = GhosttyTerminalSnapshotViewport.window(
-            for: snapshot, columns: viewportColumns, rows: viewportRows, horizontalAlignment: .leading)
+        guard snapshot.selection != nil else { return nil }
         guard let selection = GhosttyTerminalSnapshotViewport.crop(snapshot, window: window).selection else { return nil }
         return anchor(
             for: selection, columns: window.columns, rows: window.rows, contentOrigin: contentOrigin, cellWidth: cellWidth, cellHeight: cellHeight)

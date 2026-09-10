@@ -316,8 +316,8 @@ class KeyboardMetricTests(unittest.TestCase):
             lane_marker("ios-uitest", "2026-09-08T10:00:01.000Z", 0, "good", "keyboard", "keyboard_show_tap", {"cycle": "1"}),
             app_event("s1", "ios-viewer", "keyboard_toggle", "2026-09-08T10:00:01.100Z", 1_000_000_000, attributes={"visible": "1"}),
             app_event(
-                "s1", "ios-viewer", "viewport_resize_frame_visible", "2026-09-08T10:00:01.250Z", 1_150_000_000,
-                elapsed_ms=150,
+                "s1", "ios-viewer", "keyboard_shift_applied", "2026-09-08T10:00:01.250Z", 1_150_000_000,
+                elapsed_ms=150, attributes={"offset_rows": "12", "visible_rows": "18", "columns": "40", "rows": "30", "visible": "1"},
             ),
             app_event(
                 "s1", "ios-viewer", "input_command_rpc_end", "2026-09-08T10:00:01.400Z", 1_300_000_000,
@@ -326,8 +326,8 @@ class KeyboardMetricTests(unittest.TestCase):
             lane_marker("ios-uitest", "2026-09-08T10:00:02.000Z", 0, "good", "keyboard", "keyboard_hide_tap", {"cycle": "1"}),
             app_event("s1", "ios-viewer", "keyboard_toggle", "2026-09-08T10:00:02.100Z", 2_000_000_000, attributes={"visible": "0"}),
             app_event(
-                "s1", "ios-viewer", "viewport_resize_frame_visible", "2026-09-08T10:00:02.300Z", 2_200_000_000,
-                elapsed_ms=200,
+                "s1", "ios-viewer", "keyboard_shift_applied", "2026-09-08T10:00:02.300Z", 2_200_000_000,
+                elapsed_ms=200, attributes={"offset_rows": "0", "visible_rows": "30", "columns": "40", "rows": "30", "visible": "0"},
             ),
         ]
         window = window_for(events, [], "good", "keyboard")
@@ -337,15 +337,15 @@ class KeyboardMetricTests(unittest.TestCase):
         self.assertEqual(metrics["input_p50"], 40.0)
         self.assertEqual(metrics["input_max"], 40.0)
 
-    def test_first_show_without_resize_does_not_shift_later_pairs(self) -> None:
+    def test_toggle_without_shift_does_not_shift_later_pairs(self) -> None:
         events = [
             *scenario_bracket("good", "keyboard", "2026-09-08T10:00:00.000Z", "2026-09-08T10:00:20.000Z"),
-            # The first show after an open has no resize event of its own.
+            # A toggle that leaves the rendered window the same size emits no shift event of its own.
             app_event("s1", "ios-viewer", "keyboard_toggle", "2026-09-08T10:00:01.000Z", 1_000_000_000, attributes={"visible": "1"}),
             app_event("s1", "ios-viewer", "keyboard_toggle", "2026-09-08T10:00:05.000Z", 5_000_000_000, attributes={"visible": "0"}),
-            app_event("s1", "ios-viewer", "viewport_resize_frame_visible", "2026-09-08T10:00:05.500Z", 5_500_000_000, elapsed_ms=500),
+            app_event("s1", "ios-viewer", "keyboard_shift_applied", "2026-09-08T10:00:05.500Z", 5_500_000_000, elapsed_ms=500),
             app_event("s1", "ios-viewer", "keyboard_toggle", "2026-09-08T10:00:08.000Z", 8_000_000_000, attributes={"visible": "1"}),
-            app_event("s1", "ios-viewer", "viewport_resize_frame_visible", "2026-09-08T10:00:08.400Z", 8_400_000_000, elapsed_ms=400),
+            app_event("s1", "ios-viewer", "keyboard_shift_applied", "2026-09-08T10:00:08.400Z", 8_400_000_000, elapsed_ms=400),
         ]
         metrics = report.metric_keyboard(window_for(events, [], "good", "keyboard"))
         self.assertEqual(metrics["show_p50"], 400.0)

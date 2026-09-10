@@ -76,19 +76,22 @@
             XCTAssertNil(TerminalSelectionCopyPillLayout.anchor(for: range, columns: 80, rows: 24, contentOrigin: .zero, cellWidth: 10, cellHeight: 0))
         }
 
-        private func snapshot(columns: Int, rows: Int, selection: GhosttyTerminalSelectionRange?) -> GhosttyTerminalSnapshot {
+        private func snapshot(
+            columns: Int, rows: Int, selection: GhosttyTerminalSelectionRange?, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0
+        ) -> GhosttyTerminalSnapshot {
             GhosttyTerminalSnapshot(
                 columns: columns, rows: rows, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xF2F2F2,
                 defaultBackgroundRGB: 0x1A1E26,
                 cells: (0..<(columns * rows)).map { _ in
                     GhosttyTerminalSnapshot.Cell(codepoint: 0x20, foregroundRGB: 0xF2F2F2, backgroundRGB: 0x1A1E26, flags: 0)
-                }, selection: selection)
+                }, selection: selection, scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset)
         }
 
         func testAnchorFromSnapshotIsNilWhenTheFrameCarriesNoSelection() {
-            let anchor = TerminalSelectionCopyPillLayout.anchor(
-                snapshot: snapshot(columns: 40, rows: 10, selection: nil), viewportColumns: 40, viewportRows: 10, contentOrigin: .zero, cellWidth: 10,
-                cellHeight: 20)
+            let grid = snapshot(columns: 40, rows: 10, selection: nil)
+            let window = GhosttyTerminalSnapshotViewport.window(for: grid, columns: 40, rows: 10, horizontalAlignment: .leading)
+
+            let anchor = TerminalSelectionCopyPillLayout.anchor(snapshot: grid, window: window, contentOrigin: .zero, cellWidth: 10, cellHeight: 20)
 
             XCTAssertNil(anchor)
         }
@@ -97,27 +100,57 @@
         /// selection-only rule exactly: this is the seam `TerminalDetailView`'s overlay reads every frame.
         func testAnchorFromSnapshotMatchesThePureSelectionRuleWhenTheSnapshotFillsTheViewport() {
             let range = selection(startRow: 2, endColumn: 4, endRow: 3)
+            let grid = snapshot(columns: 40, rows: 10, selection: range)
+            let window = GhosttyTerminalSnapshotViewport.window(for: grid, columns: 40, rows: 10, horizontalAlignment: .leading)
 
             let anchor = TerminalSelectionCopyPillLayout.anchor(
-                snapshot: snapshot(columns: 40, rows: 10, selection: range), viewportColumns: 40, viewportRows: 10,
-                contentOrigin: CGPoint(x: 8, y: 6), cellWidth: 10, cellHeight: 20)
+                snapshot: grid, window: window, contentOrigin: CGPoint(x: 8, y: 6), cellWidth: 10, cellHeight: 20)
 
             let expected = TerminalSelectionCopyPillLayout.anchor(
                 for: range, columns: 40, rows: 10, contentOrigin: CGPoint(x: 8, y: 6), cellWidth: 10, cellHeight: 20)
             XCTAssertEqual(anchor, expected)
         }
 
-        func testAnchorFromSnapshotIsNilWhenTheViewportHasNoColumnsOrRows() {
+        func testAnchorFromSnapshotIsNilWhenTheWindowHasNoColumnsOrRows() {
             let range = selection(startRow: 0, endColumn: 1, endRow: 0)
+            let grid = snapshot(columns: 40, rows: 10, selection: range)
 
             XCTAssertNil(
                 TerminalSelectionCopyPillLayout.anchor(
-                    snapshot: snapshot(columns: 40, rows: 10, selection: range), viewportColumns: 0, viewportRows: 10, contentOrigin: .zero,
-                    cellWidth: 10, cellHeight: 20))
+                    snapshot: grid, window: GhosttyTerminalSnapshotViewport.Window(columnOffset: 0, rowOffset: 0, columns: 0, rows: 10),
+                    contentOrigin: .zero, cellWidth: 10, cellHeight: 20))
             XCTAssertNil(
                 TerminalSelectionCopyPillLayout.anchor(
-                    snapshot: snapshot(columns: 40, rows: 10, selection: range), viewportColumns: 40, viewportRows: 0, contentOrigin: .zero,
-                    cellWidth: 10, cellHeight: 20))
+                    snapshot: grid, window: GhosttyTerminalSnapshotViewport.Window(columnOffset: 0, rowOffset: 0, columns: 40, rows: 0),
+                    contentOrigin: .zero, cellWidth: 10, cellHeight: 20))
+        }
+
+        /// While scrolled back with a row offset carried over from the frame before it -- exactly what the
+        /// software keyboard produces, and what a plain scroll produces on its own -- the pill has to crop
+        /// against the window the surface actually rendered, not one recomputed at row offset 0. A
+        /// selection that sits only inside the retained window's rows would otherwise anchor nowhere near
+        /// the highlight, or (as tested here) not appear at all.
+        func testAnchorFromSnapshotCropsWithTheGivenWindowRatherThanRecomputingOneAtRowOffsetZero() {
+            let range = selection(startRow: 25, endColumn: 10, endRow: 25)
+            let grid = snapshot(columns: 40, rows: 40, selection: range, scrollbarTotal: 200, scrollbarOffset: 50)
+
+            let renderedWindow = GhosttyTerminalSnapshotViewport.window(
+                for: grid, columns: 40, rows: 20, horizontalAlignment: .leading, retainedRowOffset: 12)
+            XCTAssertEqual(renderedWindow.rowOffset, 12, "a scrolled-back frame keeps the offset the last render was drawn at")
+
+            let anchor = TerminalSelectionCopyPillLayout.anchor(
+                snapshot: grid, window: renderedWindow, contentOrigin: .zero, cellWidth: 10, cellHeight: 20)
+            XCTAssertEqual(
+                anchor, .init(point: CGPoint(x: 110, y: 260), flipsBelow: false),
+                "row 25 sits at local row 13 under the actual rendered window (25 minus its 12-row offset)")
+
+            let windowRecomputedAtRowOffsetZero = GhosttyTerminalSnapshotViewport.window(
+                for: grid, columns: 40, rows: 20, horizontalAlignment: .leading, retainedRowOffset: 0)
+            XCTAssertEqual(windowRecomputedAtRowOffsetZero.rowOffset, 0)
+            XCTAssertNil(
+                TerminalSelectionCopyPillLayout.anchor(
+                    snapshot: grid, window: windowRecomputedAtRowOffsetZero, contentOrigin: .zero, cellWidth: 10, cellHeight: 20),
+                "a window recomputed at row offset 0 shows none of the selection at all, proving the two windows disagree")
         }
 
         func testOriginMatchesTheUnclampedMathForAMidGridAnchor() {

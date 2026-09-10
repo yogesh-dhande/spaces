@@ -204,10 +204,10 @@
                 "a successful connect must not log stream_connect_end; only the failure branch does")
         }
 
-        /// The keyboard animation can settle at a grid only after passing through an earlier one, and a
-        /// frame at that earlier grid can arrive before the surface reports the final one. This drives that
-        /// sequence through `TerminalViewerModel`'s quiet window and asserts only the settled grid logs.
-        func testKeyboardResizeSkipsAnIntermediateGridAndLogsOnlyTheSettledOne() async throws {
+        /// The keyboard resizes nothing on the daemon, so what a toggle produces is a shorter rendered
+        /// window out of the grid the session already holds. `keyboard_shift_applied` measures exactly
+        /// that, once per toggle, and the resize event it replaces must be gone.
+        func testKeyboardToggleLogsTheClientSideShiftAndNoResize() async throws {
             let events = EventCollector()
             SpacesDeviceTerminalPerformanceLogger.sinkForTesting = { events.record($0) }
 
@@ -215,25 +215,32 @@
             defer { model.stop() }
             model.start()
 
+            model.updateViewportSize(columns: 40, rows: 30)
             model.noteKeyboardToggled(visible: true)
-            model.updateViewportSize(columns: 40, rows: 20)
-            await model.applyLatestState(
-                try Self.framedState(columns: 40, rows: 20, revision: 1, emittedAt: "2026-06-04T14:23:31Z", owner: model.remoteClientForTesting),
-                isOutOfBand: false)
+            model.noteRenderedViewportChanged(window: GhosttyTerminalSnapshotViewport.Window(columnOffset: 0, rowOffset: 12, columns: 40, rows: 18))
+            // The keyboard animation keeps changing the rendered window after the shift has been measured;
+            // only the toggle that armed the measurement closes it out.
+            model.noteRenderedViewportChanged(window: GhosttyTerminalSnapshotViewport.Window(columnOffset: 0, rowOffset: 13, columns: 40, rows: 17))
 
-            // Before the 500 ms quiet window can close out the 40x20 candidate above, the keyboard settles
-            // at a different grid: this must discard that candidate, not let it log alongside (or instead
-            // of) the grid the transition actually ends at.
-            model.updateViewportSize(columns: 40, rows: 18)
-            await model.applyLatestState(
-                try Self.framedState(columns: 40, rows: 18, revision: 2, emittedAt: "2026-06-04T14:23:32Z", owner: model.remoteClientForTesting),
-                isOutOfBand: false)
+            let shifts = events.recorded.filter { $0.name == "keyboard_shift_applied" }
+            XCTAssertEqual(shifts.count, 1, "one toggle must produce exactly one shift measurement")
+            let shift = try XCTUnwrap(shifts.first)
+            XCTAssertNotNil(shift.elapsedMS, "the time from the toggle to the shift must be recorded")
+            XCTAssertEqual(shift.attributes["offset_rows"], "12")
+            XCTAssertEqual(shift.attributes["visible_rows"], "18")
+            XCTAssertEqual(shift.attributes["columns"], "40")
+            XCTAssertEqual(shift.attributes["rows"], "30", "the reported grid is unchanged by the keyboard")
+            XCTAssertEqual(shift.attributes["visible"], "1")
+            XCTAssertTrue(
+                events.recorded.filter { $0.name == "viewport_resize_frame_visible" }.isEmpty,
+                "the keyboard does not resize the session, so it logs no resize event")
 
-            await waitUntil("viewport_resize_frame_visible to be logged") { events.recorded.contains { $0.name == "viewport_resize_frame_visible" } }
-            let resizeEvents = events.recorded.filter { $0.name == "viewport_resize_frame_visible" }
-            XCTAssertEqual(resizeEvents.count, 1, "only the settled grid must be logged, not the intermediate one")
-            XCTAssertEqual(resizeEvents.first?.attributes["columns"], "40")
-            XCTAssertEqual(resizeEvents.first?.attributes["rows"], "18")
+            model.noteKeyboardToggled(visible: false)
+            model.noteRenderedViewportChanged(window: GhosttyTerminalSnapshotViewport.Window(columnOffset: 0, rowOffset: 0, columns: 40, rows: 30))
+            let hide = try XCTUnwrap(events.recorded.last { $0.name == "keyboard_shift_applied" })
+            XCTAssertEqual(hide.attributes["visible"], "0")
+            XCTAssertEqual(hide.attributes["offset_rows"], "0")
+            XCTAssertEqual(hide.attributes["visible_rows"], "30")
         }
 
         // MARK: - Fixtures

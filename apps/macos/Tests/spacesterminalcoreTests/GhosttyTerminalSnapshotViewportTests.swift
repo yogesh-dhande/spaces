@@ -257,6 +257,101 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
         XCTAssertEqual(cropped.scrollbarOffset, 7)
     }
 
+    /// The row offset is the whole of the iOS keyboard's effect on the terminal: the session keeps its
+    /// grid and the visible rows move down it by the smaller of what the viewport hides and what it takes
+    /// to keep the cursor, plus its trailing context, on screen.
+    func testWindowShiftsByTheSmallerOfTheHiddenRowsAndWhatTheCursorNeeds() {
+        let glyphs = (0..<10).map { index in "ROW\(index)" }
+
+        let cursorAtBottom = makeSnapshot(columns: 4, rows: 10, cursorColumn: 0, cursorRow: 9, glyphs: glyphs)
+        XCTAssertEqual(
+            GhosttyTerminalSnapshotViewport.window(for: cursorAtBottom, columns: 4, rows: 4, horizontalAlignment: .leading).rowOffset, 6,
+            "a cursor on the last row needs every hidden row, so the shift is the whole hidden height")
+
+        let cursorNearTop = makeSnapshot(columns: 4, rows: 10, cursorColumn: 0, cursorRow: 2, glyphs: glyphs)
+        XCTAssertEqual(
+            GhosttyTerminalSnapshotViewport.window(for: cursorNearTop, columns: 4, rows: 4, horizontalAlignment: .leading).rowOffset, 0,
+            "a cursor already on screen needs no shift at all")
+
+        let cursorMidway = makeSnapshot(columns: 4, rows: 10, cursorColumn: 0, cursorRow: 5, glyphs: glyphs)
+        XCTAssertEqual(
+            GhosttyTerminalSnapshotViewport.window(for: cursorMidway, columns: 4, rows: 4, horizontalAlignment: .leading).rowOffset, 3,
+            "a cursor partway down shifts only as far as it takes to show it with its trailing row")
+    }
+
+    /// Scrolling has to move the visible rows exactly as far as it moves the content. A scrolled-back
+    /// frame has no cursor in its exported viewport to follow, so it keeps the offset the frame before it
+    /// was drawn at and the scroll already in the frame is the whole of the movement. Only a frame back
+    /// at the bottom of its scrollback follows the cursor again.
+    func testScrolledBackWindowKeepsTheOffsetTheFrameBeforeItWasDrawnAt() {
+        let glyphs = (0..<10).map { index in "ROW\(index)" }
+
+        // Four of ten rows visible, cursor near the top: nothing to shift for.
+        let atBottom = makeSnapshot(
+            columns: 4, rows: 10, cursorColumn: 0, cursorRow: 2, glyphs: glyphs, scrollbarTotal: 100, scrollbarOffset: 90)
+        let atBottomOffset = GhosttyTerminalSnapshotViewport.window(
+            for: atBottom, columns: 4, rows: 4, horizontalAlignment: .leading, retainedRowOffset: 0
+        ).rowOffset
+        XCTAssertEqual(atBottomOffset, 0, "a cursor already on screen needs no shift at all")
+
+        let scrolledBackOneRow = makeSnapshot(
+            columns: 4, rows: 10, cursorColumn: 0, cursorRow: 3, glyphs: glyphs, scrollbarTotal: 100, scrollbarOffset: 89)
+        let scrolledBackOneRowOffset = GhosttyTerminalSnapshotViewport.window(
+            for: scrolledBackOneRow, columns: 4, rows: 4, horizontalAlignment: .leading, retainedRowOffset: atBottomOffset
+        ).rowOffset
+        XCTAssertEqual(
+            scrolledBackOneRowOffset, atBottomOffset,
+            "one row of scroll must move the visible rows by that one row of content, not by the hidden row count")
+
+        let scrolledBackFurther = makeSnapshot(
+            columns: 4, rows: 10, cursorColumn: 0, cursorRow: 9, glyphs: glyphs, scrollbarTotal: 100, scrollbarOffset: 40)
+        XCTAssertEqual(
+            GhosttyTerminalSnapshotViewport.window(
+                for: scrolledBackFurther, columns: 4, rows: 4, horizontalAlignment: .leading, retainedRowOffset: scrolledBackOneRowOffset
+            ).rowOffset, scrolledBackOneRowOffset, "every further scrolled frame holds the same alignment, cursor row or not")
+
+        let backAtTheBottom = makeSnapshot(
+            columns: 4, rows: 10, cursorColumn: 0, cursorRow: 9, glyphs: glyphs, scrollbarTotal: 100, scrollbarOffset: 90)
+        XCTAssertEqual(
+            GhosttyTerminalSnapshotViewport.window(
+                for: backAtTheBottom, columns: 4, rows: 4, horizontalAlignment: .leading, retainedRowOffset: scrolledBackOneRowOffset
+            ).rowOffset, 6, "a frame at the end of its scrollback follows the cursor again")
+    }
+
+    /// Typing at the bottom of the scrollback keeps the prompt on screen however far the offset had
+    /// travelled while the user was scrolled back: a frame that is not scrolled back re-follows its
+    /// cursor instead of inheriting anything.
+    func testWindowAtTheBottomRefollowsTheCursorRatherThanTheRetainedOffset() {
+        let glyphs = (0..<10).map { index in "ROW\(index)" }
+
+        let cursorAtBottom = makeSnapshot(
+            columns: 4, rows: 10, cursorColumn: 0, cursorRow: 9, glyphs: glyphs, scrollbarTotal: 100, scrollbarOffset: 90)
+        XCTAssertEqual(
+            GhosttyTerminalSnapshotViewport.window(
+                for: cursorAtBottom, columns: 4, rows: 4, horizontalAlignment: .leading, retainedRowOffset: 0
+            ).rowOffset, 6, "a prompt on the last row is shifted onto the screen no matter where the last crop started")
+
+        let cursorNearTop = makeSnapshot(
+            columns: 4, rows: 10, cursorColumn: 0, cursorRow: 2, glyphs: glyphs, scrollbarTotal: 100, scrollbarOffset: 90)
+        XCTAssertEqual(
+            GhosttyTerminalSnapshotViewport.window(
+                for: cursorNearTop, columns: 4, rows: 4, horizontalAlignment: .leading, retainedRowOffset: 6
+            ).rowOffset, 0, "a cursor already on screen pulls the crop back to the top of the grid")
+    }
+
+    /// A retained offset from a taller crop cannot point past what this viewport can show: giving the
+    /// keyboard more of the screen back leaves fewer rows below the offset than the crop needs.
+    func testScrolledBackWindowClampsARetainedOffsetToWhatTheViewportCanShow() {
+        let glyphs = (0..<10).map { index in "ROW\(index)" }
+        let scrolledBack = makeSnapshot(
+            columns: 4, rows: 10, cursorColumn: 0, cursorRow: 0, glyphs: glyphs, scrollbarTotal: 100, scrollbarOffset: 5)
+
+        XCTAssertEqual(
+            GhosttyTerminalSnapshotViewport.window(
+                for: scrolledBack, columns: 4, rows: 8, horizontalAlignment: .leading, retainedRowOffset: 6
+            ).rowOffset, 2)
+    }
+
     private func makeSnapshot(
         columns: Int, rows: Int, cursorColumn: Int, cursorRow: Int, glyphs: [String], selection: GhosttyTerminalSelectionRange? = nil,
         scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0
