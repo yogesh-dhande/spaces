@@ -996,7 +996,10 @@ public struct SpacesDeviceWorkspaceFileReadResult: Codable, Sendable, Equatable 
 
 /// Reads a regular file as it existed at one immutable Git object in a workspace repository. `revision`
 /// must be a full 40- or 64-hex object id; symbolic and abbreviated refs are intentionally rejected so a
-/// caller that received it in diff metadata always reads the same bytes. `relativePath` is workspace-relative.
+/// caller that received it in diff metadata always reads the same bytes. `relativePath` and `oldPath` are
+/// workspace-relative: a path inside a checked-out submodule is resolved in that submodule's own
+/// repository, which is the repository `revision` names an object in, so a client never spells the
+/// submodule out separately.
 public struct SpacesDeviceWorkspaceRevisionFileReadRequest: Codable, Sendable, Equatable {
     public let workspaceID: String
     public let revision: String
@@ -1041,16 +1044,22 @@ public struct SpacesDeviceWorkspaceFileListRequest: Codable, Sendable, Equatable
     public init(workspaceID: String) { self.workspaceID = workspaceID }
 }
 
-/// Result of `workspaceFileList`. `paths` are workspace-relative and sorted ascending. `truncated` is
+/// Result of `workspaceFileList`. `paths` are workspace-relative and sorted ascending, and include the
+/// files inside every initialized submodule under their full workspace-relative path. `truncated` is
 /// `true` when the workspace has more paths than `SpacesDeviceWorkspaceFileListEngine.maxPaths`, in
-/// which case `paths` holds only the first (sorted) slice up to that cap.
+/// which case `paths` holds only the first (sorted) slice up to that cap. `submodules` names every
+/// checked-out submodule whose files `paths` covers, sorted by path, nested submodules included under
+/// their full path, each with the commit its checkout sits at; a submodule the user never initialized
+/// contributes neither paths nor an entry here.
 public struct SpacesDeviceWorkspaceFileListResult: Codable, Sendable, Equatable {
     public let paths: [String]
     public let truncated: Bool
+    public let submodules: [SpacesDeviceWorkspaceFileListSubmodule]
 
-    public init(paths: [String], truncated: Bool) {
+    public init(paths: [String], truncated: Bool, submodules: [SpacesDeviceWorkspaceFileListSubmodule] = []) {
         self.paths = paths
         self.truncated = truncated
+        self.submodules = submodules
     }
 }
 
@@ -1069,6 +1078,20 @@ public enum SpacesDeviceWorkspaceFileListSignature {
             var length = UInt64(utf8.count).bigEndian
             withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
             data.append(utf8)
+        }
+        // A submodule that becomes (or stops being) initialized while listing no openable files of its own
+        // changes `submodules` without changing `paths`, and a checkout moved to another commit with the
+        // same file set changes only the commit, while the tree labels the folder with it. Both belong in
+        // the token. The separator keeps a submodule's path from colliding with a file path of the same
+        // bytes.
+        data.append(0x00)
+        for submodule in result.submodules {
+            for field in [submodule.path, submodule.commit] {
+                let utf8 = Data(field.utf8)
+                var length = UInt64(utf8.count).bigEndian
+                withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
+                data.append(utf8)
+            }
         }
         return TerminalServiceSHA256.hexDigest(data)
     }
@@ -1219,10 +1242,18 @@ public struct SpacesDeviceWorkspaceDiffFileMetadata: Codable, Sendable, Equatabl
     /// `SpacesDeviceWorkspaceDiffSubmoduleChange`. Mirrors `isBinary`: mutually exclusive with a streamed
     /// patch body.
     public let submodule: SpacesDeviceWorkspaceDiffSubmoduleChange?
+    /// The workspace-relative path of the submodule that owns this file, when it lives inside one; nil for
+    /// a file the workspace's own repository tracks, and nil on a submodule's own pointer row (that row
+    /// belongs to the repository above it). `targetRevision`, `oldSHA`/`newSHA`, and `comparisonBaseRevision`
+    /// are then object ids in that submodule's repository. A client passes them back with the file's
+    /// workspace-relative path exactly as it does for a top-level file: the daemon works out which
+    /// repository owns the path. This field is what the change tree nests rows by, nothing more.
+    public let submodulePath: String?
 
     public init(
         path: String, oldPath: String? = nil, status: SpacesDeviceWorkspaceDiffFileStatus, isBinary: Bool = false, oldSHA: String? = nil,
-        newSHA: String? = nil, targetRevision: String? = nil, submodule: SpacesDeviceWorkspaceDiffSubmoduleChange? = nil
+        newSHA: String? = nil, targetRevision: String? = nil, submodule: SpacesDeviceWorkspaceDiffSubmoduleChange? = nil,
+        submodulePath: String? = nil
     ) {
         self.path = path
         self.oldPath = oldPath
@@ -1232,6 +1263,7 @@ public struct SpacesDeviceWorkspaceDiffFileMetadata: Codable, Sendable, Equatabl
         self.newSHA = newSHA
         self.targetRevision = targetRevision
         self.submodule = submodule
+        self.submodulePath = submodulePath
     }
 }
 
@@ -1247,19 +1279,26 @@ public struct SpacesDeviceWorkspaceDiffManifestFile: Codable, Sendable, Equatabl
     /// as a read-only submodule summary from the manifest alone, before its metadata-only patch chunk
     /// arrives.
     public let isSubmodule: Bool
+    /// The workspace-relative path of the submodule that owns this file, when it lives inside one; nil for
+    /// a file the workspace's own repository tracks, and nil on a submodule's own pointer row. A submodule's
+    /// entries follow its pointer row in manifest order, so a client can render the pointer row first and
+    /// nest everything carrying this path beneath it. See `SpacesDeviceWorkspaceDiffFileMetadata.submodulePath`
+    /// for what it means for reading revisions.
+    public let submodulePath: String?
 
     public init(
         path: String, oldPath: String? = nil, status: SpacesDeviceWorkspaceDiffFileStatus, comparisonBaseRevision: String? = nil,
-        isSubmodule: Bool = false
+        isSubmodule: Bool = false, submodulePath: String? = nil
     ) {
         self.path = path
         self.oldPath = oldPath
         self.status = status
         self.comparisonBaseRevision = comparisonBaseRevision
         self.isSubmodule = isSubmodule
+        self.submodulePath = submodulePath
     }
 
-    private enum CodingKeys: String, CodingKey { case path, oldPath, status, comparisonBaseRevision, isSubmodule }
+    private enum CodingKeys: String, CodingKey { case path, oldPath, status, comparisonBaseRevision, isSubmodule, submodulePath }
 
     /// Custom decode so an older-shaped chunk that omits `isSubmodule` (rather than sending it explicitly)
     /// still decodes correctly: absent `isSubmodule` decodes as `false`, matching `init`'s default. Encode
@@ -1272,6 +1311,7 @@ public struct SpacesDeviceWorkspaceDiffManifestFile: Codable, Sendable, Equatabl
         status = try container.decode(SpacesDeviceWorkspaceDiffFileStatus.self, forKey: .status)
         comparisonBaseRevision = try container.decodeIfPresent(String.self, forKey: .comparisonBaseRevision)
         isSubmodule = try container.decodeIfPresent(Bool.self, forKey: .isSubmodule) ?? false
+        submodulePath = try container.decodeIfPresent(String.self, forKey: .submodulePath)
     }
 }
 

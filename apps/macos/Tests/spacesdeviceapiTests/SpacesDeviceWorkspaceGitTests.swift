@@ -23,6 +23,114 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
     ] { environment.removeValue(forKey: key) }
 }
 
+/// A superproject holding every submodule shape the nested diff has to describe:
+///  - `A`, an initialized submodule that itself holds an initialized submodule at `B`.
+///  - `C`, a submodule recorded in the index but never checked out: its directory is empty, the state a
+///    fresh clone leaves behind until `git submodule update --init` runs. It is staged rather than
+///    committed so an uncommitted diff shows it as an added pointer with no repository to descend into.
+///
+/// `protocol.file.allow=always` is required for a local filesystem submodule URL since git 2.38.1
+/// (CVE-2022-39253 hardening); real users add submodules from https/ssh remotes, where this default does
+/// not apply. It is passed on the recursive update too, where git propagates it to the clones it spawns for
+/// each nested level.
+private struct NestedSubmoduleFixture {
+    /// Deleting this removes the superproject and every source repository with it.
+    let container: URL
+    let superRoot: URL
+    let submoduleASource: URL
+    let submoduleBSource: URL
+    /// The commits the superproject's `A` pointer and `A`'s own `B` pointer start at.
+    let submoduleAHead: String
+    let submoduleBHead: String
+}
+
+private func makeNestedSubmoduleSuperproject() throws -> NestedSubmoduleFixture {
+    let container = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "spaces-nested-submodule-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
+
+    let bSource = try makeFixtureRepository(
+        at: container.appendingPathComponent("b-source", isDirectory: true), file: "DEEP.txt", contents: "deep v1")
+    let aSource = try makeFixtureRepository(at: container.appendingPathComponent("a-source", isDirectory: true), file: "FILE.txt", contents: "a v1")
+    try runFixtureGit(["-c", "protocol.file.allow=always", "submodule", "add", "-q", bSource.path, "B"], cwd: aSource.path)
+    try commitFixtureAll(aSource, message: "add B")
+    let cSource = try makeFixtureRepository(at: container.appendingPathComponent("c-source", isDirectory: true), file: "C.txt", contents: "c v1")
+
+    let superRoot = try makeFixtureRepository(at: container.appendingPathComponent("super", isDirectory: true), file: "ROOT.md", contents: "root")
+    try runFixtureGit(["-c", "protocol.file.allow=always", "submodule", "add", "-q", aSource.path, "A"], cwd: superRoot.path)
+    try commitFixtureAll(superRoot, message: "add A")
+    try runFixtureGit(["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"], cwd: superRoot.path)
+
+    try runFixtureGit(["-c", "protocol.file.allow=always", "submodule", "add", "-q", cSource.path, "C"], cwd: superRoot.path)
+    // `submodule add` leaves a populated checkout; emptying the directory reproduces the uninitialized
+    // state without disturbing the index entry, exactly as `git status` reports it for a fresh clone.
+    try FileManager.default.removeItem(at: superRoot.appendingPathComponent("C"))
+    try FileManager.default.createDirectory(at: superRoot.appendingPathComponent("C"), withIntermediateDirectories: true)
+
+    return NestedSubmoduleFixture(
+        container: container, superRoot: superRoot, submoduleASource: aSource, submoduleBSource: bSource,
+        submoduleAHead: try runFixtureGit(["rev-parse", "HEAD"], cwd: aSource.path).trimmingCharacters(in: .whitespacesAndNewlines),
+        submoduleBHead: try runFixtureGit(["rev-parse", "HEAD"], cwd: bSource.path).trimmingCharacters(in: .whitespacesAndNewlines))
+}
+
+/// A stand-in `git` that appends its own argument list to `log` and then runs the real one, so a test can
+/// count the processes a code path actually spawns rather than inferring it from a cache counter.
+///
+/// `stall` makes the invocations whose argument list contains `match` sleep first, which is how a test
+/// reproduces one wedged repository inside a traversal. `match` is quoted inside the shell pattern so a
+/// multi-word match stays one word, while the asterisks around it are left to glob. The sleep's output goes
+/// to `/dev/null` so the straggler cannot hold the captured pipe open after the caller's timeout kills the
+/// shim.
+private func makeGitInvocationRecorder(at directory: URL, log: URL, stall: (match: String, seconds: Int)? = nil) throws -> URL {
+    let script = directory.appendingPathComponent("recording-git")
+    let stallLine = stall.map { "case \"$*\" in *\"\($0.match)\"*) sleep \($0.seconds) >/dev/null 2>&1 ;; esac" } ?? ""
+    try """
+        #!/bin/sh
+        printf '%s\\n' "$*" >> '\(log.path)'
+        \(stallLine)
+        exec /usr/bin/env git "$@"
+        """.write(to: script, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+    return script
+}
+
+@discardableResult private func makeFixtureRepository(at url: URL, file: String, contents: String) throws -> URL {
+    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    try runFixtureGit(["init", "--initial-branch", "main"], cwd: url.path)
+    try contents.write(to: url.appendingPathComponent(file), atomically: true, encoding: .utf8)
+    try commitFixtureAll(url, message: "initial")
+    return url
+}
+
+private func commitFixtureAll(_ repo: URL, message: String) throws {
+    try runFixtureGit(["add", "-A"], cwd: repo.path)
+    try runFixtureGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", message], cwd: repo.path)
+}
+
+@discardableResult private func runFixtureGit(_ arguments: [String], cwd: String) throws -> String {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["git"] + arguments
+    process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+    var environment = ProcessInfo.processInfo.environment
+    removeGitRepositoryEnvironment(from: &environment)
+    process.environment = environment
+    let output = Pipe()
+    let errorOutput = Pipe()
+    process.standardOutput = output
+    process.standardError = errorOutput
+    try process.run()
+    process.waitUntilExit()
+    let outputData = output.fileHandleForReading.readDataToEndOfFile()
+    guard process.terminationStatus == 0 else {
+        let errorData = errorOutput.fileHandleForReading.readDataToEndOfFile()
+        let message = String(data: errorData, encoding: .utf8) ?? "unknown git failure"
+        struct GitFixtureError: Error, CustomStringConvertible { let description: String }
+        throw GitFixtureError(description: "git \(arguments.joined(separator: " ")) failed: \(message)")
+    }
+    return String(data: outputData, encoding: .utf8) ?? ""
+}
+
 @Suite struct SpacesDeviceWorkspacePathResolverTests {
     private func makeWorkspace() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-path-resolve-\(UUID().uuidString)", isDirectory: true)
@@ -184,10 +292,14 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
         let isBinary: Bool
         let oldSHA: String?
         let newSHA: String?
+        /// Mirrors the patch chunk's `targetRevision`: the immutable revision that owns the new side.
+        let targetRevision: String?
         /// Mirrors the manifest chunk's `isSubmodule` (derived from the plan, before any patch is fetched).
         let isSubmodule: Bool
         /// Mirrors the patch chunk's `submodule` metadata (derived from the fetched patch text).
         let submodule: SpacesDeviceWorkspaceDiffSubmoduleChange?
+        /// Mirrors the manifest and patch chunks' `submodulePath`: the submodule that owns this file.
+        let submodulePath: String?
     }
 
     private struct DiffResult {
@@ -196,14 +308,15 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
     }
 
     @Test func aLargeManifestResolvesEachPathAndKeepsTheFirstDuplicatePlan() {
-        let first = SpacesDeviceWorkspaceDiffEngine.DiffFilePlan(path: "duplicate.md", oldPath: nil, status: .modified, source: .untracked)
+        let first = SpacesDeviceWorkspaceDiffEngine.DiffFilePlan(
+            path: "duplicate.md", oldPath: nil, status: .modified, source: .untracked, repoDir: "/workspace")
         let duplicate = SpacesDeviceWorkspaceDiffEngine.DiffFilePlan(
-            path: "duplicate.md", oldPath: nil, status: .deleted, source: .tracked(baseRef: "HEAD", targetRef: nil))
+            path: "duplicate.md", oldPath: nil, status: .deleted, source: .tracked(baseRef: "HEAD", targetRef: nil), repoDir: "/workspace")
         let plans =
             [first]
             + (0..<10_000).map { index in
                 SpacesDeviceWorkspaceDiffEngine.DiffFilePlan(
-                    path: "Sources/file-" + String(index) + ".swift", oldPath: nil, status: .modified, source: .untracked)
+                    path: "Sources/file-" + String(index) + ".swift", oldPath: nil, status: .modified, source: .untracked, repoDir: "/workspace")
             } + [duplicate]
         let snapshot = SpacesDeviceWorkspaceDiffEngine.DiffPlanSnapshot(scopeSignature: "signature", plans: plans)
 
@@ -228,8 +341,7 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
             FileManager.default.createFile(atPath: outputURL.path, contents: Data())
             guard
                 let transfer = try SpacesDeviceWorkspaceDiffEngine.writeDiffFilePatch(
-                    snapshot: snapshot, workspaceDir: workspaceDir, relativePath: plan.path, outputURL: outputURL, gitClient: gitClient,
-                    deadlineStart: deadlineStart)
+                    snapshot: snapshot, relativePath: plan.path, outputURL: outputURL, gitClient: gitClient, deadlineStart: deadlineStart)
             else { return nil }
             // Match the chunk contract: a refused/non-produced body has no payload, not an empty text
             // patch. This is distinct from a generated patch whose textual contents happen to be empty.
@@ -240,8 +352,9 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
                 ? nil : String(decoding: try Data(contentsOf: outputURL), as: UTF8.self)
             return DiffFile(
                 path: transfer.file.path, oldPath: transfer.file.oldPath, status: transfer.file.status, patch: patch,
-                isBinary: transfer.file.isBinary, oldSHA: transfer.file.oldSHA, newSHA: transfer.file.newSHA, isSubmodule: plan.isSubmodule,
-                submodule: transfer.file.submodule)
+                isBinary: transfer.file.isBinary, oldSHA: transfer.file.oldSHA, newSHA: transfer.file.newSHA,
+                targetRevision: transfer.file.targetRevision, isSubmodule: plan.isSubmodule, submodule: transfer.file.submodule,
+                submodulePath: transfer.file.submodulePath)
         }
         return DiffResult(scopeSignature: snapshot.scopeSignature, files: files)
     }
@@ -1566,6 +1679,528 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
         #expect(afterInsideEdit != afterOutsideEdit)
     }
 
+    // Uncommitted: every initialized submodule's own changed files follow its pointer row, at their full
+    // workspace-relative paths, recursively; an uninitialized one keeps its pointer row alone. The written
+    // patches must carry workspace-relative headers so the client can anchor comments and inline edits to
+    // the same path the row is identified by.
+    @Test func theUncommittedScopeNestsEachSubmodulesOwnChangedFilesUnderItsPointerRow() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+        let superRoot = fixture.superRoot
+
+        try "a v1 edited".write(to: superRoot.appendingPathComponent("A/FILE.txt"), atomically: true, encoding: .utf8)
+        try "brand new".write(to: superRoot.appendingPathComponent("A/NEW.txt"), atomically: true, encoding: .utf8)
+        try "deep v1 edited".write(to: superRoot.appendingPathComponent("A/B/DEEP.txt"), atomically: true, encoding: .utf8)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client)
+        let paths = result.files.map(\.path)
+        #expect(paths == [".gitmodules", "A", "A/B", "A/B/DEEP.txt", "A/FILE.txt", "A/NEW.txt", "C"])
+
+        let byPath = Dictionary(uniqueKeysWithValues: result.files.map { ($0.path, $0) })
+        let pointerA = try #require(byPath["A"])
+        #expect(pointerA.isSubmodule == true)
+        #expect(pointerA.submodulePath == nil)
+        let changeA = try #require(pointerA.submodule)
+        #expect(changeA.dirty == true)
+        #expect(changeA.checkedOut == true)
+
+        let editedFile = try #require(byPath["A/FILE.txt"])
+        #expect(editedFile.status == .modified)
+        #expect(editedFile.submodulePath == "A")
+        let editedPatch = try #require(editedFile.patch)
+        #expect(editedPatch.contains("--- a/A/FILE.txt"))
+        #expect(editedPatch.contains("+++ b/A/FILE.txt"))
+
+        let untrackedFile = try #require(byPath["A/NEW.txt"])
+        #expect(untrackedFile.status == .untracked)
+        #expect(untrackedFile.submodulePath == "A")
+        #expect(try #require(untrackedFile.patch).contains("+++ b/A/NEW.txt"))
+
+        #expect(try #require(byPath["A/B"]).isSubmodule == true)
+        let deepFile = try #require(byPath["A/B/DEEP.txt"])
+        #expect(deepFile.submodulePath == "A/B")
+        #expect(try #require(deepFile.patch).contains("+++ b/A/B/DEEP.txt"))
+
+        // Never checked out, so there is no repository to read its files from: the pointer row stands alone
+        // and says so, rather than silently looking like a submodule with no changes.
+        let pointerC = try #require(byPath["C"])
+        #expect(pointerC.isSubmodule == true)
+        #expect(try #require(pointerC.submodule).checkedOut == false)
+        #expect(!paths.contains { $0.hasPrefix("C/") })
+
+        // The plans carry the repository each file's git commands must run in, which is what keeps a
+        // submodule's patch out of the superproject's repository.
+        let snapshot = try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(
+            workspaceDir: superRoot.path, refName: nil, gitClient: client)
+        #expect(snapshot.plan(for: "A/FILE.txt")?.repoDir == superRoot.appendingPathComponent("A").path)
+        #expect(snapshot.plan(for: "A/B/DEEP.txt")?.repoDir == superRoot.appendingPathComponent("A/B").path)
+        #expect(snapshot.plan(for: "A/B/DEEP.txt")?.repoRelativePath == "DEEP.txt")
+        #expect(snapshot.plan(for: "ROOT.md") == nil)
+    }
+
+    // Last commit is committed-only at every level: a submodule's nested entries compare the two commits
+    // the superproject's `HEAD^` and `HEAD` record for it, never its working tree, and each entry names the
+    // newer of those commits as the revision its content belongs to.
+    @Test func theLastCommitScopeNestsTheFilesChangedBetweenTheRecordedPointers() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+        let superRoot = fixture.superRoot
+        let submoduleA = superRoot.appendingPathComponent("A")
+
+        // The fixture leaves `C`'s pointer staged; commit it first so `HEAD^..HEAD` below is the `A` bump
+        // alone rather than that unrelated staging.
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add C pointer"], cwd: superRoot.path)
+        let oldPointer = try runFixtureGit(["rev-parse", "HEAD"], cwd: submoduleA.path).trimmingCharacters(in: .whitespacesAndNewlines)
+        try "a v2".write(to: submoduleA.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+        try commitFixtureAll(submoduleA, message: "a v2")
+        let newPointer = try runFixtureGit(["rev-parse", "HEAD"], cwd: submoduleA.path).trimmingCharacters(in: .whitespacesAndNewlines)
+        try runGit(["add", "A"], cwd: superRoot.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "bump A"], cwd: superRoot.path)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, lastCommit: true, gitClient: client)
+        #expect(result.files.map(\.path) == ["A", "A/FILE.txt"])
+
+        let pointer = try #require(result.files.first { $0.path == "A" })
+        let change = try #require(pointer.submodule)
+        #expect(change.oldCommit == oldPointer)
+        #expect(change.newCommit == newPointer)
+        #expect(change.checkedOut == true)
+
+        let nested = try #require(result.files.first { $0.path == "A/FILE.txt" })
+        #expect(nested.status == .modified)
+        #expect(nested.submodulePath == "A")
+        #expect(nested.targetRevision == newPointer)
+        #expect(try #require(nested.patch).contains("+++ b/A/FILE.txt"))
+    }
+
+    // A checkout can exist and still be unable to describe the comparison: a shallow or unfetched clone
+    // does not hold the commit the parent records for it. Descending there would fail mid-request with a
+    // bare git error, so the pointer row stands alone and reports the submodule as not checked out.
+    @Test func aSubmodulePointingAtACommitMissingFromItsCheckoutStaysAPointerRow() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+        let superRoot = fixture.superRoot
+
+        // The fixture leaves `C`'s pointer staged; commit it first so `HEAD^..HEAD` below is the `A` bump
+        // alone rather than that unrelated staging.
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add C pointer"], cwd: superRoot.path)
+
+        // Committed in the repository `A` was cloned from and never fetched into the checkout, then
+        // recorded as the parent's pointer: the state a shallow or partially fetched clone leaves behind.
+        try "a v2".write(to: fixture.submoduleASource.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+        try commitFixtureAll(fixture.submoduleASource, message: "a v2")
+        let unfetched = try runFixtureGit(["rev-parse", "HEAD"], cwd: fixture.submoduleASource.path)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try runGit(["update-index", "--cacheinfo", "160000,\(unfetched),A"], cwd: superRoot.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "bump A"], cwd: superRoot.path)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, lastCommit: true, gitClient: client)
+        #expect(result.files.map(\.path) == ["A"])
+        let change = try #require(result.files.first?.submodule)
+        #expect(change.newCommit == unfetched)
+        #expect(change.checkedOut == false)
+    }
+    // `git rm --cached sub` drops the pointer from the index and leaves the checkout on disk, so the
+    // directory stays a readable repository still holding the commit the parent used to record. The row is
+    // a deletion all the same: the comparison has no submodule on its new side, and what is left on disk is
+    // an untracked nested repository, whose own local changes belong to no row in this diff. Descending
+    // would file them under a pointer the diff is reporting as removed.
+    @Test func aSubmoduleRemovedFromTheIndexKeepsItsLeftoverCheckoutOutOfTheDiff() throws {
+        let (superRoot, _, _) = try makeRepoWithSubmodule()
+        defer { try? FileManager.default.removeItem(at: superRoot.deletingLastPathComponent()) }
+        let client = RemoteWorkspaceGitClient()
+
+        try runGit(["rm", "--cached", "-q", "sub"], cwd: superRoot.path)
+        try "left behind".write(to: superRoot.appendingPathComponent("sub/LEFTOVER.txt"), atomically: true, encoding: .utf8)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client)
+        let pointer = try #require(result.files.first { $0.path == "sub" })
+        #expect(pointer.status == .deleted)
+        #expect(pointer.isSubmodule == true)
+        #expect(try #require(pointer.submodule).checkedOut == false)
+        #expect(!result.files.contains { $0.path.hasPrefix("sub/") })
+    }
+
+    // A tracked directory replaced by a submodule at the same path: the superproject reports the new
+    // gitlink `A` and, beside it, `A/foo` deleted from the tree that checkout replaced, while the descent
+    // into the checkout reports its own `foo` as added. Two rows for one path, and every consumer keys by
+    // path, so the descended submodule's row has to be the only one left.
+    @Test func aDirectoryReplacedByASubmoduleListsTheCheckoutsFileOnceUnderThePointer() throws {
+        let fixture = try makeSuperprojectWhereADirectoryBecameASubmodule()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+
+        let result = try buildDiff(workspaceDir: fixture.superRoot.path, refName: nil, gitClient: client)
+        let paths = result.files.map(\.path)
+        #expect(paths.sorted() == [".gitmodules", "A", "A/foo"])
+        #expect(paths.filter { $0 == "A/foo" }.count == 1)
+        let pointerIndex = try #require(paths.firstIndex(of: "A"))
+        #expect(paths[pointerIndex + 1] == "A/foo")
+
+        let pointer = try #require(result.files.first { $0.path == "A" })
+        #expect(pointer.isSubmodule == true)
+        let change = try #require(pointer.submodule)
+        #expect(change.oldCommit == nil)
+        #expect(change.checkedOut == true)
+
+        let nested = try #require(result.files.first { $0.path == "A/foo" })
+        #expect(nested.submodulePath == "A")
+        #expect(nested.status == .added)
+    }
+
+    // The same replacement with nothing to descend into (the checkout directory emptied, as a fresh clone
+    // leaves it): the superproject's own rows are then the only truth for that subtree, so its deleted
+    // `A/foo` stays, exactly once.
+    @Test func aDirectoryReplacedByAnUninitializedSubmoduleKeepsTheSuperprojectsRowForThatPath() throws {
+        let fixture = try makeSuperprojectWhereADirectoryBecameASubmodule()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+        let checkout = fixture.superRoot.appendingPathComponent("A", isDirectory: true)
+        try FileManager.default.removeItem(at: checkout)
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+
+        let result = try buildDiff(workspaceDir: fixture.superRoot.path, refName: nil, gitClient: client)
+        let paths = result.files.map(\.path)
+        #expect(paths.sorted() == [".gitmodules", "A", "A/foo"])
+
+        #expect(try #require(result.files.first { $0.path == "A" }?.submodule).checkedOut == false)
+        let outer = try #require(result.files.first { $0.path == "A/foo" })
+        #expect(outer.status == .deleted)
+        #expect(outer.submodulePath == nil)
+    }
+
+    // git's own `diff` ignores a submodule whose only change is untracked content, while `git status`
+    // reports it modified, so a checkout sitting exactly at its recorded pointer with one new file in it
+    // has no raw record to build a pointer row from. The row still has to be there: without it the new
+    // file has nothing to nest under and neither appears in the diff at all.
+    @Test func aSubmoduleWhoseOnlyChangeIsAnUntrackedFileStillNestsThatFileUnderItsPointerRow() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+        let superRoot = fixture.superRoot
+
+        try "brand new".write(to: superRoot.appendingPathComponent("A/NEW.txt"), atomically: true, encoding: .utf8)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client)
+        let paths = result.files.map(\.path)
+        #expect(paths.sorted() == [".gitmodules", "A", "A/NEW.txt", "C"])
+        let pointerIndex = try #require(paths.firstIndex(of: "A"))
+        #expect(paths[pointerIndex + 1] == "A/NEW.txt")
+
+        let pointer = try #require(result.files.first { $0.path == "A" })
+        #expect(pointer.status == .modified)
+        #expect(pointer.isSubmodule == true)
+        let change = try #require(pointer.submodule)
+        #expect(change.checkedOut == true)
+        // The checkout never left the recorded commit, so the row describes dirt alone.
+        #expect(change.oldCommit == fixture.submoduleAHead)
+        #expect(change.newCommit == fixture.submoduleAHead)
+        #expect(change.dirty == true)
+
+        let nested = try #require(result.files.first { $0.path == "A/NEW.txt" })
+        #expect(nested.status == .untracked)
+        #expect(nested.submodulePath == "A")
+        #expect(try #require(nested.patch).contains("+++ b/A/NEW.txt"))
+    }
+
+    // The same shape has to reach a subscribed client: the pointer-level fold sees no change (the recorded
+    // commit is the checkout's own HEAD), so it is the recursive per-submodule fold, which reads the
+    // submodule's own porcelain, that has to move the signature.
+    @Test func scopeSignatureChangesWhenASubmodulesOnlyChangeIsANewUntrackedFile() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+        let superRoot = fixture.superRoot
+
+        let before = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: superRoot.path, gitClient: client)
+        try "brand new".write(to: superRoot.appendingPathComponent("A/NEW.txt"), atomically: true, encoding: .utf8)
+        let after = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: superRoot.path, gitClient: client)
+
+        #expect(before != after)
+    }
+
+    // A repository can tell git to overlook a submodule's worktree (`submodule.<name>.ignore = dirty`),
+    // typically for a large vendored checkout whose local state is nobody's business. The pointer move is
+    // still reported, because it is committed history rather than worktree state, but everything inside the
+    // checkout is not: no nested rows, and no `-dirty` on the pointer the row names.
+    @Test func aSubmoduleWhoseDirtIsIgnoredKeepsItsPointerMoveAndNestsNothing() throws {
+        let (superRoot, subrepo, subrepoSHA1) = try makeRepoWithSubmodule()
+        defer { try? FileManager.default.removeItem(at: superRoot.deletingLastPathComponent()) }
+        let client = RemoteWorkspaceGitClient()
+
+        let subrepoSHA2 = try commitSecondSubrepoRevision(subrepo: subrepo)
+        let subCheckout = superRoot.appendingPathComponent("sub")
+        try runGit(["fetch", "-q", "origin"], cwd: subCheckout.path)
+        try runGit(["checkout", "-q", subrepoSHA2], cwd: subCheckout.path)
+        try runGit(["add", "sub"], cwd: superRoot.path)
+        try "sub v2 - dirty edit".write(to: subCheckout.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+        try "brand new".write(to: subCheckout.appendingPathComponent("NEW.txt"), atomically: true, encoding: .utf8)
+        try runGit(["config", "-f", ".gitmodules", "submodule.sub.ignore", "dirty"], cwd: superRoot.path)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client)
+        #expect(!result.files.contains { $0.path.hasPrefix("sub/") })
+        let pointer = try #require(result.files.first { $0.path == "sub" })
+        let change = try #require(pointer.submodule)
+        #expect(change.oldCommit == subrepoSHA1)
+        #expect(change.newCommit == subrepoSHA2)
+        #expect(change.dirty == false)
+    }
+
+    // An ignore policy covers everything inside the checkout it names, including a submodule checked out
+    // inside it: that nested checkout is part of the outer one's worktree, so an outer `untracked` has to
+    // reach the nested submodule's new files too. The nested pointer row itself stays, because the outer
+    // repository does report that its submodule's state moved; what the policy hides is the content inside.
+    @Test func anOuterUntrackedIgnorePolicyAlsoHidesANestedSubmodulesUntrackedFiles() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+        let superRoot = fixture.superRoot
+
+        try runFixtureGit(["config", "-f", ".gitmodules", "submodule.A.ignore", "untracked"], cwd: superRoot.path)
+        // A tracked edit, so `A` is dirty by more than untracked content and the descent into it happens.
+        try "a v1 edited".write(to: superRoot.appendingPathComponent("A/FILE.txt"), atomically: true, encoding: .utf8)
+        try "brand new".write(to: superRoot.appendingPathComponent("A/B/NEW.txt"), atomically: true, encoding: .utf8)
+
+        let paths = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client).files.map(\.path)
+        #expect(paths.contains("A/FILE.txt"))
+        #expect(paths.contains("A/B"))
+        #expect(!paths.contains("A/B/NEW.txt"))
+    }
+
+    // The same fixture with nothing configured, which is what proves the policy did the hiding above rather
+    // than the nested untracked file never being listed in the first place.
+    @Test func aNestedSubmodulesUntrackedFileIsListedWhenNoAncestorIgnoresIt() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+        let superRoot = fixture.superRoot
+
+        try "a v1 edited".write(to: superRoot.appendingPathComponent("A/FILE.txt"), atomically: true, encoding: .utf8)
+        try "brand new".write(to: superRoot.appendingPathComponent("A/B/NEW.txt"), atomically: true, encoding: .utf8)
+
+        let paths = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client).files.map(\.path)
+        #expect(paths.contains("A/FILE.txt"))
+        #expect(paths.contains("A/B"))
+        #expect(paths.contains("A/B/NEW.txt"))
+    }
+
+    // A workspace can be a subpackage of its repository, and then `.gitmodules` is neither in the workspace
+    // directory nor written in workspace-relative paths. The policy still has to be found, and found for the
+    // right submodule, so it is looked up at the repository top level and its paths are read through the
+    // workspace's own prefix.
+    @Test func aSubpackageWorkspaceFindsItsSubmodulesIgnorePolicyAtTheRepositoryRoot() throws {
+        let fixture = try makeSubpackageWorkspaceWithBumpedSubmodule()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+
+        try runFixtureGit(
+            ["config", "-f", ".gitmodules", "submodule.packages/app/sub.ignore", "dirty"], cwd: fixture.repositoryRoot.path)
+
+        let result = try buildDiff(workspaceDir: fixture.workspaceDir.path, refName: nil, gitClient: client)
+        #expect(!result.files.contains { $0.path.hasPrefix("sub/") })
+        let change = try #require(result.files.first { $0.path == "sub" }?.submodule)
+        #expect(change.oldCommit == fixture.oldCommit)
+        #expect(change.newCommit == fixture.newCommit)
+        #expect(change.dirty == false)
+    }
+
+    // The same subpackage layout with nothing configured, which is what proves the lookup above matched the
+    // submodule rather than silently finding nothing: with no policy the edit inside the checkout nests.
+    @Test func aSubpackageWorkspaceWithNoIgnorePolicyNestsItsSubmodulesEdit() throws {
+        let fixture = try makeSubpackageWorkspaceWithBumpedSubmodule()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+
+        let result = try buildDiff(workspaceDir: fixture.workspaceDir.path, refName: nil, gitClient: client)
+        #expect(result.files.map(\.path).filter { $0.hasPrefix("sub/") } == ["sub/FILE.txt"])
+        #expect(try #require(result.files.first { $0.path == "sub" }?.submodule).dirty == true)
+    }
+
+    // `untracked` is the narrower policy: the submodule's tracked edits are still part of the review, only
+    // files it has never heard of are not.
+    @Test func aSubmoduleIgnoringUntrackedContentNestsItsTrackedEditButNotItsNewFile() throws {
+        let (superRoot, _, _) = try makeRepoWithSubmodule()
+        defer { try? FileManager.default.removeItem(at: superRoot.deletingLastPathComponent()) }
+        let client = RemoteWorkspaceGitClient()
+
+        let subCheckout = superRoot.appendingPathComponent("sub")
+        try "sub v1 edited".write(to: subCheckout.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+        try "brand new".write(to: subCheckout.appendingPathComponent("NEW.txt"), atomically: true, encoding: .utf8)
+        try runGit(["config", "-f", ".gitmodules", "submodule.sub.ignore", "untracked"], cwd: superRoot.path)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client)
+        #expect(result.files.map(\.path).filter { $0.hasPrefix("sub/") } == ["sub/FILE.txt"])
+        #expect(try #require(result.files.first { $0.path == "sub" }?.submodule).dirty == true)
+    }
+
+    // A renamed submodule is recorded under its old name in the comparison tree, so the base pointer has
+    // to be looked up there. Looking it up under the new name finds nothing, which would leave the nested
+    // comparison with no base at all and list every file in the submodule as added.
+    @Test func aRenamedSubmoduleNestsOnlyItsOwnChangedFiles() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+        let superRoot = fixture.superRoot
+
+        try runGit(["mv", "A", "A2"], cwd: superRoot.path)
+        try "a v1 edited".write(to: superRoot.appendingPathComponent("A2/FILE.txt"), atomically: true, encoding: .utf8)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client)
+        let nestedPaths = result.files.map(\.path).filter { $0.hasPrefix("A2/") }
+        #expect(nestedPaths == ["A2/FILE.txt"])
+        #expect(!result.files.contains { $0.path == "A2/B/DEEP.txt" })
+
+        let edited = try #require(result.files.first { $0.path == "A2/FILE.txt" })
+        #expect(edited.status == .modified)
+        #expect(edited.submodulePath == "A2")
+        let patch = try #require(edited.patch)
+        #expect(patch.contains("-a v1"))
+        #expect(patch.contains("+a v1 edited"))
+    }
+
+    // A named-ref scope reviews everything since the branches diverged, including what is not committed
+    // yet, so a submodule's nested entries compare its live worktree against the pointer the merge base
+    // recorded, not against the pointer HEAD records.
+    @Test func aRefScopeNestsTheSubmoduleWorktreeAgainstThePointerRecordedAtTheMergeBase() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+        let superRoot = fixture.superRoot
+        let submoduleA = superRoot.appendingPathComponent("A")
+
+        try runGit(["branch", "base"], cwd: superRoot.path)
+        try "a v2".write(to: submoduleA.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+        try commitFixtureAll(submoduleA, message: "a v2")
+        try runGit(["add", "A"], cwd: superRoot.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "bump A"], cwd: superRoot.path)
+        // Uncommitted inside the submodule on top of the committed bump: a ref scope must show both.
+        try "a v3 uncommitted".write(to: submoduleA.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: "base", gitClient: client)
+        let byPath = Dictionary(uniqueKeysWithValues: result.files.map { ($0.path, $0) })
+        let pointer = try #require(byPath["A"])
+        #expect(try #require(pointer.submodule).oldCommit == fixture.submoduleAHead)
+        let nested = try #require(byPath["A/FILE.txt"])
+        #expect(nested.submodulePath == "A")
+        #expect(nested.targetRevision == nil)
+        let patch = try #require(nested.patch)
+        #expect(patch.contains("-a v1"))
+        #expect(patch.contains("+a v3 uncommitted"))
+    }
+
+    // A `.gitmodules` graph is user-authored and a superproject can point a submodule back at an ancestor,
+    // so the descent is bounded. At the bound a submodule keeps its pointer row and contributes nothing
+    // below it, exactly like one that was never checked out.
+    @Test func aSubmoduleChainDeeperThanTheDepthGuardStopsAtAPointerRow() throws {
+        let container = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "spaces-submodule-depth-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: container) }
+        let client = RemoteWorkspaceGitClient()
+
+        // One level past the last one the guard descends into, so the test can assert the descent stopped
+        // rather than simply running out of submodules.
+        let levelCount = SpacesDeviceWorkspaceDiffEngine.maxSubmoduleDepth + 2
+        var child: URL?
+        for index in (0..<levelCount).reversed() {
+            let level = try makeFixtureRepository(
+                at: container.appendingPathComponent("level-\(index)", isDirectory: true), file: "LEVEL.txt", contents: "level \(index)")
+            if let child {
+                try runFixtureGit(["-c", "protocol.file.allow=always", "submodule", "add", "-q", child.path, "s"], cwd: level.path)
+                try commitFixtureAll(level, message: "add s")
+            }
+            child = level
+        }
+        let superRoot = try makeFixtureRepository(at: container.appendingPathComponent("super", isDirectory: true), file: "ROOT.md", contents: "root")
+        try runFixtureGit(["-c", "protocol.file.allow=always", "submodule", "add", "-q", try #require(child).path, "s"], cwd: superRoot.path)
+        try commitFixtureAll(superRoot, message: "add s")
+        try runFixtureGit(["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"], cwd: superRoot.path)
+
+        // Editing the deepest file dirties every checkout above it, so every level would produce a pointer
+        // row if nothing bounded the descent.
+        let deepest = (0..<levelCount).map { _ in "s" }.joined(separator: "/") + "/LEVEL.txt"
+        try "edited".write(to: superRoot.appendingPathComponent(deepest), atomically: true, encoding: .utf8)
+
+        let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client)
+        let submodulePaths = result.files.filter(\.isSubmodule).map(\.path).sorted { $0.count < $1.count }
+        let deepestPointer = (0..<(SpacesDeviceWorkspaceDiffEngine.maxSubmoduleDepth + 1)).map { _ in "s" }.joined(separator: "/")
+        #expect(submodulePaths.last == deepestPointer)
+        #expect(!result.files.contains { $0.path.hasPrefix(deepestPointer + "/") })
+
+        // `checkedOut` says whether the row has the submodule's own files nested beneath it, so the
+        // depth-limited row reports false even though its checkout is perfectly readable, exactly as a
+        // never-initialized one does. The last row the descent did reach reports true.
+        let depthLimited = try #require(result.files.first { $0.path == deepestPointer }?.submodule)
+        #expect(depthLimited.checkedOut == false)
+        let lastDescended = (0..<SpacesDeviceWorkspaceDiffEngine.maxSubmoduleDepth).map { _ in "s" }.joined(separator: "/")
+        #expect(try #require(result.files.first { $0.path == lastDescended }?.submodule).checkedOut == true)
+    }
+
+    // The pointer-level diff the signature already folded in reports a submodule only as a commit id plus
+    // a `-dirty` marker, and both stay put while the submodule's own files keep changing. Since those files
+    // are rendered, the signature has to move with them.
+    @Test func scopeSignatureChangesForEveryChangeInsideAnInitializedSubmodule() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+        let superRoot = fixture.superRoot
+
+        try "a v1 edited".write(to: superRoot.appendingPathComponent("A/FILE.txt"), atomically: true, encoding: .utf8)
+        let dirtied = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: superRoot.path, gitClient: client)
+        #expect(try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: superRoot.path, gitClient: client) == dirtied)
+
+        // A second edit to an already-modified file leaves the superproject's own view of the submodule
+        // byte-for-byte identical: same porcelain letter, same directory stat, same `-dirty` marker.
+        try "a v1 edited twice".write(to: superRoot.appendingPathComponent("A/FILE.txt"), atomically: true, encoding: .utf8)
+        let editedAgain = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: superRoot.path, gitClient: client)
+        #expect(editedAgain != dirtied)
+
+        try "brand new".write(to: superRoot.appendingPathComponent("A/NEW.txt"), atomically: true, encoding: .utf8)
+        let untracked = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: superRoot.path, gitClient: client)
+        #expect(untracked != editedAgain)
+
+        try "deep v1 edited".write(to: superRoot.appendingPathComponent("A/B/DEEP.txt"), atomically: true, encoding: .utf8)
+        let nested = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: superRoot.path, gitClient: client)
+        #expect(nested != untracked)
+
+        try "deep v1 edited twice".write(to: superRoot.appendingPathComponent("A/B/DEEP.txt"), atomically: true, encoding: .utf8)
+        #expect(try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: superRoot.path, gitClient: client) != nested)
+    }
+
+    // A pointer staged inside a submodule is read straight out of that submodule's index by the manifest,
+    // so the signature has to move with it. Nothing else about the workspace does: the superproject sees
+    // the same dirty `A`, `A`'s own porcelain bytes read the same letters for the same path, and a
+    // submodule that was never checked out has no state of its own for the recursion to look at.
+    @Test func scopeSignatureChangesWhenAPointerStagedInsideASubmoduleIsRestagedAtAnotherCommit() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+        let submoduleA = fixture.superRoot.appendingPathComponent("A")
+
+        let source = try makeFixtureRepository(
+            at: fixture.container.appendingPathComponent("a-c-source", isDirectory: true), file: "C.txt", contents: "c v1")
+        let firstCommit = try runFixtureGit(["rev-parse", "HEAD"], cwd: source.path).trimmingCharacters(in: .whitespacesAndNewlines)
+        try "c v2".write(to: source.appendingPathComponent("C.txt"), atomically: true, encoding: .utf8)
+        try commitFixtureAll(source, message: "c v2")
+        let secondCommit = try runFixtureGit(["rev-parse", "HEAD"], cwd: source.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // A submodule of `A` in the state a fresh clone leaves behind: recorded in `A`'s index, with an
+        // empty directory where its checkout would be.
+        try runFixtureGit(["-c", "protocol.file.allow=always", "submodule", "add", "-q", source.path, "C"], cwd: submoduleA.path)
+        try FileManager.default.removeItem(at: submoduleA.appendingPathComponent("C"))
+        try FileManager.default.createDirectory(at: submoduleA.appendingPathComponent("C"), withIntermediateDirectories: true)
+        try runFixtureGit(["update-index", "--cacheinfo", "160000,\(firstCommit),C"], cwd: submoduleA.path)
+
+        let before = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: fixture.superRoot.path, gitClient: client)
+        try runFixtureGit(["update-index", "--cacheinfo", "160000,\(secondCommit),C"], cwd: submoduleA.path)
+        let after = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: fixture.superRoot.path, gitClient: client)
+
+        #expect(before != after)
+    }
+
     // MARK: - Fixture helpers
 
     private func makeRepo() throws -> URL {
@@ -1576,6 +2211,64 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
         try runGit(["add", "README.md"], cwd: root.path)
         try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: root.path)
         return root
+    }
+
+    /// A repository whose workspace is the subpackage `packages/app`, with the submodule inside it at
+    /// `packages/app/sub` and `.gitmodules` at the repository root. The pointer is bumped and staged and the
+    /// checkout is left dirty, so the row exists whatever the ignore policy says about its worktree.
+    private func makeSubpackageWorkspaceWithBumpedSubmodule() throws -> (
+        container: URL, repositoryRoot: URL, workspaceDir: URL, oldCommit: String, newCommit: String
+    ) {
+        let container = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "spaces-subpackage-submodule-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
+        let source = try makeFixtureRepository(
+            at: container.appendingPathComponent("sub-source", isDirectory: true), file: "FILE.txt", contents: "sub v1")
+        let oldCommit = try runFixtureGit(["rev-parse", "HEAD"], cwd: source.path).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let repositoryRoot = container.appendingPathComponent("super", isDirectory: true)
+        let workspaceDir = repositoryRoot.appendingPathComponent("packages/app", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
+        try runFixtureGit(["init", "--initial-branch", "main"], cwd: repositoryRoot.path)
+        try "root".write(to: workspaceDir.appendingPathComponent("ROOT.md"), atomically: true, encoding: .utf8)
+        try commitFixtureAll(repositoryRoot, message: "initial")
+        try runFixtureGit(
+            ["-c", "protocol.file.allow=always", "submodule", "add", "-q", source.path, "packages/app/sub"], cwd: repositoryRoot.path)
+        try commitFixtureAll(repositoryRoot, message: "add sub")
+
+        try "sub v2".write(to: source.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+        try commitFixtureAll(source, message: "sub v2")
+        let newCommit = try runFixtureGit(["rev-parse", "HEAD"], cwd: source.path).trimmingCharacters(in: .whitespacesAndNewlines)
+        let checkout = workspaceDir.appendingPathComponent("sub", isDirectory: true)
+        // The checkout was cloned before that commit existed; fetch it in before switching.
+        try runFixtureGit(["fetch", "-q", "origin"], cwd: checkout.path)
+        try runFixtureGit(["checkout", "-q", newCommit], cwd: checkout.path)
+        try runFixtureGit(["add", "packages/app/sub"], cwd: repositoryRoot.path)
+        try "sub v2 - dirty edit".write(to: checkout.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+
+        return (container, repositoryRoot, workspaceDir, oldCommit, newCommit)
+    }
+
+    /// A superproject that committed a tracked directory holding `A/foo`, then replaced that directory with
+    /// a submodule at the same path whose checkout holds a file of the same name. Staged rather than
+    /// committed, so an uncommitted diff compares the index's new gitlink against HEAD's tracked tree and
+    /// sees both sides of the replacement at once. `protocol.file.allow=always` is required for a local
+    /// filesystem submodule URL since git 2.38.1 (CVE-2022-39253 hardening).
+    private func makeSuperprojectWhereADirectoryBecameASubmodule() throws -> (container: URL, superRoot: URL) {
+        let container = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "spaces-directory-to-submodule-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
+        let source = try makeFixtureRepository(
+            at: container.appendingPathComponent("sub-source", isDirectory: true), file: "foo", contents: "sub foo")
+
+        let superRoot = container.appendingPathComponent("super", isDirectory: true)
+        try FileManager.default.createDirectory(at: superRoot.appendingPathComponent("A", isDirectory: true), withIntermediateDirectories: true)
+        try runFixtureGit(["init", "--initial-branch", "main"], cwd: superRoot.path)
+        try "tracked foo".write(to: superRoot.appendingPathComponent("A/foo"), atomically: true, encoding: .utf8)
+        try commitFixtureAll(superRoot, message: "tracked directory")
+        try runFixtureGit(["rm", "-r", "-q", "A"], cwd: superRoot.path)
+        try runFixtureGit(["-c", "protocol.file.allow=always", "submodule", "add", "-q", source.path, "A"], cwd: superRoot.path)
+        return (container, superRoot)
     }
 
     /// A superproject with a submodule already added via `git submodule add` and committed, pointing `sub`
@@ -1835,10 +2528,168 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
     }
 }
 
+@Suite struct SpacesDeviceWorkspaceFileListEngineTests {
+    // The Editor opens, edits, and saves a submodule's files through the same handlers as the workspace's
+    // own, so the listing behind the Files tree and quick-open has to name them. A submodule the user never
+    // initialized has no repository to list and contributes nothing, not even its directory.
+    @Test func listFilesIncludesInitializedSubmoduleFilesAndNamesEachCheckoutWithItsCommit() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+
+        let result = try SpacesDeviceWorkspaceFileListEngine.listFiles(workspaceDir: fixture.superRoot.path, gitClient: client)
+
+        #expect(result.paths.contains("ROOT.md"))
+        #expect(result.paths.contains("A/FILE.txt"))
+        #expect(result.paths.contains("A/B/DEEP.txt"))
+        #expect(!result.paths.contains { $0.hasPrefix("C/") })
+        // The gitlink itself is a directory on disk, so it is not an openable entry; `submodules` is what
+        // tells the client that directory is a submodule rather than a plain folder, and which commit its
+        // checkout sits at, which the tree labels the folder with.
+        #expect(!result.paths.contains("A"))
+        #expect(
+            result.submodules == [
+                .init(path: "A", commit: fixture.submoduleAHead), .init(path: "A/B", commit: fixture.submoduleBHead),
+            ])
+        #expect(result.truncated == false)
+    }
+
+    // A tracked gitlink whose checkout directory has been replaced by a symlink is not a checkout this
+    // daemon may enter: git itself refuses to treat it as the submodule's worktree (`git status` fails
+    // outright on such a path), while `ls-files` still reports the gitlink, so nothing but the containment
+    // rule stops the listing from walking the link and serving an unrelated repository's files as part of
+    // this workspace.
+    @Test func listFilesDoesNotFollowASubmoduleCheckoutReplacedByASymlink() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+
+        let outside = try makeFixtureRepository(
+            at: fixture.container.appendingPathComponent("outside", isDirectory: true), file: "OUTSIDE.txt", contents: "not this workspace")
+        let checkout = fixture.superRoot.appendingPathComponent("A")
+        try FileManager.default.removeItem(at: checkout)
+        try FileManager.default.createSymbolicLink(atPath: checkout.path, withDestinationPath: outside.path)
+
+        let result = try SpacesDeviceWorkspaceFileListEngine.listFiles(workspaceDir: fixture.superRoot.path, gitClient: client)
+
+        #expect(result.paths.contains("ROOT.md"))
+        #expect(!result.paths.contains { $0.hasPrefix("A/") })
+        #expect(!result.submodules.contains { $0.path == "A" })
+    }
+
+    // An unresolved merge leaves the gitlink in the index once per stage. Entering the checkout once per
+    // record would list its files two or three times over, name the submodule as many times, and spend the
+    // duplicates against the listing cap.
+    @Test func listFilesEntersASubmoduleLeftUnmergedByAConflictingMergeOnlyOnce() throws {
+        let container = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "spaces-unmerged-submodule-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: container) }
+        let client = RemoteWorkspaceGitClient()
+
+        let source = try makeFixtureRepository(
+            at: container.appendingPathComponent("sub-source", isDirectory: true), file: "FILE.txt", contents: "sub v1")
+        let superRoot = try makeFixtureRepository(at: container.appendingPathComponent("super", isDirectory: true), file: "ROOT.md", contents: "root")
+        try runFixtureGit(["-c", "protocol.file.allow=always", "submodule", "add", "-q", source.path, "sub"], cwd: superRoot.path)
+        try commitFixtureAll(superRoot, message: "add sub")
+
+        // Two diverging children of the commit the superproject records, so neither pointer is an ancestor
+        // of the other and git cannot resolve the gitlink on its own. One fetch brings both into the
+        // checkout, since they sit on two different branches in the source repository.
+        try runFixtureGit(["checkout", "-q", "-b", "side"], cwd: source.path)
+        try "sub v2".write(to: source.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+        try commitFixtureAll(source, message: "sub v2")
+        let sideCommit = try runFixtureGit(["rev-parse", "HEAD"], cwd: source.path).trimmingCharacters(in: .whitespacesAndNewlines)
+        try runFixtureGit(["checkout", "-q", "main"], cwd: source.path)
+        try "sub v3".write(to: source.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
+        try commitFixtureAll(source, message: "sub v3")
+        let mainCommit = try runFixtureGit(["rev-parse", "HEAD"], cwd: source.path).trimmingCharacters(in: .whitespacesAndNewlines)
+        let subCheckout = superRoot.appendingPathComponent("sub")
+        try runFixtureGit(["fetch", "-q", "origin"], cwd: subCheckout.path)
+
+        try runFixtureGit(["checkout", "-q", "-b", "left"], cwd: superRoot.path)
+        try runFixtureGit(["checkout", "-q", sideCommit], cwd: subCheckout.path)
+        try commitFixtureAll(superRoot, message: "bump sub on left")
+        try runFixtureGit(["checkout", "-q", "main"], cwd: superRoot.path)
+        try runFixtureGit(["checkout", "-q", mainCommit], cwd: subCheckout.path)
+        try commitFixtureAll(superRoot, message: "bump sub on main")
+        #expect(throws: (any Error).self) {
+            try runFixtureGit(
+                ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "-c", "core.editor=true", "merge", "left"],
+                cwd: superRoot.path)
+        }
+        // The premise of the test: the index really does hold the gitlink more than once.
+        let stages = try runFixtureGit(["ls-files", "--stage", "--", "sub"], cwd: superRoot.path)
+        #expect(stages.split(separator: "\n", omittingEmptySubsequences: true).count > 1)
+
+        let result = try SpacesDeviceWorkspaceFileListEngine.listFiles(workspaceDir: superRoot.path, gitClient: client)
+        #expect(result.paths.filter { $0 == "sub/FILE.txt" }.count == 1)
+        #expect(result.submodules == [.init(path: "sub", commit: mainCommit)])
+    }
+
+    // The cap bounds the whole response, so it has to be applied to the merged, sorted listing rather than
+    // per repository: a submodule's files must be able to push the workspace's own over the limit.
+    @Test func listFilesCapsPathsAcrossTheSubmoduleRecursion() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+
+        let uncapped = try SpacesDeviceWorkspaceFileListEngine.listFiles(workspaceDir: fixture.superRoot.path, gitClient: client)
+        #expect(uncapped.paths.count > 2)
+
+        let capped = try SpacesDeviceWorkspaceFileListEngine.listFiles(workspaceDir: fixture.superRoot.path, gitClient: client, maxPaths: 2)
+        #expect(capped.truncated == true)
+        #expect(capped.paths == Array(uncapped.paths.prefix(2)))
+        #expect(capped.submodules.map(\.path) == ["A", "A/B"])
+    }
+
+    // The whole traversal shares the request's one deadline, so a wedged submodule fails the request inside
+    // that window. Per-repository timeouts would instead let this listing wait out `A/B`'s own full budget,
+    // holding the workspace's serial git queue long after the client gave up.
+    @Test func listFilesFailsWithinTheRequestWindowWhenASubmodulesListingStalls() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let log = fixture.container.appendingPathComponent("git-invocations.log")
+        let client = RemoteWorkspaceGitClient(
+            gitExecutable: try makeGitInvocationRecorder(at: fixture.container, log: log, stall: (match: "/A/B ls-files", seconds: 20)).path)
+
+        // Most of the request's window is already spent when the listing starts, so the stalled command in
+        // `A/B` runs past what is left of it rather than getting 30 seconds of its own.
+        let started = Date()
+        #expect(throws: SpacesRuntimeError.self) {
+            try SpacesDeviceWorkspaceFileListEngine.listFiles(
+                workspaceDir: fixture.superRoot.path, gitClient: client, deadlineStart: Date().addingTimeInterval(-40))
+        }
+        #expect(Date().timeIntervalSince(started) < 15)
+    }
+}
+
 @Suite struct SpacesDeviceWorkspaceFileListSignatureTests {
     @Test func newlineContainingPathsDoNotCollideWithADifferentMembershipShape() {
         let first = SpacesDeviceWorkspaceFileListSignature.value(for: .init(paths: ["a\nb", "c"], truncated: false))
         let second = SpacesDeviceWorkspaceFileListSignature.value(for: .init(paths: ["a", "b\nc"], truncated: false))
+
+        #expect(first != second)
+    }
+
+    // The tree labels a submodule folder with the commit its checkout sits at, so a checkout moved to
+    // another commit has to reach a subscribed client even when it lists exactly the same files.
+    @Test func aSubmoduleCheckoutMovingToAnotherCommitChangesTheSignature() {
+        let paths = ["A/FILE.txt", "ROOT.md"]
+        let first = SpacesDeviceWorkspaceFileListSignature.value(
+            for: .init(paths: paths, truncated: false, submodules: [.init(path: "A", commit: String(repeating: "a", count: 40))]))
+        let second = SpacesDeviceWorkspaceFileListSignature.value(
+            for: .init(paths: paths, truncated: false, submodules: [.init(path: "A", commit: String(repeating: "b", count: 40))]))
+
+        #expect(first != second)
+    }
+
+    // A submodule that lists no openable files of its own still has to be told apart from a plain
+    // directory, so its presence moves the signature with the paths unchanged.
+    @Test func namingASubmoduleChangesTheSignatureWithTheSamePaths() {
+        let first = SpacesDeviceWorkspaceFileListSignature.value(for: .init(paths: ["ROOT.md"], truncated: false))
+        let second = SpacesDeviceWorkspaceFileListSignature.value(
+            for: .init(paths: ["ROOT.md"], truncated: false, submodules: [.init(path: "A", commit: String(repeating: "a", count: 40))]))
 
         #expect(first != second)
     }
@@ -1872,6 +2723,30 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
 
         try FileManager.default.removeItem(at: repo.appendingPathComponent("README.md"))
         #expect(try token(repo, client) != initial)
+    }
+
+    // The listing descends into submodules, so the detector has to as well: a file appearing inside one
+    // changes the exact listing while the superproject sees only a still-dirty gitlink.
+    @Test func gitDetectorDetectsMembershipChangesInsideASubmodule() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+        let superRoot = fixture.superRoot
+
+        // Dirty the submodule first, so the superproject's own porcelain view is already `M A` and stops
+        // moving; only the recursion can see what happens inside from here.
+        try "a v1 edited".write(to: superRoot.appendingPathComponent("A/FILE.txt"), atomically: true, encoding: .utf8)
+        let dirtied = try token(superRoot, client)
+
+        try "a v1 edited twice".write(to: superRoot.appendingPathComponent("A/FILE.txt"), atomically: true, encoding: .utf8)
+        #expect(try token(superRoot, client) == dirtied, "content churn inside a submodule keeps the same membership")
+
+        try "brand new".write(to: superRoot.appendingPathComponent("A/NEW.txt"), atomically: true, encoding: .utf8)
+        let added = try token(superRoot, client)
+        #expect(added != dirtied)
+
+        try "deep new".write(to: superRoot.appendingPathComponent("A/B/NESTED.txt"), atomically: true, encoding: .utf8)
+        #expect(try token(superRoot, client) != added)
     }
 
     @Test func gitDetectorDetectsCleanTrackedFileShrinkingBelowOpenabilityCap() throws {
@@ -2132,6 +3007,104 @@ private func removeGitRepositoryEnvironment(from environment: inout [String: Str
         try "materialized regular file".write(to: repo.appendingPathComponent("submodule"), atomically: true, encoding: .utf8)
 
         #expect(try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client) != initial)
+    }
+
+    // The subscription holds the caches, so a steady tick spends exactly one `git status` per repository
+    // and nothing else: every other fact it needs was resolved once and is now read with a stat. Counting
+    // the git processes each tick actually spawns is the only honest check, since the caching lives one
+    // level below the token this returns and a per-tick cache would produce the same token while rerunning
+    // every scan underneath it. The exact command list is asserted rather than just the count, so a new
+    // per-tick process cannot slip in behind a cached one that went away.
+    @Test func gitDetectorSpendsOneStatusPerRepositoryOnASteadyTick() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let log = fixture.container.appendingPathComponent("git-invocations.log")
+        let client = RemoteWorkspaceGitClient(gitExecutable: try makeGitInvocationRecorder(at: fixture.container, log: log).path)
+
+        let caches = SpacesDeviceWorkspaceFileListEngine.MembershipCaches()
+        guard
+            let context = try SpacesDeviceWorkspaceFileListEngine.gitMembershipContext(
+                workspaceDir: fixture.superRoot.path, gitClient: client, caches: caches)
+        else { throw CocoaError(.fileNoSuchFile) }
+
+        let first = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+        try Data().write(to: log)
+        let second = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: client)
+
+        #expect(first == second)
+        let status = "status --porcelain -z --untracked-files=all --ignored=matching -- ."
+        // The workspace's own repository and both submodules, in the order the recursion reaches them.
+        #expect(
+            try steadyTickCommands(log: log, root: fixture.superRoot) == [
+                ". \(status)", "A \(status)", "A/B \(status)",
+            ])
+    }
+
+    // A tick's budget is one window shared by every repository it walks, so a submodule whose status wedges
+    // fails the tick the same way a wedged top-level status does, which is the failure the poller already
+    // handles, and the tick after it is unaffected. Per-repository timeouts would let one stalled submodule
+    // add its own 30 seconds to every tick instead.
+    @Test func gitDetectorTickFailsLikeAStalledTopLevelStatusWhenASubmodulesStatusStalls() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let submoduleLog = fixture.container.appendingPathComponent("submodule-stall.log")
+        let submoduleClient = RemoteWorkspaceGitClient(
+            gitExecutable: try makeGitInvocationRecorder(at: fixture.container, log: submoduleLog, stall: (match: "/A/B status", seconds: 5)).path)
+        let rootDirectory = fixture.container.appendingPathComponent("root-stall", isDirectory: true)
+        try FileManager.default.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
+        let rootClient = RemoteWorkspaceGitClient(
+            gitExecutable: try makeGitInvocationRecorder(
+                at: rootDirectory, log: rootDirectory.appendingPathComponent("root-stall.log"),
+                stall: (match: "/super status", seconds: 5)
+            ).path)
+
+        // Most of the tick's window is already spent when these ticks start, so a five second stall outlasts
+        // whatever is left of it wherever the stall happens to be.
+        let lateTickStart = Date().addingTimeInterval(-26)
+        let submoduleFailure = #expect(throws: SpacesRuntimeError.self) {
+            guard
+                let context = try SpacesDeviceWorkspaceFileListEngine.gitMembershipContext(
+                    workspaceDir: fixture.superRoot.path, gitClient: submoduleClient)
+            else { throw CocoaError(.fileNoSuchFile) }
+            return try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(
+                context: context, gitClient: submoduleClient, deadlineStart: lateTickStart)
+        }
+        let rootFailure = #expect(throws: SpacesRuntimeError.self) {
+            guard
+                let context = try SpacesDeviceWorkspaceFileListEngine.gitMembershipContext(
+                    workspaceDir: fixture.superRoot.path, gitClient: rootClient)
+            else { throw CocoaError(.fileNoSuchFile) }
+            return try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(
+                context: context, gitClient: rootClient, deadlineStart: lateTickStart)
+        }
+        #expect(timedOutMessage(submoduleFailure) != nil)
+        #expect(timedOutMessage(rootFailure) != nil)
+
+        // The next tick opens its own window, so the same slow submodule is just a slow command inside it.
+        guard
+            let context = try SpacesDeviceWorkspaceFileListEngine.gitMembershipContext(
+                workspaceDir: fixture.superRoot.path, gitClient: submoduleClient)
+        else { throw CocoaError(.fileNoSuchFile) }
+        let token = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(context: context, gitClient: submoduleClient)
+        #expect(!token.isEmpty)
+    }
+
+    /// The timeout message a git command's own deadline produces, or nil for any other failure, so two
+    /// stalls can be compared as the same failure rather than by where they happened.
+    private func timedOutMessage(_ error: SpacesRuntimeError?) -> String? {
+        guard case .some(.gitCommandFailed(let message)) = error, message.contains("timed out") else { return nil }
+        return message
+    }
+
+    /// The git command lines one tick spawned, each named by the repository it ran in relative to the
+    /// workspace root, so an assertion reads as the tick's actual shape rather than as paths.
+    private func steadyTickCommands(log: URL, root: URL) throws -> [String] {
+        try String(contentsOf: log, encoding: .utf8).split(separator: "\n").map { line in
+            let arguments = line.split(separator: " ").map(String.init)
+            guard arguments.count > 2, arguments[0] == "-C" else { return String(line) }
+            let repository = arguments[1] == root.path ? "." : String(arguments[1].dropFirst(root.path.count + 1))
+            return ([repository] + arguments.dropFirst(2)).joined(separator: " ")
+        }
     }
 
     @Test func gitDetectorCachesIndexMembershipUntilTheIndexChanges() throws {

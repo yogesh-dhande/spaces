@@ -8,7 +8,7 @@ import { EditorSidebar, EditorSidebarCallbacks } from "../src/app/editorSidebar"
 Element.prototype.scrollIntoView = function scrollIntoView(): void {};
 
 function makeResult(paths: string[], truncated = false): WorkspaceFileListResult {
-  return { paths, truncated };
+  return { paths, truncated, submodules: [] };
 }
 
 /** Builds a real `WorkspaceFileListCache` over a `vi.fn()` bridge stub — exercises the real

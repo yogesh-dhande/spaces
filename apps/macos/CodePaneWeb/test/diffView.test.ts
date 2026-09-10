@@ -455,6 +455,7 @@ describe("DiffView submodule (gitlink) entries", () => {
         newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca",
         dirty: false,
         unmerged: false,
+        checkedOut: true,
       },
       ...overrides,
     });
@@ -476,6 +477,7 @@ describe("DiffView submodule (gitlink) entries", () => {
       newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca",
       dirty: true,
       unmerged: false,
+      checkedOut: true,
     } })], false);
 
     expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule fa1d453 → 128a927 (dirty)");
@@ -485,7 +487,7 @@ describe("DiffView submodule (gitlink) entries", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([submoduleFile({
       status: "added",
-      submodule: { newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca", dirty: false, unmerged: false },
+      submodule: { newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca", dirty: false, unmerged: false, checkedOut: true },
     })], false);
 
     expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule added 128a927");
@@ -495,7 +497,7 @@ describe("DiffView submodule (gitlink) entries", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
     diffView.setFiles([submoduleFile({
       status: "deleted",
-      submodule: { oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f", dirty: false, unmerged: false },
+      submodule: { oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f", dirty: false, unmerged: false, checkedOut: true },
     })], false);
 
     expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule removed fa1d453");
@@ -508,6 +510,7 @@ describe("DiffView submodule (gitlink) entries", () => {
       newCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
       dirty: true,
       unmerged: false,
+      checkedOut: true,
     } })], false);
 
     expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule fa1d453 (dirty)");
@@ -523,6 +526,7 @@ describe("DiffView submodule (gitlink) entries", () => {
         newCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
         dirty: false,
         unmerged: false,
+        checkedOut: true,
       },
     })], false);
 
@@ -536,9 +540,65 @@ describe("DiffView submodule (gitlink) entries", () => {
       newCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
       dirty: false,
       unmerged: true,
+      checkedOut: true,
     } })], false);
 
     expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule fa1d453 (unmerged)");
+  });
+
+  it("appends ', not checked out' when the diff nested nothing under the pointer", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([submoduleFile({ submodule: {
+      oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+      newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca",
+      dirty: false,
+      unmerged: false,
+      checkedOut: false,
+    } })], false);
+
+    expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule fa1d453 → 128a927, not checked out");
+  });
+
+  it("keeps '(dirty)' on a pointer the diff nested nothing under, since checkedOut is not a statement about the checkout", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
+    // A readable, dirty checkout sitting at the daemon's depth limit, or one missing the commit
+    // being compared against, arrives exactly like this: its files are not nested, but the daemon
+    // did observe the checkout and did report it dirty.
+    diffView.setFiles([submoduleFile({ submodule: {
+      oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+      newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca",
+      dirty: true,
+      unmerged: false,
+      checkedOut: false,
+    } })], false);
+
+    expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule fa1d453 → 128a927 (dirty), not checked out");
+  });
+
+  it("keeps '(unmerged)' before ', not checked out' when a conflicting merge left the pointer unresolved", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([submoduleFile({ submodule: {
+      oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+      newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca",
+      dirty: false,
+      unmerged: true,
+      checkedOut: false,
+    } })], false);
+
+    expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule fa1d453 → 128a927 (unmerged), not checked out");
+  });
+
+  it("renders every flag the daemon reports, dirty before unmerged, ahead of ', not checked out'", () => {
+    const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());
+    diffView.setFiles([submoduleFile({ submodule: {
+      oldCommit: "fa1d453d0f015c4446ac975bab077fe6bb0b184f",
+      newCommit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca",
+      dirty: true,
+      unmerged: true,
+      checkedOut: false,
+    } })], false);
+
+    expect(control.items.get("sbc_hal")?.file?.contents).toBe("Submodule fa1d453 → 128a927 (dirty, unmerged), not checked out");
   });
 
   it("renders as a placeholder file item with no diff annotations/gutter, even though the manifest carries no isBinary", () => {

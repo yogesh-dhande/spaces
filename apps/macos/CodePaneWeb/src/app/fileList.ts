@@ -1,5 +1,6 @@
 import { DiffFileEntry, FileChangeStatus } from "../bridge/types";
 import { buildFileTree, FileTreeDirNode, FileTreeFileNode, FileTreeNode } from "./fileTree";
+import { submoduleLabel } from "./submoduleLabel";
 
 /**
  * Diff-mode file list sidebar. Not part of the picked Variant A mockup's own
@@ -11,7 +12,9 @@ import { buildFileTree, FileTreeDirNode, FileTreeFileNode, FileTreeNode } from "
  * Renders `files` as a directory tree (docs mockup "G — Tree with compacted
  * chains" — see `buildFileTree`), rather than one flat row per file: a
  * directory row shows its (possibly chain-compacted) path once, and every
- * file under it shows only its own basename. The caller supplies the current
+ * file under it shows only its own basename. A git submodule is one of those
+ * directory rows, carrying a chip that names the commit its pointer moved to,
+ * with the submodule's own changed files nested under it. The caller supplies the current
  * workspace's expanded paths and receives expansion changes, so rebuilding
  * the DOM preserves that workspace's tree state without retaining UI state in
  * this renderer.
@@ -30,8 +33,15 @@ const STATUS_LABEL: Record<FileChangeStatus, string> = {
  * DOM; a valid but collapsed path can be updated in the backing manifest without rebuilding it. */
 interface FileListRenderState {
   rows: Map<string, HTMLElement>;
+  /** Materialized submodule pointer rows, keyed by pointer path. Separate from `rows` because a
+   *  pointer is a DIRECTORY row: its update replaces a commit chip, not a status glyph and a stat
+   *  column, so the two kinds of row can never be mixed up by a lookup. */
+  submoduleRows: Map<string, HTMLElement>;
   paths: Set<string>;
   latestFiles: Map<string, DiffFileEntry>;
+  /** Held so a chip rebuilt by `updateFileListRow` re-binds the same selection callback the
+   *  original render gave it. */
+  callbacks: FileListCallbacks;
 }
 
 const stateByContainer = new WeakMap<HTMLElement, FileListRenderState>();
@@ -61,8 +71,10 @@ export function renderFileList(
   const rowsByPath = new Map<string, HTMLElement>();
   const renderState: FileListRenderState = {
     rows: rowsByPath,
+    submoduleRows: new Map<string, HTMLElement>(),
     paths: new Set(files.map((file) => file.path)),
     latestFiles: new Map(files.map((file) => [file.path, file])),
+    callbacks,
   };
   stateByContainer.set(container, renderState);
 
@@ -98,6 +110,17 @@ export function updateFileListRow(container: HTMLElement, file: DiffFileEntry): 
   const state = stateByContainer.get(container);
   if (!state?.paths.has(file.path)) return "stale";
   state.latestFiles.set(file.path, file);
+  const submoduleRow = state.submoduleRows.get(file.path);
+  if (submoduleRow) {
+    // A pointer's directory row shows nothing that patch progress can change except its chip, which
+    // reads "submodule" from the manifest flag alone and becomes the pointer's commit once the
+    // metadata-only chunk lands. The chip is rebuilt whole rather than retitled in place so its
+    // text, tooltip, and not-checked-out styling can never disagree with each other, and replacing
+    // it (instead of appending) is what keeps one chip on a row updated once per patch-state step.
+    submoduleRow.querySelector(":scope > .submodule-badge")?.remove();
+    submoduleRow.appendChild(renderSubmoduleChip(file, state.callbacks));
+    return "updated";
+  }
   const row = state.rows.get(file.path);
   if (!row) return "hidden";
   const status = row.querySelector<HTMLElement>(":scope > .status");
@@ -105,17 +128,10 @@ export function updateFileListRow(container: HTMLElement, file: DiffFileEntry): 
     status.className = `status ${file.status}`;
     status.textContent = STATUS_LABEL[file.status];
   }
-  // Every span appendFileProgress can produce is cleared first, the badge included: a gitlink row
-  // is updated once per patch-state step (queued, streaming, ready) and would otherwise stack one
-  // badge per step.
+  // Every span appendFileProgress can produce is cleared first: a row is updated once per
+  // patch-state step (queued, streaming, ready) and would otherwise stack one per step.
   for (const child of [...row.children]) {
-    if (
-      child.classList.contains("transfer") ||
-      child.classList.contains("st") ||
-      child.classList.contains("submodule-badge")
-    ) {
-      child.remove();
-    }
+    if (child.classList.contains("transfer") || child.classList.contains("st")) child.remove();
   }
   appendFileProgress(row, file);
   return "updated";
@@ -138,6 +154,10 @@ function collectAncestorDirs(nodes: readonly FileTreeNode[], path: string): stri
       if (node.file.path === path) return [];
       continue;
     }
+    // A submodule pointer's path names a DIRECTORY row, so a selection restored onto one resolves
+    // to that row's ancestor chain instead of to nothing. The submodule's own folder is not part of
+    // that chain: the pointer is the folder row itself, visible whether it is open or closed.
+    if (node.path === path) return [];
     if (!path.startsWith(`${node.path}/`)) continue;
     const rest = collectAncestorDirs(node.children, path);
     if (rest !== undefined) return [node.path, ...rest];
@@ -158,6 +178,19 @@ function renderNode(
     : renderFileNode(node, depth, selectedPath, callbacks, renderState);
 }
 
+/**
+ * A directory row. A git submodule is one of these: its pointer entry becomes the row for its own
+ * path, carrying a commit chip at the right edge, with the submodule's changed files (and any
+ * submodule checked out inside it) as this row's children (see `buildFileTree`). Clicking the row
+ * discloses those files; clicking the chip selects the pointer entry itself, which is a separate
+ * item in the diff.
+ *
+ * A pointer with nothing nested under it (never checked out, or checked out with no changes of its
+ * own) has nothing to disclose, so it renders without a triangle and without the toggle: its chip
+ * is then the row's only control, rather than a tab stop that does nothing when activated. Whether
+ * a pointer has children is fixed by the manifest, so this never changes under a row that is
+ * already on screen.
+ */
 function renderDirNode(
   node: FileTreeDirNode,
   depth: number,
@@ -170,18 +203,69 @@ function renderDirNode(
   group.className = "dir-group";
 
   const dirrow = document.createElement("div");
-  dirrow.className = "dirrow";
-  dirrow.id = `code-pane-diff-directory-${encodeURIComponent(node.path)}`;
+  // Only a submodule row can be selected: it stands in for the pointer entry a file row used to
+  // carry, so it takes the same selected highlight when the chip's selection lands on it.
+  dirrow.className = node.submodule !== undefined && node.path === selectedPath ? "dirrow on" : "dirrow";
+  // A pointer row is identified as the change entry it is, not as a plain directory. That is also
+  // what keeps the two rows apart when a path carries both (a submodule replaced by ordinary files,
+  // see `buildFileTree`): sharing one element id would leave the pointer and the plain folder
+  // indistinguishable to anything addressing a row by id.
+  dirrow.id =
+    node.submodule !== undefined
+      ? `code-pane-change-${encodeURIComponent(node.path)}`
+      : `code-pane-diff-directory-${encodeURIComponent(node.path)}`;
   dirrow.style.setProperty("--depth", String(depth));
-  // The rows are divs for layout reasons, so button semantics + a tab stop + Enter/Space are added
-  // by hand — without them the disclosure is pointer-only for keyboard and VoiceOver users.
-  dirrow.setAttribute("role", "button");
-  dirrow.tabIndex = 0;
 
-  const tri = document.createElement("span");
-  tri.className = "tri";
-  tri.textContent = "▾";
-  dirrow.appendChild(tri);
+  const childrenEl = document.createElement("div");
+  childrenEl.className = "dir-children";
+
+  if (node.children.length > 0) {
+    // The rows are divs for layout reasons, so button semantics + a tab stop + Enter/Space are added
+    // by hand: without them the disclosure is pointer-only for keyboard and VoiceOver users.
+    dirrow.setAttribute("role", "button");
+    dirrow.tabIndex = 0;
+
+    const tri = document.createElement("span");
+    tri.className = "tri";
+    tri.textContent = "▾";
+    dirrow.appendChild(tri);
+
+    let expanded = expandedPaths.has(node.path);
+    let materialized = false;
+
+    const materialize = (): void => {
+      if (materialized) return;
+      materialized = true;
+      for (const child of node.children) {
+        childrenEl.appendChild(renderNode(child, depth + 1, selectedPath, callbacks, expandedPaths, renderState));
+      }
+    };
+
+    const applyExpandedState = (): void => {
+      childrenEl.style.display = expanded ? "" : "none";
+      tri.textContent = expanded ? "▾" : "▸";
+      dirrow.setAttribute("aria-expanded", String(expanded));
+    };
+
+    const toggle = (): void => {
+      materialize();
+      expanded = !expanded;
+      if (expanded) expandedPaths.add(node.path);
+      else expandedPaths.delete(node.path);
+      applyExpandedState();
+      callbacks.onExpandedPathsChange?.([...expandedPaths]);
+    };
+
+    if (expanded) materialize();
+    applyExpandedState();
+    dirrow.addEventListener("click", toggle);
+    dirrow.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault(); // Space would otherwise scroll the list
+      if (event.repeat) return; // a held key would oscillate the disclosure
+      toggle();
+    });
+  }
 
   const label = document.createElement("span");
   label.className = "dirlabel";
@@ -189,47 +273,53 @@ function renderDirNode(
   label.title = node.label;
   dirrow.appendChild(label);
 
-  const childrenEl = document.createElement("div");
-  childrenEl.className = "dir-children";
-  let expanded = expandedPaths.has(node.path);
-  let materialized = false;
-
-  const materialize = (): void => {
-    if (materialized) return;
-    materialized = true;
-    for (const child of node.children) {
-      childrenEl.appendChild(renderNode(child, depth + 1, selectedPath, callbacks, expandedPaths, renderState));
-    }
-  };
-
-  const applyExpandedState = (): void => {
-    childrenEl.style.display = expanded ? "" : "none";
-    tri.textContent = expanded ? "▾" : "▸";
-    dirrow.setAttribute("aria-expanded", String(expanded));
-  };
-
-  const toggle = (): void => {
-    materialize();
-    expanded = !expanded;
-    if (expanded) expandedPaths.add(node.path);
-    else expandedPaths.delete(node.path);
-    applyExpandedState();
-    callbacks.onExpandedPathsChange?.([...expandedPaths]);
-  };
-
-  if (expanded) materialize();
-  applyExpandedState();
-  dirrow.addEventListener("click", toggle);
-  dirrow.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" && event.key !== " ") return;
-    event.preventDefault(); // Space would otherwise scroll the list
-    if (event.repeat) return; // a held key would oscillate the disclosure
-    toggle();
-  });
+  if (node.submodule !== undefined) {
+    // The chip renders from the latest entry for this path, not the one the tree was built from,
+    // so a pointer whose metadata already landed while its parent folder was closed shows its
+    // commit the moment the folder opens (the same reason `renderFileNode` reads `latestFiles`).
+    const pointer = renderState.latestFiles.get(node.submodule.path) ?? node.submodule;
+    dirrow.dataset.path = pointer.path;
+    dirrow.appendChild(renderSubmoduleChip(pointer, callbacks));
+    renderState.submoduleRows.set(pointer.path, dirrow);
+  }
 
   group.appendChild(dirrow);
   group.appendChild(childrenEl);
   return group;
+}
+
+/** The chip on a submodule directory row: the pointer's commit, the whole pointer label as its
+ *  tooltip, and a click that selects the pointer entry rather than disclosing the folder. */
+function renderSubmoduleChip(file: DiffFileEntry, callbacks: FileListCallbacks): HTMLElement {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = file.submodule?.checkedOut === false ? "submodule-badge not-checked-out" : "submodule-badge";
+  chip.textContent = submoduleChipText(file);
+  chip.setAttribute("aria-label", `Submodule pointer for ${file.path}`);
+  if (file.submodule !== undefined) chip.title = submoduleLabel(file.submodule);
+  chip.addEventListener("click", (event) => {
+    // The row around this chip is the folder's disclosure toggle, so without this the one click
+    // would both select the pointer and collapse the files the selection is meant to sit above.
+    event.stopPropagation();
+    callbacks.onSelect(file.path);
+  });
+  chip.addEventListener("keydown", (event) => {
+    // Same reason as the click handler, one step earlier: the folder row's own Enter/Space handler
+    // toggles and calls preventDefault, which would both close the folder and suppress the click
+    // this button synthesizes from the key press, so a keyboard user could never select the
+    // pointer. Stopping the key here leaves the button's native activation to do its own work.
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.stopPropagation();
+  });
+  return chip;
+}
+
+/** The chip's text: the 7-character commit the pointer names (its new side, or its old side for a
+ *  submodule the comparison removed), or the fixed word "submodule" while only the manifest's
+ *  `isSubmodule` flag is known and the metadata-only chunk carrying the commits has not landed. */
+function submoduleChipText(file: DiffFileEntry): string {
+  const commit = file.submodule?.newCommit ?? file.submodule?.oldCommit;
+  return commit === undefined ? "submodule" : commit.slice(0, 7);
 }
 
 function renderFileNode(
@@ -274,18 +364,10 @@ function renderFileNode(
   return row;
 }
 
+/** Adornment for a FILE row only. A submodule pointer never reaches here: it is a directory row
+ *  carrying a commit chip instead of a transfer spinner or a +/- stat, since a gitlink has no patch
+ *  to transfer or count lines from (see `renderDirNode`). */
 function appendFileProgress(row: HTMLElement, file: DiffFileEntry): void {
-  if (file.isSubmodule === true || file.submodule !== undefined) {
-    // A gitlink has no patch to transfer or count +/- lines from, so it never shows a transfer
-    // spinner or a stat count, just a fixed badge marking the row as a submodule pointer. The
-    // manifest flag alone is enough: the badge must not wait for the metadata-only chunk that
-    // carries the pointer detail.
-    const badge = document.createElement("span");
-    badge.className = "submodule-badge";
-    badge.textContent = "submodule";
-    row.appendChild(badge);
-    return;
-  }
   if (file.patchState !== undefined && file.patchState !== "ready") {
     const transfer = document.createElement("span");
     transfer.className = `transfer ${file.patchState}`;

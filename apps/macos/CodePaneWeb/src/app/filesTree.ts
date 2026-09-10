@@ -1,3 +1,4 @@
+import { WorkspaceSubmodule } from "../bridge/types";
 import { buildPathTree, PathTreeDirNode, PathTreeFileNode, PathTreeNode } from "./pathTree";
 
 export interface FilesTreeCallbacks {
@@ -39,6 +40,7 @@ export interface FilesTreeHandle {
 export function renderFilesTree(
   container: HTMLElement,
   paths: readonly string[],
+  submodules: readonly WorkspaceSubmodule[],
   selectedPath: string | undefined,
   callbacks: FilesTreeCallbacks,
   initiallyExpandedPaths: readonly string[] = [],
@@ -47,7 +49,10 @@ export function renderFilesTree(
 
   const registry: Registry = { dirs: new Map(), files: new Map() };
 
-  if (paths.length === 0) {
+  // The tree, not `paths`, decides whether there is anything to show: a workspace whose only listed
+  // thing is a submodule checkout with no files of its own still has that checkout's folder.
+  const tree = buildPathTree(paths, submodules);
+  if (tree.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty";
     empty.textContent = "No files";
@@ -55,7 +60,6 @@ export function renderFilesTree(
     return { setSelected: () => {}, expandedPaths: () => [] };
   }
 
-  const tree = buildPathTree(paths);
   const expandedPaths = new Set(initiallyExpandedPaths);
   for (const path of selectedPath !== undefined ? (collectAncestorDirs(tree, selectedPath) ?? []) : []) expandedPaths.add(path);
 
@@ -131,10 +135,13 @@ function renderNode(
     : renderFileNode(node, depth, selectedPath, callbacks, registry);
 }
 
-// Identical to fileList.ts's renderDirNode: directory rows carry no per-file information, so the
-// two lists' directory chrome is exactly the same code, just duplicated rather than shared across
-// a module boundary for two small, independently-testable renderers (see pathTree.ts's doc
-// comment for the same tradeoff on the tree-building side).
+// The same directory chrome as fileList.ts's renderDirNode, including its rule that a childless
+// node offers no disclosure: directory rows carry no per-file information, so the two lists' rows
+// are the same code, just duplicated rather than shared across a module boundary for two small,
+// independently-testable renderers (see pathTree.ts's doc comment for the same tradeoff on the
+// tree-building side). Two things differ: the submodule chip is inert here and a selection button
+// in the Changes list, and these rows carry no element id or `data-path`, since nothing addresses a
+// row of the full workspace listing by either.
 function renderDirNode(
   node: PathTreeDirNode,
   depth: number,
@@ -149,12 +156,69 @@ function renderDirNode(
   const dirrow = document.createElement("div");
   dirrow.className = "dirrow";
   dirrow.style.setProperty("--depth", String(depth));
-  dirrow.setAttribute("role", "button");
-  dirrow.tabIndex = 0;
 
-  const tri = document.createElement("span");
-  tri.className = "tri";
-  dirrow.appendChild(tri);
+  const childrenEl = document.createElement("div");
+  childrenEl.className = "dir-children";
+
+  // A checked-out submodule holding no listable file is the one directory node here that can have
+  // no children at all (see `buildPathTree`'s seeding). There is nothing to disclose, so it gets no
+  // triangle, no button semantics, and no tab stop, rather than a control that opens nothing when
+  // activated; its commit chip below stays, since that is the whole reason the row exists. Same
+  // rule as fileList.ts's own directory rows.
+  if (node.children.length > 0) {
+    dirrow.setAttribute("role", "button");
+    dirrow.tabIndex = 0;
+
+    const tri = document.createElement("span");
+    tri.className = "tri";
+    dirrow.appendChild(tri);
+
+    // Collapsed by default; the one exception is an ancestor of the initial selectedPath, which
+    // starts expanded and materialized (see the module doc comment) so the selected row paints
+    // visible and highlighted without requiring a manual expand.
+    let expanded = expandedPaths.has(node.path);
+    let materialized = false;
+
+    const materialize = (): void => {
+      if (materialized) return;
+      materialized = true;
+      for (const child of node.children) {
+        childrenEl.appendChild(renderNode(child, depth + 1, expandedPaths, selectedPath, callbacks, registry));
+      }
+    };
+
+    const applyExpandedState = (): void => {
+      childrenEl.style.display = expanded ? "" : "none";
+      tri.textContent = expanded ? "▾" : "▸";
+      dirrow.setAttribute("aria-expanded", String(expanded));
+    };
+
+    const toggle = (): void => {
+      materialize();
+      expanded = !expanded;
+      if (expanded) expandedPaths.add(node.path);
+      else expandedPaths.delete(node.path);
+      applyExpandedState();
+      callbacks.onExpandedPathsChange?.([...expandedPaths]);
+    };
+
+    if (expanded) materialize();
+    applyExpandedState();
+
+    dirrow.addEventListener("click", toggle);
+    dirrow.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      if (event.repeat) return;
+      toggle();
+    });
+
+    registry.dirs.set(node.path, {
+      ensureExpanded: () => {
+        if (!expanded) toggle();
+      },
+    });
+  }
 
   const label = document.createElement("span");
   label.className = "dirlabel";
@@ -162,54 +226,17 @@ function renderDirNode(
   label.title = node.label;
   dirrow.appendChild(label);
 
-  const childrenEl = document.createElement("div");
-  childrenEl.className = "dir-children";
-
-  // Collapsed by default; the one exception is an ancestor of the initial selectedPath, which
-  // starts expanded and materialized (see the module doc comment) so the selected row paints
-  // visible and highlighted without requiring a manual expand.
-  let expanded = expandedPaths.has(node.path);
-  let materialized = false;
-
-  const materialize = (): void => {
-    if (materialized) return;
-    materialized = true;
-    for (const child of node.children) {
-      childrenEl.appendChild(renderNode(child, depth + 1, expandedPaths, selectedPath, callbacks, registry));
-    }
-  };
-
-  const applyExpandedState = (): void => {
-    childrenEl.style.display = expanded ? "" : "none";
-    tri.textContent = expanded ? "▾" : "▸";
-    dirrow.setAttribute("aria-expanded", String(expanded));
-  };
-
-  const toggle = (): void => {
-    materialize();
-    expanded = !expanded;
-    if (expanded) expandedPaths.add(node.path);
-    else expandedPaths.delete(node.path);
-    applyExpandedState();
-    callbacks.onExpandedPathsChange?.([...expandedPaths]);
-  };
-
-  if (expanded) materialize();
-  applyExpandedState();
-
-  dirrow.addEventListener("click", toggle);
-  dirrow.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" && event.key !== " ") return;
-    event.preventDefault();
-    if (event.repeat) return;
-    toggle();
-  });
-
-  registry.dirs.set(node.path, {
-    ensureExpanded: () => {
-      if (!expanded) toggle();
-    },
-  });
+  // A submodule checkout is a directory like any other here: it opens, it holds the submodule's
+  // files, so the only thing marking it is a commit chip naming what its `HEAD` sits at. Unlike
+  // the Changes list's chip this one is inert: there is no pointer row to select in a listing that
+  // has no diff behind it.
+  if (node.submoduleCommit !== undefined) {
+    const chip = document.createElement("span");
+    chip.className = "submodule-badge";
+    chip.textContent = node.submoduleCommit.slice(0, 7);
+    chip.title = `Submodule at ${node.submoduleCommit}`;
+    dirrow.appendChild(chip);
+  }
 
   group.appendChild(dirrow);
   group.appendChild(childrenEl);

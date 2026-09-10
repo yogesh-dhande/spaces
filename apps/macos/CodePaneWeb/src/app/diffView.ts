@@ -15,6 +15,7 @@ import {
   toAnnotationSide,
 } from "./reviewComments";
 import { DiffLayout } from "./state";
+import { submoduleLabel } from "./submoduleLabel";
 
 /** Identifier `DiffView` puts on Pierre's contenteditable while an inline edit session is live.
  *  Exported because the pane scopes its Escape shortcut to keystrokes that came from inside this
@@ -1556,30 +1557,4 @@ function statusChipText(status: AutosaveStatus): string {
     case "idle":
       return "";
   }
-}
-
-/** Text for a submodule (gitlink) entry's placeholder row. `oldCommit`/`newCommit` are full
- * 40-character shas; only the first 7 characters are shown, matching every other short-sha
- * display in this pane (e.g. `DiffFileEntry.oldSHA`/`newSHA`). One side is absent exactly when the
- * submodule was added (`oldCommit` absent) or removed (`newCommit` absent), both never absent at
- * once, since a submodule entry always has at least one side. When both sides are present and
- * identical, the pointer itself did not move (a renamed submodule, one whose own worktree is
- * dirty, or one left unresolved by a conflicting merge): a single sha is shown rather than a
- * no-op `X → X` arrow. `dirty` and `unmerged` are independent flags (a conflicted pointer's own
- * worktree can also carry uncommitted edits), so both suffixes can appear together. */
-function submoduleLabel(submodule: NonNullable<DiffFileEntry["submodule"]>): string {
-  const oldShort = submodule.oldCommit?.slice(0, 7);
-  const newShort = submodule.newCommit?.slice(0, 7);
-  const base =
-    submodule.oldCommit !== undefined && submodule.oldCommit === submodule.newCommit
-      ? `Submodule ${newShort}`
-      : oldShort !== undefined && newShort !== undefined
-        ? `Submodule ${oldShort} → ${newShort}`
-        : newShort !== undefined
-          ? `Submodule added ${newShort}`
-          : `Submodule removed ${oldShort}`;
-  const flags = [submodule.dirty ? "dirty" : undefined, submodule.unmerged ? "unmerged" : undefined].filter(
-    (flag): flag is string => flag !== undefined,
-  );
-  return flags.length > 0 ? `${base} (${flags.join(", ")})` : base;
 }
