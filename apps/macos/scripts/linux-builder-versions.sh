@@ -10,7 +10,7 @@ SPACES_LINUX_BUILDER_BASE_IMAGE="swift:6.2-noble"
 
 # Everything build_linux_spacesd_artifact.sh needs beyond the Swift toolchain: the artifact
 # build itself, the packaging steps, and the in-container smoke test.
-SPACES_LINUX_BUILDER_APT_PACKAGES="curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils"
+SPACES_LINUX_BUILDER_APT_PACKAGES="curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev zlib1g-dev openssl coreutils"
 
 # Zig builds libghostty-vt. It is baked into the image rather than downloaded per build, so a
 # fresh worktree does not re-fetch the toolchain and no build writes it to the bind mount.

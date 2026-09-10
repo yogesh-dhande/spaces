@@ -110,13 +110,15 @@ public struct GhosttyRenderUpdate: Codable, Sendable, Equatable {
     // bodies. Version 5 added the shared terminal selection (projected into the frame's viewport by the
     // daemon) and the viewport's scrollbar position (total rows and this viewport's offset within them)
     // to both bodies, plus a delta-only scroll-rects-overflowed flag marking that a delta's scroll rects
-    // are absent or incomplete. The version byte is the only guard for payloads that outlive a build (persisted
+    // are absent or incomplete. Version 6 compresses the body: the fields keep their layout, but everything
+    // after the six-byte header travels as a raw DEFLATE stream behind its uncompressed length.
+    // The version byte is the only guard for payloads that outlive a build (persisted
     // final frames, demo recordings), so any layout change must bump it — decoders reject other versions
     // rather than misread offsets. There is deliberately no decoder for older versions: pre-release,
     // a persisted final frame from an earlier build rendering as "no final frame" once is accepted
     // over carrying a compatibility path, and live sessions re-export at the current version on the
     // next frame.
-    public static let currentVersion = 5
+    public static let currentVersion = 6
 
     public let version: Int
     public let kind: GhosttyRenderUpdateKind
@@ -466,9 +468,22 @@ public enum GhosttyRenderUpdateFactory {
     }
 }
 
+/// The binary wire format for a render update: a plaintext header, then a compressed body.
+///
+/// The header is magic (4 bytes), version (1), kind (1), then the body's uncompressed length as a
+/// little-endian UInt32. It stays plaintext so `encodedKind(of:)` can classify a blob (full frame,
+/// delta, or resync) from its first six bytes without paying for a decompression, which is the whole
+/// point of that peek. Everything after it is one raw DEFLATE stream covering the rest of the fields.
+///
+/// Compression is unconditional. A screen's worth of cells is dominated by blanks and repeated colours,
+/// so a full frame shrinks by one to two orders of magnitude; the small deltas that would break even are
+/// worth a few bytes either way, and never worth a second encoding path or a flag byte the decoder would
+/// then have to trust.
 public enum GhosttyRenderUpdateBinaryCodec {
     private static let magic: [UInt8] = [0x47, 0x52, 0x54, 0x55]
     private static let nilRevision = UInt64.max
+    /// magic + version + kind + the body's uncompressed UInt32 length.
+    private static let headerByteCount = 10
 
     // The two high bits of a cell's wire flags word are reserved by the codec to mark that the cell is
     // followed by a text payload in its block's sparse section. Style flags and the per-row wrap
@@ -492,9 +507,6 @@ public enum GhosttyRenderUpdateBinaryCodec {
 
     public static func encode(_ update: GhosttyRenderUpdate) throws -> Data {
         var writer = BinaryWriter()
-        writer.appendBytes(magic)
-        writer.appendUInt8(UInt8(GhosttyRenderUpdate.currentVersion))
-        writer.appendUInt8(kindByte(update.kind))
         writer.appendUInt16(0)
         writer.appendOptionalRevision(update.sessionRevision)
         writer.appendOptionalRevision(update.baseRevision)
@@ -513,19 +525,26 @@ public enum GhosttyRenderUpdateBinaryCodec {
             try writer.appendDelta(delta)
         case .resyncRequired: break
         }
-        return writer.data
+
+        let body = writer.data
+        let compressed = try GhosttyRenderUpdateBodyCompression.deflate(body)
+        var encoded = Data(capacity: headerByteCount + compressed.count)
+        encoded.append(contentsOf: magic)
+        encoded.append(UInt8(GhosttyRenderUpdate.currentVersion))
+        encoded.append(kindByte(update.kind))
+        guard let bodyLength = UInt32(exactly: body.count) else { throw BinaryCodecError.valueOutOfRange }
+        withUnsafeBytes(of: bodyLength.littleEndian) { encoded.append(contentsOf: $0) }
+        encoded.append(compressed)
+        return encoded
     }
 
     public static func decode(_ data: Data) throws -> GhosttyRenderUpdate {
+        let (kind, body) = try inflateBody(of: data)
         // Decode the whole frame inside a single withUnsafeBytes so fixed-width integer reads use
         // loadUnaligned over a raw pointer, avoiding the per-integer generic copyBytes churn that
         // dominated main-thread CPU on grid-sized (columns×rows cells × 4 reads) snapshots.
-        try data.withUnsafeBytes { raw in
+        return try body.withUnsafeBytes { raw in
             var reader = BinaryReader(raw: raw)
-            guard try reader.readBytes(count: magic.count) == magic else { throw BinaryCodecError.invalidMagic }
-            let version = Int(try reader.readUInt8())
-            guard version == GhosttyRenderUpdate.currentVersion else { throw BinaryCodecError.unsupportedVersion }
-            let kind = try kind(for: reader.readUInt8())
             _ = try reader.readUInt16()
             let sessionRevision = try reader.readOptionalRevision()
             let baseRevision = try reader.readOptionalRevision()
@@ -549,6 +568,31 @@ public enum GhosttyRenderUpdateBinaryCodec {
                     sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, columns: columns, rows: rows,
                     fallbackReason: fallbackReason.isEmpty ? nil : fallbackReason)
             }
+        }
+    }
+
+    /// Splits an encoded blob into its kind and its inflated body, rejecting anything this build cannot
+    /// read before a byte of the body is examined. A stream that does not end cleanly, or that inflates
+    /// to a length other than the one the header recorded, is `.truncated`: the reader that follows
+    /// trusts the body to be exactly the bytes the encoder wrote.
+    private static func inflateBody(of data: Data) throws -> (kind: GhosttyRenderUpdateKind, body: Data) {
+        guard data.count >= headerByteCount else {
+            guard data.count >= magic.count, data.prefix(magic.count).elementsEqual(magic) else { throw BinaryCodecError.invalidMagic }
+            throw BinaryCodecError.truncated
+        }
+        let header = data.withUnsafeBytes {
+            (raw: UnsafeRawBufferPointer) -> (magicMatches: Bool, version: UInt8, kindByte: UInt8, bodyLength: UInt32) in
+            (
+                (0..<magic.count).allSatisfy { raw[$0] == magic[$0] }, raw[magic.count], raw[magic.count + 1],
+                UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: magic.count + 2, as: UInt32.self))
+            )
+        }
+        guard header.magicMatches else { throw BinaryCodecError.invalidMagic }
+        guard Int(header.version) == GhosttyRenderUpdate.currentVersion else { throw BinaryCodecError.unsupportedVersion }
+        let kind = try kind(for: header.kindByte)
+        let compressed = data[(data.startIndex + headerByteCount)...]
+        do { return (kind, try GhosttyRenderUpdateBodyCompression.inflate(compressed, expectedLength: Int(header.bodyLength))) } catch {
+            throw BinaryCodecError.truncated
         }
     }
 
@@ -679,8 +723,7 @@ public enum GhosttyRenderUpdateBinaryCodec {
         /// flag byte, the four selection coordinates (zeros when there is no selection), then the two
         /// scrollbar counters. Always 17 bytes, whether or not a selection is present, so the reader
         /// never has to branch on the body's total length to find what follows.
-        mutating func appendSelectionAndScrollbar(_ selection: GhosttyTerminalSelectionRange?, scrollbarTotal: UInt32, scrollbarOffset: UInt32)
-            throws
+        mutating func appendSelectionAndScrollbar(_ selection: GhosttyTerminalSelectionRange?, scrollbarTotal: UInt32, scrollbarOffset: UInt32) throws
         {
             var flags: UInt8 = 0
             if let selection {
@@ -765,12 +808,6 @@ public enum GhosttyRenderUpdateBinaryCodec {
     private struct BinaryReader {
         let raw: UnsafeRawBufferPointer
         var offset = 0
-
-        mutating func readBytes(count: Int) throws -> [UInt8] {
-            guard count >= 0, offset + count <= raw.count else { throw BinaryCodecError.truncated }
-            defer { offset += count }
-            return Array(raw[offset..<(offset + count)])
-        }
 
         mutating func readUInt8() throws -> UInt8 {
             guard offset < raw.count else { throw BinaryCodecError.truncated }
@@ -864,9 +901,8 @@ public enum GhosttyRenderUpdateBinaryCodec {
             let scrollbarOffset = try readUInt32()
             guard flags & selectionPresentFlag != 0 else { return (nil, scrollbarTotal, scrollbarOffset) }
             let selection = GhosttyTerminalSelectionRange(
-                startColumn: startColumn, startRow: startRow, endColumn: endColumn, endRow: endRow,
-                isRectangle: flags & selectionRectangleFlag != 0, extendsAbove: flags & selectionExtendsAboveFlag != 0,
-                extendsBelow: flags & selectionExtendsBelowFlag != 0)
+                startColumn: startColumn, startRow: startRow, endColumn: endColumn, endRow: endRow, isRectangle: flags & selectionRectangleFlag != 0,
+                extendsAbove: flags & selectionExtendsAboveFlag != 0, extendsBelow: flags & selectionExtendsBelowFlag != 0)
             return (selection, scrollbarTotal, scrollbarOffset)
         }
 

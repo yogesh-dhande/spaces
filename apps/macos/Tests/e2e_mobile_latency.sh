@@ -428,6 +428,7 @@ import sys
 import threading
 import time
 import uuid
+import zlib
 from pathlib import Path
 
 scenarios = sys.argv[1:]
@@ -764,7 +765,7 @@ def latest_stream_payload(stream: subprocess.Popen) -> tuple[dict, int] | None:
 
 # GhosttyRenderUpdate.currentVersion. Bumped in lockstep with the Swift codec; there is deliberately no
 # compatibility path for older versions, so a mismatch is rejected rather than misread.
-RENDER_UPDATE_VERSION = 5
+RENDER_UPDATE_VERSION = 6
 
 # The two high bits of a cell's wire flags word are codec-reserved payload markers, not style flags: the
 # cell is followed, in its block's sparse text section, by its grapheme cluster (bit 15) and/or its OSC 8
@@ -812,17 +813,33 @@ class RenderUpdateReader:
         return self.read(self.u16()).decode("utf-8")
 
 
+def split_render_update(data: bytes) -> tuple[int, bytes]:
+    """Splits a GRTU blob into its kind byte and its inflated body.
+
+    The header stays plaintext so a reader can classify a blob from its first bytes without paying for a
+    decompression: magic, version, kind, then the body's uncompressed length as a little-endian UInt32.
+    Everything after it is one raw DEFLATE stream (windowBits -15, no zlib header or trailer), which is
+    what the Swift codec writes on both Darwin and Linux.
+    """
+    if data[:4] != b"GRTU":
+        raise ValueError("invalid render update magic")
+    version = data[4]
+    if version != RENDER_UPDATE_VERSION:
+        raise ValueError(f"unsupported render update version {version} (expected {RENDER_UPDATE_VERSION})")
+    kind_byte = data[5]
+    body_length = int.from_bytes(data[6:10], "little")
+    body = zlib.decompress(data[10:], -15)
+    if len(body) != body_length:
+        raise ValueError(f"render update body is {len(body)} bytes, header declared {body_length}")
+    return kind_byte, body
+
+
 def decode_render_update(payload: dict) -> dict | None:
     encoded = payload.get("renderUpdate")
     if not encoded:
         return None
-    reader = RenderUpdateReader(base64.b64decode(encoded))
-    if reader.read(4) != b"GRTU":
-        raise ValueError("invalid render update magic")
-    version = reader.u8()
-    if version != RENDER_UPDATE_VERSION:
-        raise ValueError(f"unsupported render update version {version} (expected {RENDER_UPDATE_VERSION})")
-    kind_byte = reader.u8()
+    kind_byte, body = split_render_update(base64.b64decode(encoded))
+    reader = RenderUpdateReader(body)
     _ = reader.u16()
     session_revision = reader.revision()
     base_revision = reader.revision()
@@ -867,6 +884,11 @@ def decode_render_update(payload: dict) -> dict | None:
 
 
 def render_update_binary_size(payload: dict) -> int:
+    """The codec blob's byte count: the wire's base64 undone, the DEFLATE body still compressed.
+
+    This is the same quantity the clients report as `render_update_bytes`, so lane numbers and device
+    performance events compare directly.
+    """
     encoded = payload.get("renderUpdate")
     if not encoded:
         return 0

@@ -9,6 +9,7 @@ let ghosttyVTIncludeDirectory = "\(packageDirectory)/.local/ghosttyvt/include"
 let systemLibraryTargets: [Target] = [
     .systemLibrary(name: "CSQLite3", pkgConfig: "sqlite3"),
     .systemLibrary(name: "OpenSSL", pkgConfig: "openssl"),
+    .systemLibrary(name: "CZlib", pkgConfig: "zlib"),
 ]
 let ghosttyKitSupportTargets: [Target] = []
 let macTestSupportTargets: [Target] = []
@@ -16,8 +17,8 @@ let ghosttyKitTargetDependencies: [Target.Dependency] = []
 let mobileGhosttyTargets: [Target] = []
 let mobileGhosttyProducts: [Product] = []
 let spacesDatabaseExtraDependencies: [Target.Dependency] = [.target(name: "CSQLite3")]
-let spacesTerminalCoreExtraDependencies: [Target.Dependency] = [.target(name: "OpenSSL")]
-let spacesTerminalCoreExtraLinkerSettings: [LinkerSetting] = [.linkedLibrary("ssl"), .linkedLibrary("crypto")]
+let spacesTerminalCoreExtraDependencies: [Target.Dependency] = [.target(name: "OpenSSL"), .target(name: "CZlib")]
+let spacesTerminalCoreExtraLinkerSettings: [LinkerSetting] = [.linkedLibrary("ssl"), .linkedLibrary("crypto"), .linkedLibrary("z")]
 let workspaceCoreExtraDependencies: [Target.Dependency] = [.target(name: "CSQLite3")]
 let spacesDeviceAPIExtraDependencies: [Target.Dependency] = [.target(name: "OpenSSL")]
 // The Linux package graph is exactly what the daemon artifact ships (spacesd + spaces CLI and

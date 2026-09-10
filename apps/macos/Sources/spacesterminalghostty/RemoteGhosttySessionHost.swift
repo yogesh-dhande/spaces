@@ -852,6 +852,9 @@
                     scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason,
                     resyncCount: output.requestsResync ? 1 : nil)
                 renderUpdateAttributes["render_update"] = incomingPayload.renderUpdate == nil ? "0" : "1"
+                // The codec blob's bytes: `JSONDecoder` has already undone the wire's base64, and the codec
+                // has not yet inflated the compressed body, so this is neither the wire size nor the
+                // decoded body size. Matches the iOS sibling emit so the two lanes' numbers compare.
                 renderUpdateAttributes["render_update_bytes"] = String(incomingPayload.renderUpdate?.count ?? 0)
                 // The payloads this apply superseded report nothing of their own; this is their trace.
                 renderUpdateAttributes["coalesced_applies"] = String(output.coalescedAwayCount)
