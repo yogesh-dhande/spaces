@@ -424,6 +424,102 @@ final class RemoteWorkspaceGitClientTests: XCTestCase {
         return (root, source, remote, clone)
     }
 
+    /// Both pipes are read by the same capture, so a command that writes more than the kernel pipe buffer
+    /// (64 KiB on macOS) to stdout AND to stderr must still complete: whichever stream the child fills
+    /// first cannot be left unread while the capture waits on the other one.
+    func testRunGitAndCaptureReturnsCompleteStdoutAndStderrPastThePipeBuffer() throws {
+        let root = try makeTempDirectory()
+        let scriptURL = root.appendingPathComponent("stub-two-large-streams.sh")
+        try """
+            #!/bin/sh
+            /usr/bin/head -c 200000 /dev/zero | /usr/bin/tr '\\0' 'o'
+            /usr/bin/head -c 200000 /dev/zero | /usr/bin/tr '\\0' 'e' >&2
+            exit "$SPACES_TEST_EXIT"
+            """.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+        let succeeding = RemoteWorkspaceGitClient(gitExecutable: scriptURL.path, environmentOverrides: ["SPACES_TEST_EXIT": "0"])
+        let output = try succeeding.runGitAndCapture([], timeout: 30)
+        XCTAssertEqual(output.count, 200_000, "stdout past the pipe buffer must come back whole")
+        XCTAssertEqual(Set(output), Set("o"))
+
+        // The same command failing: the error carries stderr, which is also past the pipe buffer.
+        let failing = RemoteWorkspaceGitClient(gitExecutable: scriptURL.path, environmentOverrides: ["SPACES_TEST_EXIT": "3"])
+        XCTAssertThrowsError(try failing.runGitAndCapture([], timeout: 30)) { error in
+            guard case .gitCommandFailed(let message)? = error as? SpacesRuntimeError else {
+                XCTFail("Expected a command failure, got \(error)")
+                return
+            }
+            XCTAssertEqual(message.count, 200_000, "the rejected exit status must report the command's whole stderr")
+            XCTAssertEqual(Set(message), Set("e"))
+        }
+    }
+
+    /// The byte cap's purpose is to stop a writer that never stops on its own, so the capture must close its
+    /// end and kill the child rather than keep reading to EOF.
+    func testRunGitAndCaptureBoundedModeStopsAWriterThatNeverEnds() throws {
+        let marker = "spaces-cap-marker-784513"
+        let client = RemoteWorkspaceGitClient(gitExecutable: "/usr/bin/yes")
+        let start = Date()
+        XCTAssertThrowsError(try client.runGitAndCapture([marker], timeout: 30, maxOutputBytes: 4096)) { error in
+            XCTAssertEqual(error as? SpacesRuntimeError, .outputExceededCap)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5, "an endless writer must be cut off at the cap, not waited out")
+
+        let pgrep = Process()
+        pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        pgrep.arguments = ["-f", "yes \(marker)"]
+        pgrep.standardOutput = Pipe()
+        pgrep.standardError = Pipe()
+        try pgrep.run()
+        pgrep.waitUntilExit()
+        XCTAssertNotEqual(pgrep.terminationStatus, 0, "the endless writer must be killed, not left running")
+    }
+
+    /// A rejected exit status reports the command's own stderr, and an allowed one returns its stdout, so a
+    /// caller can tell a semantic nonzero exit (`--exit-code` style) from a failure.
+    func testRunGitAndCaptureReportsTheExitStatusAndStderrItWasGiven() throws {
+        let root = try makeTempDirectory()
+        let scriptURL = root.appendingPathComponent("stub-exit-with-stderr.sh")
+        try """
+            #!/bin/sh
+            printf 'out-%s' "$1"
+            printf 'stderr for %s' "$1" >&2
+            exit "$1"
+            """.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        let client = RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)
+
+        XCTAssertThrowsError(try client.runGitAndCapture(["3"], timeout: 30)) { error in
+            XCTAssertEqual(error as? SpacesRuntimeError, .gitCommandFailed(message: "stderr for 3"))
+        }
+        XCTAssertEqual(try client.runGitAndCapture(["2"], timeout: 30, allowedExitCodes: [0, 2]), "out-2")
+        XCTAssertEqual(try client.runGitAndCapture(["0"], timeout: 30), "out-0")
+    }
+
+    /// The daemon runs a workspace's git work on one serial queue, and some device commands fan out across
+    /// workspaces in parallel, so captures must both keep their results in submission order on one queue and
+    /// not deadlock or cross-talk when several run at once.
+    func testRunGitAndCaptureKeepsResultsOrderedOnASerialQueueAndIndependentInParallel() throws {
+        let client = RemoteWorkspaceGitClient(gitExecutable: "/bin/echo")
+        let queue = DispatchQueue(label: "spaces-test-serial-git")
+        var ordered: [String] = []
+        for index in 0..<20 {
+            queue.sync { ordered.append((try? client.runGitAndCapture([String(index)], timeout: 30)) ?? "missing") }
+        }
+        XCTAssertEqual(ordered, (0..<20).map { "\($0)\n" })
+
+        let lock = NSLock()
+        var parallel: [Int: String] = [:]
+        DispatchQueue.concurrentPerform(iterations: 8) { index in
+            let output = (try? client.runGitAndCapture([String(index * 100)], timeout: 30)) ?? "missing"
+            lock.lock()
+            parallel[index] = output
+            lock.unlock()
+        }
+        XCTAssertEqual(parallel, Dictionary(uniqueKeysWithValues: (0..<8).map { ($0, "\($0 * 100)\n") }))
+    }
+
     private func initializeGitRepository(at url: URL) throws {
         try runGit(["init", "--initial-branch", "main"], cwd: url.path)
         try "initial".write(to: url.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
