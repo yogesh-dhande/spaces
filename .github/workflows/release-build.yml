@@ -208,33 +208,69 @@ jobs:
             apps/macos/.build/apple/Products/Release/spaces \
             apps/macos/.build/apple/Products/Release/spacesd
 
+      # Build and sign Spaces.app exactly once. The DMG and the Sparkle zip are not two
+      # containers around one signed bundle by construction: create-dmg.sh and
+      # create-sparkle-archive.sh used to each build and sign their own copy independently, so
+      # every signed binary inside them differed byte for byte (each signing pass embeds its own
+      # secure timestamp) and only the copy inside the DMG ever got submitted for notarization
+      # (#696). Packaging from this one bundle, notarized and stapled below, is what makes both
+      # containers ship the same notarized app.
+      - name: Package app bundle
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+        run: |
+          app_bundle="dist/releases/${{ inputs.version }}/Spaces.app"
+          scripts/create-app-bundle.sh \
+            apps/macos/.build/apple/Products/Release/SpacesApp \
+            apps/macos/.build/apple/Products/Release/spaces \
+            apps/macos/.build/apple/Products/Release/spacesd \
+            "$app_bundle"
+          scripts/codesign-spaces-app.sh "$app_bundle"
+          echo "APP_BUNDLE_PATH=$app_bundle" >> "$GITHUB_ENV"
+
+      # Notarizing the app bundle itself, rather than only the DMG, is what a stapled ticket
+      # inside the zip needs: Gatekeeper can validate a stapled .app offline with no ticket of
+      # its own for the zip container (zip has no notarization concept, unlike DMG/PKG), so this
+      # single submission covers both the zip and the DMG's embedded copy. The DMG container
+      # still gets its own separate submission below because it is itself a distinct artifact
+      # Gatekeeper evaluates when a user downloads and opens the DMG.
+      - name: Notarize app bundle
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+        if: ${{ env.APPLE_ID != '' && env.TEAM_ID != '' && env.APP_PASSWORD != '' }}
+        run: |
+          # notarytool only accepts a flat archive, not a directory; this submission zip is a
+          # throwaway transport container, not the Sparkle zip Spaces ships (that one is built
+          # from the stapled app after this step, in "Package Sparkle archive" below).
+          submission_zip="$RUNNER_TEMP/Spaces-notarize-submission.zip"
+          ditto -c -k --keepParent --norsrc "$APP_BUNDLE_PATH" "$submission_zip"
+          xcrun notarytool submit "$submission_zip" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$TEAM_ID" \
+            --password "$APP_PASSWORD" \
+            --wait
+          rm -f "$submission_zip"
+          xcrun stapler staple "$APP_BUNDLE_PATH"
+
       - name: Package DMG
         env:
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
         run: |
-          scripts/create-dmg.sh \
-            apps/macos/.build/apple/Products/Release/SpacesApp \
-            apps/macos/.build/apple/Products/Release/spaces \
-            apps/macos/.build/apple/Products/Release/spacesd \
-            ${{ inputs.version }}
+          scripts/create-dmg.sh "$APP_BUNDLE_PATH" ${{ inputs.version }}
           dmg_name="Spaces-${{ inputs.version }}.dmg"
           echo "DMG_NAME=$dmg_name" >> "$GITHUB_ENV"
           echo "DMG_PATH=dist/releases/${{ inputs.version }}/$dmg_name" >> "$GITHUB_ENV"
 
       - name: Package Sparkle archive
-        env:
-          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
         run: |
-          scripts/create-sparkle-archive.sh \
-            apps/macos/.build/apple/Products/Release/SpacesApp \
-            apps/macos/.build/apple/Products/Release/spaces \
-            apps/macos/.build/apple/Products/Release/spacesd \
-            ${{ inputs.version }}
+          scripts/create-sparkle-archive.sh "$APP_BUNDLE_PATH" ${{ inputs.version }}
           zip_name="Spaces-${{ inputs.version }}.zip"
           echo "ZIP_NAME=$zip_name" >> "$GITHUB_ENV"
           echo "ZIP_PATH=dist/releases/${{ inputs.version }}/$zip_name" >> "$GITHUB_ENV"
 
-      - name: Notarize
+      - name: Notarize DMG
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           TEAM_ID: ${{ secrets.TEAM_ID }}
@@ -249,7 +285,7 @@ jobs:
           xcrun stapler staple "$DMG_PATH"
 
       - name: Verify release artifacts
-        run: scripts/verify-release-artifacts.sh --require-notarization "$DMG_PATH"
+        run: scripts/verify-release-artifacts.sh --require-notarization "$DMG_PATH" "$ZIP_PATH"
 
       - name: Download Linux x86_64 spacesd artifact
         uses: actions/download-artifact@v4

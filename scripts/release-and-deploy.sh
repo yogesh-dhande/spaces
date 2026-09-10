@@ -125,7 +125,7 @@ verify_remote_artifact() {
 }
 
 # Step 1: Build macOS app in release mode
-echo "🧾 Step 1/11: Syncing release metadata..."
+echo "🧾 Step 1/13: Syncing release metadata..."
 "$SCRIPTS_DIR/sync-app-version.sh" \
   --short "$VERSION" \
   --build "$BUILD_NUMBER" \
@@ -135,13 +135,13 @@ echo "🧾 Step 1/11: Syncing release metadata..."
 echo "✓ Release metadata synced"
 echo ""
 
-echo "📦 Step 2/11: Building macOS app..."
+echo "📦 Step 2/13: Building macOS app..."
 "$SCRIPTS_DIR/swiftpm.sh" build -c release --arch arm64 --arch x86_64
 echo "✓ Build complete"
 echo ""
 
 # Step 3: Code sign binaries
-echo "🔐 Step 3/11: Code signing binaries..."
+echo "🔐 Step 3/13: Code signing binaries..."
 BUILD_DIR="$MACOS_DIR/.build/apple/Products/Release"
 SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
@@ -156,7 +156,7 @@ fi
 echo "✓ Code signing complete"
 echo ""
 
-echo "🐧 Step 4/11: Building and smoke-testing Ubuntu remote spacesd artifacts..."
+echo "🐧 Step 4/13: Building and smoke-testing Ubuntu remote spacesd artifacts..."
 rm -rf "$REMOTE_ARTIFACT_DIR"
 mkdir -p "$REMOTE_ARTIFACT_DIR"
 build_linux_remote_artifact x86_64 linux/amd64
@@ -164,16 +164,59 @@ build_linux_remote_artifact arm64 linux/arm64
 echo "✓ Ubuntu remote artifacts built"
 echo ""
 
-echo "🔎 Step 5/11: Verifying and signing remote artifact manifest..."
+echo "🔎 Step 5/13: Verifying and signing remote artifact manifest..."
 verify_remote_artifact "spacesd-ubuntu-24.04-x86_64.tar.gz"
 verify_remote_artifact "spacesd-ubuntu-24.04-arm64.tar.gz"
 "$SCRIPTS_DIR/create-remote-artifact-manifest.sh" "$VERSION" "$TAG" "$REMOTE_ARTIFACT_DIR"
 echo "✓ Remote artifact manifest signed"
 echo ""
 
-# Step 6: Create DMG installer
-echo "💿 Step 6/11: Creating DMG installer..."
-"$SCRIPTS_DIR/create-dmg.sh" "$SPACES_APP" "$SPACES_CLI" "$SPACESD" "$VERSION"
+# Step 6: Build and sign the Spaces.app bundle exactly once. The DMG and the Sparkle zip are
+# packaged from this one signed (and, once notarized below, stapled) bundle rather than each
+# building and signing its own copy: independently signed copies differ byte for byte (each
+# signing pass embeds its own secure timestamp), so only the copy submitted for notarization
+# would ever carry a valid ticket (#696).
+echo "📦 Step 6/13: Building signed app bundle..."
+APP_BUNDLE="$REPO_ROOT/dist/releases/$VERSION/Spaces.app"
+"$SCRIPTS_DIR/create-app-bundle.sh" "$SPACES_APP" "$SPACES_CLI" "$SPACESD" "$APP_BUNDLE"
+"$SCRIPTS_DIR/codesign-spaces-app.sh" "$APP_BUNDLE"
+echo "✓ App bundle built and signed"
+echo ""
+
+# Step 7: Notarize the app bundle (optional). Notarizing and stapling the app itself, rather than
+# only the DMG, is what lets a stapled ticket travel inside the Sparkle zip: Gatekeeper validates
+# a stapled .app offline with no notarization ticket of its own required for the zip container
+# (zip carries no notarization concept, unlike DMG/PKG). The DMG still gets its own separate
+# submission in Step 10 because it is itself a distinct artifact Gatekeeper evaluates when a user
+# downloads and opens the DMG.
+if [[ "${NOTARIZE:-}" == "1" ]]; then
+  echo "🍎 Step 7/13: Notarizing app bundle..."
+  if [[ -z "${APPLE_ID:-}" ]] || [[ -z "${TEAM_ID:-}" ]] || [[ -z "${APP_PASSWORD:-}" ]]; then
+    echo "Error: APPLE_ID, TEAM_ID, and APP_PASSWORD are required for notarization" >&2
+    exit 1
+  fi
+  # notarytool only accepts a flat archive, not a directory; this submission zip is a throwaway
+  # transport container, not the Sparkle zip Spaces ships (that one is built from the stapled app
+  # in Step 9).
+  submission_zip="$(mktemp -d)/Spaces-notarize-submission.zip"
+  ditto -c -k --keepParent --norsrc "$APP_BUNDLE" "$submission_zip"
+  xcrun notarytool submit "$submission_zip" \
+    --apple-id "$APPLE_ID" \
+    --team-id "$TEAM_ID" \
+    --password "$APP_PASSWORD" \
+    --wait
+  rm -f "$submission_zip"
+  xcrun stapler staple "$APP_BUNDLE"
+  echo "✓ App bundle notarized and stapled"
+  echo ""
+else
+  echo "⏭️  Step 7/13: Skipping app bundle notarization (set NOTARIZE=1 to enable)"
+  echo ""
+fi
+
+# Step 8: Create DMG installer
+echo "💿 Step 8/13: Creating DMG installer..."
+"$SCRIPTS_DIR/create-dmg.sh" "$APP_BUNDLE" "$VERSION"
 DMG_NAME="Spaces-${VERSION}.dmg"
 DMG_PATH="$REPO_ROOT/dist/releases/$VERSION/$DMG_NAME"
 
@@ -184,21 +227,17 @@ fi
 echo "✓ DMG created: $DMG_NAME"
 echo ""
 
-# Step 7: Create Sparkle archive
-echo "📦 Step 7/11: Creating Sparkle archive..."
-"$SCRIPTS_DIR/create-sparkle-archive.sh" "$SPACES_APP" "$SPACES_CLI" "$SPACESD" "$VERSION"
+# Step 9: Create Sparkle archive
+echo "📦 Step 9/13: Creating Sparkle archive..."
+"$SCRIPTS_DIR/create-sparkle-archive.sh" "$APP_BUNDLE" "$VERSION"
 ZIP_NAME="Spaces-${VERSION}.zip"
 ZIP_PATH="$REPO_ROOT/dist/releases/$VERSION/$ZIP_NAME"
 echo "✓ Sparkle archive created: $ZIP_NAME"
 echo ""
 
-# Step 8: Notarize (optional)
+# Step 10: Notarize the DMG container itself (optional)
 if [[ "${NOTARIZE:-}" == "1" ]]; then
-  echo "🍎 Step 8/11: Notarizing DMG..."
-  if [[ -z "${APPLE_ID:-}" ]] || [[ -z "${TEAM_ID:-}" ]] || [[ -z "${APP_PASSWORD:-}" ]]; then
-    echo "Error: APPLE_ID, TEAM_ID, and APP_PASSWORD are required for notarization" >&2
-    exit 1
-  fi
+  echo "🍎 Step 10/13: Notarizing DMG..."
   xcrun notarytool submit "$DMG_PATH" \
     --apple-id "$APPLE_ID" \
     --team-id "$TEAM_ID" \
@@ -208,7 +247,7 @@ if [[ "${NOTARIZE:-}" == "1" ]]; then
   echo "✓ Notarization complete"
   echo ""
 else
-  echo "⏭️  Step 8/11: Skipping notarization (set NOTARIZE=1 to enable)"
+  echo "⏭️  Step 10/13: Skipping DMG notarization (set NOTARIZE=1 to enable)"
   echo ""
 fi
 
@@ -217,22 +256,22 @@ verify_args=()
 if [[ "${NOTARIZE:-}" == "1" ]]; then
   verify_args+=(--require-notarization)
 fi
-"$SCRIPTS_DIR/verify-release-artifacts.sh" "${verify_args[@]}" "$DMG_PATH"
+"$SCRIPTS_DIR/verify-release-artifacts.sh" "${verify_args[@]}" "$DMG_PATH" "$ZIP_PATH"
 echo ""
 
-# Step 9: Generate and publish the Sparkle appcast. This must
+# Step 11: Generate and publish the Sparkle appcast. This must
 # happen before the GitHub release is created below: the release upload
 # includes the appcast, and the website build (after the release) fetches its
 # copy of the appcast and zip back from that same release, so the release has
 # to exist and carry both assets first.
-echo "🛰️  Step 9/11: Publishing Sparkle appcast..."
+echo "🛰️  Step 11/13: Publishing Sparkle appcast..."
 "$SCRIPTS_DIR/publish-sparkle-appcast.sh" "$VERSION"
 APPCAST_PATH="$REPO_ROOT/dist/updates/appcast.xml"
 echo "✓ Sparkle appcast updated"
 echo ""
 
-# Step 10: Create the GitHub release
-echo "🚀 Step 10/11: Creating GitHub release..."
+# Step 12: Create the GitHub release
+echo "🚀 Step 12/13: Creating GitHub release..."
 cd "$REPO_ROOT"
 release_assets=(
   "$DMG_PATH"
@@ -255,10 +294,10 @@ gh release create "$TAG" "${release_assets[@]}" \
 echo "✓ GitHub release created"
 echo ""
 
-# Step 11: Build website static output. prebuild downloads the appcast and
+# Step 13: Build website static output. prebuild downloads the appcast and
 # Sparkle zip from the GitHub release created above, so this must run after
 # that release exists.
-echo "🌐 Step 11/11: Building website..."
+echo "🌐 Step 13/13: Building website..."
 (
   cd "$REPO_ROOT/apps/web"
   npm run build

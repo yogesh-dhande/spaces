@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ $# -ne 4 ]; then
-  echo "Usage: $0 <Spaces-app-path> <spaces-cli-path> <spacesd-path> <version>"
+if [ $# -ne 2 ]; then
+  echo "Usage: $0 <signed-app-bundle-path> <version>"
   exit 1
 fi
 
-SPACES_APP="$1"
-SPACES_CLI="$2"
-SPACESD="$3"
-VERSION="$4"
+APP_BUNDLE_INPUT="$1"
+VERSION="$2"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RELEASES_DIR="$REPO_ROOT/dist/releases/$VERSION"
 DMG_NAME="Spaces-${VERSION}.dmg"
 DMG_PATH="$RELEASES_DIR/$DMG_NAME"
 VOLUME_NAME="Spaces-${VERSION}"
+
+if [[ ! -d "$APP_BUNDLE_INPUT" ]]; then
+  echo "Error: app bundle not found at $APP_BUNDLE_INPUT" >&2
+  exit 1
+fi
 
 # Create releases directory if it doesn't exist
 mkdir -p "$RELEASES_DIR"
@@ -25,7 +28,14 @@ temp_dmg=""
 trap 'rm -rf "$staging"; [ -n "$temp_dmg" ] && rm -f "$temp_dmg"' EXIT
 
 app_bundle="$staging/Spaces.app"
-"$REPO_ROOT/scripts/create-app-bundle.sh" "$SPACES_APP" "$SPACES_CLI" "$SPACESD" "$app_bundle"
+# The caller builds, signs, and (when notarization secrets are configured) notarizes and staples
+# Spaces.app exactly once, then hands that same bundle to this script and to
+# create-sparkle-archive.sh. That is what makes the DMG and the Sparkle zip carry byte-for-byte
+# the same notarized app instead of two independently signed copies with different cdhashes, only
+# one of which Apple ever saw (#696). A notarization ticket stapled to an app bundle is stored as
+# a regular file inside it, so a plain directory copy here carries the ticket along with no extra
+# work.
+ditto "$APP_BUNDLE_INPUT" "$app_bundle"
 
 # Create installer helper script used by the DMG wizard app.
 installer_script="$staging/.install-spaces.sh"
@@ -246,7 +256,9 @@ cp "$REPO_ROOT/apps/macos/Sources/SpacesApp/AppIcon.icns" "$installer_app/Conten
 rm -f "$installer_source"
 
 IDENTITY="${CODESIGN_IDENTITY:--}"
-"$REPO_ROOT/scripts/codesign-spaces-app.sh" "$app_bundle"
+# The bundle arrives already signed (and possibly notarized/stapled) by the caller; only verify
+# the copy, don't re-sign it, or the DMG's Spaces.app would again diverge from the zip's (#696).
+codesign --verify --deep --strict --verbose=2 "$app_bundle"
 echo "✓ App bundle signature verified"
 
 codesign --force --deep --timestamp --options runtime --sign "$IDENTITY" "$installer_app"
