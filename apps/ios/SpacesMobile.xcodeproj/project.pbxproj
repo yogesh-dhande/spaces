@@ -94,6 +94,7 @@
 		A5B43C5E216BB2F41FE167E9 /* TerminalViewerState.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA68AED2895AEB8CC0D1B824 /* TerminalViewerState.swift */; };
 		A689FBD78BB4F03E56B97D3C /* GhosttyRemoteTerminalSelectionMarshallingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68621C6469CFDB965239753C /* GhosttyRemoteTerminalSelectionMarshallingTests.swift */; };
 		AAED3289F85B868C2AA29B44 /* SubscriptionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41E15C5763CA61AE8C9C2D6E /* SubscriptionStore.swift */; };
+		AB9D63ECA00509EC6E6BE168 /* TerminalConnectAttempt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CA4FA4F44AD4029C6DD0FCE /* TerminalConnectAttempt.swift */; };
 		B476AD376F17B415C12E45F2 /* TerminalMarkdownArtifactView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CB657C9D6E4D2D2EA3DAD06 /* TerminalMarkdownArtifactView.swift */; };
 		B4B0A237C6F8325405C27F93 /* TerminalFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9653B3B66E0DCF0C0583B3B5 /* TerminalFlow.swift */; };
 		B714F3A46AB66F8F5934D155 /* TerminalSelectionCopyPillLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 733C6A36BBA3E7FCA82CBA12 /* TerminalSelectionCopyPillLayoutTests.swift */; };
@@ -233,6 +234,7 @@
 		784131399C289E534B48BA92 /* SpacesMobileSmokeUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SpacesMobileSmokeUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		79297BA89CDDB8E95545E9FB /* TerminalImageAttachments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalImageAttachments.swift; sourceTree = "<group>"; };
 		798B7FC0202A9E32DB5E072E /* SpacesTabSmokeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesTabSmokeUITests.swift; sourceTree = "<group>"; };
+		7CA4FA4F44AD4029C6DD0FCE /* TerminalConnectAttempt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalConnectAttempt.swift; sourceTree = "<group>"; };
 		7CB657C9D6E4D2D2EA3DAD06 /* TerminalMarkdownArtifactView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalMarkdownArtifactView.swift; sourceTree = "<group>"; };
 		8558FA040BF164F6A5B8023F /* BrowserProxySmokeTestView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserProxySmokeTestView.swift; sourceTree = "<group>"; };
 		860FB18D54BADD35ECB29BD9 /* AutomationDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationDetailView.swift; sourceTree = "<group>"; };
@@ -385,6 +387,7 @@
 				68ACEAFCA89C7E530880B3F0 /* StagedScreenshotStore.swift */,
 				E92FFB319423FE9AD2BABE15 /* TerminalCommandContext.swift */,
 				C3768855D78AF654041E08AB /* TerminalComposerSheet.swift */,
+				7CA4FA4F44AD4029C6DD0FCE /* TerminalConnectAttempt.swift */,
 				7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */,
 				DCB861DE08F903AE3ED56ADF /* TerminalFontSizeStorage.swift */,
 				79297BA89CDDB8E95545E9FB /* TerminalImageAttachments.swift */,
@@ -829,6 +832,7 @@
 				AAED3289F85B868C2AA29B44 /* SubscriptionStore.swift in Sources */,
 				7ECC54F84964136165C34CDE /* TerminalCommandContext.swift in Sources */,
 				7CB275F461388D1B1B686182 /* TerminalComposerSheet.swift in Sources */,
+				AB9D63ECA00509EC6E6BE168 /* TerminalConnectAttempt.swift in Sources */,
 				246792578DBC4C17B7038206 /* TerminalDetailView.swift in Sources */,
 				B4B0A237C6F8325405C27F93 /* TerminalFlow.swift in Sources */,
 				E7ED7D59DF2C65BC86BE1E56 /* TerminalFontSizeStorage.swift in Sources */,

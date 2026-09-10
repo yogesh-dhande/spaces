@@ -48,8 +48,10 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
 
     nonisolated func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { DemoRequestTransport(backend: self) }
 
+    /// `initialEventTimeout` is unused here: a recorded stream answers from local storage, so there is
+    /// no dial or handshake for a budget to bound.
     nonisolated func openSessionStream(
-        request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+        request: SpacesDeviceAPIRequest, initialEventTimeout: Duration, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
         onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
     ) async throws -> SpacesDeviceAPIStreamHandle {
         guard case .subscribe(let subscription) = request.command else { throw DemoRecordingLibraryError.recordingMissing(sessionID: "unknown") }

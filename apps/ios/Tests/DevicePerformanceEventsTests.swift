@@ -35,7 +35,8 @@
                 try Self.framedState(
                     columns: 80, rows: 24, revision: 1, emittedAt: "2026-06-04T14:23:31Z", owner: model.remoteClientForTesting,
                     reason: TerminalRemoteSessionStateReason.attachmentState.rawValue), isOutOfBand: false)
-            XCTAssertTrue(events.recorded.filter { $0.name == "terminal_first_paint" }.isEmpty, "a frame at a grid the viewport moved past must not paint")
+            XCTAssertTrue(
+                events.recorded.filter { $0.name == "terminal_first_paint" }.isEmpty, "a frame at a grid the viewport moved past must not paint")
 
             await model.applyLatestState(
                 try Self.framedState(columns: 40, rows: 30, revision: 2, emittedAt: "2026-06-04T14:23:32Z", owner: model.remoteClientForTesting),
@@ -273,7 +274,8 @@
             func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { AlwaysOKTransport() }
 
             func openSessionStream(
-                request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                request: SpacesDeviceAPIRequest, initialEventTimeout: Duration,
+                onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
                 onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
             ) async throws -> SpacesDeviceAPIStreamHandle {
                 await MainActor.run { onEvent(payload) }
@@ -330,8 +332,9 @@
             GhosttyRemoteSessionStatePayload(
                 sessionID: sessionID, reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, emittedAt: emittedAt,
                 sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
-                runtimeState: TerminalSessionRuntimeState(sessionID: sessionID, servicePID: 100, childPID: 200, state: .running, updatedAt: emittedAt),
-                attachmentSnapshot: nil, title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0)
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, servicePID: 100, childPID: 200, state: .running, updatedAt: emittedAt), attachmentSnapshot: nil,
+                title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0)
         }
 
         private nonisolated static func gridSnapshot(columns: Int, rows: Int) -> GhosttyTerminalSnapshot {
