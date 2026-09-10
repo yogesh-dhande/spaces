@@ -5,7 +5,7 @@
 set -euo pipefail
 apt-get update -qq
 # procps supplies the `ps` the failure-time state dump below uses; the swift base image does not carry it.
-apt-get install -y -qq pkg-config libsqlite3-dev libssl-dev openssl rsync procps >/dev/null
+apt-get install -y -qq pkg-config libsqlite3-dev libssl-dev zlib1g-dev openssl rsync procps >/dev/null
 
 # Stage sources onto container-native fs: resource copies (e.g. AppIcon.icns) from the
 # virtiofs bind mount fail deterministically with EINTR under the amd64 runner, and

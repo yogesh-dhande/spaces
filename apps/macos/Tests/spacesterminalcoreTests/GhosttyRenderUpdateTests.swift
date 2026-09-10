@@ -80,19 +80,24 @@ final class GhosttyRenderUpdateTests: XCTestCase {
                     return GhosttyRenderCellRun(row: row, column: 0, cells: Array(target.cells[start..<(start + columns)]))
                 }, changedCellCount: rows * columns))
 
-        let scrollRectBytes = try GhosttyRenderUpdateBinaryCodec.encode(scrollRectUpdate).count
-        let cellRunOnlyBytes = try GhosttyRenderUpdateBinaryCodec.encode(cellRunOnlyUpdate).count
+        let scrollRectEncoded = try GhosttyRenderUpdateBinaryCodec.encode(scrollRectUpdate)
+        let cellRunOnlyEncoded = try GhosttyRenderUpdateBinaryCodec.encode(cellRunOnlyUpdate)
+        let scrollRectBytes = try body(of: scrollRectEncoded).count
+        let cellRunOnlyBytes = try body(of: cellRunOnlyEncoded).count
 
         XCTAssertEqual(scrollRectDelta.scrollRects.count, 1)
         XCTAssertEqual(scrollRectDelta.replaceCellRuns.count, 1)
         XCTAssertEqual(scrollRectDelta.changedCellCount, columns)
         XCTAssertEqual(try GhosttyRenderUpdateApplier.apply(scrollRectUpdate, to: baseline).snapshot, target)
-        // The delta header grew by 18 bytes (the 17-byte selection/scrollbar section plus the 1-byte
-        // scroll-rects-overflowed flag) versus the pre-selection layout, on top of what each fixture
-        // already accounted for.
-        XCTAssertEqual(scrollRectBytes, 1_233)
-        XCTAssertEqual(cellRunOnlyBytes, 27_115)
+        // Body bytes, not blob bytes: the body is the layout this fixture pins, while the compressed blob's
+        // size depends on which platform's DEFLATE encoder wrote it. The delta header grew by 18 bytes (the
+        // 17-byte selection/scrollbar section plus the 1-byte scroll-rects-overflowed flag) versus the
+        // pre-selection layout, on top of what each fixture already accounted for.
+        XCTAssertEqual(scrollRectBytes, 1_227)
+        XCTAssertEqual(cellRunOnlyBytes, 27_109)
         XCTAssertLessThan(scrollRectBytes, cellRunOnlyBytes)
+        // Compression does not reverse the ordering the fixture exists to show.
+        XCTAssertLessThan(scrollRectEncoded.count, cellRunOnlyEncoded.count)
     }
 
     /// The header peek exists so a caller can ask "is this a full frame?" without paying a grid decode,
@@ -168,16 +173,15 @@ final class GhosttyRenderUpdateTests: XCTestCase {
             let encoded = try GhosttyRenderUpdateBinaryCodec.encode(GhosttyRenderUpdate.full(frame))
 
             // Every prefix shorter than the full frame must throw rather than crash. The magic check
-            // requires the first magic.count bytes to match, so a zero-length prefix throws too. A cut
-            // inside a payload's declared length can also surface as .invalidCellPayload, when the
-            // truncated bytes happen to parse as an entry that does not describe its cell.
+            // requires the first magic.count bytes to match, so a prefix too short to hold it throws
+            // .invalidMagic; every longer cut lands inside the compressed body, which then fails to reach
+            // a clean end of stream and reads as .truncated.
             for cut in 0..<encoded.count {
                 let prefix = encoded.prefix(cut)
                 XCTAssertThrowsError(try GhosttyRenderUpdateBinaryCodec.decode(prefix)) { error in
                     let codecError = error as? GhosttyRenderUpdateBinaryCodec.BinaryCodecError
                     XCTAssertTrue(
-                        codecError == .truncated || codecError == .invalidMagic || codecError == .invalidCellPayload,
-                        "cut \(cut) of \(lines) threw \(String(describing: codecError))")
+                        codecError == .truncated || codecError == .invalidMagic, "cut \(cut) of \(lines) threw \(String(describing: codecError))")
                 }
             }
         }
@@ -207,23 +211,123 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         XCTAssertEqual(GhosttyTerminalSnapshotGrid.fullPlainText(for: decodedSnapshot), "❤️👋🏽\n👨‍👩‍👧‍👦🇯🇵\ne\u{0301}x")
     }
 
-    /// Cluster support must cost an all-ASCII frame nothing on the wire: the flag bits that mark a
+    /// A terminal screen is mostly blank cells in the default colours, so the 14 fixed bytes a cell costs
+    /// in the body are almost all repetition. Compressing the body is what keeps a screen-sized frame off
+    /// the wire at grid scale, and the frame still decodes to the exact snapshot it was built from. The
+    /// phone grid carries an absolute bound too, because that frame is what dominates a mobile session's
+    /// wire cost.
+    func testMostlyBlankScreensCompressFarBelowTheUncompressedCellCost() throws {
+        let desktop = ["user@host spaces % swift build", "Building for debugging...", "Build complete! (3.41s)", "user@host spaces % "]
+        let phone = ["user@host ~ % ls -la", "total 24", "drwxr-xr-x  5 user staff  160 Sep  9 09:12 .", "user@host ~ % "]
+
+        for (columns, rows, lines) in [(80, 24, desktop), (52, 41, phone)] {
+            let padded = (lines + Array(repeating: "", count: rows - lines.count)).map { $0 + String(repeating: " ", count: columns - $0.count) }
+            let snapshot = makeSnapshot(lines: padded)
+            let update = GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: snapshot))
+
+            let encoded = try GhosttyRenderUpdateBinaryCodec.encode(update)
+
+            XCTAssertEqual(snapshot.cells.count, columns * rows)
+            XCTAssertLessThan(
+                encoded.count, snapshot.cells.count * 14 / 8,
+                "a \(columns)x\(rows) screen with four lines of text must cost well under an eighth of its uncompressed cell block")
+            XCTAssertEqual(try GhosttyRenderUpdateBinaryCodec.decode(encoded), update, "compression must be exact, not approximate")
+        }
+
+        let phonePadded = (phone + Array(repeating: "", count: 37)).map { $0 + String(repeating: " ", count: 52 - $0.count) }
+        let phoneFrame = GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: makeSnapshot(lines: phonePadded))
+        XCTAssertLessThan(
+            try GhosttyRenderUpdateBinaryCodec.encode(.full(phoneFrame)).count, 3072, "a 52x41 shell screen must stay under 3 KB on the wire")
+    }
+
+    /// Cluster support must cost an all-ASCII frame nothing in the body: the flag bits that mark a
     /// payload live in the cell's existing flags word, and a block with no flagged cell writes no
-    /// sparse section at all.
-    func testAsciiFrameCostsOnlyTheFixedPerCellBytes() throws {
+    /// sparse section at all. The body is the plaintext the compressor sees, so the invariant is
+    /// asserted there rather than on the compressed blob, whose size no fixed arithmetic predicts.
+    func testAsciiFrameBodyCostsOnlyTheFixedPerCellBytes() throws {
         let snapshot = makeSnapshot(lines: ["hello", "world"])
         let update = GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: snapshot))
 
-        // 46-byte update header (magic 4, version 1, kind 1, reserved 2, three revisions 24, owner
-        // epoch 8, columns 2, rows 2, empty fallback reason 2), 36-byte snapshot header (19 fixed fields
-        // plus the 17-byte selection/scrollbar section), 14 bytes a cell.
-        XCTAssertEqual(try GhosttyRenderUpdateBinaryCodec.encode(update).count, 46 + 36 + snapshot.cells.count * 14)
+        // 40-byte update body header (reserved 2, three revisions 24, owner epoch 8, columns 2, rows 2,
+        // empty fallback reason 2), 36-byte snapshot header (19 fixed fields plus the 17-byte
+        // selection/scrollbar section), 14 bytes a cell.
+        XCTAssertEqual(try body(of: GhosttyRenderUpdateBinaryCodec.encode(update)).count, 40 + 36 + snapshot.cells.count * 14)
 
         // One cluster cell adds exactly its sparse entry: 4-byte offset, 2-byte length, utf8 bytes.
         let clustered = makeSnapshot(lines: ["👋🏽ello", "world"])
         let clusteredUpdate = GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: clustered))
         XCTAssertEqual(
-            try GhosttyRenderUpdateBinaryCodec.encode(clusteredUpdate).count, 46 + 36 + snapshot.cells.count * 14 + 6 + Array("👋🏽".utf8).count)
+            try body(of: GhosttyRenderUpdateBinaryCodec.encode(clusteredUpdate)).count,
+            40 + 36 + snapshot.cells.count * 14 + 6 + Array("👋🏽".utf8).count)
+    }
+
+    /// A Linux daemon streaming to an iPhone means one platform's zlib writes what the other's Compression
+    /// framework reads. The fixture is a raw DEFLATE stream produced outside this process (Python's
+    /// `zlib.compressobj(level, zlib.DEFLATED, -15)`), so a back end that silently switched framing (picking
+    /// up a zlib header, say, or a checksum trailer) fails here instead of only on a real device.
+    func testBodyCompressionReadsARawDeflateStreamFromAnotherEncoder() throws {
+        // zlib.compressobj(6, zlib.DEFLATED, -15) over Array("spaces render body".utf8).
+        let fixture = Data([0x2B, 0x2E, 0x48, 0x4C, 0x4E, 0x2D, 0x56, 0x28, 0x4A, 0xCD, 0x4B, 0x49, 0x2D, 0x52, 0x48, 0xCA, 0x4F, 0xA9, 0x04, 0x00])
+        let expected = Array("spaces render body".utf8)
+
+        XCTAssertEqual(
+            Array(try GhosttyRenderUpdateBodyCompression.inflate(fixture, expectedLength: expected.count)), expected,
+            "this build must read a raw DEFLATE stream written by an independent encoder")
+        XCTAssertEqual(
+            Array(
+                try GhosttyRenderUpdateBodyCompression.inflate(
+                    GhosttyRenderUpdateBodyCompression.deflate(Data(expected)), expectedLength: expected.count)), expected,
+            "and its own output must round-trip")
+    }
+
+    /// The length prefix is what sizes the decoder's buffer, so a body that inflates to a different length
+    /// than the header promised is refused rather than handed to the reader half-filled.
+    func testBodyLengthPrefixMustMatchTheInflatedBody() throws {
+        let snapshot = makeSnapshot(lines: ["hello", "world"])
+        let encoded = try GhosttyRenderUpdateBinaryCodec.encode(
+            GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: snapshot)))
+
+        let bodyLength = try body(of: encoded).count
+        for wrongLength in [UInt32(bodyLength - 1), UInt32(bodyLength + 1)] {
+            var tampered = encoded
+            withUnsafeBytes(of: wrongLength.littleEndian) { for (index, byte) in $0.enumerated() { tampered[6 + index] = byte } }
+            XCTAssertThrowsError(try GhosttyRenderUpdateBinaryCodec.decode(tampered)) { error in
+                XCTAssertEqual(error as? GhosttyRenderUpdateBinaryCodec.BinaryCodecError, .truncated, "declared length \(wrongLength)")
+            }
+        }
+    }
+
+    /// DEFLATE's 1032:1 maximum expansion bounds the inflated length relative to the compressed size, but
+    /// that ratio alone still lets a small, peer-controlled compressed payload claim a length far past
+    /// anything a real render update body holds. A declared length one byte over
+    /// `maximumInflatedByteCount`, backed by a compressed section large enough that the ratio bound alone
+    /// would have accepted it, must still be refused before the decoder allocates a buffer that size.
+    func testInflatedLengthAboveTheAbsoluteCapIsRejectedEvenWithinTheRatioBound() throws {
+        let oversizedLength = UInt32(GhosttyRenderUpdateBodyCompression.maximumInflatedByteCount + 1)
+        // The smallest compressed byte count whose 1032:1 ratio bound alone would admit `oversizedLength`,
+        // so padding the compressed section to this size isolates the absolute cap: without it, this
+        // fixture decodes past the guard and only the cap below stops it.
+        let ratioAdmissibleCompressedByteCount = Int(oversizedLength) / 1032 + 1
+
+        let snapshot = makeSnapshot(lines: ["hello", "world"])
+        let encoded = try GhosttyRenderUpdateBinaryCodec.encode(
+            GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: snapshot)))
+
+        var tampered = Data(encoded.prefix(10))
+        withUnsafeBytes(of: oversizedLength.littleEndian) { for (index, byte) in $0.enumerated() { tampered[6 + index] = byte } }
+        // The padding bytes are never decompressed: the cap is checked before a single compressed byte is
+        // examined, so junk in place of a real DEFLATE stream still exercises the guard this test is for.
+        tampered.append(Data(count: ratioAdmissibleCompressedByteCount))
+
+        XCTAssertThrowsError(try GhosttyRenderUpdateBinaryCodec.decode(tampered)) { error in
+            XCTAssertEqual(error as? GhosttyRenderUpdateBinaryCodec.BinaryCodecError, .truncated)
+        }
+
+        XCTAssertThrowsError(
+            try GhosttyRenderUpdateBodyCompression.inflate(Data(count: ratioAdmissibleCompressedByteCount), expectedLength: Int(oversizedLength))
+        ) { error in
+            XCTAssertEqual(error as? GhosttyRenderUpdateBodyCompression.CompressionError, .inflateFailed)
+        }
     }
 
     /// No representable snapshot may encode to a frame its own decoder rejects, so the tables normalize
@@ -263,14 +367,15 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         let encoded = try GhosttyRenderUpdateBinaryCodec.encode(
             GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: snapshot)))
 
-        // The frame's only sparse entry is last: [UInt32 offset][UInt16 length][utf8 bytes]. Swap the
+        // The body's only sparse entry is last: [UInt32 offset][UInt16 length][utf8 bytes]. Swap the
         // in-cap cluster ("e" + one mark, 3 bytes) for one codepoint past the cap, within the byte cap
         // so the codepoint check is the one that fires.
         let inCapBytes = Array("e\u{0301}".utf8)
         let oversizedBytes = Array(("e" + String(repeating: "\u{0301}", count: GhosttyTerminalSnapshot.maximumClusterCodepointCount)).utf8)
-        var crafted = encoded.dropLast(inCapBytes.count + 2)
-        withUnsafeBytes(of: UInt16(oversizedBytes.count).littleEndian) { crafted.append(contentsOf: $0) }
-        crafted.append(contentsOf: oversizedBytes)
+        var craftedBody = try Data(body(of: encoded).dropLast(inCapBytes.count + 2))
+        withUnsafeBytes(of: UInt16(oversizedBytes.count).littleEndian) { craftedBody.append(contentsOf: $0) }
+        craftedBody.append(contentsOf: oversizedBytes)
+        let crafted = try repack(encoded, body: craftedBody)
 
         XCTAssertThrowsError(try GhosttyRenderUpdateBinaryCodec.decode(crafted)) { error in
             XCTAssertEqual(error as? GhosttyRenderUpdateBinaryCodec.BinaryCodecError, .invalidCellPayload)
@@ -283,22 +388,23 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         let snapshot = makeSnapshot(lines: ["a👋🏽"])
         let encoded = try GhosttyRenderUpdateBinaryCodec.encode(
             GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: snapshot)))
-        // The frame's only sparse entry is last: [UInt32 offset][UInt16 length][utf8 bytes].
-        let lengthIndex = encoded.count - Array("👋🏽".utf8).count - 2
+        // The body's only sparse entry is last: [UInt32 offset][UInt16 length][utf8 bytes].
+        let plain = try body(of: encoded)
+        let lengthIndex = plain.count - Array("👋🏽".utf8).count - 2
 
-        // A length within the cluster cap but past the end of the frame: the read is refused, not
+        // A length within the cluster cap but past the end of the body: the read is refused, not
         // clamped or run off the buffer.
-        var overrun = encoded
+        var overrun = plain
         overrun[lengthIndex] = 60
         overrun[lengthIndex + 1] = 0x00
-        XCTAssertThrowsError(try GhosttyRenderUpdateBinaryCodec.decode(overrun)) { error in
+        XCTAssertThrowsError(try GhosttyRenderUpdateBinaryCodec.decode(repack(encoded, body: overrun))) { error in
             XCTAssertEqual(error as? GhosttyRenderUpdateBinaryCodec.BinaryCodecError, .truncated)
         }
 
-        var empty = encoded
+        var empty = plain
         empty[lengthIndex] = 0x00
         empty[lengthIndex + 1] = 0x00
-        XCTAssertThrowsError(try GhosttyRenderUpdateBinaryCodec.decode(empty)) { error in
+        XCTAssertThrowsError(try GhosttyRenderUpdateBinaryCodec.decode(repack(encoded, body: empty))) { error in
             XCTAssertEqual(error as? GhosttyRenderUpdateBinaryCodec.BinaryCodecError, .invalidCellPayload)
         }
     }
@@ -560,7 +666,8 @@ final class GhosttyRenderUpdateTests: XCTestCase {
             cursorVisible: snapshot.cursorVisible, defaultForegroundRGB: snapshot.defaultForegroundRGB,
             defaultBackgroundRGB: snapshot.defaultBackgroundRGB, cells: snapshot.cells, selection: stream, scrollbarTotal: 10, scrollbarOffset: 0)
         let decoded = try GhosttyRenderUpdateBinaryCodec.decode(
-            try GhosttyRenderUpdateBinaryCodec.encode(GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: withSelection))))
+            try GhosttyRenderUpdateBinaryCodec.encode(
+                GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: withSelection))))
         XCTAssertEqual(decoded.fullFrame?.snapshot.selection, stream)
 
         let noSelection = GhosttyTerminalSnapshot(
@@ -568,7 +675,8 @@ final class GhosttyRenderUpdateTests: XCTestCase {
             cursorVisible: snapshot.cursorVisible, defaultForegroundRGB: snapshot.defaultForegroundRGB,
             defaultBackgroundRGB: snapshot.defaultBackgroundRGB, cells: snapshot.cells, scrollbarTotal: 10, scrollbarOffset: 7)
         let decodedNoSelection = try GhosttyRenderUpdateBinaryCodec.decode(
-            try GhosttyRenderUpdateBinaryCodec.encode(GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: noSelection))))
+            try GhosttyRenderUpdateBinaryCodec.encode(
+                GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: noSelection))))
         XCTAssertNil(decodedNoSelection.fullFrame?.snapshot.selection)
         XCTAssertEqual(decodedNoSelection.fullFrame?.snapshot.scrollbarOffset, 7)
     }
@@ -643,19 +751,35 @@ final class GhosttyRenderUpdateTests: XCTestCase {
     }
 
     /// The version byte is the only guard for a persisted or peer payload built at a different layout:
-    /// the current version is 5, and a payload claiming version 4 (the pre-selection layout) is rejected
-    /// exactly like any other unsupported version, never silently misread as the new layout.
-    func testVersionIsFiveAndVersionFourPayloadIsRejected() throws {
-        XCTAssertEqual(GhosttyRenderUpdate.currentVersion, 5)
+    /// the current version is 6, and a payload claiming version 5 (the uncompressed layout) is rejected
+    /// exactly like any other unsupported version, never silently misread as a compressed body.
+    func testVersionIsSixAndVersionFivePayloadIsRejected() throws {
+        XCTAssertEqual(GhosttyRenderUpdate.currentVersion, 6)
 
         let snapshot = makeSnapshot(lines: ["hello"])
         var encoded = try GhosttyRenderUpdateBinaryCodec.encode(
             GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: snapshot)))
-        encoded[4] = 4
+        encoded[4] = 5
 
         XCTAssertThrowsError(try GhosttyRenderUpdateBinaryCodec.decode(encoded)) { error in
             XCTAssertEqual(error as? GhosttyRenderUpdateBinaryCodec.BinaryCodecError, .unsupportedVersion)
         }
+    }
+
+    /// The plaintext body inside an encoded frame. The crafted-payload fixtures edit bytes the encoder can
+    /// write but no representable snapshot produces, and those bytes live under the compression.
+    private func body(of encoded: Data) throws -> Data {
+        let declaredLength = encoded[6..<10].withUnsafeBytes { Int(UInt32(littleEndian: $0.loadUnaligned(as: UInt32.self))) }
+        return try GhosttyRenderUpdateBodyCompression.inflate(encoded[10...], expectedLength: declaredLength)
+    }
+
+    /// Puts a mutated body back behind the original frame's header, so the decoder sees exactly the blob
+    /// a peer writing those body bytes would have sent.
+    private func repack(_ encoded: Data, body: Data) throws -> Data {
+        var repacked = Data(encoded.prefix(6))
+        withUnsafeBytes(of: UInt32(body.count).littleEndian) { repacked.append(contentsOf: $0) }
+        repacked.append(try GhosttyRenderUpdateBodyCompression.deflate(body))
+        return repacked
     }
 
     /// The cell a character occupies. Only its base codepoint lives in the cell; a multi-scalar

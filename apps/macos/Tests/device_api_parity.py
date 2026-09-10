@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import uuid
+import zlib
 from pathlib import Path
 
 
@@ -28,7 +29,7 @@ TERMINAL_BACKGROUND_RGB = {
 }
 
 # GhosttyRenderUpdate.currentVersion. Bumped in lockstep with the Swift codec.
-RENDER_UPDATE_VERSION = 5
+RENDER_UPDATE_VERSION = 6
 
 
 def parse_args() -> argparse.Namespace:
@@ -426,10 +427,26 @@ def decode_full_frame_default_background_rgb(render_update_b64: str) -> int:
 
     The `state` Device API command always exports a full self-contained frame, so only the full-frame
     header + snapshot prologue up to the background colour is parsed here; deltas are never returned by
-    `state` and nothing past the colour is read. Mirrors the GRTU v5 wire format written by
+    `state` and nothing past the colour is read. Mirrors the GRTU v6 wire format written by
     GhosttyRenderUpdateBinaryCodec and decoded by profile_device_api.sh / e2e_mobile_latency.sh.
     """
-    data = base64.b64decode(render_update_b64)
+    blob = base64.b64decode(render_update_b64)
+    if blob[:4] != b"GRTU":
+        raise ValueError("invalid render update magic")
+    version = blob[4]
+    # The codec has no compatibility path for older versions: a layout change bumps the version byte and
+    # every decoder rejects the rest rather than misreading offsets.
+    if version != RENDER_UPDATE_VERSION:
+        raise ValueError(f"unsupported render update version {version} (expected {RENDER_UPDATE_VERSION})")
+    kind_byte = blob[5]
+    if kind_byte != 1:
+        raise ValueError(f"expected a full render frame from state, got kind {kind_byte}")
+    # The header is plaintext through the kind byte and the body's uncompressed UInt32 length; the rest
+    # is one raw DEFLATE stream (windowBits -15).
+    body_length = int.from_bytes(blob[6:10], "little")
+    data = zlib.decompress(blob[10:], -15)
+    if len(data) != body_length:
+        raise ValueError(f"render update body is {len(data)} bytes, header declared {body_length}")
     offset = 0
 
     def take(count: int) -> bytes:
@@ -440,16 +457,6 @@ def decode_full_frame_default_background_rgb(render_update_b64: str) -> int:
         offset += count
         return chunk
 
-    if take(4) != b"GRTU":
-        raise ValueError("invalid render update magic")
-    version = take(1)[0]
-    # The codec has no compatibility path for older versions: a layout change bumps the version byte and
-    # every decoder rejects the rest rather than misreading offsets.
-    if version != RENDER_UPDATE_VERSION:
-        raise ValueError(f"unsupported render update version {version} (expected {RENDER_UPDATE_VERSION})")
-    kind_byte = take(1)[0]
-    if kind_byte != 1:
-        raise ValueError(f"expected a full render frame from state, got kind {kind_byte}")
     take(2)  # reserved padding
     take(8)  # session revision
     take(8)  # base revision

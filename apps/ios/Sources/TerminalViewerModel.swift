@@ -4122,10 +4122,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             renderUpdateAttributes["render_update"] = incomingPayload.renderUpdate == nil ? "0" : "1"
             // `incomingPayload.renderUpdate` is already-decoded `Data` (`GhosttyRemoteSessionState
             // .renderUpdate`'s `.encodedData`, decoded from the wire's base64 field by `JSONDecoder` before
-            // this payload ever reaches here), so this and the event's own `count:` below are decoded
-            // render-update bytes, not the larger base64 string the wire actually carried. Recovering the
-            // wire size would mean capturing the base64 string's length before decoding, upstream of this
-            // model entirely; not added here since nothing on this path already has it cheaply in hand.
+            // this payload ever reaches here), so this and the event's own `count:` below are the codec
+            // blob's bytes: base64 undone, the DEFLATE body still compressed. That is neither the larger
+            // base64 string the wire carried nor the larger body the codec inflates to. Recovering the wire
+            // size would mean capturing the base64 string's length before decoding, upstream of this model
+            // entirely, and the inflated size lives inside the codec; neither is already in hand here, so
+            // neither is computed for a metric.
             renderUpdateAttributes["render_update_bytes"] = String(incomingPayload.renderUpdate?.count ?? 0)
             // The payloads this apply superseded report nothing of their own; this is their trace.
             renderUpdateAttributes["coalesced_applies"] = String(output.coalescedAwayCount)
