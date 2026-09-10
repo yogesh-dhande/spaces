@@ -13,7 +13,7 @@ import ghosttyvtshim
 @Suite struct GhosttyTerminalSnapshotViewportWrappedLineTests {
     private static let hostColumns = 80
     private static let viewportColumns = 49
-    private static let path = "/Users/yogesh/projects/spaces-ui-status-tabs/apps/macos/prototypes/status-tabs-command-palette/index.html"
+    private static let path = "/fixtures/projects/status-tabs/apps/macos/prototypes/status-tabs-command-palette/index.html"
 
     @Test func croppingASoftWrappedPathKeepsTheWrapBitsAndLosesTheColumnsBetweenThem() throws {
         let hostSnapshot = try softWrappedSnapshot(columns: Self.hostColumns, rows: 4, text: Self.path)

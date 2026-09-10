@@ -254,10 +254,10 @@ import XCTest
             let socketPath = "/tmp/spaces-sockets-\(getuid())/service-current.sock"
             let output = """
                 COMMAND     PID   USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
-                launchd       1 yogesh  12u  unix 0xffffffffffffffff      0t0      /tmp/spaces-sockets-\(getuid())/service-other.sock
-                SpacesTer   222 yogesh  13u  unix 0xffffffffffffffff      0t0      \(socketPath)
-                sleep       333 yogesh  14u  unix 0xffffffffffffffff      0t0      \(socketPath)
-                broken      abc yogesh  15u  unix 0xffffffffffffffff      0t0      \(socketPath)
+                launchd       1 tester  12u  unix 0xffffffffffffffff      0t0      /tmp/spaces-sockets-\(getuid())/service-other.sock
+                SpacesTer   222 tester  13u  unix 0xffffffffffffffff      0t0      \(socketPath)
+                sleep       333 tester  14u  unix 0xffffffffffffffff      0t0      \(socketPath)
+                broken      abc tester  15u  unix 0xffffffffffffffff      0t0      \(socketPath)
                 """
 
             XCTAssertEqual(TerminalService.parseSocketOwnerProcessIDs(output, socketPath: socketPath), [222, 333])

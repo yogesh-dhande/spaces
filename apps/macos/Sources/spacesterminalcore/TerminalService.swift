@@ -215,7 +215,11 @@ import Foundation
                 let executableURL = try resolveExecutableURL(profile: profile)
                 let process = Process()
                 process.executableURL = executableURL
-                process.environment = ProcessInfo.processInfo.environment
+                // The daemon has to bind where this caller polls. A test host resolves a socket root of its
+                // own (`SpacesSocketPaths`), which a spawned daemon cannot derive for itself, so the root
+                // travels with the spawn; for every real Spaces process this is the process environment
+                // unchanged.
+                process.environment = try SpacesSocketPaths.environmentPropagatingSocketRoot(ProcessInfo.processInfo.environment)
                 process.standardInput = FileHandle.nullDevice
                 process.standardOutput = FileHandle.nullDevice
                 process.standardError = FileHandle.nullDevice

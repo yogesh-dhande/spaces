@@ -245,4 +245,38 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .exited)
         XCTAssertTrue(try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty, "clients must be detached once the repair commits")
     }
+    // MARK: - Per-session socket reclamation
+
+    /// A session's sockets are unlinked when it ends, but a daemon killed between the terminal-state
+    /// write and the unlink leaves them in the shared socket root, where their hashed names can only be
+    /// derived again by this profile's own daemon (#685). Startup is where it derives them.
+    func testSocketsOfAnEndedSessionAreReclaimedEvenThoughItsRowNeedsNoRepair() throws {
+        let sessionID = "session-ended-with-sockets"
+        let paths = try seedSession(sessionID: sessionID, servicePID: 4242, state: .exited)
+        try paths.ensureDirectories()
+        XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
+        XCTAssertTrue(FileManager.default.createFile(atPath: paths.subscriptionSocketPath, contents: Data()))
+
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], isProcessAlive: { _ in false })
+
+        XCTAssertTrue(result.finalized.isEmpty, "an already-ended row has nothing to repair")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.controlSocketPath))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.subscriptionSocketPath))
+    }
+
+    /// The reclaim must never reach a session that is still being served: a live foreign pid means
+    /// another process owns those sockets and is listening on them.
+    func testSocketsOfASessionOwnedByALiveProcessAreLeftAlone() throws {
+        let sessionID = "session-live-with-sockets"
+        let paths = try seedSession(sessionID: sessionID, servicePID: 4242, state: .running)
+        try paths.ensureDirectories()
+        XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
+        XCTAssertTrue(FileManager.default.createFile(atPath: paths.subscriptionSocketPath, contents: Data()))
+
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], isProcessAlive: { _ in true })
+
+        XCTAssertTrue(result.finalized.isEmpty, "a row owned by a live process is left alone")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.controlSocketPath))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.subscriptionSocketPath))
+    }
 }
