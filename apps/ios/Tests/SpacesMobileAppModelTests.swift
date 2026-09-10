@@ -81,7 +81,7 @@
         func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { SpacesMobileFakeRequestTransport(handler: handler) }
 
         func openSessionStream(
-            request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+            request: SpacesDeviceAPIRequest, initialEventTimeout: Duration, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
             onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
         ) async throws -> SpacesDeviceAPIStreamHandle { throw SpacesDeviceAPIClientError.invalidEndpoint }
 
@@ -1054,9 +1054,7 @@
                 sessions: baseOverview.sessions, daemonStatus: baseOverview.daemonStatus)
             let client = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
-                if request.commandName == "archiveWorkspace" {
-                    throw SpacesDeviceAPIClientError.connectionClosed
-                }
+                if request.commandName == "archiveWorkspace" { throw SpacesDeviceAPIClientError.connectionClosed }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
@@ -1108,9 +1106,7 @@
         func testDeleteWorkspaceWithNoReachableOverviewKeepsTheMarkAndHoldsTheError() async {
             let settings = SpacesMobileConnectionSettings()
             let overview = makeOverview()
-            let client = SpacesDeviceAPIClient(settings: settings) { _ in
-                throw SpacesDeviceAPIClientError.connectionClosed
-            }
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in throw SpacesDeviceAPIClientError.connectionClosed }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
             model.overview = overview
 
@@ -1231,9 +1227,7 @@
         func testDeviceSwitchDuringADeferredDeleteClearsItWithoutSurfacingAnError() async {
             let settings = SpacesMobileConnectionSettings()
             let overview = makeOverview()
-            let client = SpacesDeviceAPIClient(settings: settings) { _ in
-                throw SpacesDeviceAPIClientError.connectionClosed
-            }
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in throw SpacesDeviceAPIClientError.connectionClosed }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
             model.overview = overview
 
@@ -1255,9 +1249,7 @@
             let settings = SpacesMobileConnectionSettings()
             let overview = makeOverview()
             let client = SpacesDeviceAPIClient(settings: settings) { request in
-                if request.commandName == "archiveWorkspace" {
-                    throw SpacesDeviceAPIClientError.connectionClosed
-                }
+                if request.commandName == "archiveWorkspace" { throw SpacesDeviceAPIClientError.connectionClosed }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)

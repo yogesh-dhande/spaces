@@ -43,6 +43,21 @@ final class TerminalConnectionStageTrackerTests: XCTestCase {
         XCTAssertEqual(delay, 1)
     }
 
+    /// A caller that races several redials at once reports each attempt's failure as evidence only and
+    /// paces the redials itself, so entering stage 2 repeatedly must not walk the ladder. Only
+    /// `nextRedialDelay()` advances it, and it picks up where the reported failures left it alone.
+    func testEnteringUnreachableRepeatedlyDoesNotSpendTheBackoffLadder() {
+        var tracker = TerminalConnectionStageTracker()
+        tracker.streamLost()
+        tracker.enterUnreachable()
+        tracker.enterUnreachable()
+        tracker.enterUnreachable()
+        XCTAssertEqual(tracker.stage, .unreachable)
+        XCTAssertTrue(tracker.isBannerVisible)
+        XCTAssertEqual(tracker.nextRedialDelay(), 1)
+        XCTAssertEqual(tracker.nextRedialDelay(), 2)
+    }
+
     func testRepeatedAttemptEndedUnreachableFollowsTheBackoffLadder() {
         var tracker = TerminalConnectionStageTracker()
         tracker.streamLost()

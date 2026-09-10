@@ -156,8 +156,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
     private var takeoverAttemptState = TerminalViewerTakeoverAttemptState.none {
         didSet {
-            let wasAwaiting = oldValue == .awaitingConfirmation
-                || oldValue == .confirmationPendingAfterRecoveryClearedBusy
+            let wasAwaiting = oldValue == .awaitingConfirmation || oldValue == .confirmationPendingAfterRecoveryClearedBusy
             guard isAwaitingTakeoverConfirmation != wasAwaiting else { return }
             trace("awaiting_takeover_confirmation value=\(isAwaitingTakeoverConfirmation ? 1 : 0)")
         }
@@ -176,9 +175,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
     private var ownershipSyncState = TerminalViewerOwnershipSyncState.idle {
         didSet {
-            if isSynchronizingOwnership != (oldValue == .running) {
-                trace("ownership_sync active=\(isSynchronizingOwnership ? 1 : 0)")
-            }
+            if isSynchronizingOwnership != (oldValue == .running) { trace("ownership_sync active=\(isSynchronizingOwnership ? 1 : 0)") }
             let wasScheduled = oldValue == .scheduled || oldValue == .running
             if isOwnershipSynchronizationScheduled != wasScheduled {
                 trace("ownership_sync scheduled=\(isOwnershipSynchronizationScheduled ? 1 : 0)")
@@ -235,8 +232,31 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// is not about reopening) gets an empty store of its own and behaves exactly as a first open does.
     @ObservationIgnored private let retainedScreens: TerminalRetainedScreenStore
     private var e2eConfig: SpacesMobileE2EConfig { .shared }
-    private var streamHandle: SpacesDeviceAPIStreamHandle?
-    private var reconnectTask: Task<Void, Never>?
+    /// Every connect attempt this viewer currently considers live, keyed by the attempt generation that
+    /// identifies it. Membership is what `isCurrentConnect` tests, so retiring an attempt (removing it
+    /// here) is what makes its stream's callbacks stale on arrival.
+    ///
+    /// Ordinarily this holds at most one attempt. Stage 2 ("Device unreachable") is the exception: the
+    /// backoff ladder's tick starts a fresh dial alongside a stale one rather than waiting out its
+    /// transport budget, so up to `maximumConcurrentUnreachableAttempts` race at once and the first to
+    /// deliver a frame wins (see `armUnreachableRedialTick` and `registerLiveStreamFrame`).
+    private var connectAttempts: [UInt64: TerminalConnectAttempt] = [:]
+    /// The attempt whose stream the viewer is currently reading: the most recent one to install a
+    /// handle. During a stage 2 race no attempt has proven itself yet, so this is "the newest installed",
+    /// not "the winner"; the winner is settled by the first frame, which retires every other attempt and
+    /// leaves exactly one attempt here.
+    private var streamAttemptGeneration: UInt64?
+    /// Bumped by `registerLiveStreamFrame` for every frame delivered on an attempt that is still live.
+    /// Read purely as a change detector: a failure handler suspended in a state read compares it across
+    /// its own suspension (see `isConnectFailureOvertaken`), since any frame at all on a live stream is
+    /// proof the connection came up while the handler was parked.
+    private var liveStreamFrameCount: UInt64 = 0
+    /// The ended-session state load `start()` and the ended-state recovery paths run instead of a dial.
+    /// Separate from `connectAttempts` because it opens no stream and has no generation of its own.
+    private var endedStateTask: Task<Void, Never>?
+    /// The stage 2 redial cadence: one sleep on the current ladder rung, then a fresh dial, then re-armed
+    /// on the next rung. Non-nil exactly while the tracker is `.unreachable`.
+    private var unreachableRedialTask: Task<Void, Never>?
     private var reconnectAttemptGeneration: UInt64 = 0
 
     // MARK: Connection banner
@@ -267,33 +287,19 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// The single in-flight ping-corroboration probe for a timed-out input send (see
     /// `startInputTimeoutCorroborationProbe`). At most one runs at a time.
     private var inputTimeoutCorroborationProbeTask: Task<Void, Never>?
+    /// The attempt `streamAttemptGeneration` names, if it is still live.
+    private var currentStreamAttempt: TerminalConnectAttempt? { streamAttemptGeneration.flatMap { connectAttempts[$0] } }
+    /// The live stream this viewer is reading, i.e. `currentStreamAttempt`'s handle.
+    private var streamHandle: SpacesDeviceAPIStreamHandle? { currentStreamAttempt?.handle }
     /// The address `streamHandle`'s live stream actually connected to (see
-    /// `SpacesDeviceAPIStreamHandle.host`), captured alongside `streamHandle` itself. `nil` for a
-    /// backend with no host concept (Demo Mode) or before any stream has connected; in either case
-    /// `startInputTimeoutCorroborationProbe` has nothing to pin the probe to and skips it.
-    private var streamConnectedHost: String?
-    /// Whether the current `streamHandle` has ever delivered a frame (see `registerLiveStreamFrame`).
-    /// Reset to `false` whenever a new handle is installed (`connect`), so `handleDisconnect` can tell a
-    /// redial that never dialed successfully (this stays `false`) apart from a live stream that dropped
-    /// after delivering frames (this is `true`): only the former is stage 2 evidence when combined with
-    /// `SpacesDeviceAPIStreamDisconnect.dialExhaustedAllCandidates`, since the daemon sends an initial
-    /// state event on every successful subscribe, so a stream that dialed successfully always delivers a
-    /// frame promptly.
-    private var currentStreamDeliveredFrame = false
-    /// `stream_first_frame`'s elapsed time when the frame beat `connect()`'s handle install (see
-    /// `registerLiveStreamFrame`); the event is emitted once the handle names the host it dialed.
-    private var firstFrameElapsedMSAwaitingHost: Int?
+    /// `SpacesDeviceAPIStreamHandle.host`). `nil` for a backend with no host concept (Demo Mode) or
+    /// before any stream has connected; in either case `startInputTimeoutCorroborationProbe` has nothing
+    /// to pin the probe to and skips it.
+    private var streamConnectedHost: String? { currentStreamAttempt?.connectedHost }
     /// Uptime anchor for this open's `terminal_open_begin`, consumed by `terminal_first_paint`'s
     /// `elapsedMS`. Uptime rather than wall-clock so a device sleep spanning the open cannot inflate the
     /// measured first-paint latency. Set at the top of `start()`.
     private var openBeginUptimeNanoseconds: UInt64?
-    /// Uptime anchor and reconnect metadata for the connect attempt currently in flight, set at the top of
-    /// `connect()`. Feeds `stream_first_frame` (in `registerLiveStreamFrame`), the proven-connected moment
-    /// for this attempt, and `stream_connect_end`'s failure branch in `handleConnectError`, which has no
-    /// access to `connect()`'s own locals, unlike `connect()` itself.
-    private var connectAttemptBeginUptimeNanoseconds: UInt64?
-    private var connectAttemptNumber: UInt64 = 0
-    private var connectAttemptIsSilent = false
     /// Runs `battery_sample` on a 60-second cadence while this viewer's detail route is on screen. Started
     /// in `start()`, cancelled in `beginStop()`; `nil` whenever the performance log is disabled, so a
     /// production run without `SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH`/the DEBUG default configured
@@ -327,6 +333,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// actually armed with (e.g. distinguishing the stage 2 ladder's first rung from its second) without
     /// a seam that lets it drive the delay itself.
     private(set) var lastScheduledReconnectDelayForTesting: Duration?
+    /// How many connect attempts are live right now. Stage 2 races several at once, so a test that has to
+    /// prove a teardown actually retired all of them cannot infer it from the stream cancel count alone:
+    /// an attempt that never installed a handle has nothing to cancel.
+    var liveConnectAttemptCountForTesting: Int { connectAttempts.count }
     private var bufferedInputText = ""
     private var bufferedInputFlushTask: Task<Void, Never>?
     private let inputSendQueue = TerminalInputSerialQueue()
@@ -516,6 +526,28 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// so composer image steps use a larger timeout than `inputRequestTimeout`.
     private static let pasteImageRequestTimeout: Duration = .seconds(30)
     private static let stateRequestTimeout: Duration = .seconds(12)
+    /// The dial-to-first-payload budget a cold open's subscription gets (see
+    /// `SpacesDeviceAPIClient.subscribe`). Sized for a live but slow link: a poor cellular link's TCP
+    /// plus TLS handshake and the daemon's first state event have to fit, and the open has nothing else
+    /// to fall back on.
+    private static let streamInitialEventTimeout: Duration = .seconds(12)
+    /// The same budget for a redial made while the device is already reported unreachable. Sized for a
+    /// link that has already failed once: the point of the budget here is to stop a dead dial from
+    /// occupying one of the two concurrent attempt slots, not to give a struggling link every chance, and
+    /// a fresh dial is started on the ladder tick regardless. Four seconds still covers a poor link's
+    /// handshake and first payload (measured round trips on the constrained profile are well under a
+    /// second), while sitting between the ladder's second and third rungs, so a dial that is going
+    /// nowhere is gone before the third tick needs its slot.
+    private static let unreachableRedialStreamInitialEventTimeout: Duration = .seconds(4)
+    /// The bootstrap read's timeout for a redial made while the device is already reported unreachable,
+    /// for the same reason and at the same size as the stream budget above. The read shares this
+    /// viewer's serial command channel, so an orphaned one holds the channel (and therefore the next
+    /// attempt's own bootstrap read) for its full timeout.
+    private static let unreachableRedialStateRequestTimeout: Duration = .seconds(4)
+    /// How many stage 2 dials may be in flight at once: the stale attempt and the fresh one the ladder
+    /// tick started. A third tick retires the oldest rather than letting dials pile up against a device
+    /// that is not answering.
+    private static let maximumConcurrentUnreachableAttempts = 2
     private static let ownerRecoveryGraceInterval: TimeInterval = 2
     private static let silentReconnectDelay: Duration = .milliseconds(150)
     private static let viewportSyncWaitStep: Duration = .milliseconds(50)
@@ -730,7 +762,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     var snapshotRows: Int? { latestState?.renderSnapshot?.rows }
 
     func start() {
-        guard streamHandle == nil, reconnectTask == nil else { return }
+        guard connectAttempts.isEmpty, endedStateTask == nil else { return }
         // The earliest point in a genuine open with the session id already known: `start()` runs exactly
         // once per open (guarded above, and re-armed by `beginStop()` on a retained detail's next open),
         // synchronously from `TerminalDetailView`'s `.task`. Uptime, not wall-clock, so `terminal_first_paint`'s
@@ -754,7 +786,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         hasRetriedEndedStateAfterStreamClose = false
         trace("start")
         if isEndedState {
-            reconnectTask = Task { [weak self] in await self?.loadEndedState() }
+            endedStateTask = Task { [weak self] in await self?.loadEndedState() }
             return
         }
         // A screen the app already has beats waiting for one: the retained paint goes up now, and the hold
@@ -891,9 +923,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         cancelOpenScreenHoldTimers()
         let released = openScreenHold.end()
         trace("open_screen_hold_release reason=\(reason)")
-        if released, reason != "stop" {
-            logFirstPaint(holdReleasedBy: reason, columns: viewportSize?.columns, rows: viewportSize?.rows)
-        }
+        if released, reason != "stop" { logFirstPaint(holdReleasedBy: reason, columns: viewportSize?.columns, rows: viewportSize?.rows) }
     }
 
     /// Paints the screen the first-paint gate suppressed, once the hold that suppressed it is over.
@@ -1012,8 +1042,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             let appliedGenerationBeforeRead = self.appliedStateCount
             do {
                 heartbeatState = try await self.bridgeClient.heartbeat(
-                    sessionID: self.session.id, clientID: self.remoteClient.id, heldFrame: self.heldFrameIdentity,
-                    timeout: Self.stateRequestTimeout, commandChannel: self.commandChannel)
+                    sessionID: self.session.id, clientID: self.remoteClient.id, heldFrame: self.heldFrameIdentity, timeout: Self.stateRequestTimeout,
+                    commandChannel: self.commandChannel)
                 self.trace("foreground_resume_heartbeat_success cycle=\(resumeCycle) state=\(heartbeatState == nil ? 0 : 1)")
             } catch {
                 self.logForegroundResumeStateReadFailure(startedAt: readStartedAt)
@@ -1043,8 +1073,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             let refreshOutcome: StateRefreshOutcome
             if needsFollowUpStateRead {
                 refreshOutcome = await self.refreshLatestStateOutcome(
-                    timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: Self.foregroundResumeStateReason,
-                    lifecycle: lifecycle, clientID: clientID, isCurrent: isCurrent)
+                    timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: Self.foregroundResumeStateReason, lifecycle: lifecycle,
+                    clientID: clientID, isCurrent: isCurrent)
             } else if let heartbeatState {
                 refreshOutcome = await self.applyOutOfBandState(
                     heartbeatState, reason: Self.foregroundResumeStateReason, startedAt: readStartedAt,
@@ -1138,10 +1168,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         sceneState = isSceneActive ? .active(resume: .none) : .backgrounded(resume: .none)
         hasConfirmedOwnerInputReadiness = false
         isInputSurfaceReady = false
-        reconnectTask?.cancel()
-        reconnectTask = nil
-        streamHandle?.cancel()
-        streamHandle = nil
+        cancelAllConnectAttempts()
+        endedStateTask?.cancel()
+        endedStateTask = nil
         // A stop is the end of this run's lifecycle, not evidence about the connection: leaving the
         // banner and stage 2 ladder stale would show a retained detail's next start() picking up mid
         // outage, immediately displaying a banner and skipping straight to backoff, for a session that
@@ -1211,13 +1240,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // it.
             if isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) {
                 connectionState = .idle
-                reconnectTask = nil
+                endedStateTask = nil
             }
         }
         trace("ended_state_load")
         // A successful load applies the ended state through `applyReducedState`'s `isEndedState` block,
         // which clears the outage banner itself; nothing further is needed here.
-        await refreshLatestState(timeout: Self.stateRequestTimeout, ignoreTransientTimeout: false, reason: "ended_initial", lifecycle: lifecycle, clientID: clientID)
+        await refreshLatestState(
+            timeout: Self.stateRequestTimeout, ignoreTransientTimeout: false, reason: "ended_initial", lifecycle: lifecycle, clientID: clientID)
     }
 
     private var renderModeValue: TerminalViewerRenderMode {
@@ -1249,7 +1279,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // the computed property — this defer never resolves that component itself, it is left exactly
         // as whichever branch below (or the early guards above, if none ran) already settled it.
         defer {
-            let isStillCurrentAttempt = isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) && (automaticContext.map(isCurrentAutomaticTakeover) ?? true)
+            let isStillCurrentAttempt =
+                isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) && (automaticContext.map(isCurrentAutomaticTakeover) ?? true)
             takeoverAttemptState = TerminalViewerTakeoverAttemptState(
                 isBusy: isStillCurrentAttempt ? false : isBusy, isAwaitingTakeoverConfirmation: isAwaitingTakeoverConfirmation)
         }
@@ -2231,24 +2262,37 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
-    /// Any frame at all on a live stream is proof the connection is up, called from the stream's
-    /// `onEvent` closure for every payload, not just the first after a loss. The perf event fires only the
-    /// first time for this handle (`currentStreamDeliveredFrame` is reset to `false` for every new handle
-    /// in `connect()`), which is what makes it `stream_first_frame` rather than a per-payload event.
-    private func registerLiveStreamFrame() {
-        if !currentStreamDeliveredFrame {
+    /// Any frame at all on `generation`'s stream is proof that attempt's connection is up, called from
+    /// the stream's `onEvent` closure for every payload, not just the first after a loss. The perf event
+    /// fires only the first time for this attempt, which is what makes it `stream_first_frame` rather
+    /// than a per-payload event.
+    ///
+    /// This is also where a stage 2 race is decided: the first attempt to deliver a frame is the one that
+    /// actually reached the device, so it becomes the viewer's stream and every other live attempt is
+    /// retired and cancelled here, synchronously, before the payload behind this call reaches the
+    /// reduction pipeline. A loser therefore contributes nothing after this point: its later payloads and
+    /// its disconnect both fail `isCurrentConnect` on arrival.
+    private func registerLiveStreamFrame(for generation: UInt64) {
+        guard let attempt = connectAttempts[generation] else { return }
+        // Only a live attempt's frame counts, which is why this sits below the membership guard: a
+        // retired attempt's late frame proves nothing and must not make a suspended failure handler
+        // believe it was overtaken.
+        liveStreamFrameCount &+= 1
+        if !attempt.deliveredFrame {
             // The very first frame can arrive on this actor before `connect()` resumes from `subscribe`
             // and installs the handle that names the dialed host. The elapsed time is taken here, at the
             // frame; the event waits for the handle (`connect()` emits it), since guessing the host would
             // mislabel a failover to a secondary address in the handoff report.
-            let elapsedMS = DevicePerformanceLog.elapsedMS(sinceUptimeNanoseconds: connectAttemptBeginUptimeNanoseconds)
-            if let host = streamConnectedHost {
+            let elapsedMS = DevicePerformanceLog.elapsedMS(sinceUptimeNanoseconds: attempt.beginUptimeNanoseconds)
+            if let host = attempt.connectedHost {
                 logPerformanceEvent(name: "stream_first_frame", elapsedMS: elapsedMS, attributes: ["host": host])
             } else {
-                firstFrameElapsedMSAwaitingHost = elapsedMS
+                attempt.firstFrameElapsedMSAwaitingHost = elapsedMS
             }
         }
-        currentStreamDeliveredFrame = true
+        attempt.deliveredFrame = true
+        streamAttemptGeneration = generation
+        for losingGeneration in Array(connectAttempts.keys) where losingGeneration != generation { retireConnectAttempt(losingGeneration) }
         clearConnectionOutage()
     }
 
@@ -2268,6 +2312,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         connectionGraceTask = nil
         inputTimeoutCorroborationProbeTask?.cancel()
         inputTimeoutCorroborationProbeTask = nil
+        cancelUnreachableRedialTick()
         connectionStageTracker.frameReceived()
         syncConnectionStageObservables()
     }
@@ -2302,15 +2347,66 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     /// A reconnect attempt exhausted every known candidate address: hard evidence the device is
     /// actually unreachable, not merely a slow or momentarily dead link. Jumps straight to stage 2 with
-    /// no grace period (see `TerminalConnectionStageTracker.attemptEndedUnreachable()`) and returns the
-    /// backoff delay the next automatic redial must wait, which supersedes the model's fixed reconnect
-    /// cadence for this one attempt.
-    private func registerUnreachableConnectionAttempt() -> TimeInterval {
+    /// no grace period (see `TerminalConnectionStageTracker.enterUnreachable()`) and hands the redial
+    /// cadence below the job of pacing every attempt from here on.
+    ///
+    /// Deliberately does not advance the backoff ladder: while stage 2 persists several attempts can be
+    /// in flight at once, so a failing attempt is not a tick. `armUnreachableRedialTick()` is the only
+    /// thing that spends a rung, which is what keeps the redial cadence the ladder's, rather than
+    /// whatever pace the failures happen to arrive at.
+    private func registerUnreachableConnectionAttempt() {
         connectionGraceTask?.cancel()
         connectionGraceTask = nil
-        let delay = connectionStageTracker.attemptEndedUnreachable()
+        connectionStageTracker.enterUnreachable()
         syncConnectionStageObservables()
-        return delay
+        armUnreachableRedialTick()
+    }
+
+    /// Arms the stage 2 redial cadence on the ladder's next rung, unless it is already armed.
+    ///
+    /// Stage 2 means every candidate address has already refused a dial, so an attempt still in flight
+    /// when the rung elapses is not progress worth waiting for: it is a dial against an address that was
+    /// down when it started, and the link may well have come back since. The tick therefore starts a
+    /// fresh dial alongside it rather than superseding it, and whichever one delivers a frame first wins
+    /// (`registerLiveStreamFrame`). Waiting for the stale attempt's own transport budget instead is what
+    /// made a phone that regained its link take a fixed ten seconds to paint (#676).
+    ///
+    /// Idempotent, and the only place the ladder advances while stage 2 persists: a failing attempt
+    /// re-enters `registerUnreachableConnectionAttempt()` and finds the tick already armed, so it can
+    /// neither spend a rung nor push the pending redial further out.
+    private func armUnreachableRedialTick() {
+        guard connectionStage == .unreachable, !isStopping, !isEndedState, !isSessionUnavailable else { return }
+        guard unreachableRedialTask == nil else { return }
+        let delay = connectionStageTracker.nextRedialDelay()
+        lastScheduledReconnectDelayForTesting = .seconds(delay)
+        trace("arm_unreachable_redial delay_ms=\(Self.traceDurationMilliseconds(.seconds(delay)))")
+        unreachableRedialTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self else { return }
+            self.unreachableRedialTask = nil
+            self.startConcurrentUnreachableRedial()
+            self.armUnreachableRedialTick()
+        }
+    }
+
+    private func cancelUnreachableRedialTick() {
+        unreachableRedialTask?.cancel()
+        unreachableRedialTask = nil
+    }
+
+    /// The stage 2 tick's redial: a fresh dial that leaves whatever is still in flight running, capped at
+    /// `maximumConcurrentUnreachableAttempts` live attempts. The cap retires the oldest attempt, which is
+    /// the one with the least chance left of answering and the one whose stream handle would otherwise
+    /// never be cancelled (`SpacesDeviceAPIStreamHandle` has no deinit cancellation).
+    private func startConcurrentUnreachableRedial() {
+        // `isSessionUnavailable` is re-checked here as well as on the tick: `markSessionUnavailable` can
+        // land between this tick's sleep ending and its redial, and a dial started then would reinstate
+        // the very cadence that call just cancelled.
+        guard !isStopping, !isEndedState, !isSessionUnavailable else { return }
+        while connectAttempts.count >= Self.maximumConcurrentUnreachableAttempts, let oldest = connectAttempts.keys.min() {
+            retireConnectAttempt(oldest)
+        }
+        beginConnectAttempt(after: .zero)
     }
 
     private static func isAllCandidatesUnreachableError(_ error: Error) -> Bool {
@@ -2329,41 +2425,32 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         trace("retry_connection")
         connectionStageTracker.retryRequested()
         syncConnectionStageObservables()
-        reconnectTask?.cancel()
-        reconnectTask = nil
-        // Retired here, before the cancel below, rather than left for `scheduleReconnect` to bump later:
-        // `streamHandle?.cancel()` can deliver its own `onDisconnect(nil)` on this actor before that
-        // later bump runs, and while the generation still matched, `isCurrentConnect` would pass and
-        // `handleDisconnect`'s clean-close branch would spend the ladder rung `retryRequested()` just
-        // reset above (it calls `registerUnreachableConnectionAttempt()` while `.unreachable`), pacing a
-        // failed Retry's next attempt at 2s instead of the promised 1s. Bumping here first makes the
-        // cancel's callback stale on arrival no matter when it fires: `isCurrentConnect` reads the
-        // already-retired generation and the callback never reaches `handleDisconnect`.
-        // `scheduleReconnect` below bumps the generation again once the redial is actually scheduled;
-        // that second bump is harmless, it only retires a generation already retired here.
-        reconnectAttemptGeneration &+= 1
-        // An automatic redial can already have installed a stream by the time Retry is tapped: stage 2
-        // has no timer gate on `connect()` itself, only on entering the stage, so a redial can dial
-        // successfully and sit there having delivered no frame yet while `connectionStage` is still
-        // `.unreachable`. Cancel and drop that handle here rather than leaving it running: the
-        // generation bump above already makes the orphaned stream's frames discarded, but
-        // `SpacesDeviceAPIStreamHandle` has no deinit cancellation, so without this the underlying
-        // connection is never actually torn down and every Retry tap leaks another one. This does not
-        // route through `tearDownStream`/`handleDisconnect`: the stage is already `.unreachable` and
-        // Retry, not the disconnect path, owns the redial that follows.
-        streamHandle?.cancel()
-        streamHandle = nil
-        streamConnectedHost = nil
+        // The pending tick is paced on the ladder Retry just reset, so it is cancelled rather than left
+        // to fire; the redial below re-arms it from the first rung once the reset is actually in effect.
+        cancelUnreachableRedialTick()
+        // Every attempt still in flight is retired here, synchronously, before anything else: removing an
+        // attempt from `connectAttempts` is what makes its callbacks stale (`isCurrentConnect` tests
+        // membership), so a handle cancelled below cannot deliver an `onDisconnect(nil)` that reaches
+        // `handleDisconnect`'s clean-close branch and, while already `.unreachable`, spends the very rung
+        // `retryRequested()` just reset -- which would pace a failed Retry's next attempt at 2s instead of
+        // the promised 1s. Cancelling the handles matters on its own too: an automatic redial can already
+        // have installed a stream (stage 2 gates entering the stage, not `connect()` itself), and
+        // `SpacesDeviceAPIStreamHandle` has no deinit cancellation, so without this every Retry tap would
+        // leak another live connection.
+        cancelAllConnectAttempts()
         replaceCommandChannel()
         // The reset and the redial must happen in that order inside one task: `resetEndpointResolution()`
         // is what clears the resolver's cached winner, and `scheduleReconnect` is what starts the redial
         // that reads it (`nextStreamHost()`). Firing them as two independent unstructured tasks let the
         // redial's `nextStreamHost()` run before the reset actually cleared the cache, so Retry could
-        // silently redial the very address it was meant to move on from.
+        // silently redial the very address it was meant to move on from. Re-arming the tick trails the
+        // redial for the same reason it exists at all: the cadence must keep running even if this dial
+        // hangs, and arming it here rather than above keeps the first rung measured from the redial.
         Task { [weak self] in
             guard let self else { return }
             await self.bridgeClient.resetEndpointResolution()
             self.scheduleReconnect(after: .zero)
+            self.armUnreachableRedialTick()
         }
     }
 
@@ -2427,25 +2514,62 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// `SpacesDeviceAPIClientError.allCandidatesUnreachable` it caught, so `handleDisconnect`'s
     /// `isAllCandidatesUnreachableError` check recognizes it as stage 2 evidence).
     private func tearDownStream(reportingLoss error: Error) async {
-        streamHandle?.cancel()
-        streamConnectedHost = nil
-        await handleDisconnect(SpacesDeviceAPIStreamDisconnect(error: error))
+        // Addressed at the attempt whose stream this is, not at "the model's stream": in stage 2 several
+        // attempts can be live and only this one is being torn down.
+        guard let generation = streamAttemptGeneration, let attempt = connectAttempts[generation] else { return }
+        attempt.handle?.cancel()
+        await handleDisconnect(SpacesDeviceAPIStreamDisconnect(error: error), generation: generation)
     }
 
+    /// Drops `generation` from the live set, so everything it still has in flight is stale on arrival
+    /// (`isCurrentConnect` tests membership), and cancels the dial task still running it. Leaves the
+    /// stream handle alone: this is for an attempt whose stream has already ended on its own, where
+    /// there is nothing left to cancel.
+    private func dropConnectAttempt(_ generation: UInt64) {
+        guard let attempt = connectAttempts.removeValue(forKey: generation) else { return }
+        attempt.task?.cancel()
+        if streamAttemptGeneration == generation { streamAttemptGeneration = nil }
+    }
+
+    /// Drops `generation` and cancels the stream it opened. For an attempt being taken out of service
+    /// while its stream may still be live: a loser of the stage 2 race, the oldest attempt when the
+    /// concurrency cap is reached, or any teardown. `SpacesDeviceAPIStreamHandle` has no deinit
+    /// cancellation, so an attempt dropped without this leaks its connection. Never routes through
+    /// `handleDisconnect`, so retiring an attempt reports nothing and paces nothing.
+    private func retireConnectAttempt(_ generation: UInt64) {
+        let handle = connectAttempts[generation]?.handle
+        dropConnectAttempt(generation)
+        handle?.cancel()
+    }
+
+    private func cancelAllConnectAttempts() { for generation in Array(connectAttempts.keys) { retireConnectAttempt(generation) } }
+
+    /// Starts a fresh attempt after `delay`, retiring everything currently in flight. This is the
+    /// ordinary redial: outside stage 2 exactly one attempt runs at a time, so a new one supersedes
+    /// whatever is still running. The stage 2 ladder tick uses `startConcurrentUnreachableRedial()`
+    /// instead, which keeps the in-flight attempt and races it.
     private func scheduleReconnect(after delay: Duration) {
         guard !isStopping else { return }
         guard !isEndedState else { return }
+        lastScheduledReconnectDelayForTesting = delay
+        cancelAllConnectAttempts()
+        beginConnectAttempt(after: delay)
+    }
+
+    private func beginConnectAttempt(after delay: Duration) {
         reconnectAttemptGeneration &+= 1
-        let reconnectAttempt = reconnectAttemptGeneration
+        let generation = reconnectAttemptGeneration
         let lifecycle = viewerAttachmentLifecycle
         let clientID = remoteClient.id
-        lastScheduledReconnectDelayForTesting = delay
-        trace("schedule_reconnect delay_ms=\(Self.traceDurationMilliseconds(delay)) silent=\(shouldReconnectSilently ? 1 : 0)")
-        reconnectTask?.cancel()
-        reconnectTask = Task { [weak self] in
+        trace(
+            "schedule_reconnect delay_ms=\(Self.traceDurationMilliseconds(delay)) silent=\(shouldReconnectSilently ? 1 : 0) live=\(connectAttempts.count + 1)"
+        )
+        let attempt = TerminalConnectAttempt(generation: generation)
+        connectAttempts[generation] = attempt
+        attempt.task = Task { [weak self] in
             if delay > .zero { try? await Task.sleep(for: delay) }
             guard !Task.isCancelled else { return }
-            await self?.connect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt)
+            await self?.connect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: generation)
         }
     }
 
@@ -2456,12 +2580,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             return
         }
 
+        guard let attempt = connectAttempts[reconnectAttempt] else { return }
         let reconnectSilently = shouldReconnectSilently
-        // Anchors this attempt's timing events. `handleConnectError` has no parameters of its own to carry
-        // `reconnectAttempt`/`reconnectSilently` forward, so it reads these back off the model instead.
-        connectAttemptBeginUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
-        connectAttemptNumber = reconnectAttempt
-        connectAttemptIsSilent = reconnectSilently
+        // Anchors this attempt's timing events. They live on the attempt, not on the model: a losing
+        // stage 2 dial must report its own numbers when it ends, not the winner's.
+        attempt.beginUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        attempt.isSilent = reconnectSilently
         trace("connect_begin silent=\(reconnectSilently ? 1 : 0) attach_before_subscribe=\(shouldAttachBeforeSubscribing ? 1 : 0)")
         connectionState = reconnectSilently ? .idle : .connecting
         do {
@@ -2492,28 +2616,22 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // It is a structured child (`async let`), not a detached task, because the read must end when
             // the attempt that asked for it ends. It is cancelled with the enclosing task whenever this
             // attempt is torn down (`beginStop`, `scheduleReconnect` and the stream-disconnect path all
-            // cancel `reconnectTask`), and a path out of this `do` that never reaches the await below
-            // (the subscribe throwing, this attempt being superseded) cancels and awaits it as the scope
+            // cancel the attempt's task), and a path out of this `do` that never reaches the await below
+            // (the subscribe throwing, this attempt being retired) cancels and awaits it as the scope
             // exits. What makes that load-bearing is the command channel: the read holds this viewer's
             // channel, which serves one request at a time, and a cancelled caller gives its turn up
-            // immediately. An orphaned read would instead hold the channel for its full 12 s timeout,
-            // with the dismissal detach (`detachForStop`, same channel) and the next attempt's own
-            // bootstrap read queued behind it.
+            // immediately. An orphaned read would instead hold the channel for its full timeout, with the
+            // dismissal detach (`detachForStop`, same channel) and the next attempt's own bootstrap read
+            // queued behind it.
             async let bootstrapRead = readStateForConnectBootstrap(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt)
-            // Reset before subscribing, not after: the onEvent closure below can start delivering frames
-            // on this actor while this call is still suspended awaiting the handle, so an assignment placed
-            // after `subscribe` returns could stomp a delivery that already landed for this same attempt.
-            currentStreamDeliveredFrame = false
-            firstFrameElapsedMSAwaitingHost = nil
-            // Also the host: a retained detail's stop leaves the previous stream's host behind, and a first
-            // frame that beats this attempt's handle must not be labeled with it.
-            streamConnectedHost = nil
-            let handle = try await bridgeClient.subscribe(sessionID: session.id, clientID: clientID) { [weak self] payload in
+            let handle = try await bridgeClient.subscribe(sessionID: session.id, clientID: clientID, initialEventTimeout: streamInitialEventTimeout) {
+                [weak self] payload in
                 guard let self else { return }
                 guard self.isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
                 // Any frame at all on a live stream is proof the connection is up, regardless of what it
-                // contains; settle the banner before doing anything with the payload itself.
-                self.registerLiveStreamFrame()
+                // contains; settle the banner (and, in stage 2, the race) before doing anything with the
+                // payload itself.
+                self.registerLiveStreamFrame(for: reconnectAttempt)
                 // Hand off and return. This is the session's flush rate — up to a few hundred payloads a
                 // second under a streaming agent — and everything expensive about a payload (decoding the
                 // render update, applying it to the baseline, re-encoding the full frame) happens in the
@@ -2524,17 +2642,18 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                     guard let self, self.isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else {
                         return
                     }
-                    await self.handleDisconnect(disconnect)
+                    await self.handleDisconnect(disconnect, generation: reconnectAttempt)
                 }
             }
             guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else {
                 handle.cancel()
                 return
             }
-            streamHandle = handle
-            streamConnectedHost = handle.host
-            if let elapsedMS = firstFrameElapsedMSAwaitingHost {
-                firstFrameElapsedMSAwaitingHost = nil
+            attempt.handle = handle
+            attempt.connectedHost = handle.host
+            streamAttemptGeneration = reconnectAttempt
+            if let elapsedMS = attempt.firstFrameElapsedMSAwaitingHost {
+                attempt.firstFrameElapsedMSAwaitingHost = nil
                 logPerformanceEvent(name: "stream_first_frame", elapsedMS: elapsedMS, attributes: ["host": handle.host ?? ""])
             }
             errorMessage = nil
@@ -2547,25 +2666,36 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // where it was handled when the read was issued at this point.
             let refreshedState = await bootstrapRead
             guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
-            // Retired only once the attempt is actually over, which is here and not at the subscribe
-            // above: while the bootstrap read is still in flight this task is the attempt, and
-            // `reconnectTask` is the only handle to it. Every teardown (`beginStop`, `scheduleReconnect`,
-            // `retryConnection`, the ended-state transition) cancels through that handle, and clearing it
-            // early would leave the read running with nothing able to stop it. The guard above is what
-            // keeps this from retiring a newer attempt's handle: a superseded attempt returns first.
-            reconnectTask = nil
+            // Dropped only once the attempt's own work is actually over, which is here and not at the
+            // subscribe above: while the bootstrap read is still in flight this task is the attempt, and
+            // `attempt.task` is the only handle to it. Every teardown (`beginStop`, `scheduleReconnect`,
+            // `retryConnection`, the concurrency cap, the ended-state transition) cancels through that
+            // handle, and clearing it early would leave the read running with nothing able to stop it. The
+            // attempt itself stays in `connectAttempts`: its stream is live from here on, and membership
+            // is what lets its frames through.
+            attempt.task = nil
             // Only a non-owner settles `isConnecting` on a bootstrap that answered nothing: an owner
             // reconnects silently, so it never raised the flag in the first place.
-            if refreshedState == nil, !isOwner, !isStopping {
-                connectionState = .idle
-            }
+            if refreshedState == nil, !isOwner, !isStopping { connectionState = .idle }
         } catch {
             guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
-            reconnectTask = nil
+            // Cleared before retiring: `attempt.task` is the task running this very line, and
+            // `retireConnectAttempt` cancels whatever it finds there. Retiring is what makes this dead
+            // attempt's late callbacks stale, and it has to happen before `handleConnectError` schedules
+            // anything, or the schedule's own teardown would find this attempt still listed.
+            attempt.task = nil
+            retireConnectAttempt(reconnectAttempt)
             connectionState = .idle
             trace("connect_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
-            await handleConnectError(error)
+            await handleConnectError(error, attempt: attempt)
         }
+    }
+
+    /// The dial-to-first-payload budget this attempt's subscription gets. A redial made while the device
+    /// is already reported unreachable takes the short one: the ladder tick will start a fresh dial
+    /// alongside it anyway, so a dead dial only needs to be gone before it costs a concurrency slot.
+    private var streamInitialEventTimeout: Duration {
+        connectionStage == .unreachable ? Self.unreachableRedialStreamInitialEventTimeout : Self.streamInitialEventTimeout
     }
 
     /// `connect`'s bootstrap read, as one call taking only sendable values. `async let` evaluates its
@@ -2576,13 +2706,17 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         -> GhosttyRemoteSessionStatePayload?
     {
         await refreshLatestState(
-            timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, includesRenderUpdate: false, reason: "connect_bootstrap",
-            lifecycle: lifecycle, clientID: clientID,
+            timeout: connectionStage == .unreachable ? Self.unreachableRedialStateRequestTimeout : Self.stateRequestTimeout,
+            ignoreTransientTimeout: true, includesRenderUpdate: false, reason: "connect_bootstrap", lifecycle: lifecycle, clientID: clientID,
             isCurrent: { self.isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) })
     }
 
+    /// Whether `reconnectAttempt` is still one of this viewer's live connect attempts. Membership in
+    /// `connectAttempts`, not equality against a single current generation: stage 2 runs two attempts at
+    /// once and both are current until one of them delivers a frame. Retiring an attempt is therefore
+    /// what makes everything it still has in flight stale on arrival.
     private func isCurrentConnect(lifecycle: UInt64, clientID: String, reconnectAttempt: UInt64) -> Bool {
-        !isStopping && viewerAttachmentLifecycle == lifecycle && remoteClient.id == clientID && reconnectAttemptGeneration == reconnectAttempt
+        !isStopping && viewerAttachmentLifecycle == lifecycle && remoteClient.id == clientID && connectAttempts[reconnectAttempt] != nil
     }
 
     private func isCurrentStateRefresh(lifecycle: UInt64, clientID: String) -> Bool {
@@ -2684,8 +2818,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             }
             if handleAuthenticationFailure(error) { return .unavailable }
             if let unavailableMessage = unavailableMessage(for: error) {
-                isSessionUnavailable = true
-                errorMessage = unavailableMessage
+                markSessionUnavailable(unavailableMessage)
                 return .unavailable
             }
             errorMessage = error.localizedDescription
@@ -2785,7 +2918,44 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             sessionID: session.id, includesRenderUpdate: includesRenderUpdate, timeout: timeout, commandChannel: commandChannel)
     }
 
-    private func handleDisconnect(_ disconnect: SpacesDeviceAPIStreamDisconnect) async {
+    /// What a connect-failure handler revalidates itself against after each of its suspension points.
+    /// Captured by `handleDisconnect` and `handleConnectError` before their first `await`.
+    ///
+    /// Neither handler can revalidate by membership (`isCurrentConnect`): both run for an attempt that
+    /// has deliberately already been taken out of `connectAttempts` (dropped by `handleDisconnect`,
+    /// retired by `connect()`'s catch), which is exactly what makes the rest of that attempt's traffic
+    /// stale. What they revalidate instead is the viewer itself and whether the connection has been
+    /// proven up since.
+    private struct ConnectFailureRevalidation {
+        let lifecycle: UInt64
+        let clientID: String
+        let liveStreamFrameCount: UInt64
+    }
+
+    private var connectFailureRevalidation: ConnectFailureRevalidation {
+        ConnectFailureRevalidation(lifecycle: viewerAttachmentLifecycle, clientID: remoteClient.id, liveStreamFrameCount: liveStreamFrameCount)
+    }
+
+    /// Whether the failure this handler is reporting has been overtaken while the handler was suspended.
+    ///
+    /// Both `handleDisconnect` and `handleConnectError` suspend across state reads (the ended-state and
+    /// launch-not-ready recoveries), and in stage 2 a second dial is racing for the whole of that
+    /// suspension: the frame that wins the race can land while this handler is parked, promoting that
+    /// dial's stream, retiring everything else and clearing the outage. A handler that resumes after
+    /// that point must schedule nothing, spend no ladder rung and move no stage -- above all it must not
+    /// reach `scheduleReconnect`, which cancels every live attempt, the winner included, tearing down
+    /// the very stream that just recovered the viewer.
+    private func isConnectFailureOvertaken(_ revalidation: ConnectFailureRevalidation) -> Bool {
+        isStopping || viewerAttachmentLifecycle != revalidation.lifecycle || remoteClient.id != revalidation.clientID
+            || liveStreamFrameCount != revalidation.liveStreamFrameCount
+    }
+
+    /// One attempt's stream ended. `generation` names it: in stage 2 several attempts can be live at
+    /// once, and everything below reads that attempt's own evidence (did it ever deliver a frame, what
+    /// did its dial conclude), never the model's idea of "the stream".
+    private func handleDisconnect(_ disconnect: SpacesDeviceAPIStreamDisconnect, generation: UInt64) async {
+        guard let attempt = connectAttempts[generation] else { return }
+        let revalidation = connectFailureRevalidation
         let dialExhaustedAllCandidates = disconnect.dialExhaustedAllCandidates
         let error = disconnect.error
         let reconnectSilently = shouldReconnectSilently
@@ -2794,24 +2964,26 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             name: "stream_disconnect",
             attributes: [
                 "error": error.map { DevicePerformanceLog.sanitized($0.localizedDescription) } ?? "clean",
-                "delivered_frame": currentStreamDeliveredFrame ? "1" : "0", "exhausted": dialExhaustedAllCandidates ? "1" : "0",
+                "delivered_frame": attempt.deliveredFrame ? "1" : "0", "exhausted": dialExhaustedAllCandidates ? "1" : "0",
             ])
         // Captured before the stream state below is cleared: this is evidence about the stream that just
         // ended, not about whatever connect() installs next. `dialExhaustedAllCandidates` in particular
-        // arrives as part of this disconnect event rather than being read off `streamHandle` or
+        // arrives as part of this disconnect event rather than being read off the attempt's handle or
         // re-queried from the resolver here: the backend that recorded the failed dial captures the
         // verdict at that moment and hands it along with the event (see `SpacesDeviceAPIStreamDisconnect`).
         // That matters for two independent reasons. First, timing: `connect()` starts the subscription
-        // before it installs the returned handle onto `streamHandle`, and both that installation and a
+        // before it installs the returned handle onto the attempt, and both that installation and a
         // fast dial failure's disconnect callback are ordinary main-actor jobs, so a failure reported
         // before the handle lands would find no handle to read a verdict from. Second, staleness: the
         // resolver behind the verdict is shared per device across every pane's stream, so another pane's
         // own redial can land between this dial's failure and a later query and self-reset the resolver's
         // failed-host set, silently erasing real "every candidate is down" evidence a later query would
         // have missed.
-        let deliveredFrame = currentStreamDeliveredFrame
-        streamHandle = nil
-        streamConnectedHost = nil
+        let deliveredFrame = attempt.deliveredFrame
+        // Dropped, not retired: this attempt's stream has already ended, so there is no live connection
+        // left to cancel, and cancelling one that ended on its own would be indistinguishable from this
+        // viewer taking a live stream out of service.
+        dropConnectAttempt(generation)
         // A probe still in flight was asking about the stream that just ended, not about whatever
         // `connect()` installs next: without cancelling it here, a probe started by stream A's input
         // timeout can outlive A, and while it is in flight `startInputTimeoutCorroborationProbe`'s
@@ -2845,10 +3017,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // authentication classification.
             if !isTransient, handleAuthenticationFailure(error) { return }
             if await retryStartingStateIfLaunchIsNotReady(error, reason: "disconnect_starting_launch_not_ready") { return }
+            if isConnectFailureOvertaken(revalidation) { return }
             if await recoverEndedStateIfLiveStreamIsMissing(error, reason: "disconnect_missing_live_stream") { return }
+            if isConnectFailureOvertaken(revalidation) { return }
             if let unavailableMessage = unavailableMessage(for: error) {
-                isSessionUnavailable = true
-                errorMessage = unavailableMessage
+                markSessionUnavailable(unavailableMessage)
                 return
             }
             if isTransient, latestState != nil {
@@ -2876,8 +3049,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 // handshake-then-stall self-heals on the very next successful connect rather than sticking.
                 let allCandidatesFailed = dialFailed && dialExhaustedAllCandidates
                 if connectionStage == .unreachable || allCandidatesFailed || Self.isAllCandidatesUnreachableError(error) {
-                    let delay = registerUnreachableConnectionAttempt()
-                    scheduleReconnect(after: .seconds(delay))
+                    // The stage 2 redial cadence owns every attempt from here on, so nothing is scheduled
+                    // for this failure alone: an attempt ending is not a tick, and a ladder rung is spent
+                    // only by `armUnreachableRedialTick()`.
+                    registerUnreachableConnectionAttempt()
                     return
                 }
                 registerTransientConnectionLoss()
@@ -2888,12 +3063,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // Once already unreachable, a clean close of a redial that delivered no frame is kept on
             // the stage 2 ladder the same way the `if let error` branch above keeps an error-carrying
             // disconnect on it: a frame would have returned the tracker to `.connected` first (see
-            // `currentStreamDeliveredFrame` above), so this can only fire for a redial, never a stream
+            // `deliveredFrame` above), so this can only fire for a redial, never a stream
             // that was actually live. Without this, `registerTransientConnectionLoss()` below is a
             // no-op while already unreachable, and the redial drops back to the fixed 150ms/1s cadence.
             if connectionStage == .unreachable {
-                let delay = registerUnreachableConnectionAttempt()
-                scheduleReconnect(after: .seconds(delay))
+                registerUnreachableConnectionAttempt()
                 return
             }
             // A clean close (e.g. the daemon restarting, or this viewer's own stream being cancelled and
@@ -2905,12 +3079,17 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         scheduleReconnect(after: reconnectSilently ? Self.silentReconnectDelay : .seconds(1))
     }
 
-    private func handleConnectError(_ error: Error) async {
+    /// A connect attempt's own request failed (as opposed to its stream ending, which is
+    /// `handleDisconnect`). `attempt` is the record that failed, already retired by the caller: it is
+    /// passed rather than looked up so this reports the failing attempt's own timing and identity even
+    /// when another attempt is still racing.
+    private func handleConnectError(_ error: Error, attempt: TerminalConnectAttempt) async {
+        let revalidation = connectFailureRevalidation
         trace("connect_error error=\(sanitizedTraceDetail(error.localizedDescription)) silent=\(shouldReconnectSilently ? 1 : 0)")
         logPerformanceEvent(
-            name: "stream_connect_end", elapsedMS: DevicePerformanceLog.elapsedMS(sinceUptimeNanoseconds: connectAttemptBeginUptimeNanoseconds),
+            name: "stream_connect_end", elapsedMS: DevicePerformanceLog.elapsedMS(sinceUptimeNanoseconds: attempt.beginUptimeNanoseconds),
             attributes: [
-                "attempt": String(connectAttemptNumber), "silent": connectAttemptIsSilent ? "1" : "0", "success": "0",
+                "attempt": String(attempt.generation), "silent": attempt.isSilent ? "1" : "0", "success": "0",
                 "error": DevicePerformanceLog.sanitized(error.localizedDescription),
             ])
         let isTransient = Self.isTransientReconnectError(error)
@@ -2918,11 +3097,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // still settling after a foreground resume is retried, not read as revocation.
         if !isTransient, handleAuthenticationFailure(error) { return }
         if await retryStartingStateIfLaunchIsNotReady(error, reason: "connect_starting_launch_not_ready") { return }
+        if isConnectFailureOvertaken(revalidation) { return }
         if await recoverStartingStateAfterTerminalStopped(error, reason: "connect_starting_terminal_stopped") { return }
+        if isConnectFailureOvertaken(revalidation) { return }
         if await recoverEndedStateIfLiveStreamIsMissing(error, reason: "connect_missing_live_stream") { return }
+        if isConnectFailureOvertaken(revalidation) { return }
         if let unavailableMessage = unavailableMessage(for: error) {
-            isSessionUnavailable = true
-            errorMessage = unavailableMessage
+            markSessionUnavailable(unavailableMessage)
             return
         }
         if isTransient, latestState != nil {
@@ -2934,8 +3115,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // dropping back to the fixed cadence, even when this particular attempt's own failure is not
             // itself `allCandidatesUnreachable`.
             if Self.isAllCandidatesUnreachableError(error) || connectionStage == .unreachable {
-                let delay = registerUnreachableConnectionAttempt()
-                scheduleReconnect(after: .seconds(delay))
+                // See `handleDisconnect`'s matching branch: in stage 2 the redial cadence paces every
+                // attempt, so a single failure schedules nothing and spends no rung.
+                registerUnreachableConnectionAttempt()
                 return
             }
             registerTransientConnectionLoss()
@@ -3396,6 +3578,25 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         return "This terminal session ended. Return to Terminals to open the current live session."
     }
 
+    /// The daemon answered that this terminal no longer exists: show the unavailable message and stop
+    /// every reconnect this viewer has running.
+    ///
+    /// Redialing cannot bring back a session the daemon has removed, so the tick and every live attempt
+    /// go with the verdict. The tick matters most: it is armed independently of any one attempt's
+    /// outcome (`armUnreachableRedialTick`), so a device that comes back after its terminal was removed
+    /// would otherwise keep opening subscriptions on the ladder forever, behind an unavailable UI that
+    /// can never change. Retiring the attempts closes the streams a stage 2 race may already have
+    /// installed, which nothing else would cancel (`SpacesDeviceAPIStreamHandle` has no deinit
+    /// cancellation). `scheduleReconnect`/`beginConnectAttempt` are deliberately left unguarded: every
+    /// caller that reaches them past this point either resets `isSessionUnavailable` first (`start()`,
+    /// `retryStartingStateIfLaunchIsNotReady`) or is the user's own explicit Retry.
+    private func markSessionUnavailable(_ message: String) {
+        isSessionUnavailable = true
+        errorMessage = message
+        cancelUnreachableRedialTick()
+        cancelAllConnectAttempts()
+    }
+
     private static func isTerminalSessionUnavailableError(_ error: Error) -> Bool {
         switch error {
         // Kept on the message: the daemon's `.sessionNotAvailable` code is coarser than this iOS
@@ -3421,10 +3622,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // `isBusy` is not touched here, so if a `takeOver()` is in flight this derives
         // `.sendingAfterRecoveryClearedConfirmation` rather than assuming the attempt is settled.
         takeoverAttemptState = TerminalViewerTakeoverAttemptState(isBusy: isBusy, isAwaitingTakeoverConfirmation: false)
-        reconnectTask?.cancel()
-        reconnectTask = nil
-        streamHandle?.cancel()
-        streamHandle = nil
+        cancelAllConnectAttempts()
+        endedStateTask?.cancel()
+        endedStateTask = nil
+        cancelUnreachableRedialTick()
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
         cancelQueuedInputSends()
@@ -3488,7 +3689,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // `allCandidatesUnreachable` is the same retry class as a timeout: the endpoint resolver could
         // not reach the daemon at any of its addresses this instant, which a moment later it often can
         // (a Wi-Fi handoff, a tailnet path still coming up). It must not surface as a hard error.
-        case SpacesDeviceAPIClientError.requestTimedOut, SpacesDeviceAPIClientError.allCandidatesUnreachable, SpacesDeviceAPIClientError.connectionClosed:
+        case SpacesDeviceAPIClientError.requestTimedOut, SpacesDeviceAPIClientError.allCandidatesUnreachable,
+            SpacesDeviceAPIClientError.connectionClosed:
             return true
         case SpacesDeviceAPIClientError.requestFailed(let message, _):
             return message.localizedStandardContains("cancelled") || message.localizedStandardContains("timed out")
@@ -3793,10 +3995,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             hasAttachedToSession = activeAttachmentExists(in: payload.attachmentSnapshot)
         }
         if isEndedState {
-            streamHandle?.cancel()
-            streamHandle = nil
-            reconnectTask?.cancel()
-            reconnectTask = nil
+            cancelAllConnectAttempts()
+            endedStateTask?.cancel()
+            endedStateTask = nil
             // The ended notice is what the view reports from here on, and no stream frame can ever arrive
             // to clear the outage for an ended session.
             clearConnectionOutage()
@@ -3857,8 +4058,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         {
             trace("open_screen_hold_release reason=apply_matching_frame")
             logFirstPaint(
-                holdReleasedBy: "matching_frame", columns: frame.columns, rows: frame.rows,
-                frame: reduction.decodedUpdate?.kind.rawValue ?? "full")
+                holdReleasedBy: "matching_frame", columns: frame.columns, rows: frame.rows, frame: reduction.decodedUpdate?.kind.rawValue ?? "full")
         }
         // The keyboard-caused resize `noteKeyboardToggled` armed reached the surface: this is a frame at
         // the grid that resize's most recent target names, regardless of whether the open hold above also
@@ -4133,14 +4333,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// Opens that never arm the hold (an already-ended session, Demo Mode) log no first paint: the
     /// baseline measures live sessions, and those opens have no network wait to time.
     private func logFirstPaint(holdReleasedBy: String, columns: Int?, rows: Int?, frame: String? = nil) {
-        var attributes = [
-            "columns": columns.map { String($0) } ?? "",
-            "rows": rows.map { String($0) } ?? "",
-            "hold_released_by": holdReleasedBy,
-        ]
-        if let frame {
-            attributes["frame"] = frame
-        }
+        var attributes = ["columns": columns.map { String($0) } ?? "", "rows": rows.map { String($0) } ?? "", "hold_released_by": holdReleasedBy]
+        if let frame { attributes["frame"] = frame }
         logPerformanceEvent(
             name: "terminal_first_paint", elapsedMS: DevicePerformanceLog.elapsedMS(sinceUptimeNanoseconds: openBeginUptimeNanoseconds),
             attributes: attributes)

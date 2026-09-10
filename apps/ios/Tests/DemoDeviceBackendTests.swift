@@ -102,7 +102,7 @@
             let received = XCTestExpectation(description: "subscribe delivers the recorded frame")
             let deliveredText = TextBox()
             let handle = try await client.subscribe(
-                sessionID: sessionID, clientID: "client-ios",
+                sessionID: sessionID, clientID: "client-ios", initialEventTimeout: .seconds(12),
                 onEvent: { payload in
                     XCTAssertEqual(payload.sessionID, sessionID)
                     deliveredText.set(payload.renderText ?? "")

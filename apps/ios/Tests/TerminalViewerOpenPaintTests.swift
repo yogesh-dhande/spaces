@@ -928,7 +928,8 @@
             nonisolated func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { Transport(backend: self) }
 
             nonisolated func openSessionStream(
-                request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                request: SpacesDeviceAPIRequest, initialEventTimeout: Duration,
+                onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
                 onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
             ) async throws -> SpacesDeviceAPIStreamHandle { await recordSubscribe(onEvent: onEvent, onDisconnect: onDisconnect) }
 
@@ -1007,7 +1008,8 @@
             }
 
             func openSessionStream(
-                request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                request: SpacesDeviceAPIRequest, initialEventTimeout: Duration,
+                onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
                 onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
             ) async throws -> SpacesDeviceAPIStreamHandle { throw SpacesDeviceAPIClientError.invalidEndpoint }
 
@@ -1062,7 +1064,8 @@
             func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { RecordingTransport(backend: self) }
 
             func openSessionStream(
-                request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                request: SpacesDeviceAPIRequest, initialEventTimeout: Duration,
+                onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
                 onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
             ) async throws -> SpacesDeviceAPIStreamHandle {
                 let deadline = ContinuousClock().now + .seconds(2)
@@ -1129,7 +1132,8 @@
             func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { ParkingTransport(backend: self) }
 
             func openSessionStream(
-                request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                request: SpacesDeviceAPIRequest, initialEventTimeout: Duration,
+                onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
                 onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
             ) async throws -> SpacesDeviceAPIStreamHandle { SpacesDeviceAPIStreamHandle(host: "127.0.0.1") {} }
 

@@ -381,10 +381,8 @@ struct SpacesDeviceAPIClient: Sendable {
     }
 
     func workspaceRevisionFileRead(
-        workspaceID: String, revision: String, relativePath: String, oldPath: String? = nil,
-        commandChannel: SpacesDeviceAPICommandChannel? = nil
-    ) async throws -> SpacesDeviceWorkspaceRevisionFileReadResult
-    {
+        workspaceID: String, revision: String, relativePath: String, oldPath: String? = nil, commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> SpacesDeviceWorkspaceRevisionFileReadResult {
         let response = try await sendRequest(
             .init(
                 command: .workspaceRevisionFileRead(
@@ -528,9 +526,8 @@ struct SpacesDeviceAPIClient: Sendable {
     ) async throws {
         let request = SpacesDeviceAPIRequest(
             command: .terminalControl(
-                .init(
-                    action: .attach, sessionID: sessionID, client: client, attachmentMode: mode, appearance: appearance,
-                    includesRenderUpdate: true)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
+                .init(action: .attach, sessionID: sessionID, client: client, attachmentMode: mode, appearance: appearance, includesRenderUpdate: true)
+            ), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
         let response = try await sendRequest(request, commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
@@ -750,13 +747,18 @@ struct SpacesDeviceAPIClient: Sendable {
         return chunk
     }
 
+    /// `initialEventTimeout` bounds the whole way from starting the dial to the stream's first payload.
+    /// The caller sizes it for the attempt it is making: see `TerminalViewerModel`'s
+    /// `streamInitialEventTimeout` (a cold open, which can afford a slow link's handshake) and
+    /// `unreachableRedialStreamInitialEventTimeout` (a redial into a reported outage, which cannot).
     func subscribe(
-        sessionID: String, clientID: String, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+        sessionID: String, clientID: String, initialEventTimeout: Duration, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
         onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
     ) async throws -> SpacesDeviceAPIStreamHandle {
         let request = SpacesDeviceAPIRequest(
             command: .subscribe(.init(sessionID: sessionID, clientID: clientID)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
-        return try await backend.openSessionStream(request: request, onEvent: onEvent, onDisconnect: onDisconnect)
+        return try await backend.openSessionStream(
+            request: request, initialEventTimeout: initialEventTimeout, onEvent: onEvent, onDisconnect: onDisconnect)
     }
 
     /// The address this client's backend most recently proved reachable, if it has resolved one yet.
@@ -991,7 +993,7 @@ struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
     func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { SpacesDeviceNetworkRequestTransport(resolver: resolver) }
 
     func openSessionStream(
-        request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+        request: SpacesDeviceAPIRequest, initialEventTimeout: Duration, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
         onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
     ) async throws -> SpacesDeviceAPIStreamHandle {
         let label: String
@@ -1059,8 +1061,8 @@ struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
             }
         }
         StreamSubscription(
-            connection: connection, pinRejection: pinRejection, request: request, silenceTimeout: streamSilenceTimeout, onEvent: onEvent,
-            onDisconnect: invalidatingOnDisconnect
+            connection: connection, pinRejection: pinRejection, request: request, initialEventTimeout: initialEventTimeout,
+            silenceTimeout: streamSilenceTimeout, onEvent: onEvent, onDisconnect: invalidatingOnDisconnect
         ).start(on: queue)
         return handle
     }
@@ -1136,10 +1138,11 @@ struct SpacesDeviceClosureBackend: SpacesDeviceAPIBackend {
     func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { SpacesDeviceClosureRequestTransport(handler: handler) }
 
     func openSessionStream(
-        request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+        request: SpacesDeviceAPIRequest, initialEventTimeout: Duration, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
         onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
     ) async throws -> SpacesDeviceAPIStreamHandle {
-        try await networkBackend.openSessionStream(request: request, onEvent: onEvent, onDisconnect: onDisconnect)
+        try await networkBackend.openSessionStream(
+            request: request, initialEventTimeout: initialEventTimeout, onEvent: onEvent, onDisconnect: onDisconnect)
     }
 
     /// Routes the ping through the same `handler` closure every other request already goes through,
@@ -1448,8 +1451,11 @@ private final class StreamLifecycle: @unchecked Sendable {
 
 private final class StreamSubscription: @unchecked Sendable {
     /// One budget covering the whole way from starting the connection to decoding the first payload,
-    /// since this type owns the handshake as well as the wait for terminal state.
-    private static let initialEventTimeout: Duration = .seconds(12)
+    /// since this type owns the handshake as well as the wait for terminal state. Injected per
+    /// subscription rather than fixed here: a cold open and a redial into a reported outage want very
+    /// different budgets, and only the caller knows which one it is making (see
+    /// `SpacesDeviceAPIClient.subscribe(sessionID:clientID:initialEventTimeout:onEvent:onDisconnect:)`).
+    private let initialEventTimeout: Duration
 
     private let connection: NWConnection
     private let pinRejection: SpacesPinnedTLSPinRejection
@@ -1468,12 +1474,14 @@ private final class StreamSubscription: @unchecked Sendable {
     private var lastReceiveUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
 
     init(
-        connection: NWConnection, pinRejection: SpacesPinnedTLSPinRejection, request: SpacesDeviceAPIRequest, silenceTimeout: TimeInterval,
-        onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void, onDisconnect: @escaping @MainActor (Error?) -> Void
+        connection: NWConnection, pinRejection: SpacesPinnedTLSPinRejection, request: SpacesDeviceAPIRequest, initialEventTimeout: Duration,
+        silenceTimeout: TimeInterval, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+        onDisconnect: @escaping @MainActor (Error?) -> Void
     ) {
         self.connection = connection
         self.pinRejection = pinRejection
         self.request = request
+        self.initialEventTimeout = initialEventTimeout
         self.silenceTimeout = silenceTimeout
         self.onEvent = onEvent
         lifecycle = StreamLifecycle(onDisconnect: onDisconnect)
@@ -1489,7 +1497,7 @@ private final class StreamSubscription: @unchecked Sendable {
     /// because the daemon's identity did not match reaches the re-pair recovery flow, while a handshake
     /// that merely stalled or dropped reads as the stalled stream it is and gets retried.
     func start(on queue: DispatchQueue) {
-        queue.asyncAfter(deadline: .now() + Self.initialEventTimeout.timeInterval) { [weak self] in
+        queue.asyncAfter(deadline: .now() + initialEventTimeout.timeInterval) { [weak self] in
             guard let self, !decodedState else { return }
             if !connectionReady, let rejection = pinRejection.error {
                 lifecycle.finish(error: rejection)

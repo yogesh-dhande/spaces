@@ -140,7 +140,7 @@
         func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { StubRequestTransport(recorder: recorder, respond: respond) }
 
         func openSessionStream(
-            request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+            request: SpacesDeviceAPIRequest, initialEventTimeout: Duration, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
             onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
         ) async throws -> SpacesDeviceAPIStreamHandle {
             subscribeRequestBox.set(request)
@@ -391,7 +391,7 @@
 
             let received = XCTestExpectation(description: "onEvent delivers the recorded payload")
             let handle = try await client.subscribe(
-                sessionID: "terminal-session", clientID: "client-ios",
+                sessionID: "terminal-session", clientID: "client-ios", initialEventTimeout: .seconds(12),
                 onEvent: { delivered in
                     XCTAssertEqual(delivered.sessionID, "terminal-session")
                     received.fulfill()

@@ -29,8 +29,11 @@ protocol SpacesDeviceAPIBackend: Sendable {
     /// error, or `nil` on clean close, plus the dial-exhaustion verdict for a failed dial, see
     /// `SpacesDeviceAPIStreamDisconnect`). The `request` is the fully-formed `.subscribe` request the
     /// client built (auth token and client identity already applied), so a backend transmits it as-is.
+    /// `initialEventTimeout` is the whole budget from starting the dial to decoding the stream's first
+    /// payload: the caller sizes it for the attempt it is making (a cold open can afford a slow link, a
+    /// redial into a reported outage cannot), so it is a per-call value rather than a backend constant.
     func openSessionStream(
-        request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+        request: SpacesDeviceAPIRequest, initialEventTimeout: Duration, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
         onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
     ) async throws -> SpacesDeviceAPIStreamHandle
 

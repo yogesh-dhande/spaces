@@ -221,7 +221,7 @@
             let sentinelBox = WeakStreamSentinelBox()
             let disconnected = expectation(description: "stream disconnected with an error")
             _ = try await backend.openSessionStream(
-                request: request, onEvent: makeSentinelEventCallback(recordingInto: sentinelBox),
+                request: request, initialEventTimeout: .seconds(12), onEvent: makeSentinelEventCallback(recordingInto: sentinelBox),
                 onDisconnect: { disconnect in
                     XCTAssertNotNil(disconnect.error)
                     disconnected.fulfill()
@@ -257,7 +257,7 @@
                 command: .subscribe(.init(sessionID: "session-1", clientID: "client-1")), authToken: nil, clientApp: nil)
             let disconnected = expectation(description: "stream disconnected cleanly")
             let handle = try await backend.openSessionStream(
-                request: request, onEvent: { _ in },
+                request: request, initialEventTimeout: .seconds(12), onEvent: { _ in },
                 onDisconnect: { disconnect in
                     XCTAssertNil(disconnect.error)
                     disconnected.fulfill()
@@ -331,9 +331,7 @@
                 XCTFail("expected connectionClosed when the peer hangs up without answering")
             } catch SpacesDeviceAPIClientError.connectionClosed {
                 // Expected.
-            } catch {
-                XCTFail("expected connectionClosed, got \(error)")
-            }
+            } catch { XCTFail("expected connectionClosed, got \(error)") }
         }
 
         func testStreamRejectionDoesNotRecordAFailedCandidateOrExhaustDialCandidates() async throws {
@@ -356,7 +354,7 @@
             let disconnected = expectation(description: "stream disconnected with a decoded rejection")
             let errorBox = StreamDisconnectErrorBox()
             _ = try await backend.openSessionStream(
-                request: request, onEvent: { _ in },
+                request: request, initialEventTimeout: .seconds(12), onEvent: { _ in },
                 onDisconnect: { disconnect in
                     errorBox.record(disconnect.error, dialExhaustedAllCandidates: disconnect.dialExhaustedAllCandidates)
                     disconnected.fulfill()
@@ -372,8 +370,7 @@
                 return XCTFail("expected streamRejected, got \(String(describing: errorBox.error()))")
             }
             XCTAssertFalse(
-                errorBox.dialExhaustedAllCandidates(),
-                "a decoded rejection proves the daemon answered and must not read as dial exhaustion")
+                errorBox.dialExhaustedAllCandidates(), "a decoded rejection proves the daemon answered and must not read as dial exhaustion")
 
             let cachedHostAfterRejection = await backend.resolver.currentCachedHost()
             XCTAssertEqual(cachedHostAfterRejection, "127.0.0.1", "a rejection must not clear the cached winner or record a failed candidate")
@@ -410,7 +407,8 @@
                 command: .subscribe(.init(sessionID: "session-1", clientID: "client-1")), authToken: nil, clientApp: nil)
             let disconnected = expectation(description: "stream disconnected cleanly")
             let handle = try await backend.openSessionStream(
-                request: request, onEvent: makeSentinelEventCallback(recordingInto: sentinelBox), onDisconnect: { _ in disconnected.fulfill() })
+                request: request, initialEventTimeout: .seconds(12), onEvent: makeSentinelEventCallback(recordingInto: sentinelBox),
+                onDisconnect: { _ in disconnected.fulfill() })
             handle.cancel()
 
             await fulfillment(of: [disconnected], timeout: 5)
@@ -442,7 +440,7 @@
             let request = SpacesDeviceAPIRequest(
                 command: .subscribe(.init(sessionID: "session-1", clientID: "client-1")), authToken: nil, clientApp: nil)
             _ = try await backend.openSessionStream(
-                request: request,
+                request: request, initialEventTimeout: .seconds(12),
                 onEvent: makeSentinelEventCallback(recordingInto: sentinelBox, fulfilling: receivedPayload),
                 onDisconnect: { disconnect in
                     stallErrorBox.record(disconnect.error)
@@ -485,7 +483,7 @@
             let request = SpacesDeviceAPIRequest(
                 command: .subscribe(.init(sessionID: "session-1", clientID: "client-1")), authToken: nil, clientApp: nil)
             let handle = try await backend.openSessionStream(
-                request: request,
+                request: request, initialEventTimeout: .seconds(12),
                 onEvent: { _ in
                     eventCount.increment()
                     receivedPayload.fulfill()
@@ -522,9 +520,9 @@
         /// to talk to has arrived: a test that already opened a connection of its own (a resolver
         /// `connect`, for instance) must ask for one more than that, or this returns on the earlier
         /// connection and the bytes the test then broadcasts go out before the one it meant them for exists.
-        private func waitForAcceptedConnection(
-            on server: PinnedTLSLoopbackServer, count: Int = 1, file: StaticString = #filePath, line: UInt = #line
-        ) async throws {
+        private func waitForAcceptedConnection(on server: PinnedTLSLoopbackServer, count: Int = 1, file: StaticString = #filePath, line: UInt = #line)
+            async throws
+        {
             let deadline = Date().addingTimeInterval(10)
             while Date() < deadline, server.acceptedConnectionCount() < count { try await Task.sleep(for: .milliseconds(20)) }
             XCTAssertGreaterThanOrEqual(server.acceptedConnectionCount(), count, "the stream never connected", file: file, line: line)
@@ -806,9 +804,7 @@
             let backend = SpacesDeviceNetworkBackend(settings: settings)
 
             let request = SpacesDeviceAPIRequest(command: .ping, authToken: nil, clientApp: nil)
-            let pingTask = Task {
-                await backend.sendPinnedPing(request: request, host: "127.0.0.1", timeout: .seconds(10))
-            }
+            let pingTask = Task { await backend.sendPinnedPing(request: request, host: "127.0.0.1", timeout: .seconds(10)) }
             // Well before the 5s accept delay elapses, so the cancellation is guaranteed to land while the
             // probe is still inside `resolver.connect`, waiting on the handshake.
             try await Task.sleep(for: .milliseconds(150))

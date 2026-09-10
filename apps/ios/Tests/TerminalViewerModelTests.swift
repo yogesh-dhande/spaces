@@ -303,7 +303,8 @@
             nonisolated func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { HeldConnectLifecycleRequestTransport(backend: self) }
 
             nonisolated func openSessionStream(
-                request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                request: SpacesDeviceAPIRequest, initialEventTimeout: Duration,
+                onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
                 onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
             ) async throws -> SpacesDeviceAPIStreamHandle {
                 await recordSubscribe()
@@ -599,8 +600,7 @@
                 controls.first { $0.action == .takeover }?.includesRenderUpdate, false,
                 "the takeover's acknowledgment must cost the session no screen export")
             XCTAssertEqual(
-                controls.first { $0.action == .attach }?.includesRenderUpdate, true,
-                "every other state-carrying control is answered with the screen")
+                controls.first { $0.action == .attach }?.includesRenderUpdate, true, "every other state-carrying control is answered with the screen")
         }
 
         /// The counterpart to the bootstrap read: an ended session's state load has no stream behind it at
@@ -882,8 +882,7 @@
                 isOutOfBand: false)
             try await Task.sleep(for: .milliseconds(100))
             let beforeReadTakeoverCount = await recorder.countTerminalControlAction(.takeover)
-            XCTAssertEqual(
-                beforeReadTakeoverCount, 0, "a stream update must not consume foreground ownership intent before its heartbeat answers")
+            XCTAssertEqual(beforeReadTakeoverCount, 0, "a stream update must not consume foreground ownership intent before its heartbeat answers")
 
             await heartbeat.release()
             let didTakeOver = try await waitForTerminalControlAction(.takeover, count: 1, recorder: recorder)
@@ -2264,8 +2263,7 @@
             let settings = settings()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
                 switch request.commandName {
-                case "resolveTerminalLink":
-                    return SpacesDeviceAPIResponse(ok: false, message: "Terminal link file is not a readable regular file.")
+                case "resolveTerminalLink": return SpacesDeviceAPIResponse(ok: false, message: "Terminal link file is not a readable regular file.")
                 default: return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
                 }
             }
@@ -2295,7 +2293,8 @@
         func testDismissLinkBannersLeavesPreviewAndPreparingStateIntact() {
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
-            let preview = TerminalLinkPreview(id: "link-1", title: "image.png", kind: .image, content: .quickLook(URL(fileURLWithPath: "/tmp/image.png")))
+            let preview = TerminalLinkPreview(
+                id: "link-1", title: "image.png", kind: .image, content: .quickLook(URL(fileURLWithPath: "/tmp/image.png")))
             model.linkPreview = preview
             model.isPreparingLinkPreview = true
             model.linkPreviewErrorMessage = "Terminal link file is not a readable regular file."
@@ -2640,9 +2639,7 @@
             let resize = HeldResizeResponder()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
                 await recorder.append(request)
-                if case .terminalControl(let payload) = request.command, payload.action == .resize {
-                    await resize.waitForFirstResizeThenRelease()
-                }
+                if case .terminalControl(let payload) = request.command, payload.action == .resize { await resize.waitForFirstResizeThenRelease() }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             let model = TerminalViewerModel(
@@ -2695,8 +2692,7 @@
             // [80, 100] sequence, so no request-level seam can tell the two apart in this scenario.
             try await Task.sleep(for: .milliseconds(900))
             let settledRequestCount = await recorder.countTerminalControlAction(.resize)
-            XCTAssertEqual(
-                settledRequestCount, 2, "the coalesced report must produce exactly one rerun, not an additional uncoalesced round trip")
+            XCTAssertEqual(settledRequestCount, 2, "the coalesced report must produce exactly one rerun, not an additional uncoalesced round trip")
             let requests = await recorder.snapshot()
             let resizedColumns = requests.compactMap { request -> Int? in
                 guard case .terminalControl(let payload) = request.command, payload.action == .resize else { return nil }
@@ -2717,9 +2713,7 @@
             let takeover = HeldTakeoverResponder()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
                 await recorder.append(request)
-                if case .terminalControl(let payload) = request.command, payload.action == .takeover {
-                    await takeover.waitForReleaseAfterStarting()
-                }
+                if case .terminalControl(let payload) = request.command, payload.action == .takeover { await takeover.waitForReleaseAfterStarting() }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             // A starting session, so the viewer never auto-takes-over and the takeover below is the only
@@ -2753,11 +2747,10 @@
             // flag that branch actually clears, and the one `takeOver()`'s own defer would otherwise leave
             // held until the still-open takeover response returns — is what pins the behavior below.
             XCTAssertFalse(model.isTakingOver, "ownership confirmed by the stream must clear the takeover affordance on its own")
-            XCTAssertTrue(
-                model.keepsTerminalInputSurfaceActive, "an owner past its takeover must keep the input surface active while still settling")
+            XCTAssertTrue(model.keepsTerminalInputSurfaceActive, "an owner past its takeover must keep the input surface active while still settling")
             XCTAssertFalse(
-                model.isBusy,
-                "the stream confirmation must clear the busy takeover presentation on its own, before its own takeover response returns")
+                model.isBusy, "the stream confirmation must clear the busy takeover presentation on its own, before its own takeover response returns"
+            )
 
             await takeover.release()
             await takeoverTask.value
@@ -3107,8 +3100,7 @@
                     return payload
                 }.first)
             XCTAssertNotEqual(
-                resize.ownerEpoch, 1,
-                "the displaced owner's epoch must not stamp the new owner's resize: the daemon would reject it as stale")
+                resize.ownerEpoch, 1, "the displaced owner's epoch must not stamp the new owner's resize: the daemon would reject it as stale")
         }
 
         /// An owner whose stream drops reconnects silently, and the new subscription's deltas are computed
@@ -3638,8 +3630,7 @@
             await waitUntil("the stage to move to reconnecting") { model.connectionStage == .reconnecting }
             XCTAssertFalse(model.isConnectionBannerVisible, "a stream that already delivered a frame must not skip the grace")
             XCTAssertNotEqual(
-                model.connectionStage, .unreachable,
-                "candidate exhaustion describes a different dial, not this stream's own already-proven-live one")
+                model.connectionStage, .unreachable, "candidate exhaustion describes a different dial, not this stream's own already-proven-live one")
         }
 
         /// Negative case for the same evidence: a disconnect with an untried candidate left must not jump
@@ -4062,8 +4053,7 @@
             await model.sendKey("b")
             let secondProbeStarted = await backend.waitForPingCallCount(2, timeout: .seconds(5))
             XCTAssertTrue(
-                secondProbeStarted,
-                "the replacement stream's own input timeout must not be blocked by a stale probe from the stream it replaced")
+                secondProbeStarted, "the replacement stream's own input timeout must not be blocked by a stale probe from the stream it replaced")
 
             // Let stream A's stale probe answer land after the fact: it must not tear down the replacement
             // stream it was never actually asking about.
@@ -4178,7 +4168,9 @@
             }
 
             let redialed = await backend.waitForSubscribeCount(2, timeout: .seconds(3))
-            XCTAssertTrue(redialed, "the 1 s ladder redial armed when the device became unreachable must fire on schedule; typing must not re-arm it further out")
+            XCTAssertTrue(
+                redialed,
+                "the 1 s ladder redial armed when the device became unreachable must fire on schedule; typing must not re-arm it further out")
             XCTAssertEqual(model.connectionStage, .unreachable)
         }
 
@@ -4228,6 +4220,46 @@
             XCTAssertTrue(secondRungRedial, "the ladder's next rung must still fire after a clean close while unreachable")
             XCTAssertEqual(model.connectionStage, .unreachable)
             XCTAssertNil(model.errorMessage)
+        }
+
+        /// The device comes back, but the terminal it hosted was removed on the daemon in the meantime, so
+        /// the redial's subscribe is rejected with "terminal session ... is not available". That verdict is
+        /// final: the viewer switches to the unavailable message and nothing it dials can ever change the
+        /// answer. Before the fix, only the failing attempt stopped -- the stage 2 tick is armed
+        /// independently of any one attempt's outcome, so it kept ticking up the ladder and opening a fresh
+        /// subscription on every rung, forever, behind a UI that could never move.
+        func testASessionUnavailableRejectionStopsTheUnreachableRedialCadence() async throws {
+            let backend = StageTrackerTestBackend()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.connectionBannerGraceSecondsForTesting = 30
+            model.start()
+            await backend.waitForSubscribeCount(1)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+
+            // The first stream delivered no frame, so a disconnect with every candidate failed jumps the
+            // tracker straight to `.unreachable` and arms the first ladder redial (1 s).
+            await backend.setAllStreamCandidatesFailed(true)
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+            await waitUntil("the stage to reach unreachable", timeout: .seconds(5)) { model.connectionStage == .unreachable }
+
+            // The device is reachable again by the time that redial goes out, and answers it with the
+            // daemon's verdict that this terminal no longer exists.
+            await backend.setNextSubscribeError(SpacesDeviceAPIClientError.streamRejected("Terminal session terminal-session is not available."))
+
+            await waitUntil("the rejection to mark the session unavailable", timeout: .seconds(5)) { model.isSessionUnavailable }
+            let subscribesAtRejection = await backend.currentSubscribeCount()
+
+            // The ladder's next two rungs (2 s, then 4 s) both come and go inside this window, so a cadence
+            // that is still running cannot hide in it.
+            let dialedAgain = await backend.waitForSubscribeCount(subscribesAtRejection + 1, timeout: .seconds(6.5))
+            XCTAssertFalse(dialedAgain, "a terminal the daemon says no longer exists must not keep being redialed on the stage 2 ladder")
+            XCTAssertEqual(model.liveConnectAttemptCountForTesting, 0, "the rejection must retire every attempt, not only the one that failed")
+            XCTAssertTrue(model.isSessionUnavailable)
+            XCTAssertEqual(model.phase, .unavailable)
         }
 
         /// Regression for the retry-cancel race described in `retryConnection()`'s own doc comment:
@@ -4295,12 +4327,13 @@
         /// is still `.unreachable` -- the redial is in flight but has not yet proven the link recovered.
         /// Before the fix, `handleInputSendError`'s gate read `streamHandle == nil`, so it was skipped once
         /// that handle existed: a keystroke's connection-level failure fell to the bare connection-level
-        /// branch, which tore the just-redialed stream down through `tearDownStream(reportingLoss:)`, and
-        /// `handleDisconnect` (reading `connectionStage == .unreachable`) put the next attempt back on the
-        /// ladder, producing a third subscribe roughly 2 s later. Gating on the tracker's stage alone (this
-        /// fix) recognizes the in-flight redial as still "link already reported down" and drops the
-        /// keystroke without touching it, so the redial that already fired is left alone and no further
-        /// subscribe happens.
+        /// branch, which tore the just-redialed stream down through `tearDownStream(reportingLoss:)`.
+        /// Gating on the tracker's stage alone (this fix) recognizes the in-flight redial as still "link
+        /// already reported down" and drops the keystroke without touching it, so the redial that already
+        /// fired keeps running. The assertion is on the redial's stream handle never being cancelled
+        /// rather than on a subscribe count: the stage 2 ladder is a redial cadence that dials again on
+        /// its own schedule whatever the user types, so a count only says nothing extra happened before
+        /// the cadence's next tick, while the cancel says the in-flight dial itself was left alone.
         func testTypingDuringAnInFlightUnreachableRedialDoesNotAbortIt() async throws {
             let backend = StageTrackerTestBackend(transportFactory: { InputConnectionResetRequestTransport() })
             let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
@@ -4324,7 +4357,8 @@
             // exactly the "handle installed, link not yet proven" window this test is targeting.
             let redialInstalled = await backend.waitForSubscribeCount(2, timeout: .seconds(3))
             XCTAssertTrue(redialInstalled, "the 1 s ladder redial must fire and install a stream before input is sent")
-            XCTAssertEqual(model.connectionStage, .unreachable, "the redialed stream has delivered no frame, so the stage must still read unreachable")
+            XCTAssertEqual(
+                model.connectionStage, .unreachable, "the redialed stream has delivered no frame, so the stage must still read unreachable")
 
             // The redial's own bootstrap `.state` read (see `waitForRedialBootstrapToLand`) answers with an
             // ownerless snapshot that clears ownership once it lands; `sendKey` below silently no-ops
@@ -4339,15 +4373,345 @@
                 try await Task.sleep(for: .milliseconds(150))
             }
 
-            // Give the old, buggy path time to run its course: a wrongly torn-down stream would reschedule
-            // on the ladder's next delay (2 s) and produce a third subscribe well within this window.
-            try await Task.sleep(for: .seconds(2.5))
+            // Give the old, buggy path time to run its course: it tore the redialed stream down, which
+            // cancels its handle. The window stays short of the ladder's next rung (2 s from the redial),
+            // so the cadence's own next dial has not fired yet and the subscribe count still reads the
+            // redial alone.
+            try await Task.sleep(for: .milliseconds(400))
+            let cancelCount = await backend.currentCancelCount()
+            XCTAssertEqual(cancelCount, 0, "typing into an in-flight redial must not tear its stream down")
             let finalSubscribeCount = await backend.currentSubscribeCount()
-            XCTAssertEqual(
-                finalSubscribeCount, 2,
-                "typing into an in-flight redial must not tear it down and force a further reconnect")
+            XCTAssertEqual(finalSubscribeCount, 2, "no redial beyond the one the ladder already made: the next rung has not elapsed yet")
             XCTAssertEqual(model.connectionStage, .unreachable)
             XCTAssertNil(model.errorMessage)
+        }
+
+        /// The stage 2 ladder is a redial cadence, not a per-failure delay: when a rung elapses with an
+        /// attempt still in flight, a fresh dial starts alongside the stale one instead of waiting for it
+        /// to give up. That is the point of the fix for #676 -- the attempt that is hanging on an address
+        /// that was dead when it started is exactly the one that cannot notice the link coming back, so
+        /// waiting for its transport budget made a phone that regained its link take a fixed ten seconds
+        /// to paint. Whichever dial delivers a frame first wins, the older one included, and from that
+        /// instant the loser is cancelled and everything it still has in flight is ignored.
+        func testAnUnreachableLadderTickRacesAFreshDialAndTheFirstFrameWins() async throws {
+            let backend = StageTrackerTestBackend()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.connectionBannerGraceSecondsForTesting = 30
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:30Z"),
+                isOutOfBand: false)
+
+            model.start()
+            await backend.waitForSubscribeCount(1)
+            await backend.setAllStreamCandidatesFailed(true)
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+            await waitUntil("the stage to reach unreachable", timeout: .seconds(5)) { model.connectionStage == .unreachable }
+
+            // The ladder's first rung (1 s) dials stream 2, and nothing in this test ever answers it: it
+            // stands in for the dial still hanging on an address that was down when it started.
+            let firstRungDial = await backend.waitForSubscribeCount(2, timeout: .seconds(3))
+            XCTAssertTrue(firstRungDial, "the ladder's first rung must dial")
+
+            // The second rung (2 s) must dial again even though stream 2 has neither failed nor answered.
+            let secondRungDial = await backend.waitForSubscribeCount(3, timeout: .seconds(4))
+            XCTAssertTrue(secondRungDial, "the next rung must start a fresh dial while the previous attempt is still in flight")
+            let cancelsDuringTheRace = await backend.currentCancelCount()
+            XCTAssertEqual(cancelsDuringTheRace, 0, "the in-flight attempt must be raced, not superseded and cancelled")
+
+            // The stale dial is the one that reaches the device, which is the case the fix exists for.
+            await backend.fireFrame(Self.outputState(title: "stale-wins", emittedAt: "2026-06-04T14:23:40Z"), onStream: 2)
+            await waitUntil("the stage to return to connected") { model.connectionStage == .connected }
+            XCTAssertFalse(model.isConnectionBannerVisible, "the winning frame must clear the banner")
+            await waitUntil("the winner's frame to be applied") { model.latestState?.title == "stale-wins" }
+            let loserCancelled = await backend.waitForCancelCount(1, timeout: .seconds(2))
+            XCTAssertTrue(loserCancelled, "the losing dial's stream must be cancelled the moment the winner delivers a frame")
+
+            // The loser is inert from here: its payloads must not reach the reduction pipeline (its
+            // `emittedAt` is newer, so one that did would replace what the winner painted), and its
+            // failure must neither flip the stage back nor redial.
+            await backend.fireFrame(Self.outputState(title: "loser", emittedAt: "2026-06-04T14:23:50Z"), onStream: 3)
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled, onStream: 3)
+            try await Task.sleep(for: .milliseconds(300))
+            XCTAssertEqual(model.latestState?.title, "stale-wins", "a losing attempt's payload must never reach the reduction pipeline")
+            XCTAssertEqual(model.connectionStage, .connected, "a losing attempt's failure must not flip the stage back")
+            let subscribesAfterTheRace = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribesAfterTheRace, 3, "a losing attempt's failure must not schedule a redial of its own")
+        }
+
+        /// The race is capped at two dials: the stale one and the fresh one. A third tick against a
+        /// device that is still not answering retires the oldest rather than letting dead dials pile up,
+        /// and `SpacesDeviceAPIStreamHandle` has no deinit cancellation, so the retired one's connection
+        /// has to be cancelled explicitly. The attempt that survives the cap can still win.
+        func testAThirdUnreachableTickRetiresTheOldestLiveDial() async throws {
+            let backend = StageTrackerTestBackend()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.connectionBannerGraceSecondsForTesting = 30
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:30Z"),
+                isOutOfBand: false)
+
+            model.start()
+            await backend.waitForSubscribeCount(1)
+            await backend.setAllStreamCandidatesFailed(true)
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+            await waitUntil("the stage to reach unreachable", timeout: .seconds(5)) { model.connectionStage == .unreachable }
+
+            // Rungs 1, 2 and 4 dial streams 2, 3 and 4; none of them ever answers.
+            let firstTwoRungsDialed = await backend.waitForSubscribeCount(3, timeout: .seconds(6))
+            XCTAssertTrue(firstTwoRungsDialed, "the first two rungs must dial")
+            let cancelsWithTwoLive = await backend.currentCancelCount()
+            XCTAssertEqual(cancelsWithTwoLive, 0, "two live dials are within the cap, so neither is retired")
+
+            let thirdRungDialed = await backend.waitForSubscribeCount(4, timeout: .seconds(7))
+            XCTAssertTrue(thirdRungDialed, "the third rung must dial")
+            let cancelsAfterTheCap = await backend.waitForCancelCount(1, timeout: .seconds(2))
+            XCTAssertTrue(cancelsAfterTheCap, "the third dial must retire the oldest of the two already live")
+            let cancelsAfterSettling = await backend.currentCancelCount()
+            XCTAssertEqual(cancelsAfterSettling, 1, "only the oldest dial is retired, not both of the ones already live")
+
+            // The retired dial is inert; the one that survived the cap is still racing and can still win.
+            await backend.fireFrame(Self.outputState(title: "retired", emittedAt: "2026-06-04T14:23:41Z"), onStream: 2)
+            try await Task.sleep(for: .milliseconds(300))
+            XCTAssertEqual(model.connectionStage, .unreachable, "a retired dial's frame proves nothing about the connection")
+
+            await backend.fireFrame(Self.outputState(title: "survivor-wins", emittedAt: "2026-06-04T14:23:42Z"), onStream: 3)
+            await waitUntil("the stage to return to connected") { model.connectionStage == .connected }
+            await waitUntil("the surviving dial's frame to be applied") { model.latestState?.title == "survivor-wins" }
+        }
+
+        /// Every live dial has to go when the viewer does. Two are live here, and a stopped viewer must
+        /// leave neither the connections nor the redial cadence running behind it.
+        func testStoppingWhileTwoUnreachableDialsAreLiveCancelsBoth() async throws {
+            let backend = StageTrackerTestBackend()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            model.connectionBannerGraceSecondsForTesting = 30
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:30Z"),
+                isOutOfBand: false)
+
+            model.start()
+            await backend.waitForSubscribeCount(1)
+            await backend.setAllStreamCandidatesFailed(true)
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+            await waitUntil("the stage to reach unreachable", timeout: .seconds(5)) { model.connectionStage == .unreachable }
+            let twoDialsLive = await backend.waitForSubscribeCount(3, timeout: .seconds(6))
+            XCTAssertTrue(twoDialsLive, "two dials must be live before the stop")
+
+            model.stop()
+
+            let bothCancelled = await backend.waitForCancelCount(2, timeout: .seconds(2))
+            XCTAssertTrue(bothCancelled, "a stop must cancel every dial still in flight, not just the newest")
+            try await Task.sleep(for: .seconds(1.5))
+            let subscribesAfterStop = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribesAfterStop, 3, "a stopped viewer must not keep the redial cadence running")
+        }
+
+        /// The ladder advances once per redial tick, never once per failed attempt: with two dials racing,
+        /// pacing on failures would spend rungs at whatever rate the failures happened to arrive and would
+        /// re-arm the pending redial each time, pushing recovery out exactly when the device is proven
+        /// down. A losing dial's failure must leave the tick that is already armed exactly as it is.
+        func testALosingUnreachableDialsFailureSpendsNoLadderRung() async throws {
+            let backend = StageTrackerTestBackend()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.connectionBannerGraceSecondsForTesting = 30
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:30Z"),
+                isOutOfBand: false)
+
+            model.start()
+            await backend.waitForSubscribeCount(1)
+            await backend.setAllStreamCandidatesFailed(true)
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+            await waitUntil("the stage to reach unreachable", timeout: .seconds(5)) { model.connectionStage == .unreachable }
+
+            // Rungs 1 and 2 dial streams 2 and 3; the tick armed after stream 3 is the ladder's third rung.
+            let rungsDialed = await backend.waitForSubscribeCount(3, timeout: .seconds(6))
+            XCTAssertTrue(rungsDialed, "the first two rungs must dial")
+            await waitUntil("the third rung to be armed") { model.lastScheduledReconnectDelayForTesting == .seconds(4) }
+
+            // The stale dial now fails on its own. Under a per-failure ladder this spends the next rung
+            // (8 s) and re-arms the pending redial from scratch.
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled, onStream: 2)
+            try await Task.sleep(for: .milliseconds(500))
+            XCTAssertEqual(
+                model.lastScheduledReconnectDelayForTesting, .seconds(4),
+                "an attempt ending is not a ladder tick, so it must neither spend a rung nor re-arm the pending redial")
+            XCTAssertEqual(model.connectionStage, .unreachable)
+            let prematureRedial = await backend.waitForSubscribeCount(4, timeout: .seconds(2))
+            XCTAssertFalse(prematureRedial, "the tick armed before the failure must keep its own schedule")
+        }
+
+        /// A losing stage 2 dial's failure handler suspends inside its ended-state recovery read, and the
+        /// racing dial's winning frame lands while it is parked. The handler must not resume into the
+        /// rest of the failure path: `scheduleReconnect` cancels every live attempt, so the very stream
+        /// that just recovered the viewer would be torn down and redialed from scratch, throwing away the
+        /// recovery this concurrent-redial design exists to make fast (#676).
+        func testAFrameWinningDuringALosingDialsRecoveryReadKeepsTheWinningStream() async throws {
+            let transport = HeldStateReadRequestTransport()
+            let backend = StageTrackerTestBackend(transportFactory: { transport })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.connectionBannerGraceSecondsForTesting = 30
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:30Z"),
+                isOutOfBand: false)
+
+            model.start()
+            await backend.waitForSubscribeCount(1)
+            await backend.setAllStreamCandidatesFailed(true)
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+            await waitUntil("the stage to reach unreachable", timeout: .seconds(5)) { model.connectionStage == .unreachable }
+
+            // Rungs 1 and 2 dial streams 2 and 3, so two attempts are racing. The tick armed after stream
+            // 3 is four seconds out, which is the quiet window everything below runs in.
+            let bothDialsRacing = await backend.waitForSubscribeCount(3, timeout: .seconds(6))
+            XCTAssertTrue(bothDialsRacing, "two dials must be racing before the recovery read is held")
+            await waitUntil("the next rung to be armed") { model.lastScheduledReconnectDelayForTesting == .seconds(4) }
+
+            // The older dial now ends with the daemon's missing-live-stream error, the one failure whose
+            // handling suspends in a state read. Holding that read is what puts the winning frame below
+            // squarely inside the handler's own suspension.
+            await transport.armStateReadHold()
+            await backend.fireDisconnect(
+                SpacesDeviceAPIClientError.streamFailed("Terminal session 'terminal-session' has no live state stream."), onStream: 2)
+            let recoveryReadHeld = await transport.waitForHeldStateRead()
+            XCTAssertTrue(recoveryReadHeld, "the losing dial's failure must suspend in its ended-state recovery read")
+
+            // The racing dial reaches the device while that handler is parked: it wins the race, and from
+            // here the viewer is connected on stream 3.
+            await backend.fireFrame(Self.outputState(title: "winner", emittedAt: "2026-06-04T14:23:40Z"), onStream: 3)
+            await waitUntil("the stage to return to connected") { model.connectionStage == .connected }
+            await waitUntil("the winner's frame to be applied") { model.latestState?.title == "winner" }
+
+            // The held read answers with a live session, so the recovery recovers nothing and the
+            // overtaken handler resumes into the rest of the failure path.
+            await transport.releaseHeldStateRead()
+
+            let staleTeardown = await backend.waitForCancelCount(1, timeout: .seconds(1))
+            XCTAssertFalse(staleTeardown, "an overtaken failure must not cancel the stream that won the race")
+            try await Task.sleep(for: .seconds(1))
+            let subscribesAfterTheRecovery = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribesAfterTheRecovery, 3, "an overtaken failure must not redial over a connection that is already up")
+            XCTAssertEqual(model.connectionStage, .connected, "an overtaken failure must not move the viewer off its winning stream")
+        }
+
+        /// The connect-error sibling of the test above: here the losing stage 2 attempt never opens a
+        /// stream at all -- its subscribe is refused with the same missing-live-stream error -- so the
+        /// suspension happens in `handleConnectError`'s recovery read instead. The attempt that is still
+        /// live wins while it is parked, and must survive the same way.
+        func testAFrameWinningDuringARefusedDialsRecoveryReadKeepsTheWinningStream() async throws {
+            let transport = HeldStateReadRequestTransport()
+            let backend = StageTrackerTestBackend(transportFactory: { transport })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.connectionBannerGraceSecondsForTesting = 30
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:30Z"),
+                isOutOfBand: false)
+
+            model.start()
+            await backend.waitForSubscribeCount(1)
+            await backend.setAllStreamCandidatesFailed(true)
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+            await waitUntil("the stage to reach unreachable", timeout: .seconds(5)) { model.connectionStage == .unreachable }
+
+            // Rung 1 dials stream 2 and nothing answers it yet; that dial is the one that will win. Rung 2
+            // is refused outright, so it opens no stream of its own and goes straight to
+            // `handleConnectError`.
+            let firstRungDialed = await backend.waitForSubscribeCount(2, timeout: .seconds(4))
+            XCTAssertTrue(firstRungDialed, "the ladder's first rung must dial")
+            await backend.setNextSubscribeError(SpacesDeviceAPIClientError.requestFailed("no live state stream", code: nil))
+            await transport.armStateReadHold()
+
+            let secondRungRefused = await backend.waitForSubscribeCount(3, timeout: .seconds(5))
+            XCTAssertTrue(secondRungRefused, "the next rung must dial and be refused")
+            let recoveryReadHeld = await transport.waitForHeldStateRead()
+            XCTAssertTrue(recoveryReadHeld, "the refused dial's failure must suspend in its ended-state recovery read")
+
+            await backend.fireFrame(Self.outputState(title: "winner", emittedAt: "2026-06-04T14:23:40Z"), onStream: 2)
+            await waitUntil("the stage to return to connected") { model.connectionStage == .connected }
+            await waitUntil("the winner's frame to be applied") { model.latestState?.title == "winner" }
+
+            await transport.releaseHeldStateRead()
+
+            let staleTeardown = await backend.waitForCancelCount(1, timeout: .seconds(1))
+            XCTAssertFalse(staleTeardown, "an overtaken connect failure must not cancel the stream that won the race")
+            try await Task.sleep(for: .seconds(1))
+            let subscribesAfterTheRecovery = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribesAfterTheRecovery, 3, "an overtaken connect failure must not redial over a connection that is already up")
+            XCTAssertEqual(model.connectionStage, .connected, "an overtaken connect failure must not move the viewer off its winning stream")
+        }
+
+        /// A redial made while the device is already reported unreachable dials on a much shorter budget
+        /// than the first connection an open makes: its job is to notice the device coming back, and the
+        /// tick starts a fresh dial regardless, so a dead dial only has to be gone before it costs a
+        /// concurrency slot. A cold open has no such backstop and keeps the full budget.
+        func testARedialIntoAnOutageDialsOnAShorterBudgetThanAColdOpen() async throws {
+            let transport = StateTimeoutRecordingRequestTransport()
+            let backend = StageTrackerTestBackend(transportFactory: { transport })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.connectionBannerGraceSecondsForTesting = 30
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:30Z"),
+                isOutOfBand: false)
+
+            model.start()
+            await backend.waitForSubscribeCount(1)
+            // Read budgets are matched by value, not by position: this viewer issues `.state` reads for
+            // several reasons (the automatic takeover's confirmation read among them), and only the
+            // connect bootstrap's budget is what this test is about. They are also compared as bounds
+            // rather than for equality, since the command channel hands the transport whatever is left of
+            // the caller's budget after waiting its turn on the channel.
+            await waitUntilAsync("the cold open's bootstrap read to be issued") {
+                await transport.stateRequestTimeouts().contains { $0 > .seconds(11) }
+            }
+            let coldOpenBudgets = await backend.initialEventTimeouts
+            XCTAssertEqual(coldOpenBudgets.first, .seconds(12), "a cold open dials on the full initial-event budget")
+            let coldOpenReads = await transport.stateRequestTimeouts()
+            XCTAssertFalse(coldOpenReads.contains { $0 <= .seconds(4) }, "no read a cold open makes is cut to the reconnect budget")
+            let coldOpenReadCount = coldOpenReads.count
+
+            await backend.setAllStreamCandidatesFailed(true)
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+            await waitUntil("the stage to reach unreachable", timeout: .seconds(5)) { model.connectionStage == .unreachable }
+            let firstRungDialed = await backend.waitForSubscribeCount(2, timeout: .seconds(3))
+            XCTAssertTrue(firstRungDialed, "the ladder's first rung must dial")
+            await waitUntilAsync("the redial's bootstrap read to be issued") {
+                await transport.stateRequestTimeouts().dropFirst(coldOpenReadCount).contains { $0 <= .seconds(4) }
+            }
+
+            let budgets = await backend.initialEventTimeouts
+            XCTAssertEqual(budgets.count, 2)
+            XCTAssertEqual(budgets[1], .seconds(4), "a redial into a reported outage dials on the short initial-event budget")
+            let redialReads = Array(await transport.stateRequestTimeouts().dropFirst(coldOpenReadCount))
+            XCTAssertTrue(
+                redialReads.contains { $0 > .seconds(3) && $0 <= .seconds(4) },
+                "the redial's bootstrap read is cut to the reconnect budget, and still keeps a usable one")
         }
 
         /// `TerminalScrollCoalescer` allows only one in-flight batch at a time (`queuedBatchCount`),
@@ -4388,8 +4752,7 @@
             // follows time to run to completion and discard the queued scroll batch.
             try await Task.sleep(for: .milliseconds(400))
             XCTAssertEqual(
-                tracker.currentScrollRequestCount(), 0,
-                "the scroll batch queued behind the failed key send must never reach the transport")
+                tracker.currentScrollRequestCount(), 0, "the scroll batch queued behind the failed key send must never reach the transport")
 
             // The escalation above tears the stream down and arms a redial; wait for its bootstrap read to
             // land and reassert ownership before sending again, exactly like
@@ -4400,9 +4763,7 @@
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 2)
 
             await model.sendScroll(horizontal: 0, vertical: 7, scrollMods: 0, pointerPosition: nil)
-            await waitUntil("the post-recovery scroll to reach the transport", timeout: .seconds(3)) {
-                tracker.currentScrollRequestCount() == 1
-            }
+            await waitUntil("the post-recovery scroll to reach the transport", timeout: .seconds(3)) { tracker.currentScrollRequestCount() == 1 }
         }
 
         /// K1 regression: a connection-level transport failure on an input send (a reset, refused, or
@@ -4591,7 +4952,8 @@
             nonisolated func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { StalledStreamRequestTransport() }
 
             nonisolated func openSessionStream(
-                request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                request: SpacesDeviceAPIRequest, initialEventTimeout: Duration,
+                onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
                 onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
             ) async throws -> SpacesDeviceAPIStreamHandle {
                 await recordSubscribe(onDisconnect: onDisconnect)
@@ -4673,9 +5035,24 @@
         }
 
         private actor StageTrackerTestBackend: SpacesDeviceAPIBackend {
+            /// One opened subscription's callbacks, kept per stream rather than as a single "latest"
+            /// pair: stage 2 races two dials at once, so a test has to be able to deliver a frame or a
+            /// disconnect on the FIRST of them while the second is still open.
+            private struct OpenedStream {
+                let onEvent: @MainActor (GhosttyRemoteSessionStatePayload) -> Void
+                let onDisconnect: @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
+            }
+
             private var subscribeCount = 0
-            private var onEvent: (@MainActor (GhosttyRemoteSessionStatePayload) -> Void)?
-            private var onDisconnect: (@MainActor (SpacesDeviceAPIStreamDisconnect) -> Void)?
+            /// Every stream this backend has opened, in the order it opened them. Index 0 is the first
+            /// subscribe of the run, so `fireFrame(onStream:)` and `fireDisconnect(_:onStream:)` address
+            /// a stream by its subscribe number (1-based) and the unsuffixed helpers keep addressing the
+            /// most recent one.
+            private var openedStreams: [OpenedStream] = []
+            /// The initial-event budget each `openSessionStream` call was given, in the same order as
+            /// `openedStreams`: what a test asserts when it checks that a redial is dialed on a shorter
+            /// budget than a cold open.
+            private(set) var initialEventTimeouts: [Duration] = []
             private var nextSubscribeError: (any Error)?
             private var pingOutcome: (any Error)?
             private(set) var pingCallCount = 0
@@ -4704,10 +5081,11 @@
             nonisolated func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { transportFactory() }
 
             nonisolated func openSessionStream(
-                request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                request: SpacesDeviceAPIRequest, initialEventTimeout: Duration,
+                onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
                 onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
             ) async throws -> SpacesDeviceAPIStreamHandle {
-                try await recordSubscribe(onEvent: onEvent, onDisconnect: onDisconnect)
+                try await recordSubscribe(initialEventTimeout: initialEventTimeout, onEvent: onEvent, onDisconnect: onDisconnect)
             }
 
             /// Routed exactly like `SpacesDeviceClosureBackend.sendPinnedPing`, but its outcome is set
@@ -4806,9 +5184,14 @@
 
             /// Delivers `payload` on the most recently opened subscription, exactly as a real stream event
             /// would: proof positive to the model that the connection is live.
-            func fireFrame(_ payload: GhosttyRemoteSessionStatePayload) async {
-                let handler = onEvent
-                await MainActor.run { handler?(payload) }
+            func fireFrame(_ payload: GhosttyRemoteSessionStatePayload) async { await fireFrame(payload, onStream: openedStreams.count) }
+
+            /// Delivers `payload` on the `stream`th subscription this backend opened (1-based), so a test
+            /// can decide which of two racing dials is the one that reaches the device.
+            func fireFrame(_ payload: GhosttyRemoteSessionStatePayload, onStream stream: Int) async {
+                guard stream >= 1, stream <= openedStreams.count else { return }
+                let handler = openedStreams[stream - 1].onEvent
+                await MainActor.run { handler(payload) }
             }
 
             /// Ends the most recently opened subscription with `error`, exactly as the real liveness watch
@@ -4817,12 +5200,15 @@
             /// `SpacesDeviceNetworkBackend.openSessionStream` capturing that verdict onto the event it
             /// hands `onDisconnect`; a clean (`nil`) disconnect always reads `false`, since a clean close
             /// proves nothing about the address that was in use.
-            func fireDisconnect(_ error: (any Error)?) async {
-                let handler = onDisconnect
+            func fireDisconnect(_ error: (any Error)?) async { await fireDisconnect(error, onStream: openedStreams.count) }
+
+            /// Ends the `stream`th subscription this backend opened (1-based), so a test can end one of
+            /// two racing dials while the other stays open.
+            func fireDisconnect(_ error: (any Error)?, onStream stream: Int) async {
+                guard stream >= 1, stream <= openedStreams.count else { return }
+                let handler = openedStreams[stream - 1].onDisconnect
                 let exhausted = allStreamCandidatesFailed
-                await MainActor.run {
-                    handler?(SpacesDeviceAPIStreamDisconnect(error: error, dialExhaustedAllCandidates: error != nil && exhausted))
-                }
+                await MainActor.run { handler(SpacesDeviceAPIStreamDisconnect(error: error, dialExhaustedAllCandidates: error != nil && exhausted)) }
             }
 
             /// Fires a disconnect exactly like `fireDisconnect`, except the event's
@@ -4832,23 +5218,23 @@
             /// later query would see) reads, proving the model consumes the captured value rather than
             /// re-deriving it afterward.
             func fireDisconnect(_ error: (any Error)?, exhaustedOverride: Bool) async {
-                let handler = onDisconnect
+                guard let handler = openedStreams.last?.onDisconnect else { return }
                 await MainActor.run {
-                    handler?(SpacesDeviceAPIStreamDisconnect(error: error, dialExhaustedAllCandidates: error != nil && exhaustedOverride))
+                    handler(SpacesDeviceAPIStreamDisconnect(error: error, dialExhaustedAllCandidates: error != nil && exhaustedOverride))
                 }
             }
 
             private func recordSubscribe(
-                onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                initialEventTimeout: Duration, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
                 onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
             ) async throws -> SpacesDeviceAPIStreamHandle {
                 subscribeCount += 1
+                initialEventTimeouts.append(initialEventTimeout)
                 if let nextSubscribeError {
                     self.nextSubscribeError = nil
                     throw nextSubscribeError
                 }
-                self.onEvent = onEvent
-                self.onDisconnect = onDisconnect
+                openedStreams.append(OpenedStream(onEvent: onEvent, onDisconnect: onDisconnect))
                 if let payload = deliverInitialFrameBeforeReturningHandle {
                     deliverInitialFrameBeforeReturningHandle = nil
                     await MainActor.run { onEvent(payload) }
@@ -4863,6 +5249,28 @@
             }
         }
 
+        /// Answers `.state` the way the daemon would and records the timeout every `.state` read was
+        /// issued with, so a test can assert that a redial into a reported outage asks on a shorter budget
+        /// than a cold open does.
+        private actor StateTimeoutRecordingRequestTransport: SpacesDeviceAPIRequestTransport {
+            private var recordedStateRequestTimeouts: [Duration] = []
+
+            func stateRequestTimeouts() -> [Duration] { recordedStateRequestTimeouts }
+            func stateRequestTimeoutCount() -> Int { recordedStateRequestTimeouts.count }
+
+            func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                if case .state = request.command {
+                    recordedStateRequestTimeouts.append(timeout)
+                    return TerminalViewerModelTests.terminalStateResponse(
+                        TerminalViewerModelTests.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:31Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+
+            func close() async {}
+        }
+
         /// Answers `.state` the way the daemon would (so a reconnect's bootstrap read succeeds), throws
         /// `requestTimedOut` for every `.key` send (so an input send always reaches the corroboration
         /// probe), and answers everything else `ok`.
@@ -4874,6 +5282,52 @@
                             attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:31Z"))
                 }
                 if case .terminalControl(let payload) = request.command, payload.action == .key { throw SpacesDeviceAPIClientError.requestTimedOut }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+
+            func close() async {}
+        }
+
+        /// Answers `.state` the way the daemon would, except that while a hold is armed the next read
+        /// that asks for the screen parks until `releaseHeldStateRead()` is called, so a test can act on
+        /// the model while a failure handler is suspended inside its own recovery read.
+        ///
+        /// Only a screen-asking read is eligible. The connect bootstrap read asks for none
+        /// (`includesRenderUpdate: false`) and runs as a cancellable child of the dial itself, so parking
+        /// one would strand the dial rather than the handler under test -- and a parked
+        /// `withCheckedContinuation` does not answer cancellation, so it would hang the test outright.
+        private actor HeldStateReadRequestTransport: SpacesDeviceAPIRequestTransport {
+            private var isHoldArmed = false
+            private var heldContinuation: CheckedContinuation<Void, Never>?
+            private var heldReadCount = 0
+
+            func armStateReadHold() { isHoldArmed = true }
+
+            @discardableResult func waitForHeldStateRead(timeout: Duration = .seconds(5)) async -> Bool {
+                let deadline = ContinuousClock().now + timeout
+                while ContinuousClock().now < deadline {
+                    if heldReadCount > 0 { return true }
+                    try? await Task.sleep(for: .milliseconds(5))
+                }
+                return heldReadCount > 0
+            }
+
+            func releaseHeldStateRead() {
+                heldContinuation?.resume()
+                heldContinuation = nil
+            }
+
+            func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                if case .state(let payload) = request.command {
+                    if isHoldArmed, payload.includesRenderUpdate {
+                        isHoldArmed = false
+                        heldReadCount += 1
+                        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in heldContinuation = continuation }
+                    }
+                    return TerminalViewerModelTests.terminalStateResponse(
+                        TerminalViewerModelTests.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:31Z"))
+                }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
 
@@ -4934,9 +5388,7 @@
                         TerminalViewerModelTests.runningTerminalState(
                             attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:31Z"))
                 }
-                if case .terminalControl(let payload) = request.command, payload.action == .key {
-                    throw POSIXError(.ECONNRESET)
-                }
+                if case .terminalControl(let payload) = request.command, payload.action == .key { throw POSIXError(.ECONNRESET) }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
 
@@ -4975,9 +5427,7 @@
                         TerminalViewerModelTests.runningTerminalState(
                             attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:31Z"))
                 }
-                if case .terminalControl(let payload) = request.command, payload.action == .key {
-                    throw POSIXError(.EHOSTUNREACH)
-                }
+                if case .terminalControl(let payload) = request.command, payload.action == .key { throw POSIXError(.EHOSTUNREACH) }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
 
@@ -5016,9 +5466,7 @@
                         TerminalViewerModelTests.runningTerminalState(
                             attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:31Z"))
                 }
-                if case .terminalControl(let payload) = request.command, payload.action == .key {
-                    throw SpacesDeviceAPIClientError.connectionClosed
-                }
+                if case .terminalControl(let payload) = request.command, payload.action == .key { throw SpacesDeviceAPIClientError.connectionClosed }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
 
@@ -5127,6 +5575,16 @@
         /// ownership flip itself, which is exactly the effect the reassert has to come after.
         private func waitForRedialBootstrapToLand(_ model: TerminalViewerModel) async {
             await waitUntil("the redial's bootstrap state read to land (ownership cleared by its ownerless snapshot)") { !model.isOwner }
+        }
+
+        /// `waitUntil` for a condition that has to be read off an actor.
+        private func waitUntilAsync(_ description: String, timeout: Duration = .seconds(5), _ condition: () async -> Bool) async {
+            let deadline = ContinuousClock().now + timeout
+            while ContinuousClock().now < deadline {
+                if await condition() { return }
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            XCTFail("Timed out waiting for \(description).")
         }
 
         /// Polls instead of awaiting the condition directly, so a regression that strands a waiter fails
