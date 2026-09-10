@@ -101,7 +101,21 @@ public struct GhosttyTerminalCellMetricsCache {
     /// geometry.
     public func predictedGrid(fontSizePoints: Int, scale: Double, renderBoundsWidth: Double, renderBoundsHeight: Double) -> (columns: Int, rows: Int)?
     {
-        guard let cell = cellPixelSize(fontSizePoints: fontSizePoints, scale: scale), cell.width > 0, cell.height > 0 else { return nil }
+        guard let cell = cellPixelSize(fontSizePoints: fontSizePoints, scale: scale) else { return nil }
+        return Self.grid(cellPixelSize: cell, scale: scale, renderBoundsWidth: renderBoundsWidth, renderBoundsHeight: renderBoundsHeight)
+    }
+
+    /// The grid a surface with cells of `cellPixelSize` measures for a viewport of `renderBoundsWidth` x
+    /// `renderBoundsHeight` points at `scale`. Nil for a degenerate cell size.
+    ///
+    /// Split out from ``predictedGrid(fontSizePoints:scale:renderBoundsWidth:renderBoundsHeight:)`` so a
+    /// live `ghostty_surface_size()` read can measure a viewport other than the one the surface itself is
+    /// sized to: the iOS host renders into the area above the software keyboard but reports the grid for
+    /// the whole pane, and both come out of this one formula applied to different bounds.
+    public static func grid(cellPixelSize cell: CellPixelSize, scale: Double, renderBoundsWidth: Double, renderBoundsHeight: Double) -> (
+        columns: Int, rows: Int
+    )? {
+        guard cell.width > 0, cell.height > 0 else { return nil }
         let widthPx = max(Int((renderBoundsWidth * scale).rounded(.down)), 1)
         let heightPx = max(Int((renderBoundsHeight * scale).rounded(.down)), 1)
         let paddingPerSide = Self.paddingPerSidePx(scale: scale)

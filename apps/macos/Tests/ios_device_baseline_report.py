@@ -520,35 +520,34 @@ def metric_keyboard(window):
         (e for e in window.app_events if e.get("name") == "keyboard_toggle" and event_uptime_ns(e) is not None),
         key=event_uptime_ns,
     )
-    resizes = sorted(
+    shifts = sorted(
         (
             e
             for e in window.app_events
-            if e.get("name") == "viewport_resize_frame_visible" and event_uptime_ns(e) is not None
+            if e.get("name") == "keyboard_shift_applied" and event_uptime_ns(e) is not None
         ),
         key=event_uptime_ns,
     )
-    # A toggle pairs only with a resize that lands before the next toggle. The first show after an
-    # open has no resize event of its own (the frame for the reduced grid arrives before the viewport
-    # target is armed), and a running cursor would hand that show the following hide's resize and shift
-    # every later pair by one.
+    # A toggle pairs only with a shift that lands before the next toggle. A toggle that leaves the
+    # rendered window the same size (nothing to shift) emits no shift event, and a running cursor would
+    # hand that toggle the next one's shift and move every later pair by one.
     show_ms, hide_ms = [], []
     for position, toggle in enumerate(toggles):
         toggle_ns = event_uptime_ns(toggle)
         next_toggle_ns = event_uptime_ns(toggles[position + 1]) if position + 1 < len(toggles) else None
-        resize = next(
+        shift = next(
             (
                 candidate
-                for candidate in resizes
+                for candidate in shifts
                 if event_uptime_ns(candidate) >= toggle_ns and (next_toggle_ns is None or event_uptime_ns(candidate) < next_toggle_ns)
             ),
             None,
         )
-        if resize is None:
+        if shift is None:
             continue
-        # The resize event's own `elapsedMS` is the toggle-to-frame time the app measured; the event is
-        # logged 500 ms later, after its quiet window, so its timestamp would overstate every transition.
-        delta = event_elapsed_ms(resize)
+        # The shift event's own `elapsedMS` is the toggle-to-shift time the app measured, which is the
+        # whole transition: the keyboard resizes nothing on the daemon, so no frame is waited on.
+        delta = event_elapsed_ms(shift)
         if delta is None:
             continue
         (show_ms if attr(toggle, "visible") == "1" else hide_ms).append(delta)
@@ -833,10 +832,10 @@ BACK_AND_FORTH_COLUMNS = [
 ]
 
 KEYBOARD_COLUMNS = [
-    ("show_p50", "show->resize p50 ms", fmt_ms),
-    ("show_max", "show->resize max ms", fmt_ms),
-    ("hide_p50", "hide->resize p50 ms", fmt_ms),
-    ("hide_max", "hide->resize max ms", fmt_ms),
+    ("show_p50", "show->shift p50 ms", fmt_ms),
+    ("show_max", "show->shift max ms", fmt_ms),
+    ("hide_p50", "hide->shift p50 ms", fmt_ms),
+    ("hide_max", "hide->shift max ms", fmt_ms),
     ("frames_p50", "frames/cycle p50", fmt_count),
     ("frames_max", "frames/cycle max", fmt_count),
     ("kb_p50", "decoded KB/cycle p50", fmt_kb),

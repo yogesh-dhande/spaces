@@ -183,8 +183,15 @@ public enum GhosttyTerminalSnapshotViewport {
             endRow: UInt16(overlapRowEnd - windowRowStart), isRectangle: false, extendsAbove: extendsAbove, extendsBelow: extendsBelow)
     }
 
+    /// The window of `snapshot` a viewport of `columns` x `rows` shows.
+    ///
+    /// `retainedRowOffset` is the row offset the caller drew the frame before this one at. A caller that
+    /// keeps no such state (one whose viewport always covers the whole snapshot) passes the default; the
+    /// iOS host view, whose viewport shrinks under the software keyboard, passes the offset its last
+    /// render used. See ``rowOffset(for:viewportRows:retainedRowOffset:)`` for what it decides.
     public static func window(
-        for snapshot: GhosttyTerminalSnapshot, columns: Int, rows: Int, horizontalAlignment: HorizontalAlignment = .followCursor
+        for snapshot: GhosttyTerminalSnapshot, columns: Int, rows: Int, horizontalAlignment: HorizontalAlignment = .followCursor,
+        retainedRowOffset: Int = 0
     ) -> Window {
         let resolvedColumns = min(max(columns, 1), max(snapshot.columns, 1))
         let resolvedRows = min(max(rows, 1), max(snapshot.rows, 1))
@@ -198,10 +205,39 @@ public enum GhosttyTerminalSnapshotViewport {
         }
 
         return Window(
-            columnOffset: columnOffset,
-            rowOffset: viewportOffset(
-                cursor: snapshot.cursorRow, viewport: resolvedRows, content: snapshot.rows, trailingContext: min(max(1, resolvedRows / 8), 2)),
+            columnOffset: columnOffset, rowOffset: rowOffset(for: snapshot, viewportRows: resolvedRows, retainedRowOffset: retainedRowOffset),
             columns: resolvedColumns, rows: resolvedRows)
+    }
+
+    /// How far down the snapshot the visible rows start.
+    ///
+    /// On iOS this is the whole of the software keyboard's effect on the terminal: the session keeps the
+    /// grid it was given, and the rows the keyboard covers are taken off the top rather than off the
+    /// session (see `GhosttyRemoteTerminalHostView.reportedViewportBounds()`).
+    ///
+    /// Two rules, by whether the frame has a cursor to follow:
+    ///
+    /// - A frame at the bottom of its scrollback follows the cursor, so the offset is the smaller of
+    ///   what the viewport hides (`content - viewport`) and what it takes to keep the cursor row, plus
+    ///   its trailing rows of context, on screen. A cursor already inside the first `viewport` rows
+    ///   needs nothing, so the content does not move at all. This is what keeps the prompt on screen
+    ///   while typing, and a frame back at the bottom re-follows the cursor however far the offset had
+    ///   travelled while scrolled back.
+    /// - A frame the user has scrolled back has its cursor somewhere outside the exported viewport, so
+    ///   there is nothing to follow. It keeps `retainedRowOffset`, the offset the frame before it was
+    ///   drawn at, clamped to what this viewport can show. Holding the offset still is what makes the
+    ///   visible rows move exactly as far as the scroll moved the content: the scroll is already in the
+    ///   frame, since the daemon exports a viewport that has itself moved up the scrollback. Any rule
+    ///   that recomputed an offset per scrolled frame instead (pinning to the viewport's bottom rows,
+    ///   say) would jump the content by the difference between the two rules on the first scrolled
+    ///   frame and jump it back on the return to the bottom.
+    private static func rowOffset(for snapshot: GhosttyTerminalSnapshot, viewportRows: Int, retainedRowOffset: Int) -> Int {
+        guard snapshot.rows > viewportRows else { return 0 }
+        let maximumOffset = snapshot.rows - viewportRows
+        let isScrolledBack = Int(snapshot.scrollbarOffset) + snapshot.rows < Int(snapshot.scrollbarTotal)
+        guard !isScrolledBack else { return min(max(retainedRowOffset, 0), maximumOffset) }
+        return viewportOffset(
+            cursor: snapshot.cursorRow, viewport: viewportRows, content: snapshot.rows, trailingContext: min(max(1, viewportRows / 8), 2))
     }
 
     private static func viewportOffset(cursor: Int, viewport: Int, content: Int, trailingContext: Int) -> Int {

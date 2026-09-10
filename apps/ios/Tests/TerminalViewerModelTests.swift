@@ -2628,6 +2628,38 @@
             XCTAssertEqual(stateRequestCount, 2, "a frame that covers the failure retires the retry")
         }
 
+        /// The software keyboard is handled entirely on the client: the surface reports a shorter rendered
+        /// window and the same grid, so no resize reaches the daemon and no other client attached to the
+        /// session reflows.
+        func testAKeyboardToggleSendsNoResizeRequest() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            defer { model.stop() }
+
+            model.updateViewportSize(columns: 80, rows: 40)
+            let didResize = try await waitForTerminalControlAction(.resize, count: 1, recorder: recorder)
+            XCTAssertTrue(didResize, "the pane's own grid is what resizes the session")
+
+            model.noteKeyboardToggled(visible: true)
+            model.noteRenderedViewportChanged(window: GhosttyTerminalSnapshotViewport.Window(columnOffset: 0, rowOffset: 18, columns: 80, rows: 22))
+            model.noteKeyboardToggled(visible: false)
+            model.noteRenderedViewportChanged(window: GhosttyTerminalSnapshotViewport.Window(columnOffset: 0, rowOffset: 0, columns: 80, rows: 40))
+
+            // Comfortably past the 120 ms ownership-sync debounce a viewport change would have armed.
+            try await Task.sleep(for: .milliseconds(400))
+            let resizeCount = await recorder.countTerminalControlAction(.resize)
+            XCTAssertEqual(resizeCount, 1, "a keyboard show and hide must add no resize round trip of their own")
+            XCTAssertEqual(model.viewportRows, 40, "the grid the session holds is unchanged by the keyboard")
+            XCTAssertEqual(model.renderedViewportWindow?.rows, 40, "the client is back to rendering every row it reported")
+        }
+
         /// A viewport report that arrives while an earlier one's ownership-synchronization round trip is
         /// still running does not start a second resize; `scheduleOwnershipSynchronization`'s coalescing
         /// branch records it in `needsOwnershipSynchronizationAfterCurrentRun` instead, and the round trip

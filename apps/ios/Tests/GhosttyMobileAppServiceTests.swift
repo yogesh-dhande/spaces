@@ -1034,7 +1034,11 @@
             window.isHidden = true
         }
 
-        func testRemoteTerminalHostViewUsesKeyboardVisibleViewportForRenderedSnapshot() throws {
+        /// The keyboard is a client-side shift, never a session resize: while it is up the host view keeps
+        /// reporting the grid the pane holds and renders a shorter window out of it, so the prompt stays
+        /// on screen without the daemon reflowing anything. The accessory toolbar is the counter-case in
+        /// the same test: it is permanent chrome, so it does change the reported grid.
+        func testRemoteTerminalHostViewShiftsTheRenderedWindowForTheKeyboardWithoutResizingTheSession() throws {
             let phoneBounds = CGRect(x: 0, y: 0, width: 393, height: 640)
             let window = UIWindow(frame: phoneBounds)
             let viewController = UIViewController()
@@ -1044,30 +1048,40 @@
             hostView.userInterfaceIdiomOverrideForTesting = .phone
             var reportedViewports: [(columns: Int, rows: Int)] = []
             hostView.onViewportSizeChanged = { columns, rows in reportedViewports.append((columns: columns, rows: rows)) }
+            var renderedViewports: [GhosttyTerminalSnapshotViewport.Window] = []
+            hostView.onRenderedViewportChanged = { window in renderedViewports.append(window) }
             viewController.view.addSubview(hostView)
             window.isHidden = false
             viewController.view.frame = window.bounds
             hostView.frame = viewController.view.bounds
             viewController.view.layoutIfNeeded()
 
-            let fullViewport = hostView.viewportSizeForTesting()
-            let keyboardHeight: CGFloat = 260
-            hostView.setKeyboardOccludedHeightForTesting(keyboardHeight)
-            let keyboardOnlyViewport = hostView.viewportSizeForTesting()
-
-            XCTAssertGreaterThan(fullViewport.rows, keyboardOnlyViewport.rows)
-            XCTAssertEqual(hostView.visibleRenderBoundsForTesting().height, 380, accuracy: 0.5)
+            let fullPaneViewport = hostView.reportedViewportSizeForTesting()
 
             hostView.setAcceptsTerminalInput(true)
-            hostView.setKeyboardOccludedHeightForTesting(keyboardHeight)
+            XCTAssertTrue(hostView.becomeFirstResponder())
+            // Laid out before the keyboard step below so the toolbar's own (legitimate) resize of the
+            // session is already reported, and anything reported afterwards can only be the keyboard's.
+            hostView.setNeedsLayout()
             viewController.view.layoutIfNeeded()
-            let keyboardViewport = hostView.viewportSizeForTesting()
+            let toolbarViewport = hostView.reportedViewportSizeForTesting()
+            XCTAssertLessThan(toolbarViewport.rows, fullPaneViewport.rows, "the accessory toolbar is permanent chrome, so it does resize the session")
+            XCTAssertEqual(hostView.reportedViewportBoundsForTesting().height, phoneBounds.height - 46, accuracy: 0.5)
+            reportedViewports.removeAll()
 
-            XCTAssertLessThan(keyboardViewport.rows, keyboardOnlyViewport.rows)
+            hostView.setKeyboardOccludedHeightForTesting(260)
+            viewController.view.layoutIfNeeded()
+
             XCTAssertEqual(hostView.visibleRenderBoundsForTesting().height, 334, accuracy: 0.5)
-            XCTAssertEqual(try XCTUnwrap(reportedViewports.last).rows, keyboardViewport.rows)
+            XCTAssertEqual(hostView.reportedViewportBoundsForTesting().height, phoneBounds.height - 46, accuracy: 0.5)
+            let keyboardUpReported = hostView.reportedViewportSizeForTesting()
+            let keyboardUpRendered = hostView.renderedViewportSizeForTesting()
+            XCTAssertEqual(keyboardUpReported.rows, toolbarViewport.rows, "the software keyboard must never change the grid the session holds")
+            XCTAssertEqual(keyboardUpReported.columns, toolbarViewport.columns)
+            XCTAssertLessThan(keyboardUpRendered.rows, keyboardUpReported.rows, "the keyboard must shorten what this client renders")
+            XCTAssertTrue(reportedViewports.isEmpty, "a keyboard transition must send no viewport report at all")
 
-            let longSnapshot = promptAtBottomSnapshot(columns: 80, rows: fullViewport.rows + 20)
+            let longSnapshot = promptAtBottomSnapshot(columns: 80, rows: keyboardUpReported.rows)
             hostView.update(
                 snapshot: longSnapshot, renderStateKey: "viewer|runtime=80x\(longSnapshot.rows)|snapshot=80x\(longSnapshot.rows)|interactive=0",
                 fallbackText: "Waiting for terminal state...")
@@ -1076,14 +1090,114 @@
 
             let renderedSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
             let renderedText = GhosttyTerminalSnapshotLayout.plainText(for: renderedSnapshot)
-            XCTAssertEqual(renderedSnapshot.rows, keyboardViewport.rows)
+            XCTAssertEqual(renderedSnapshot.rows, keyboardUpRendered.rows)
             XCTAssertTrue(renderedText.localizedStandardContains("shell %"), renderedText)
             XCTAssertFalse(renderedText.localizedStandardContains("SEQ 000000"), renderedText)
+            let shift = try XCTUnwrap(renderedViewports.last)
+            XCTAssertEqual(shift.rows, keyboardUpRendered.rows)
+            XCTAssertEqual(
+                shift.rowOffset, keyboardUpReported.rows - keyboardUpRendered.rows,
+                "the cursor is on the last row, so the shift is the whole hidden height")
+
+            // A row-offset-only change -- the keyboard geometry and grid untouched, only where the cursor
+            // sits -- must still produce a report: the Copy pill and the `keyboard_shift_applied`
+            // measurement have to see every window the surface actually renders, not only the ones a
+            // size-only dedupe would have let through.
+            let cursorNearTopOfWindowSnapshot = promptAtTopSnapshot(columns: 80, rows: keyboardUpReported.rows)
+            hostView.update(
+                snapshot: cursorNearTopOfWindowSnapshot,
+                renderStateKey: "viewer|runtime=80x\(keyboardUpReported.rows)|snapshot=80x\(keyboardUpReported.rows)|interactive=1",
+                fallbackText: "Waiting for terminal state...")
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            let rowOffsetOnlyShift = try XCTUnwrap(renderedViewports.last)
+            XCTAssertEqual(rowOffsetOnlyShift.rows, keyboardUpRendered.rows, "the rendered window's size did not change")
+            XCTAssertEqual(rowOffsetOnlyShift.rowOffset, 0, "the cursor is back inside the visible rows, so the window starts at the grid's top")
+            XCTAssertNotEqual(rowOffsetOnlyShift.rowOffset, shift.rowOffset, "the offset must actually have changed for this to prove anything")
+
+            hostView.setKeyboardOccludedHeightForTesting(0)
+            viewController.view.layoutIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+            XCTAssertEqual(
+                hostView.reportedViewportSizeForTesting().rows, toolbarViewport.rows, "hiding the keyboard must not resize the session either")
+            XCTAssertEqual(
+                hostView.renderedViewportSizeForTesting().rows, keyboardUpReported.rows, "hiding the keyboard gives the rows back to this client")
+            XCTAssertTrue(reportedViewports.isEmpty, "neither half of a keyboard cycle reports a viewport")
+            XCTAssertEqual(try XCTUnwrap(renderedViewports.last).rowOffset, 0, "with every row on screen there is nothing left to shift")
 
             window.isHidden = true
         }
 
-        func testRemoteTerminalHostViewSettlesKeyboardViewportOnceAfterReplacingATransition() throws {
+        /// A scroll's pointer position is expressed in the grid the daemon holds, not in the area this
+        /// client shows. The daemon expands the normalized pointer over the whole session surface, so
+        /// while the keyboard crops rows off the top, a touch on the first visible row has to arrive as
+        /// the row that crop starts at, not as row zero.
+        func testRemoteTerminalHostViewSendsScrollPointerPositionsInTheDaemonsGrid() throws {
+            let phoneBounds = CGRect(x: 0, y: 0, width: 393, height: 640)
+            let window = UIWindow(frame: phoneBounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: phoneBounds)
+            hostView.userInterfaceIdiomOverrideForTesting = .phone
+            var sentScrolls: [TerminalScrollPointerPosition?] = []
+            hostView.onSendScroll = { _, _, _, pointerPosition in sentScrolls.append(pointerPosition) }
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.setAcceptsTerminalInput(true)
+            XCTAssertTrue(hostView.becomeFirstResponder())
+            hostView.setKeyboardOccludedHeightForTesting(260)
+            viewController.view.layoutIfNeeded()
+
+            let gridRows = hostView.reportedViewportSizeForTesting().rows
+            let longSnapshot = promptAtBottomSnapshot(columns: 80, rows: gridRows)
+            hostView.update(
+                snapshot: longSnapshot, renderStateKey: "viewer|runtime=80x\(gridRows)|snapshot=80x\(gridRows)|interactive=0",
+                fallbackText: "Waiting for terminal state...")
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            let renderedSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            // The prompt is on the last row, so the crop starts at every row the keyboard hides.
+            let offsetRows = gridRows - renderedSnapshot.rows
+            XCTAssertGreaterThan(offsetRows, 0, "the keyboard has to crop rows off the top for this to prove anything")
+
+            let visibleBounds = hostView.visibleRenderBoundsForTesting()
+            XCTAssertTrue(hostView.debugSendScrollForTesting(horizontal: 0, vertical: 4, location: CGPoint(x: 0, y: visibleBounds.minY)))
+            let topOfVisibleArea = try XCTUnwrap(sentScrolls.last ?? nil)
+            XCTAssertEqual(
+                topOfVisibleArea.y, Double(offsetRows) / Double(gridRows), accuracy: 0.001,
+                "the first visible row is the row the crop starts at, not the grid's first row")
+            XCTAssertEqual(topOfVisibleArea.x, 0, accuracy: 0.001)
+
+            XCTAssertTrue(hostView.debugSendScrollForTesting(horizontal: 0, vertical: 4, location: CGPoint(x: 0, y: visibleBounds.midY)))
+            let middleOfVisibleArea = try XCTUnwrap(sentScrolls.last ?? nil)
+            XCTAssertEqual(
+                middleOfVisibleArea.y, (Double(offsetRows) + Double(renderedSnapshot.rows) / 2) / Double(gridRows), accuracy: 0.01,
+                "a touch halfway down the visible area is halfway down the crop, measured in the daemon's grid")
+
+            hostView.setKeyboardOccludedHeightForTesting(0)
+            viewController.view.layoutIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+            XCTAssertTrue(
+                hostView.debugSendScrollForTesting(
+                    horizontal: 0, vertical: 4, location: CGPoint(x: 0, y: hostView.visibleRenderBoundsForTesting().minY)))
+            XCTAssertEqual(
+                try XCTUnwrap(sentScrolls.last ?? nil).y, 0, accuracy: 0.001,
+                "with no crop left the visible area is the grid and the position is unchanged")
+
+            window.isHidden = true
+        }
+
+        /// Every intermediate keyboard geometry reaches `layoutSubviews`, and none of them may reach the
+        /// daemon. The local surface still follows each one, and a change that is not the keyboard (the
+        /// pane itself resizing, as a rotation does) still reports.
+        func testKeyboardLayoutsReportNoViewportWhileAPaneResizeStillDoes() throws {
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 393, height: 640))
             hostView.userInterfaceIdiomOverrideForTesting = .phone
             hostView.setAcceptsTerminalInput(true)
@@ -1093,48 +1207,33 @@
             hostView.onViewportSizeChanged = { columns, rows in reportedViewports.append((columns: columns, rows: rows)) }
             hostView.setNeedsLayout()
             hostView.layoutIfNeeded()
-            let baselineViewport = hostView.viewportSizeForTesting()
+            let baselineViewport = hostView.reportedViewportSizeForTesting()
             reportedViewports.removeAll()
             let rendersBeforeTransition = hostView.renderLatestSnapshotCallCountForTesting
 
-            hostView.setSoftwareKeyboardVisible(false)
-            let firstSettlement = try XCTUnwrap(hostView.keyboardViewportSettlementIDForTesting())
-            hostView.setKeyboardOccludedHeightForTesting(180)
-            hostView.layoutIfNeeded()
+            for occludedHeight in [80.0, 180.0, 260.0] as [CGFloat] {
+                hostView.setKeyboardOccludedHeightForTesting(occludedHeight)
+                hostView.layoutIfNeeded()
+            }
 
-            XCTAssertTrue(reportedViewports.isEmpty, "an intermediate keyboard frame must not resize the remote terminal")
+            XCTAssertTrue(reportedViewports.isEmpty, "no keyboard geometry, intermediate or final, may resize the remote terminal")
             XCTAssertEqual(
-                hostView.renderLatestSnapshotCallCountForTesting, rendersBeforeTransition + 1, "the local surface must follow the keyboard layout")
+                hostView.renderLatestSnapshotCallCountForTesting, rendersBeforeTransition + 3, "the local surface must follow the keyboard layout")
+            XCTAssertEqual(hostView.reportedViewportSizeForTesting().rows, baselineViewport.rows)
 
-            hostView.setSoftwareKeyboardVisible(true)
-            let secondSettlement = try XCTUnwrap(hostView.keyboardViewportSettlementIDForTesting())
-            XCTAssertNotEqual(firstSettlement, secondSettlement)
-            hostView.setKeyboardOccludedHeightForTesting(260)
+            hostView.setKeyboardOccludedHeightForTesting(0)
             hostView.layoutIfNeeded()
 
-            XCTAssertTrue(reportedViewports.isEmpty, "the replacement transition must also suppress its interim viewport")
-            XCTAssertEqual(hostView.renderLatestSnapshotCallCountForTesting, rendersBeforeTransition + 2)
+            XCTAssertTrue(reportedViewports.isEmpty, "the hide half of the cycle reports nothing either")
 
-            hostView.completeKeyboardViewportSettlementForTesting(id: firstSettlement)
-            XCTAssertTrue(reportedViewports.isEmpty, "a cancelled transition must not report after its replacement")
-            XCTAssertEqual(hostView.renderLatestSnapshotCallCountForTesting, rendersBeforeTransition + 2)
-
-            hostView.completeKeyboardViewportSettlementForTesting(id: secondSettlement)
-            XCTAssertEqual(reportedViewports.count, 1)
-            let finalReport = try XCTUnwrap(reportedViewports.first)
-            let settledViewport = hostView.viewportSizeForTesting()
-            XCTAssertNotEqual(settledViewport.rows, baselineViewport.rows)
-            XCTAssertEqual(finalReport.columns, settledViewport.columns)
-            XCTAssertEqual(finalReport.rows, settledViewport.rows)
-            XCTAssertEqual(hostView.renderLatestSnapshotCallCountForTesting, rendersBeforeTransition + 3)
-
-            hostView.setKeyboardOccludedHeightForTesting(260)
+            hostView.frame = CGRect(x: 0, y: 0, width: 640, height: 393)
             hostView.layoutIfNeeded()
-            let restoredViewport = hostView.viewportSizeForTesting()
-            let lastReportedViewport = try XCTUnwrap(reportedViewports.last)
-            XCTAssertEqual(lastReportedViewport.columns, restoredViewport.columns, "ordinary layouts still report outside keyboard transitions")
-            XCTAssertEqual(lastReportedViewport.rows, restoredViewport.rows, "ordinary layouts still report outside keyboard transitions")
-            XCTAssertEqual(hostView.renderLatestSnapshotCallCountForTesting, rendersBeforeTransition + 4)
+
+            let rotatedViewport = hostView.reportedViewportSizeForTesting()
+            let rotatedReport = try XCTUnwrap(reportedViewports.last)
+            XCTAssertNotEqual(rotatedViewport.rows, baselineViewport.rows)
+            XCTAssertEqual(rotatedReport.columns, rotatedViewport.columns, "a pane resize still reports its new grid")
+            XCTAssertEqual(rotatedReport.rows, rotatedViewport.rows)
         }
 
         func testRemoteTerminalHostViewUsesSurfaceRowsForKeyboardHiddenPrompt() throws {
@@ -1157,11 +1256,11 @@
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
 
             XCTAssertEqual(hostView.visibleRenderBoundsForTesting().height, phoneBounds.height - 46, accuracy: 0.5)
-            let fallbackViewport = hostView.viewportSizeForTesting()
+            let fallbackViewport = hostView.reportedViewportSizeForTesting()
             let surfaceRows = max(fallbackViewport.rows - 12, 1)
             hostView.setSurfaceViewportSizeForTesting(columns: 80, rows: surfaceRows)
 
-            let surfaceViewport = hostView.viewportSizeForTesting()
+            let surfaceViewport = hostView.reportedViewportSizeForTesting()
             XCTAssertEqual(surfaceViewport.columns, 80)
             XCTAssertEqual(surfaceViewport.rows, surfaceRows)
 
@@ -1349,8 +1448,8 @@
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
             let appliesAtOriginalGeometry = hostView.renderFrameApplyCountForTesting
 
-            // Hiding the keyboard grows the view without changing the daemon snapshot. The surface
-            // refreshes its retained state at the new geometry without resetting it from that frame.
+            // A pane resize grows the view without changing the daemon snapshot. The surface refreshes its
+            // retained state at the new geometry without resetting it from that frame.
             hostView.frame.size.height += 120
             hostView.setNeedsLayout()
             hostView.layoutIfNeeded()
@@ -2541,6 +2640,11 @@
             let lines = (0..<historyRows).map { index in "SEQ \(String(format: "%06d", index)) keyboard-safe-row-\(index)" }
             return snapshot(columns: columns, rows: rows, text: (lines + ["shell %"]).joined(separator: "\n"))
         }
+
+        /// A grid the same size as `promptAtBottomSnapshot`'s, but with the cursor on its first row instead
+        /// of its last: the cursor-follow rule needs no shift at all for this one, unlike the bottom prompt,
+        /// which proves a rendered-window report changed for the row offset alone rather than for its size.
+        private func promptAtTopSnapshot(columns: Int, rows: Int) -> GhosttyTerminalSnapshot { snapshot(columns: columns, rows: rows, text: "shell %") }
 
         private func snapshotSignature(_ snapshot: GhosttyTerminalSnapshot?) -> String {
             guard let snapshot else { return "nil" }

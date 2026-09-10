@@ -104,6 +104,7 @@ struct TerminalDetailView: View {
                                     renderedText = text
                                     model.recordRenderedText(text)
                                 } : nil, onViewportSizeChanged: { columns, rows in model.updateViewportSize(columns: columns, rows: rows) },
+                            onRenderedViewportChanged: { window in model.noteRenderedViewportChanged(window: window) },
                             onSendText: { text, asPaste in sendTerminalText(text, asPaste: asPaste) }, onSendKey: { key in sendTerminalKey(key) },
                             onSendScroll: { horizontal, vertical, scrollMods, pointerPosition in
                                 sendTerminalScroll(
@@ -274,20 +275,27 @@ struct TerminalDetailView: View {
     /// `contentOrigin`/cell metrics mirror exactly what `GhosttyRemoteTerminalHostView` itself measures
     /// (`GhosttyRemoteTerminalViewport.contentInsets`/`cellMetrics(fontSize:)`), so the pill agrees with
     /// the surface on where a row/column lands on screen without the two ever drifting apart.
+    ///
+    /// `model.renderedViewportWindow`, not the reported grid, is what the placement crops against: it is
+    /// the exact window the host view last rendered, columns, rows, and row offset together, reported by
+    /// `GhosttyRemoteTerminalHostView.onRenderedViewportChanged`. While the software keyboard is up that
+    /// window is a shifted slice of a grid taller than the screen, and while the user is scrolled back its
+    /// row offset carries state (the retained scroll position) this view has no other way to reproduce;
+    /// cropping against anything else, including a window recomputed from the reported grid size alone,
+    /// can place the pill against rows the surface isn't actually showing.
     private var selectionCopyPillPlacement: SelectionCopyPillPlacement? {
         // The daemon rejects readSelectionText once the session has ended, so the pill would be a
         // dead control on a frozen frame.
         guard let snapshot = model.latestState?.renderSnapshot, snapshot.selection != nil, model.endedRender == nil,
-            let columns = model.viewportColumns, let rows = model.viewportRows
+            let window = model.renderedViewportWindow
         else { return nil }
         let metrics = GhosttyRemoteTerminalViewport.cellMetrics(fontSize: terminalFontSize)
         let contentOrigin = CGPoint(x: GhosttyRemoteTerminalViewport.contentInsets.left, y: GhosttyRemoteTerminalViewport.contentInsets.top)
         guard
             let anchor = TerminalSelectionCopyPillLayout.anchor(
-                snapshot: snapshot, viewportColumns: columns, viewportRows: rows, contentOrigin: contentOrigin, cellWidth: metrics.width,
-                cellHeight: metrics.height)
+                snapshot: snapshot, window: window, contentOrigin: contentOrigin, cellWidth: metrics.width, cellHeight: metrics.height)
         else { return nil }
-        let gridSize = CGSize(width: CGFloat(columns) * metrics.width, height: CGFloat(rows) * metrics.height)
+        let gridSize = CGSize(width: CGFloat(window.columns) * metrics.width, height: CGFloat(window.rows) * metrics.height)
         return SelectionCopyPillPlacement(anchor: anchor, contentOrigin: contentOrigin, gridSize: gridSize)
     }
 

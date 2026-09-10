@@ -99,13 +99,22 @@ import Foundation
         /// creates a selection, only clears the shared one (#514 tracks drag-to-select parity), so this
         /// fires instead of the usual link-probe/focus tap handling; see `handleTapToActivateInput`.
         public let onClearSelectionTapped: (@MainActor () -> Void)?
+        /// Reports the exact window the host view renders out of the daemon's grid, which the software
+        /// keyboard changes without the session's own grid changing at all. The row offset moves with the
+        /// cursor on nearly every frame, so this fires on more frames than a size-only report would, but
+        /// the Copy pill has to crop against exactly the window the surface painted, not a recomputed one
+        /// that can disagree with it while a retained scrollback offset is in play (see
+        /// `TerminalSelectionCopyPillLayout.anchor(snapshot:window:...)`).
+        public let onRenderedViewportChanged: (@MainActor (GhosttyTerminalSnapshotViewport.Window) -> Void)?
 
         public init(
             ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil, fallbackText: String,
             isVisible: Bool, acceptsInput: Bool, isBusy: Bool, fontSize: TerminalFontSize,
             onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in }, onScrollGestureApplied: (@MainActor () -> Void)? = nil,
             onRenderedTextChanged: (@MainActor (String) -> Void)? = nil, onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void,
-            onSendText: @escaping @MainActor (String, Bool) -> Void, onSendKey: @escaping @MainActor (String) -> Void,
+            onRenderedViewportChanged: (@MainActor (GhosttyTerminalSnapshotViewport.Window) -> Void)? = nil,
+            onSendText: @escaping @MainActor (String, Bool) -> Void,
+            onSendKey: @escaping @MainActor (String) -> Void,
             onSendScroll: @escaping @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void = { _, _, _, _ in },
             onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil,
             onPasteClipboardImage: (@MainActor () -> Bool)? = nil, onClearSelectionTapped: (@MainActor () -> Void)? = nil
@@ -121,6 +130,7 @@ import Foundation
             self.onScrollGestureApplied = onScrollGestureApplied
             self.onRenderedTextChanged = onRenderedTextChanged
             self.onViewportSizeChanged = onViewportSizeChanged
+            self.onRenderedViewportChanged = onRenderedViewportChanged
             self.onSendText = onSendText
             self.onSendKey = onSendKey
             self.onSendScroll = onSendScroll
@@ -136,9 +146,14 @@ import Foundation
             hostView.onInputReadinessChanged = { ready in _ = Task { @MainActor in onInputReadinessChanged(ready) } }
             hostView.onScrollGestureApplied = onScrollGestureApplied.map { callback in { _ = Task { @MainActor in callback() } } }
             // UIKit delivers layout on the main thread. Keeping viewport delivery synchronous preserves
-            // the keyboard transition's measured order: a late smaller grid must not overwrite its final
-            // settled grid after the model has already resized the owner runtime to it.
+            // the order a pane resize measures in: a grid measured mid-rotation must not overwrite the
+            // final one after the model has already resized the owner runtime to it.
             hostView.onViewportSizeChanged = { columns, rows in MainActor.assumeIsolated { onViewportSizeChanged(columns, rows) } }
+            // Synchronous for the same reason: it is delivered from the same UIKit layout and render pass
+            // the `keyboard_shift_applied` measurement on the other end times.
+            hostView.onRenderedViewportChanged = onRenderedViewportChanged.map { callback in
+                { window in MainActor.assumeIsolated { callback(window) } }
+            }
             hostView.onSendText = { text, asPaste in _ = Task { @MainActor in onSendText(text, asPaste) } }
             hostView.onSendKey = { key in _ = Task { @MainActor in onSendKey(key) } }
             hostView.onSendScroll = { horizontal, vertical, scrollMods, pointerPosition in
@@ -290,9 +305,9 @@ import Foundation
         /// previous holder's frame.
         private var appliedFrameCoversHostColumns = false
         private var lastSurfaceGeometry: SurfaceGeometry?
-        private var keyboardViewportRefreshTask: Task<Void, Never>?
-        private var pendingKeyboardViewportSettlementID: UUID?
         private var lastReportedViewportSize: (columns: Int, rows: Int)?
+        private var lastReportedRenderedViewport: GhosttyTerminalSnapshotViewport.Window?
+        private var renderedCrop: RenderedCrop?
         private var lastRenderedText = ""
         private var lastReportedInputReadiness = false
         private var emittedHostRenderEvents = Set<String>()
@@ -352,6 +367,14 @@ import Foundation
         public var onInputReadinessChanged: ((Bool) -> Void)?
         public var onScrollGestureApplied: (() -> Void)?
         public var onViewportSizeChanged: ((Int, Int) -> Void)?
+        /// Reports the exact window this view renders out of the daemon's grid. Distinct from
+        /// `onViewportSizeChanged`, which reports the grid the daemon should hold; on iOS the software
+        /// keyboard changes only the former (see `reportedViewportBounds()`). The row offset moves with
+        /// the cursor on nearly every frame, so this fires on more frames than a size-only report would;
+        /// the detail view already re-evaluates its placement every frame off `latestState`, and the Copy
+        /// pill has to agree with the rendered rows exactly, so the extra reports are the cost of that
+        /// agreement rather than waste.
+        public var onRenderedViewportChanged: ((GhosttyTerminalSnapshotViewport.Window) -> Void)?
         public var onSendText: ((String, Bool) -> Void)?
         public var onSendKey: ((String) -> Void)?
         public var onSendScroll: ((Double, Double, Int32, TerminalScrollPointerPosition?) -> Void)?
@@ -464,9 +487,6 @@ import Foundation
             let hadRenderedSnapshot = currentRenderedSnapshot != nil
             momentumDisplayLink?.invalidate()
             momentumDisplayLink = nil
-            keyboardViewportRefreshTask?.cancel()
-            keyboardViewportRefreshTask = nil
-            pendingKeyboardViewportSettlementID = nil
             resignFirstResponder()
             activeOwnerEpoch = nil
             activeEndedRender = nil
@@ -476,6 +496,8 @@ import Foundation
             latestSnapshot = nil
             currentRenderedSnapshot = nil
             renderedSnapshotCoversHostColumns = false
+            lastReportedRenderedViewport = nil
+            renderedCrop = nil
             lastSurfaceGeometry = nil
             releaseSharedMirror()
             reportInputReadinessIfNeeded(force: true)
@@ -596,7 +618,10 @@ import Foundation
             guard suppressesSoftwareKeyboard != shouldSuppress else { return }
             suppressesSoftwareKeyboard = shouldSuppress
             if isFirstResponder { reloadInputViews() } else { becomeFirstResponder() }
-            scheduleKeyboardViewportRefresh()
+            // The keyboard's own arrival or departure drives the layout guide, and every layout pass
+            // re-measures the rendered window; this only makes sure a suppression that changes nothing
+            // else still relayouts the local surface.
+            setNeedsLayout()
         }
 
         public func update(ownerEpoch: GhosttyRemoteTerminalOwnerEpoch?, endedRender: GhosttyRemoteTerminalEndedRender?, fallbackText: String) {
@@ -625,10 +650,11 @@ import Foundation
 
         public override func layoutSubviews() {
             super.layoutSubviews()
-            // A keyboard layout guide reports intermediate frames during its animation. Resizing the
-            // remote terminal for those frames makes the daemon reflow through transient grids, so the
-            // keyboard transition owns the one final report below. The local surface still follows each
-            // layout: it has no remote round trip and must never leave a newly exposed area unpainted.
+            // A keyboard layout guide reports intermediate frames throughout its animation, and every one
+            // of them reaches here. None of them changes the reported grid, which the keyboard is not part
+            // of (see `reportedViewportBounds()`), so the report below is a no-op for the whole
+            // transition; the render that follows it is what tracks the keyboard, re-cropping the grid
+            // into whatever area is left so a newly exposed area is never left unpainted.
             reportViewportSizeIfNeeded()
             renderLatestSnapshot()
         }
@@ -910,36 +936,12 @@ import Foundation
             }
         }
 
-        private func scheduleKeyboardViewportRefresh() {
-            keyboardViewportRefreshTask?.cancel()
-            let settlementID = UUID()
-            pendingKeyboardViewportSettlementID = settlementID
-            keyboardViewportRefreshTask = Task { @MainActor [weak self] in
-                // UIKeyboardLayoutGuide exposes the changing geometry but no completion callback for
-                // reloadInputViews(). Keep the established final 320 ms sample as the single settle
-                // point, rather than reporting each intermediate layout-guide frame.
-                try? await Task.sleep(for: .milliseconds(320))
-                guard !Task.isCancelled, let self else { return }
-                self.completeKeyboardViewportSettlement(id: settlementID)
-            }
-        }
-
-        private func completeKeyboardViewportSettlement(id: UUID) {
-            guard pendingKeyboardViewportSettlementID == id else { return }
-            pendingKeyboardViewportSettlementID = nil
-            keyboardViewportRefreshTask?.cancel()
-            keyboardViewportRefreshTask = nil
-            setNeedsLayout()
-            layoutIfNeeded()
-        }
-
         private func reportViewportSizeIfNeeded() {
-            guard pendingKeyboardViewportSettlementID == nil else { return }
             guard scrollInteractionDepth == 0 else {
                 deferredViewportSizeReport = true
                 return
             }
-            let (size, source) = viewportSizeWithSource()
+            let (size, source) = reportedViewportSizeWithSource()
             // While the mirror is about to be acquired, an estimate is not trustworthy enough to
             // report: see `isMirrorAcquisitionImminent`. A cache prediction or a live surface read
             // still reports normally. Suppressing the estimate here is safe only because acquisition
@@ -974,6 +976,7 @@ import Foundation
             guard let latestSnapshot else {
                 currentRenderedSnapshot = nil
                 renderedSnapshotCoversHostColumns = false
+                renderedCrop = nil
                 latestRenderFrame = nil
                 setNeedsDisplay()
                 emitRenderedTextIfNeeded(force: false)
@@ -985,6 +988,8 @@ import Foundation
             let cropped = GhosttyTerminalSnapshotViewport.crop(latestSnapshot, window: window)
             currentRenderedSnapshot = cropped
             renderedSnapshotCoversHostColumns = GhosttyTerminalSnapshotViewport.coversColumns(latestSnapshot, window: window)
+            renderedCrop = RenderedCrop(window: window, gridColumns: latestSnapshot.columns, gridRows: latestSnapshot.rows)
+            reportRenderedViewportIfNeeded(window: window)
             emitHostRenderEvent(
                 "host_view_snapshot_ready", dedupeKey: lastRenderKey,
                 attributes: ["snapshot_columns": "\(cropped.columns)", "snapshot_rows": "\(cropped.rows)"])
@@ -1346,12 +1351,58 @@ import Foundation
             }
         }
 
+        /// The window of the daemon's grid this view renders: as many rows as fit above the software
+        /// keyboard, starting wherever ``GhosttyTerminalSnapshotViewport`` puts them. Measured against
+        /// ``visibleRenderBounds()``, never the reported grid, so the keyboard shifts what is on screen
+        /// without the session ever being resized for it.
         private func viewportWindow(for snapshot: GhosttyTerminalSnapshot) -> GhosttyTerminalSnapshotViewport.Window {
-            let size = viewportSize()
-            return GhosttyTerminalSnapshotViewport.window(for: snapshot, columns: size.columns, rows: size.rows, horizontalAlignment: .leading)
+            let size = renderedViewportSize()
+            return GhosttyTerminalSnapshotViewport.window(
+                for: snapshot, columns: size.columns, rows: size.rows, horizontalAlignment: .leading,
+                // A scrolled-back frame holds the alignment the last frame was drawn at, so the visible
+                // rows move exactly as far as the scroll moved the content. Until the first frame is
+                // drawn there is no alignment to hold and the top of the grid is where a crop starts.
+                retainedRowOffset: renderedCrop?.window.rowOffset ?? 0)
         }
 
-        /// Where a `viewportSize()` result came from: a live surface read, a `cellMetricsCache`
+        /// The window the last render cropped out of the daemon's grid, with the grid it came from.
+        ///
+        /// Two things outside the crop itself have to speak the daemon's coordinates rather than the
+        /// visible area's: a scroll's pointer position, which the daemon expands over the whole session
+        /// surface, and the next frame's row offset, which a scrolled-back frame inherits from the frame
+        /// before it.
+        private struct RenderedCrop {
+            let window: GhosttyTerminalSnapshotViewport.Window
+            let gridColumns: Int
+            let gridRows: Int
+
+            /// Rebases a position normalized over the visible area into the grid the daemon holds: the
+            /// crop's own origin plus how far into the crop the position sits, over the grid's full size.
+            /// A crop that covers the grid maps a position to itself.
+            func gridPosition(forVisible visible: TerminalScrollPointerPosition) -> TerminalScrollPointerPosition {
+                TerminalScrollPointerPosition(
+                    x: gridCoordinate(offset: window.columnOffset, span: window.columns, gridSize: gridColumns, within: visible.x),
+                    y: gridCoordinate(offset: window.rowOffset, span: window.rows, gridSize: gridRows, within: visible.y), mods: visible.mods)
+            }
+
+            private func gridCoordinate(offset: Int, span: Int, gridSize: Int, within fraction: Double) -> Double {
+                min(max((Double(offset) + fraction * Double(span)) / Double(max(gridSize, 1)), 0), 1)
+            }
+        }
+
+        /// Hands the window this view renders to whatever outside it needs to agree on what is on screen:
+        /// the Copy pill's placement, and the `keyboard_shift_applied` measurement. Deduped on the whole
+        /// window (`Window` is `Equatable`), not just its size: the row offset moves with the cursor on
+        /// nearly every frame, so this reports on more frames than a size-only dedupe would, but a report
+        /// that skipped an offset-only change would leave the Copy pill cropping against a window this
+        /// view no longer renders.
+        private func reportRenderedViewportIfNeeded(window: GhosttyTerminalSnapshotViewport.Window) {
+            guard lastReportedRenderedViewport != window else { return }
+            lastReportedRenderedViewport = window
+            onRenderedViewportChanged?(window)
+        }
+
+        /// Where a `viewportSizeWithSource(for:)` result came from: a live surface read, a `cellMetricsCache`
         /// prediction keyed off a past surface read, or the pre-mirror `UIFont` estimate.
         /// `reportViewportSizeIfNeeded()` uses this to suppress the one source
         /// (`isMirrorAcquisitionImminent`) that a real surface is guaranteed to contradict a moment
@@ -1361,38 +1412,48 @@ import Foundation
 
         private var currentScaleFactor: Double { Double(window?.screen.scale ?? UIScreen.main.scale) }
 
-        private func viewportSize() -> (columns: Int, rows: Int) { viewportSizeWithSource().size }
+        /// The grid the daemon is asked to hold, measured against ``reportedViewportBounds()``.
+        private func reportedViewportSizeWithSource() -> (size: (columns: Int, rows: Int), source: ViewportSizeSource) {
+            viewportSizeWithSource(for: reportedViewportBounds())
+        }
 
-        private func viewportSizeWithSource() -> (size: (columns: Int, rows: Int), source: ViewportSizeSource) {
-            let renderBounds = visibleRenderBounds()
-            if let surfaceSize = surfaceViewportSize(renderBounds: renderBounds) {
+        /// The grid this view renders into the area above the software keyboard. Never larger than the
+        /// reported grid, since it measures a subset of the same bounds with the same cell size.
+        private func renderedViewportSize() -> (columns: Int, rows: Int) { viewportSizeWithSource(for: visibleRenderBounds()).size }
+
+        private func viewportSizeWithSource(for measuredBounds: CGRect) -> (size: (columns: Int, rows: Int), source: ViewportSizeSource) {
+            if let surfaceSize = surfaceViewportSize(measuredBounds: measuredBounds) {
                 return (
                     GhosttyRemoteTerminalViewport.reportedSize(
-                        rawColumns: surfaceSize.columns, rawRows: surfaceSize.rows, bounds: renderBounds, idiom: terminalUserInterfaceIdiom), .surface
+                        rawColumns: surfaceSize.columns, rawRows: surfaceSize.rows, bounds: measuredBounds, idiom: terminalUserInterfaceIdiom),
+                    .surface
                 )
             }
             if let predicted = Self.cellMetricsCache.predictedGrid(
-                fontSizePoints: fontSize.rawValue, scale: currentScaleFactor, renderBoundsWidth: Double(renderBounds.width),
-                renderBoundsHeight: Double(renderBounds.height))
+                fontSizePoints: fontSize.rawValue, scale: currentScaleFactor, renderBoundsWidth: Double(measuredBounds.width),
+                renderBoundsHeight: Double(measuredBounds.height))
             {
                 return (
                     GhosttyRemoteTerminalViewport.reportedSize(
-                        rawColumns: predicted.columns, rawRows: predicted.rows, bounds: renderBounds, idiom: terminalUserInterfaceIdiom),
+                        rawColumns: predicted.columns, rawRows: predicted.rows, bounds: measuredBounds, idiom: terminalUserInterfaceIdiom),
                     .cachePrediction
                 )
             }
             let metrics = cellMetrics()
-            let content = renderBounds.inset(by: Self.contentInsets)
+            let content = measuredBounds.inset(by: Self.contentInsets)
             let rawColumns = max(Int(floor(max(content.width, 1) / metrics.width)), 1)
             let rawRows = max(Int(floor(max(content.height, 1) / metrics.height)), 1)
             return (
                 GhosttyRemoteTerminalViewport.reportedSize(
-                    rawColumns: rawColumns, rawRows: rawRows, bounds: renderBounds, idiom: terminalUserInterfaceIdiom), .estimate
+                    rawColumns: rawColumns, rawRows: rawRows, bounds: measuredBounds, idiom: terminalUserInterfaceIdiom), .estimate
             )
         }
 
-        private func surfaceViewportSize(renderBounds: CGRect) -> (columns: Int, rows: Int)? {
+        private func surfaceViewportSize(measuredBounds: CGRect) -> (columns: Int, rows: Int)? {
             if let surfaceViewportSizeOverrideForTesting {
+                // The seam stands in for the whole live-surface read, so it names the grid for whichever
+                // bounds are being measured: a test that needs the reported and rendered grids to differ
+                // drives the measurement through the estimate path instead.
                 return (columns: max(surfaceViewportSizeOverrideForTesting.columns, 1), rows: max(surfaceViewportSizeOverrideForTesting.rows, 1))
             }
             guard mirror != nil else { return nil }
@@ -1402,13 +1463,19 @@ import Foundation
             guard size.columns > 0, size.rows > 0 else { return nil }
             let columns = Int(size.columns)
             let rows = Int(size.rows)
-            guard size.cell_height_px > 0 else { return (columns: columns, rows: rows) }
-            if size.cell_width_px > 0 { recordCellMetricsIfNeeded(cellWidthPx: Int(size.cell_width_px), cellHeightPx: Int(size.cell_height_px)) }
-
-            let scale = CGFloat(window?.screen.scale ?? UIScreen.main.scale)
-            let visiblePixelHeight = max(floor(renderBounds.height * scale), 1)
-            let visibleRows = max(Int(floor(visiblePixelHeight / CGFloat(size.cell_height_px))), 1)
-            return (columns: columns, rows: min(rows, visibleRows))
+            // The surface is sized to `visibleRenderBounds()`, so its own row count only ever measures the
+            // area above the keyboard. `measuredBounds` is re-measured with the cell size the surface just
+            // reported, through the same formula the cache predicts a grid with, so the reported grid
+            // stays a function of the pane and the font alone and the keyboard cannot move it. A surface
+            // that reports no cell size has nothing to re-measure with, so its own grid stands.
+            guard size.cell_width_px > 0, size.cell_height_px > 0 else { return (columns: columns, rows: rows) }
+            recordCellMetricsIfNeeded(cellWidthPx: Int(size.cell_width_px), cellHeightPx: Int(size.cell_height_px))
+            guard
+                let grid = GhosttyTerminalCellMetricsCache.grid(
+                    cellPixelSize: .init(width: Int(size.cell_width_px), height: Int(size.cell_height_px)), scale: currentScaleFactor,
+                    renderBoundsWidth: Double(measuredBounds.width), renderBoundsHeight: Double(measuredBounds.height))
+            else { return (columns: columns, rows: rows) }
+            return grid
         }
 
         /// Records what a live surface just measured for this view's (font size, scale) into
@@ -1432,11 +1499,23 @@ import Foundation
             Self.cellMetricsCache.recordCellPixelSize(fontSizePoints: fontSize.rawValue, scale: scale, width: cellWidthPx, height: cellHeightPx)
         }
 
+        /// Where a touch sits in the grid the daemon holds, not in the area this client shows.
+        ///
+        /// The daemon expands a normalized pointer over the whole session surface, and under the software
+        /// keyboard the visible area is a crop of that surface rather than all of it, so a position
+        /// measured against the visible area alone would name a row the finger never touched. The
+        /// position is normalized over the visible area first and then rebased through the crop the last
+        /// render used, which is the crop the finger is actually pointing at. With no crop yet (nothing
+        /// rendered) the visible area is all there is to point into.
         private func scrollPointerPosition(for location: CGPoint) -> TerminalScrollPointerPosition? {
             let renderBounds = visibleRenderBounds()
-            return TerminalScrollPointerPosition.normalized(
-                x: Double(location.x - renderBounds.minX), y: Double(location.y - renderBounds.minY), width: Double(renderBounds.width),
-                height: Double(renderBounds.height))
+            guard
+                let visible = TerminalScrollPointerPosition.normalized(
+                    x: Double(location.x - renderBounds.minX), y: Double(location.y - renderBounds.minY), width: Double(renderBounds.width),
+                    height: Double(renderBounds.height))
+            else { return nil }
+            guard let renderedCrop else { return visible }
+            return renderedCrop.gridPosition(forVisible: visible)
         }
 
         @discardableResult private func sendScroll(
@@ -1518,12 +1597,45 @@ import Foundation
 
         private func toggleAccessorySoftwareKeyboard() { setSoftwareKeyboardVisible(suppressesSoftwareKeyboard) }
 
-        private func visibleRenderBounds() -> CGRect {
+        private func visibleRenderBounds() -> CGRect { boundsMinusOcclusion(keyboardAndAccessoryOccludedHeight()) }
+
+        /// The bounds the grid reported to the daemon is measured against: this view minus the input
+        /// accessory toolbar, with the software keyboard deliberately left in.
+        ///
+        /// The toolbar and the keyboard are treated differently on purpose. The toolbar is permanent
+        /// chrome for as long as this pane takes input, so rows behind it are rows the session should
+        /// never have had. The keyboard comes and goes several times a minute, and resizing the session
+        /// for it would cost a daemon round trip, a full frame on every transition, and a reflow for every
+        /// other client attached to the same session. So the keyboard changes only what this client
+        /// renders: ``visibleRenderBounds()`` shrinks and the rendered window shifts up inside the grid
+        /// the session keeps.
+        private func reportedViewportBounds() -> CGRect { boundsMinusOcclusion(accessoryOccludedHeight()) }
+
+        private func boundsMinusOcclusion(_ occludedHeight: CGFloat) -> CGRect {
             guard bounds.width > 0, bounds.height > 0 else { return bounds }
-            let occludedHeight = keyboardAndAccessoryOccludedHeight()
             guard occludedHeight > 0 else { return bounds }
             let clampedOcclusion = min(max(occludedHeight, 0), bounds.height)
             return CGRect(x: 0, y: 0, width: bounds.width, height: max(bounds.height - clampedOcclusion, 1))
+        }
+
+        /// The height the input accessory toolbar takes off the bottom of this view, independent of where
+        /// the keyboard currently parks it: the toolbar rides on top of the keyboard while one is up, but
+        /// the reported grid measures it from the bottom of the pane, which is where it sits once the
+        /// keyboard is gone.
+        private func accessoryOccludedHeight() -> CGFloat {
+            guard bounds.width > 0, bounds.height > 0, isAccessoryToolbarPresent else { return 0 }
+            return min(Self.accessoryToolbarHeight, bounds.height)
+        }
+
+        /// Whether the input accessory toolbar is on screen. It rides with first-responder status, not
+        /// with the software keyboard, so it stays up while the keyboard is suppressed and its effect on
+        /// the reported grid outlives every keyboard transition. The keyboard's own geometry is
+        /// deliberately not consulted here, unlike in `fallbackAccessoryOccludingFrame`: reading it would
+        /// put the keyboard back into the reported grid through the toolbar.
+        private var isAccessoryToolbarPresent: Bool {
+            guard acceptsTerminalInput else { return false }
+            if terminalAccessoryView.window != nil, !terminalAccessoryView.bounds.isEmpty { return true }
+            return isFirstResponder
         }
 
         private func keyboardAndAccessoryOccludedHeight() -> CGFloat {
@@ -1593,13 +1705,13 @@ import Foundation
             renderLatestSnapshot()
         }
 
-        func viewportSizeForTesting() -> (columns: Int, rows: Int) { viewportSize() }
+        func reportedViewportSizeForTesting() -> (columns: Int, rows: Int) { reportedViewportSizeWithSource().size }
+
+        func renderedViewportSizeForTesting() -> (columns: Int, rows: Int) { renderedViewportSize() }
 
         func visibleRenderBoundsForTesting() -> CGRect { visibleRenderBounds() }
 
-        func keyboardViewportSettlementIDForTesting() -> UUID? { pendingKeyboardViewportSettlementID }
-
-        func completeKeyboardViewportSettlementForTesting(id: UUID) { completeKeyboardViewportSettlement(id: id) }
+        func reportedViewportBoundsForTesting() -> CGRect { reportedViewportBounds() }
 
         private var terminalUserInterfaceIdiom: UIUserInterfaceIdiom { userInterfaceIdiomOverrideForTesting ?? traitCollection.userInterfaceIdiom }
 
