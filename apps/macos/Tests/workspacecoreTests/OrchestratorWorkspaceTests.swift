@@ -987,6 +987,419 @@ extension OrchestratorTests {
         XCTAssertNil(try store.workspace(id: workspace.id), "a workspace whose worktree is gone is removed, not flagged")
     }
 
+    /// A worktree on a detached HEAD has no branch line in `git worktree list --porcelain`, and workspace
+    /// identity, branch rename, and `displayName` all assume a named branch, so import keeps skipping it.
+    func testScanAndCreateWorkspacesFromWorktreesSkipsDetachedWorktree() throws {
+        let repo = try makeTempGitRepo(name: "detached-worktree-skipped")
+        let root = repo.deletingLastPathComponent()
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let detachedWorktree = root.appendingPathComponent("detached-worktree", isDirectory: true)
+        try runGit(["worktree", "add", "--detach", detachedWorktree.path], cwd: repo.path)
+
+        let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+
+        XCTAssertTrue(created.isEmpty)
+        XCTAssertNil(try store.workspace(dir: detachedWorktree.path))
+    }
+
+    /// An existing workspace whose worktree goes detached keeps its row and its last-known branch: the
+    /// reconcile pass must not overwrite the record with `branch: nil` just because the worktree listing
+    /// stopped reporting one.
+    func testScanKeepsLastKnownBranchWhenWorktreeGoesDetached() throws {
+        let repo = try makeTempGitRepo(name: "detach-after-create-keeps-branch")
+        let root = repo.deletingLastPathComponent()
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let worktree = root.appendingPathComponent("feature-goes-detached", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature-goes-detached")
+        let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path)
+
+        try runGit(["checkout", "--detach", "HEAD"], cwd: worktree.path)
+
+        _ = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+
+        let stored = try XCTUnwrap(store.workspace(id: workspace.id))
+        XCTAssertEqual(stored.branch, "feature-goes-detached", "the record keeps its last-known branch instead of being nulled")
+    }
+
+    /// Once a workspace's worktree lands back on a named branch, reconcile updates the branch as it does
+    /// for any other branch change; the detached interval in between did not disturb the stored branch.
+    func testScanUpdatesBranchWhenDetachedWorktreeReturnsToABranch() throws {
+        let repo = try makeTempGitRepo(name: "back-on-branch-updates")
+        let root = repo.deletingLastPathComponent()
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let worktree = root.appendingPathComponent("feature-returns", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature-returns")
+        let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path)
+
+        try runGit(["checkout", "--detach", "HEAD"], cwd: worktree.path)
+        _ = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+
+        try runGit(["checkout", "-b", "feature-returns-renamed"], cwd: worktree.path)
+        _ = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+
+        let stored = try XCTUnwrap(store.workspace(id: workspace.id))
+        XCTAssertEqual(stored.branch, "feature-returns-renamed")
+    }
+
+    /// A detached workspace's last-known branch is a claim, not an exclusive lock: git allows that same
+    /// branch to be checked out into a second worktree while the first stays detached. Importing that
+    /// second worktree would otherwise collide with the stale claim on `workspaces_project_branch_unique`
+    /// and abort the whole scan, so the scan must release the stale claim before the import runs.
+    func testScanReleasesDetachedWorkspacesStaleBranchClaimWhenAnotherWorktreeClaimsIt() throws {
+        let repo = try makeTempGitRepo(name: "stale-claim-released")
+        let root = repo.deletingLastPathComponent()
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let worktreeA = root.appendingPathComponent("workspace-a", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktreeA.path, branch: "shared-branch")
+        let workspaceA = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktreeA.path)
+
+        try runGit(["checkout", "--detach", "HEAD"], cwd: worktreeA.path)
+
+        let worktreeC = root.appendingPathComponent("workspace-c", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktreeC.path, branch: "shared-branch")
+
+        let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+
+        let importedC = try XCTUnwrap(created.first { normalizeTestPath($0.dir) == normalizeTestPath(worktreeC.path) })
+        XCTAssertEqual(importedC.branch, "shared-branch", "the live worktree on the branch owns it")
+
+        let storedA = try XCTUnwrap(store.workspace(id: workspaceA.id))
+        XCTAssertNil(storedA.branch, "the detached workspace's stale claim is released once another worktree holds the branch")
+    }
+
+    /// The same collision the scan resolves can also be hit head-on through the app's own Create Workspace
+    /// path: without a release here, a detached workspace's stale branch claim would refuse forever, since
+    /// nothing else can ever create the live worktree that would let a scan release it.
+    func testCreateWorkspaceReleasesDetachedWorkspacesStaleBranchClaim() throws {
+        let repo = try makeTempGitRepo(name: "create-releases-stale-claim")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let worktreeA = repo.deletingLastPathComponent().appendingPathComponent("workspace-a", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktreeA.path, branch: "shared-branch")
+        let workspaceA = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktreeA.path)
+
+        try runGit(["checkout", "--detach", "HEAD"], cwd: worktreeA.path)
+
+        let created = try orchestrator.createWorkspace(projectID: project.id, branch: "shared-branch", allowExistingBranchReuse: true)
+        XCTAssertEqual(created.branch, "shared-branch")
+
+        let storedA = try XCTUnwrap(store.workspace(id: workspaceA.id))
+        XCTAssertNil(storedA.branch, "the detached workspace's stale claim is released so the new live worktree can take the branch")
+    }
+
+    /// The same corrupt-gitdir shape the scan's collision-release step now also handles
+    /// (`testScanReleasesCorruptGitdirWorkspacesStaleBranchClaimWhenAnotherWorktreeClaimsIt`) must not
+    /// refuse this create either: a workspace whose worktree git omits from the listing entirely, while its
+    /// directory remains, is not "confirmed still checked out on the branch" any more than a listed,
+    /// detached one is.
+    func testCreateWorkspaceReleasesCorruptGitdirWorkspacesStaleBranchClaim() throws {
+        let repo = try makeTempGitRepo(name: "create-releases-corrupt-gitdir-stale-claim")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let worktreeA = repo.deletingLastPathComponent().appendingPathComponent("workspace-a", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktreeA.path, branch: "shared-branch")
+        let workspaceA = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktreeA.path)
+
+        // Corrupt the administrative reverse-pointer, the same way
+        // `testScanKeepsWorkspaceWhenCorruptGitdirOmitsPresentWorktreeFromList` does: `git worktree list`
+        // omits worktreeA afterward even though its directory and branch checkout are untouched on disk.
+        let gitFile = try String(contentsOf: worktreeA.appendingPathComponent(".git"), encoding: .utf8)
+        let gitdirPrefix = "gitdir: "
+        guard gitFile.hasPrefix(gitdirPrefix) else { return XCTFail("linked worktree .git file does not contain a gitdir pointer") }
+        let administrativeDirectory = URL(
+            fileURLWithPath: String(gitFile.dropFirst(gitdirPrefix.count)).trimmingCharacters(in: .whitespacesAndNewlines), isDirectory: true)
+        try "".write(to: administrativeDirectory.appendingPathComponent("gitdir"), atomically: false, encoding: .utf8)
+
+        let worktreeListOutput = try runGitAndCapture(["worktree", "list", "--porcelain"], cwd: repo.path)
+        XCTAssertFalse(worktreeListOutput.contains(worktreeA.path), "git omits a worktree whose administrative gitdir link is corrupt")
+
+        let created = try orchestrator.createWorkspace(projectID: project.id, branch: "shared-branch", allowExistingBranchReuse: true)
+        XCTAssertEqual(created.branch, "shared-branch")
+
+        let storedA = try XCTUnwrap(store.workspace(id: workspaceA.id))
+        XCTAssertNil(storedA.branch, "workspace A's stale claim is released even though its own worktree was never listed as detached")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktreeA.path), "workspace A's row and checkout are untouched otherwise")
+    }
+
+    /// The release must not run ahead of validation that can still fail this create: Create Branch mode
+    /// against a branch name that already exists locally is refused before any worktree is made, and that
+    /// refusal must not have already erased the detached claimant's branch — there is no replacement
+    /// worktree to hold it if it had.
+    func testCreateWorkspaceFailureLeavesDetachedWorkspacesBranchClaimIntact() throws {
+        let repo = try makeTempGitRepo(name: "create-failure-keeps-stale-claim")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let worktreeA = repo.deletingLastPathComponent().appendingPathComponent("workspace-a", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktreeA.path, branch: "shared-branch")
+        let workspaceA = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktreeA.path)
+
+        try runGit(["checkout", "--detach", "HEAD"], cwd: worktreeA.path)
+
+        // Create Branch mode (the default) refuses a branch name that already exists locally, which
+        // "shared-branch" does — it is exactly the branch the detached workspace last held.
+        XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: project.id, branch: "shared-branch")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("already exists"))
+        }
+
+        let storedA = try XCTUnwrap(store.workspace(id: workspaceA.id))
+        XCTAssertEqual(storedA.branch, "shared-branch", "a create that fails before making a worktree must not have released the claim it never replaced")
+    }
+
+    /// The collision-release step and the import loop each claim the project lifecycle gate on their own
+    /// rather than sharing one lock interval across the whole scan (see the comment ahead of
+    /// `staleBranchClaimsSkippedAsBusy` in `Orchestrator.swift`). That means a short external operation can
+    /// hold the gate through the release step only and free it again before the import loop reaches the
+    /// worktree the release was supposed to make room for. Without recording that skip, the import's
+    /// `store.upsert` would hit the real `workspaces_project_branch_unique` constraint instead of the busy
+    /// sentinel below it and abort the whole scan, leaving the live worktree unimported indefinitely rather
+    /// than self-healing on the next pass.
+    ///
+    /// Reproducing the split deterministically (rather than by racing the clock) uses a padding workspace
+    /// whose worktree is live but whose stored branch is deliberately stale: the scan's reconcile step
+    /// (lock-free, and ordered after the release step) rewrites it, and only after the release step has
+    /// finished with every workspace — including workspace A's single, currently-busy attempt. Polling for
+    /// that write is proof the release step is over, with no dependence on wall-clock timing. Two more
+    /// padding workspaces sort after workspace A (by branch name) to buy real, additional lock-free work
+    /// between the release signal and the import loop reaching the live claimant.
+    func testScanSkipsImportWhenReleaseLosesTheGateRaceButImportWinsIt() throws {
+        let repo = try makeTempGitRepo(name: "scan-release-busy-import-free")
+        let root = repo.deletingLastPathComponent()
+        let store = try makeTemporaryStore()
+        let holder = makeTestOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
+        let scanOrchestrator = makeTestOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+
+        // The detached claimant: its worktree exists but is detached, and its stored branch is the stale
+        // claim the live worktree below collides with.
+        let worktreeA = root.appendingPathComponent("claimant-a", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktreeA.path, branch: "shared-branch")
+        let workspaceA = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktreeA.path)
+        try runGit(["checkout", "--detach", "HEAD"], cwd: worktreeA.path)
+
+        // Sorts ahead of workspace A (`ORDER BY is_default DESC, branch`), so the reconcile write this
+        // forces is the first real work the reconcile+retire loop does — the signal that the release loop
+        // ahead of it, including workspace A's one attempt, has already run to completion.
+        @discardableResult
+        func makePaddingWorkspace(name: String, realBranch: String, staleBranch: String) throws -> WorkspaceRecord {
+            let worktree = root.appendingPathComponent(name, isDirectory: true)
+            try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: realBranch)
+            let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path)
+            try store.upsert(
+                workspace: WorkspaceRecord(
+                    id: workspace.id, projectID: project.id, dir: workspace.dir, dirname: workspace.dirname, branch: staleBranch,
+                    baseBranch: workspace.baseBranch, isDefault: false, isRunning: false, lastLaunchedAt: nil))
+            return workspace
+        }
+        let paddingSignal = try makePaddingWorkspace(name: "padding-signal", realBranch: "padding-real-branch", staleBranch: "padding-stale-branch")
+        try makePaddingWorkspace(name: "padding-buffer-1", realBranch: "shared-branch-zzz-buffer-1", staleBranch: "shared-branch-zzz-buffer-1-stale")
+        try makePaddingWorkspace(name: "padding-buffer-2", realBranch: "shared-branch-zzz-buffer-2", staleBranch: "shared-branch-zzz-buffer-2-stale")
+
+        // The live claimant: a second worktree on the branch workspace A still claims. Nothing imports it
+        // yet — the collision is between its branch name and workspace A's stale claim.
+        let worktreeC = root.appendingPathComponent("live-claimant-c", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktreeC.path, branch: "shared-branch")
+
+        let lockHeld = expectation(description: "an external operation holds the project gate")
+        let releaseLock = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            try? holder.withProjectLifecycleLock(projectID: project.id) {
+                lockHeld.fulfill()
+                releaseLock.wait()
+            }
+        }
+        wait(for: [lockHeld], timeout: 15)
+
+        var scanError: (any Error)?
+        let scanFinished = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            do { _ = try scanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id) } catch { scanError = error }
+            scanFinished.signal()
+        }
+
+        // Bounded so a wrong assumption about the release-loop-then-reconcile-loop ordering fails loudly
+        // instead of hanging the suite.
+        let deadline = Date().addingTimeInterval(15)
+        while true {
+            if let reconciled = try store.workspace(id: paddingSignal.id), reconciled.branch == "padding-real-branch" { break }
+            if Date() > deadline {
+                XCTFail("padding workspace never reconciled; the release loop may not have run before this point")
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.0005)
+        }
+        releaseLock.signal()
+
+        XCTAssertEqual(scanFinished.wait(timeout: .now() + 15), .success, "the scan did not complete in time")
+        XCTAssertNil(scanError, "the scan must complete without throwing even though the release lost the gate race for workspace A's branch")
+
+        XCTAssertEqual(
+            try store.workspace(id: workspaceA.id)?.branch, "shared-branch",
+            "the release lost the gate race, so workspace A's stale claim is still in place after this pass")
+        XCTAssertNil(
+            try store.workspace(dir: worktreeC.path),
+            "importing the live claimant this pass would hit the real uniqueness constraint the release above was supposed to clear first; it is skipped instead, same as the busy path")
+
+        let createdAfterRelease = try scanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+        XCTAssertEqual(createdAfterRelease.count, 1)
+        XCTAssertNotNil(try store.workspace(dir: worktreeC.path), "a rerun once the gate is free releases the stale claim and imports the live worktree")
+        XCTAssertNil(try store.workspace(id: workspaceA.id)?.branch, "the stale claim is released on the rerun that succeeds")
+    }
+
+    /// A corrupt administrative `gitdir` link makes `git worktree list` omit an otherwise present checkout
+    /// (`testScanKeepsWorkspaceWhenCorruptGitdirOmitsPresentWorktreeFromList`) — a different way for a
+    /// workspace's claim to go stale than the listed-and-detached case above, but the same kind of claim.
+    /// The release step used to look only at rows whose own worktree was listed and detached, so a
+    /// workspace stuck this way kept blocking every future worktree on its last-known branch forever, on
+    /// every scan, with the collision erroring the whole scan out instead of self-healing. The generalized
+    /// rule releases any workspace row holding a branch that a live worktree elsewhere now holds, whether
+    /// that row's own worktree is listed as detached or not listed at all.
+    func testScanReleasesCorruptGitdirWorkspacesStaleBranchClaimWhenAnotherWorktreeClaimsIt() throws {
+        let repo = try makeTempGitRepo(name: "corrupt-gitdir-releases-stale-claim")
+        let root = repo.deletingLastPathComponent()
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let worktreeA = root.appendingPathComponent("claimant-a", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktreeA.path, branch: "shared-branch")
+        let workspaceA = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktreeA.path)
+
+        // Corrupt the administrative reverse-pointer, the same way
+        // `testScanKeepsWorkspaceWhenCorruptGitdirOmitsPresentWorktreeFromList` does: `git worktree list`
+        // omits worktreeA afterward even though its directory and branch checkout are untouched on disk.
+        let gitFile = try String(contentsOf: worktreeA.appendingPathComponent(".git"), encoding: .utf8)
+        let gitdirPrefix = "gitdir: "
+        guard gitFile.hasPrefix(gitdirPrefix) else { return XCTFail("linked worktree .git file does not contain a gitdir pointer") }
+        let administrativeDirectory = URL(
+            fileURLWithPath: String(gitFile.dropFirst(gitdirPrefix.count)).trimmingCharacters(in: .whitespacesAndNewlines), isDirectory: true)
+        try "".write(to: administrativeDirectory.appendingPathComponent("gitdir"), atomically: false, encoding: .utf8)
+
+        let worktreeListOutput = try runGitAndCapture(["worktree", "list", "--porcelain"], cwd: repo.path)
+        XCTAssertFalse(worktreeListOutput.contains(worktreeA.path), "git omits a worktree whose administrative gitdir link is corrupt")
+
+        // The live claimant: git itself treats "shared-branch" as free once the admin link is broken, so
+        // this succeeds even though workspace A's row still claims it.
+        let worktreeC = root.appendingPathComponent("live-claimant-c", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktreeC.path, branch: "shared-branch")
+
+        let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+
+        XCTAssertEqual(created.count, 1)
+        XCTAssertNotNil(try store.workspace(dir: worktreeC.path), "the live worktree is imported")
+        let storedA = try XCTUnwrap(store.workspace(id: workspaceA.id))
+        XCTAssertNil(storedA.branch, "workspace A's stale claim is released even though its own worktree was never listed as detached")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktreeA.path), "workspace A's row and checkout are untouched otherwise")
+    }
+
+    /// The busy-branch skip guards new imports (the collision-release tests above), but the existing-
+    /// workspace reconciliation loop can hit the exact same collision: a registered workspace B whose
+    /// worktree moved onto a branch that a stale claimant A's release lost the gate race for would have its
+    /// reconcile write hit the real `workspaces_project_branch_unique` constraint instead of the busy
+    /// sentinel below and abort the whole scan. Holding the project gate for the whole scan call — the same
+    /// technique `testScanSkipsImportWhileProjectLifecycleLockIsHeldAndImportsAfterRelease` above uses — is
+    /// enough here, unlike the release-busy-but-import-free test further up: `staleBranchClaimsSkippedAsBusy`
+    /// finishes being populated when the release loop ends, strictly before the reconcile loop starts, so
+    /// it does not matter exactly when the external hold ends relative to the rest of the scan.
+    func testScanSkipsReconcileWhenReleaseLosesTheGateRaceForTheBranchItWouldMoveTo() throws {
+        let repo = try makeTempGitRepo(name: "scan-release-busy-reconcile-skip")
+        let root = repo.deletingLastPathComponent()
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let scanOrchestrator = makeTestOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+
+        // The detached claimant: its worktree exists but is detached, and its stored branch is the stale
+        // claim workspace B's worktree below moves onto.
+        let worktreeA = root.appendingPathComponent("claimant-a", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktreeA.path, branch: "foo")
+        let workspaceA = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktreeA.path)
+        try runGit(["checkout", "--detach", "HEAD"], cwd: worktreeA.path)
+
+        // Registered workspace B, starting on "bar". Its worktree switches to "foo" — the branch A's stale
+        // claim still names, freed up by A going detached — so the scan's reconcile step would normally
+        // move B's stored branch to match.
+        let worktreeB = root.appendingPathComponent("workspace-b", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktreeB.path, branch: "bar")
+        let workspaceB = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktreeB.path)
+        try runGit(["checkout", "foo"], cwd: worktreeB.path)
+
+        let createdWhileHeld = try orchestrator.withProjectLifecycleLock(projectID: project.id) {
+            try scanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+        }
+        XCTAssertTrue(createdWhileHeld.isEmpty, "nothing new to import; B is already registered")
+
+        XCTAssertEqual(
+            try store.workspace(id: workspaceB.id)?.branch, "bar",
+            "B's reconcile onto \"foo\" is deferred this pass because the release that would have freed the branch lost the gate race")
+        XCTAssertEqual(
+            try store.workspace(id: workspaceA.id)?.branch, "foo", "A's stale claim is untouched since its release also lost the gate race")
+
+        let createdAfterRelease = try scanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+        XCTAssertTrue(createdAfterRelease.isEmpty, "nothing new to import; B is already registered")
+        XCTAssertEqual(
+            try store.workspace(id: workspaceB.id)?.branch, "foo", "a rerun once the gate is free releases A's claim and reconciles B onto it")
+        XCTAssertNil(try store.workspace(id: workspaceA.id)?.branch, "the stale claim is released on the rerun that succeeds")
+    }
+
+    /// Without a competing claimant, a detached workspace's last-known branch is stable across repeated
+    /// scans: nothing in the collision-release step should clear it just because a scan ran again.
+    func testScanKeepsLastKnownBranchAcrossRepeatedScansWithNoClaimant() throws {
+        let repo = try makeTempGitRepo(name: "no-claimant-branch-stable")
+        let root = repo.deletingLastPathComponent()
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let worktree = root.appendingPathComponent("feature-stays-detached", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature-stays-detached")
+        let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path)
+
+        try runGit(["checkout", "--detach", "HEAD"], cwd: worktree.path)
+
+        for _ in 0..<3 {
+            _ = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+            let stored = try XCTUnwrap(store.workspace(id: workspace.id))
+            XCTAssertEqual(stored.branch, "feature-stays-detached")
+        }
+    }
+
     /// Discovery retires a workspace only when it can see that the worktree is gone. A git probe that times
     /// out says nothing about the checkout, and the scan is triggered by writes inside `.git` — so it runs
     /// exactly while an agent is committing in the workspace the user is watching, when a git spawn is most
