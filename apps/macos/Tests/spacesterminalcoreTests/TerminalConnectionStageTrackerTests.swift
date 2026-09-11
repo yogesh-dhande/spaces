@@ -34,13 +34,13 @@ final class TerminalConnectionStageTrackerTests: XCTestCase {
         XCTAssertFalse(tracker.isBannerVisible)
     }
 
-    func testAttemptEndedUnreachableBeforeGraceElapsesEntersUnreachableWithBannerVisible() {
+    func testEnteringUnreachableBeforeGraceElapsesShowsTheBannerImmediately() {
         var tracker = TerminalConnectionStageTracker()
         tracker.streamLost()
-        let delay = tracker.attemptEndedUnreachable()
+        tracker.enterUnreachable()
         XCTAssertEqual(tracker.stage, .unreachable)
         XCTAssertTrue(tracker.isBannerVisible)
-        XCTAssertEqual(delay, 1)
+        XCTAssertEqual(tracker.nextRedialDelay(), 1)
     }
 
     /// A caller that races several redials at once reports each attempt's failure as evidence only and
@@ -58,34 +58,36 @@ final class TerminalConnectionStageTrackerTests: XCTestCase {
         XCTAssertEqual(tracker.nextRedialDelay(), 2)
     }
 
-    func testRepeatedAttemptEndedUnreachableFollowsTheBackoffLadder() {
+    func testRepeatedRedialsFollowTheBackoffLadder() {
         var tracker = TerminalConnectionStageTracker()
         tracker.streamLost()
-        XCTAssertEqual(tracker.attemptEndedUnreachable(), 1)
-        XCTAssertEqual(tracker.attemptEndedUnreachable(), 2)
-        XCTAssertEqual(tracker.attemptEndedUnreachable(), 4)
-        XCTAssertEqual(tracker.attemptEndedUnreachable(), 8)
-        XCTAssertEqual(tracker.attemptEndedUnreachable(), 15)
-        XCTAssertEqual(tracker.attemptEndedUnreachable(), 15)
+        tracker.enterUnreachable()
+        XCTAssertEqual(tracker.nextRedialDelay(), 1)
+        XCTAssertEqual(tracker.nextRedialDelay(), 2)
+        XCTAssertEqual(tracker.nextRedialDelay(), 4)
+        XCTAssertEqual(tracker.nextRedialDelay(), 8)
+        XCTAssertEqual(tracker.nextRedialDelay(), 15)
+        XCTAssertEqual(tracker.nextRedialDelay(), 15)
     }
 
-    func testAttemptEndedUnreachableFromConnectedIsTreatedSafely() {
+    func testEnteringUnreachableFromConnectedIsTreatedSafely() {
         var tracker = TerminalConnectionStageTracker()
-        let delay = tracker.attemptEndedUnreachable()
+        tracker.enterUnreachable()
         XCTAssertEqual(tracker.stage, .unreachable)
         XCTAssertTrue(tracker.isBannerVisible)
-        XCTAssertEqual(delay, 1)
+        XCTAssertEqual(tracker.nextRedialDelay(), 1)
     }
 
     func testRetryRequestedWhileUnreachableResetsTheBackoffButKeepsStageAndBanner() {
         var tracker = TerminalConnectionStageTracker()
         tracker.streamLost()
-        _ = tracker.attemptEndedUnreachable()
-        _ = tracker.attemptEndedUnreachable()
+        tracker.enterUnreachable()
+        _ = tracker.nextRedialDelay()
+        _ = tracker.nextRedialDelay()
         tracker.retryRequested()
         XCTAssertEqual(tracker.stage, .unreachable)
         XCTAssertTrue(tracker.isBannerVisible)
-        XCTAssertEqual(tracker.attemptEndedUnreachable(), 1)
+        XCTAssertEqual(tracker.nextRedialDelay(), 1)
     }
 
     func testRetryRequestedWhileConnectedIsANoOp() {
@@ -98,25 +100,28 @@ final class TerminalConnectionStageTrackerTests: XCTestCase {
     func testFrameReceivedFromUnreachableReturnsToConnectedAndResetsBackoff() {
         var tracker = TerminalConnectionStageTracker()
         tracker.streamLost()
-        _ = tracker.attemptEndedUnreachable()
-        _ = tracker.attemptEndedUnreachable()
+        tracker.enterUnreachable()
+        _ = tracker.nextRedialDelay()
+        _ = tracker.nextRedialDelay()
         tracker.frameReceived()
         XCTAssertEqual(tracker.stage, .connected)
         XCTAssertFalse(tracker.isBannerVisible)
 
         tracker.streamLost()
-        XCTAssertEqual(tracker.attemptEndedUnreachable(), 1)
+        tracker.enterUnreachable()
+        XCTAssertEqual(tracker.nextRedialDelay(), 1)
     }
 
     func testStreamLostWhileUnreachableIsANoOp() {
         var tracker = TerminalConnectionStageTracker()
         tracker.streamLost()
-        _ = tracker.attemptEndedUnreachable()
-        _ = tracker.attemptEndedUnreachable()
+        tracker.enterUnreachable()
+        _ = tracker.nextRedialDelay()
+        _ = tracker.nextRedialDelay()
         tracker.streamLost()
         XCTAssertEqual(tracker.stage, .unreachable)
         XCTAssertTrue(tracker.isBannerVisible)
-        XCTAssertEqual(tracker.attemptEndedUnreachable(), 4)
+        XCTAssertEqual(tracker.nextRedialDelay(), 4)
     }
 
     func testStreamLostWhileAlreadyReconnectingIsANoOp() {

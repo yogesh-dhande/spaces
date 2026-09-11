@@ -228,7 +228,10 @@ async def close_connection(state, conn):
 async def handle_connection(state, client_reader, client_writer):
     conn = Connection(state.next_id(), client_writer)
     state.connections[conn.id] = conn
-    log_event(state.log_file, "conn_open", conn=conn.id)
+    # The link state the accept happened under: a driving test that timed an outage from the client's
+    # own events still needs the proxy to confirm the dial it is about actually landed in the dead
+    # link, and only this record can say that.
+    log_event(state.log_file, "conn_open", conn=conn.id, link=state.link_state)
 
     if state.link_state == "down":
         # Accepted but deliberately never connected upstream and never

@@ -231,6 +231,10 @@ class ScenarioWindow:
     app_events_by_uptime: list = field(default_factory=list)
     markers: dict = field(default_factory=dict)  # marker name -> list of lane_marker events
     shaper_bytes: list = field(default_factory=list)  # shaper "bytes" events within [begin, end]
+    # shaper "conn_open"/"conn_close" events within [begin, end]. The Mac scenario reads these to
+    # check that the outage actually stranded a dial, which the app's own events cannot show: a
+    # connection the proxy accepted and never answered leaves no trace on the client.
+    shaper_connections: list = field(default_factory=list)
     # The app_launch closest to (at or before) this window's end, searched across the WHOLE run
     # rather than scoped to [begin, end]: whether the test writes its scenario_begin marker before
     # or after the app finishes launching is not specified by the lane contract, and app_launch
@@ -317,6 +321,11 @@ def build_scenario_windows(device_events, shaper_events):
                 s
                 for s in shaper_events
                 if s.get("event") == "bytes" and event_time(s) is not None and begin <= event_time(s) <= end
+            ]
+            window.shaper_connections = [
+                c
+                for c in shaper_events
+                if c.get("event") in ("conn_open", "conn_close") and event_time(c) is not None and begin <= event_time(c) <= end
             ]
             candidates = [launch for launch in all_app_launches if event_time(launch) <= end]
             window.app_launch_event = candidates[-1] if candidates else None
@@ -407,6 +416,27 @@ def shaper_bytes_in_range(window, start_t, end_t, direction):
 
 def shaper_kb(window, direction):
     return shaper_bytes_in_range(window, window.begin, window.end, direction) / 1024.0
+
+
+def restrict_to_session(window, session_id):
+    """Returns a copy of `window` whose app-event lists hold only events carrying `session_id`,
+    leaving markers, shaper_bytes, and every other field untouched. The Mac client measures a pane
+    inside the developer's own profile, where panes restored from earlier work emit the same event
+    names into the same log, so a Mac metric reads only the session its scenario opened."""
+    return replace(
+        window,
+        app_events=[e for e in window.app_events if e.get("sessionID") == session_id],
+        app_events_by_uptime=[e for e in window.app_events_by_uptime if e.get("sessionID") == session_id],
+    )
+
+
+def scenario_session_id(sessions, profile, scenario):
+    """The session id the lane recorded in sessions.json for one profile's run of `scenario`, or
+    None when that run recorded none."""
+    for entry in sessions.get("scenarios") or []:
+        if entry.get("profile") == profile and entry.get("scenario") == scenario:
+            return entry.get("sessionID")
+    return None
 
 
 def restrict_to_sources(window, sources):
@@ -757,20 +787,26 @@ def metric_background(window, mode):
     }
 
 
-def metric_reconnect(window, *, sources=None):
+def metric_reconnect(window, *, sources=None, session_id=None):
     if window is None:
         return None
     if sources is not None:
         window = restrict_to_sources(window, sources)
+    if session_id is not None:
+        window = restrict_to_session(window, session_id)
     link_down, link_up, recovered = marker(window, "link_down"), marker(window, "link_up"), marker(window, "recovered")
 
     banner_event = None
     if link_down is not None and event_time(link_down) is not None:
         down_time = event_time(link_down)
+        # The banner flag, not the stage, is what says the user saw the banner: both clients share a
+        # stage tracker that enters `reconnecting` immediately and holds the banner back for a grace
+        # period, so the first `reconnecting` event carries `banner=0`, and a session that goes
+        # straight to `unreachable` raises the banner without ever passing through `reconnecting`.
         banner_event = first_named(
             [e for e in window.app_events if event_time(e) is not None and event_time(e) >= down_time],
             "connection_stage",
-            predicate=lambda e: attr(e, "stage") == "reconnecting",
+            predicate=lambda e: attr(e, "banner") == "1",
         )
 
     first_frame_after_up, banner_clear_event = None, None
@@ -795,6 +831,80 @@ def metric_reconnect(window, *, sources=None):
         "recovery_kb": recovery_kb,
         "connection_error_alerts": len([e for e in window.app_events if e.get("name") == "connection_error_alert"]),
     }
+
+
+def mac_stranded_dials(window):
+    """How many of the pane's dials this outage actually stranded, which is what makes the row a
+    measurement of issue #694 rather than of an ordinary reconnect.
+
+    A stranded dial is a connection the proxy accepted while the link was down and never closed
+    inside the window: `link up dead` leaves every connection the outage tainted parked forever, so
+    the pane can only recover by dialing anew once its own budget expires. The count is zero unless
+    the proxy also accepted a connection after the link came back (the pane's recovering dial, which
+    the trace records under link state `up-dead`) and the stream that recovered the pane belongs to a
+    LATER connect attempt than the one in flight when the link came back: a recovery on the same
+    generation means that dial reached the daemon after all, so nothing about the attempt being timed
+    was stranded.
+
+    A trace whose accepts carry no link state at all predates the proxy recording it and cannot say
+    either way, so it reports no data rather than a zero that reads like a failed run.
+
+    `window` is expected to be already scoped to the Mac pane's own source and session, which is what
+    makes the generations here belong to the measured pane."""
+    if window is None:
+        return 0
+    opens = [c for c in window.shaper_connections if c.get("event") == "conn_open"]
+    if opens and not any("link" in c for c in opens):
+        return None
+    closed = {c.get("conn") for c in window.shaper_connections if c.get("event") == "conn_close"}
+    stranded = [
+        c
+        for c in window.shaper_connections
+        if c.get("event") == "conn_open" and c.get("link") == "down" and c.get("conn") not in closed
+    ]
+    if not stranded:
+        return 0
+
+    link_up = marker(window, "link_up")
+    up_time = event_time(link_up) if link_up is not None else None
+    if up_time is None:
+        return 0
+    dials_before_up = [
+        e for e in window.app_events if e.get("name") == "stream_dial_begin" and event_time(e) is not None and event_time(e) <= up_time
+    ]
+    recovering_frame = first_named(
+        [e for e in window.app_events if event_time(e) is not None and event_time(e) >= up_time], "stream_first_frame"
+    )
+    if not dials_before_up or recovering_frame is None:
+        return 0
+    accepted_after_up = [
+        c
+        for c in window.shaper_connections
+        if c.get("event") == "conn_open" and c.get("link") == "up-dead" and event_time(c) is not None and event_time(c) >= up_time
+    ]
+    if not accepted_after_up:
+        return 0
+    try:
+        parked_generation = int(attr(dials_before_up[-1], "generation"))
+        recovering_generation = int(attr(recovering_frame, "generation"))
+    except (TypeError, ValueError):
+        return 0
+    return len(stranded) if recovering_generation > parked_generation else 0
+
+
+def metric_mac_reconnect(window, sessions, profile):
+    """The Mac reconnect row for one profile. It reads only the Mac client's own sources and only the
+    session the scenario opened, so a run whose sessions.json cannot name that session reports no data
+    for the profile rather than an unscoped measurement of whatever else the app had open."""
+    session_id = scenario_session_id(sessions, profile, "mac-reconnect")
+    if session_id is None:
+        return None
+    scoped = restrict_to_session(restrict_to_sources(window, ("mac-pane", "mac-mirror")), session_id) if window is not None else None
+    metrics = metric_reconnect(window, sources=("mac-pane", "mac-mirror"), session_id=session_id)
+    if metrics is None:
+        return None
+    metrics["stranded_dials"] = mac_stranded_dials(scoped)
+    return metrics
 
 
 def metric_idle(window):
@@ -903,6 +1013,11 @@ RECONNECT_COLUMNS = [
     ("connection_error_alerts", "connection_error_alert count", fmt_count),
 ]
 
+# The Mac table carries one column the iOS reconnect table has no use for: the proof that the
+# outage stranded a dial, which is the difference between measuring issue #694 and measuring an
+# ordinary reconnect.
+MAC_RECONNECT_COLUMNS = RECONNECT_COLUMNS + [("stranded_dials", "stranded dials", fmt_count)]
+
 IDLE_COLUMNS = [
     ("up_bytes_per_sec", "wire KB/s up", lambda v: fmt_num(v / 1024.0) if v is not None else "n/a"),
     ("down_bytes_per_sec", "wire KB/s down", lambda v: fmt_num(v / 1024.0) if v is not None else "n/a"),
@@ -985,6 +1100,14 @@ def build_header(run_root: Path, device_events, shaper_events, sessions, windows
     return "\n".join(lines)
 
 
+IOS_SOURCES = ("ios-app", "ios-viewer")
+
+
+def ios_window(window):
+    """`window` holding only the iOS app's own events, the scoping every iOS table needs."""
+    return restrict_to_sources(window, IOS_SOURCES) if window is not None else None
+
+
 def build_report_sections(run_root: Path):
     device_events = load_device_events(run_root)
     shaper_events = load_shaper_events(run_root)
@@ -992,8 +1115,15 @@ def build_report_sections(run_root: Path):
     windows = build_scenario_windows(device_events, shaper_events)
 
     def metrics_for(scenario, metric_fn, *extra_args, **extra_kwargs):
+        """Every table below this line measures the iOS app, so each window is scoped to the iOS
+        client's own event sources first. A default local run stages the Mac app for
+        `cold-open-owned` and keeps it running through the rest of the run, where its restored
+        paired-device panes emit the same event names (banners, frames, stage changes) into the same
+        log, inside these windows. Lane markers and the shaper's byte accounting are not app events
+        and survive the scoping untouched, which is what these metrics read for their own brackets."""
         return {
-            profile: metric_fn(windows.get((profile, scenario)), *extra_args, **extra_kwargs) for profile in PROFILES
+            profile: metric_fn(ios_window(windows.get((profile, scenario))), *extra_args, **extra_kwargs)
+            for profile in PROFILES
         }
 
     return [
@@ -1021,11 +1151,12 @@ def build_report_sections(run_root: Path):
         # proxy), driven through the macOS app's paired-device terminal pane instead of the iOS
         # app, into the same device-perf.jsonl. Scoped to the Mac client's own event sources
         # (mac-pane, mac-mirror) because the iOS app can still be emitting into that log during
-        # this window.
+        # this window, and to the session the scenario opened because the Mac app restores the
+        # profile's other panes, which emit the same events for sessions this table is not about.
         render_table(
             "Mac reconnect",
-            RECONNECT_COLUMNS,
-            metrics_for("mac-reconnect", metric_reconnect, sources=("mac-pane", "mac-mirror")),
+            MAC_RECONNECT_COLUMNS,
+            {profile: metric_mac_reconnect(windows.get((profile, "mac-reconnect")), sessions, profile) for profile in PROFILES},
         ),
         render_table("Idle", IDLE_COLUMNS, metrics_for("idle", metric_idle)),
     ]

@@ -60,6 +60,17 @@ def shaper_bytes(at, up, down, uptime_ns=0):
     return {"event": "bytes", "at": at, "uptime_ns": uptime_ns, "up": up, "down": down}
 
 
+def shaper_conn_open(at, conn, link, uptime_ns=0):
+    return {"event": "conn_open", "at": at, "uptime_ns": uptime_ns, "conn": conn, "link": link}
+
+
+def shaper_conn_close(at, conn, uptime_ns=0, bytes_up=0, bytes_down=0):
+    return {
+        "event": "conn_close", "at": at, "uptime_ns": uptime_ns, "conn": conn,
+        "bytes_up": bytes_up, "bytes_down": bytes_down, "duration_ms": 1.0,
+    }
+
+
 def shaper_profile(name, at, delay_ms, bandwidth_mbit, uptime_ns=0):
     return {"event": "profile", "at": at, "uptime_ns": uptime_ns, "name": name, "delay_ms": delay_ms, "bandwidth_mbit": bandwidth_mbit}
 
@@ -561,6 +572,62 @@ class ReconnectMetricTests(unittest.TestCase):
         self.assertEqual(metrics["connection_error_alerts"], 0)
 
 
+class IOSTableScopingTests(unittest.TestCase):
+    def test_the_ios_tables_ignore_the_mac_app_s_events_in_their_window(self) -> None:
+        """A default local run stages the Mac app for `cold-open-owned` and leaves it running, so its
+        restored paired-device panes emit banners and frames into the iOS scenarios' windows. The
+        decoys below would each beat the iOS app's own event if the table read the raw window."""
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp)
+            events = [
+                *scenario_bracket("poor", "reconnect", "2026-09-08T10:00:00.000Z", "2026-09-08T10:01:00.000Z"),
+                lane_marker("ios-uitest", "2026-09-08T10:00:10.000Z", 0, "poor", "reconnect", "link_down"),
+                app_event(
+                    "mac1", "mac-pane", "connection_stage", "2026-09-08T10:00:10.500Z", 0,
+                    attributes={"stage": "reconnecting", "banner": "1", "device": "mac"},
+                ),
+                app_event(
+                    "s1", "ios-viewer", "connection_stage", "2026-09-08T10:00:11.500Z", 0,
+                    attributes={"stage": "reconnecting", "banner": "1"},
+                ),
+                lane_marker("ios-uitest", "2026-09-08T10:00:20.000Z", 0, "poor", "reconnect", "link_up"),
+                app_event(
+                    "mac1", "mac-pane", "stream_first_frame", "2026-09-08T10:00:20.300Z", 0, elapsed_ms=300,
+                    attributes={"host": "h", "generation": "2"},
+                ),
+                app_event(
+                    "mac1", "mac-mirror", "render_frame_payload_receive", "2026-09-08T10:00:20.400Z", 0,
+                    count=4096, attributes={"render_update": "1"},
+                ),
+                app_event(
+                    "mac1", "mac-pane", "connection_stage", "2026-09-08T10:00:20.600Z", 0,
+                    attributes={"stage": "connected", "banner": "0", "device": "mac"},
+                ),
+                app_event(
+                    "s1", "ios-viewer", "stream_first_frame", "2026-09-08T10:00:22.000Z", 0, elapsed_ms=2000,
+                    attributes={"host": "h"},
+                ),
+                app_event(
+                    "s1", "ios-viewer", "render_frame_payload_receive", "2026-09-08T10:00:22.100Z", 0,
+                    count=1024, attributes={"render_update": "1"},
+                ),
+                app_event(
+                    "s1", "ios-viewer", "connection_stage", "2026-09-08T10:00:22.500Z", 0,
+                    attributes={"stage": "connected", "banner": "0"},
+                ),
+                lane_marker("ios-uitest", "2026-09-08T10:00:23.000Z", 0, "poor", "reconnect", "recovered"),
+            ]
+            write_jsonl(run_root / "device-perf.jsonl", events)
+            write_jsonl(run_root / "shaper.jsonl", [shaper_profile("poor", "2026-09-08T09:59:59.000Z", 200, 1)])
+            (run_root / "sessions.json").write_text(json.dumps({"target": None, "scenarios": []}), encoding="utf-8")
+
+            report_text = report.build_report(run_root)
+
+        # The iOS app's own banner (1500 ms after link down), first frame (2000 ms after link up),
+        # banner clear (2500 ms), and single 1 KB frame, none of them the Mac pane's.
+        self.assertIn("| poor | 1500.0 | 2000.0 | 2500.0 | 1 | 1.0 | 0 |", report_text)
+
+
 class MacReconnectMetricTests(unittest.TestCase):
     def test_full_cycle(self) -> None:
         # The mac-reconnect scenario has no ios-uitest scenario_begin/scenario_end markers: its
@@ -571,6 +638,12 @@ class MacReconnectMetricTests(unittest.TestCase):
         events = [
             lane_marker("lane-runner", "2026-09-08T10:00:00.000Z", 0, "poor", "mac-reconnect", "runner_scenario_start"),
             lane_marker("lane-runner", "2026-09-08T10:00:10.000Z", 0, "poor", "mac-reconnect", "link_down"),
+            # A pane the Mac app restored for another session emits the same names from the same
+            # sources into the same log, so only the session id tells it apart from the measured one.
+            app_event(
+                "s3", "mac-pane", "connection_stage", "2026-09-08T10:00:10.200Z", 0,
+                attributes={"stage": "reconnecting", "banner": "1", "device": "mac"},
+            ),
             app_event(
                 "s1", "ios-viewer", "connection_stage", "2026-09-08T10:00:10.500Z", 0,
                 attributes={"stage": "reconnecting", "banner": "1"},
@@ -584,6 +657,18 @@ class MacReconnectMetricTests(unittest.TestCase):
                 count=2048, attributes={"render_update": "1"},
             ),
             lane_marker("lane-runner", "2026-09-08T10:00:20.000Z", 0, "poor", "mac-reconnect", "link_up"),
+            app_event(
+                "s3", "mac-pane", "stream_first_frame", "2026-09-08T10:00:20.200Z", 0, elapsed_ms=200,
+                attributes={"device": "mac"},
+            ),
+            app_event(
+                "s3", "mac-pane", "connection_stage", "2026-09-08T10:00:20.300Z", 0,
+                attributes={"stage": "connected", "banner": "0", "device": "mac"},
+            ),
+            app_event(
+                "s3", "mac-mirror", "render_frame_payload_receive", "2026-09-08T10:00:21.000Z", 0,
+                count=4096, attributes={"render_update": "1"},
+            ),
             app_event(
                 "s1", "ios-viewer", "stream_first_frame", "2026-09-08T10:00:20.500Z", 0, elapsed_ms=500,
                 attributes={"host": "h"},
@@ -610,7 +695,7 @@ class MacReconnectMetricTests(unittest.TestCase):
         window = window_for(events, [], "poor", "mac-reconnect")
         self.assertEqual(window.source, "runner")
 
-        mac_metrics = report.metric_reconnect(window, sources=("mac-pane", "mac-mirror"))
+        mac_metrics = report.metric_reconnect(window, sources=("mac-pane", "mac-mirror"), session_id="s2")
         self.assertAlmostEqual(mac_metrics["link_down_to_banner_ms"], 1500.0)
         self.assertAlmostEqual(mac_metrics["link_up_to_first_frame_ms"], 2000.0)
         self.assertAlmostEqual(mac_metrics["link_up_to_banner_clear_ms"], 2500.0)
@@ -621,11 +706,174 @@ class MacReconnectMetricTests(unittest.TestCase):
         # Without the source filter, the earlier iOS decoys win every "first" search and the extra
         # iOS frame inflates the recovery counts, proving the filter is what excludes them.
         unfiltered_metrics = report.metric_reconnect(window)
-        self.assertAlmostEqual(unfiltered_metrics["link_down_to_banner_ms"], 500.0)
-        self.assertAlmostEqual(unfiltered_metrics["link_up_to_first_frame_ms"], 500.0)
-        self.assertAlmostEqual(unfiltered_metrics["link_up_to_banner_clear_ms"], 1000.0)
-        self.assertEqual(unfiltered_metrics["recovery_frames"], 2)
-        self.assertAlmostEqual(unfiltered_metrics["recovery_kb"], 3.0)
+        self.assertAlmostEqual(unfiltered_metrics["link_down_to_banner_ms"], 200.0)
+        self.assertAlmostEqual(unfiltered_metrics["link_up_to_first_frame_ms"], 200.0)
+        self.assertAlmostEqual(unfiltered_metrics["link_up_to_banner_clear_ms"], 300.0)
+        self.assertEqual(unfiltered_metrics["recovery_frames"], 3)
+        self.assertAlmostEqual(unfiltered_metrics["recovery_kb"], 7.0)
+
+        # The source filter alone still reads the restored pane's own outage: it is the Mac client
+        # emitting into the same log, and only the session id tells the two panes apart.
+        source_only_metrics = report.metric_reconnect(window, sources=("mac-pane", "mac-mirror"))
+        self.assertAlmostEqual(source_only_metrics["link_down_to_banner_ms"], 200.0)
+        self.assertAlmostEqual(source_only_metrics["link_up_to_first_frame_ms"], 200.0)
+        self.assertEqual(source_only_metrics["recovery_frames"], 2)
+        self.assertAlmostEqual(source_only_metrics["recovery_kb"], 5.0)
+
+    def banner_run(self, stage_events):
+        """One mac-reconnect window whose only post-outage stage events are `stage_events`, so a test
+        can say exactly which of them the banner time should come from."""
+        events = [
+            lane_marker("lane-runner", "2026-09-08T10:00:00.000Z", 0, "good", "mac-reconnect", "runner_scenario_start"),
+            lane_marker("lane-runner", "2026-09-08T10:00:10.000Z", 0, "good", "mac-reconnect", "link_down"),
+            *stage_events,
+            lane_marker("lane-runner", "2026-09-08T10:00:25.000Z", 0, "good", "mac-reconnect", "link_up"),
+            app_event(
+                "s1", "mac-pane", "stream_first_frame", "2026-09-08T10:00:26.000Z", 0, elapsed_ms=1000,
+                attributes={"host": "h", "generation": "4"},
+            ),
+            lane_marker("lane-runner", "2026-09-08T10:00:30.000Z", 0, "good", "mac-reconnect", "runner_scenario_finish"),
+        ]
+        return window_for(events, [], "good", "mac-reconnect")
+
+    def test_the_banner_time_comes_from_the_banner_flag_not_the_stage_change(self) -> None:
+        # The pane enters `reconnecting` at once and holds the banner back for its grace period, so
+        # the stage change is not the moment the user saw anything.
+        window = self.banner_run([
+            app_event(
+                "s1", "mac-pane", "connection_stage", "2026-09-08T10:00:12.000Z", 0,
+                attributes={"stage": "reconnecting", "banner": "0", "device": "mac"},
+            ),
+            app_event(
+                "s1", "mac-pane", "connection_stage", "2026-09-08T10:00:17.000Z", 0,
+                attributes={"stage": "reconnecting", "banner": "1", "device": "mac"},
+            ),
+        ])
+        sessions = {"scenarios": [{"profile": "good", "scenario": "mac-reconnect", "sessionID": "s1"}]}
+
+        self.assertAlmostEqual(report.metric_mac_reconnect(window, sessions, "good")["link_down_to_banner_ms"], 7000.0)
+
+    def test_a_session_that_goes_straight_to_unreachable_still_reports_a_banner(self) -> None:
+        # A dial that fails outright skips `reconnecting` entirely and raises the banner from
+        # `unreachable`, which still has a banner time to report.
+        window = self.banner_run([
+            app_event(
+                "s1", "mac-pane", "connection_stage", "2026-09-08T10:00:18.000Z", 0,
+                attributes={"stage": "unreachable", "banner": "1", "device": "mac"},
+            ),
+        ])
+        sessions = {"scenarios": [{"profile": "good", "scenario": "mac-reconnect", "sessionID": "s1"}]}
+
+        self.assertAlmostEqual(report.metric_mac_reconnect(window, sessions, "good")["link_down_to_banner_ms"], 8000.0)
+
+    def stranded_dial_run(self, recovering_generation):
+        """One mac-reconnect window in the shape the lane drives: a dial parked in the dead link, a
+        `link up dead` recovery, and the frame that ended the outage. `recovering_generation` is what
+        separates the valid shape (a later attempt recovered, so the parked dial was stranded) from
+        the invalid one (the parked dial itself connected, so the run measured an ordinary
+        reconnect)."""
+        events = [
+            lane_marker("lane-runner", "2026-09-08T10:00:00.000Z", 0, "good", "mac-reconnect", "runner_scenario_start"),
+            lane_marker("lane-runner", "2026-09-08T10:00:10.000Z", 0, "good", "mac-reconnect", "link_down"),
+            app_event(
+                "s1", "mac-pane", "connection_stage", "2026-09-08T10:00:17.000Z", 0,
+                attributes={"stage": "reconnecting", "banner": "1", "device": "mac"},
+            ),
+            app_event("s1", "mac-pane", "stream_dial_begin", "2026-09-08T10:00:19.000Z", 0, attributes={"host": "h", "generation": "3"}),
+            lane_marker("lane-runner", "2026-09-08T10:00:20.000Z", 0, "good", "mac-reconnect", "link_up"),
+            app_event(
+                "s1", "mac-pane", "stream_first_frame", "2026-09-08T10:00:30.000Z", 0, elapsed_ms=10000,
+                attributes={"host": "h", "generation": str(recovering_generation)},
+            ),
+            app_event(
+                "s1", "mac-pane", "connection_stage", "2026-09-08T10:00:30.100Z", 0,
+                attributes={"stage": "connected", "banner": "0", "device": "mac"},
+            ),
+            lane_marker("lane-runner", "2026-09-08T10:00:31.000Z", 0, "good", "mac-reconnect", "recovered"),
+            lane_marker("lane-runner", "2026-09-08T10:00:40.000Z", 0, "good", "mac-reconnect", "runner_scenario_finish"),
+        ]
+        shaper = [
+            shaper_conn_open("2026-09-08T10:00:19.100Z", 5, "down"),
+            shaper_conn_open("2026-09-08T10:00:29.000Z", 6, "up-dead"),
+            shaper_conn_close("2026-09-08T10:00:35.000Z", 6, bytes_down=2048),
+        ]
+        return window_for(events, shaper, "good", "mac-reconnect")
+
+    def test_a_stranded_dial_is_counted_when_a_later_attempt_recovers(self) -> None:
+        window = self.stranded_dial_run(recovering_generation=4)
+        sessions = {"scenarios": [{"profile": "good", "scenario": "mac-reconnect", "sessionID": "s1"}]}
+
+        metrics = report.metric_mac_reconnect(window, sessions, "good")
+        self.assertEqual(metrics["stranded_dials"], 1, "the dial parked in the dead link is still open when the window ends")
+        self.assertAlmostEqual(metrics["link_up_to_first_frame_ms"], 10000.0)
+
+    def test_a_recovery_on_the_parked_dial_counts_no_stranded_dials(self) -> None:
+        # The link came back before the parked dial reached the proxy, so that dial connected and
+        # delivered the frame: an ordinary reconnect, and the lane refuses to report it as a number.
+        window = self.stranded_dial_run(recovering_generation=3)
+        sessions = {"scenarios": [{"profile": "good", "scenario": "mac-reconnect", "sessionID": "s1"}]}
+
+        self.assertEqual(report.metric_mac_reconnect(window, sessions, "good")["stranded_dials"], 0)
+
+    def test_no_connection_accepted_while_down_counts_no_stranded_dials(self) -> None:
+        window = self.stranded_dial_run(recovering_generation=4)
+        window.shaper_connections = [c for c in window.shaper_connections if c.get("link") != "down"]
+        sessions = {"scenarios": [{"profile": "good", "scenario": "mac-reconnect", "sessionID": "s1"}]}
+
+        self.assertEqual(report.metric_mac_reconnect(window, sessions, "good")["stranded_dials"], 0)
+
+    def test_a_recovery_the_proxy_never_accepted_counts_no_stranded_dials(self) -> None:
+        # Nothing was accepted after `link up dead`, so the frame that ended the outage did not come
+        # from a dial this proxy carried: the trace cannot show the stranded-dial race happened.
+        window = self.stranded_dial_run(recovering_generation=4)
+        window.shaper_connections = [c for c in window.shaper_connections if c.get("link") != "up-dead"]
+        sessions = {"scenarios": [{"profile": "good", "scenario": "mac-reconnect", "sessionID": "s1"}]}
+
+        self.assertEqual(report.metric_mac_reconnect(window, sessions, "good")["stranded_dials"], 0)
+
+    def test_a_trace_without_link_states_reports_no_stranded_dial_data(self) -> None:
+        # A run recorded before the proxy logged the link state of each accept cannot say whether the
+        # outage stranded anything, which is not the same claim as "it stranded nothing".
+        window = self.stranded_dial_run(recovering_generation=4)
+        window.shaper_connections = [{k: v for k, v in c.items() if k != "link"} for c in window.shaper_connections]
+        sessions = {"scenarios": [{"profile": "good", "scenario": "mac-reconnect", "sessionID": "s1"}]}
+
+        self.assertIsNone(report.metric_mac_reconnect(window, sessions, "good")["stranded_dials"])
+
+    def test_a_run_that_cannot_name_the_session_reports_no_data(self) -> None:
+        # Same window as above, but sessions.json is missing the entry (a corrupt or absent file
+        # loads the same way): the events cannot be attributed, so the row degrades to no data
+        # instead of silently measuring another pane.
+        events = [
+            lane_marker("lane-runner", "2026-09-08T10:00:00.000Z", 0, "poor", "mac-reconnect", "runner_scenario_start"),
+            lane_marker("lane-runner", "2026-09-08T10:00:10.000Z", 0, "poor", "mac-reconnect", "link_down"),
+            app_event(
+                "s3", "mac-pane", "connection_stage", "2026-09-08T10:00:10.200Z", 0,
+                attributes={"stage": "reconnecting", "banner": "1", "device": "mac"},
+            ),
+            lane_marker("lane-runner", "2026-09-08T10:00:20.000Z", 0, "poor", "mac-reconnect", "link_up"),
+            lane_marker("lane-runner", "2026-09-08T10:01:00.000Z", 0, "poor", "mac-reconnect", "runner_scenario_finish"),
+        ]
+        window = window_for(events, [], "poor", "mac-reconnect")
+
+        self.assertIsNone(report.metric_mac_reconnect(window, {"scenarios": []}, "poor"))
+        self.assertIsNone(report.metric_mac_reconnect(window, {}, "poor"))
+        self.assertIsNotNone(
+            report.metric_mac_reconnect(
+                window, {"scenarios": [{"profile": "poor", "scenario": "mac-reconnect", "sessionID": "s3"}]}, "poor"
+            )
+        )
+
+    def test_session_id_comes_from_the_run_s_sessions_file(self) -> None:
+        sessions = {
+            "scenarios": [
+                {"profile": "good", "scenario": "mac-reconnect", "sessionID": "good-session"},
+                {"profile": "poor", "scenario": "mac-reconnect", "sessionID": "poor-session"},
+            ]
+        }
+        self.assertEqual(report.scenario_session_id(sessions, "poor", "mac-reconnect"), "poor-session")
+        self.assertIsNone(report.scenario_session_id(sessions, "constrained", "mac-reconnect"))
+        self.assertIsNone(report.scenario_session_id({}, "good", "mac-reconnect"))
 
 
 class IdleMetricTests(unittest.TestCase):

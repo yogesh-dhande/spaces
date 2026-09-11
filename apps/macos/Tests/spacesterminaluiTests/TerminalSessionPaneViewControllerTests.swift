@@ -4483,7 +4483,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         var tracker = TerminalConnectionStageTracker()
-        tracker.attemptEndedUnreachable()
+        tracker.enterUnreachable()
         let controller = try makeBannerController(
             sessionID: "session-banner-unreachable-clicks", state: .running, root: root, connectionStageTracker: tracker)
         controller.view.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
@@ -4504,7 +4504,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         var tracker = TerminalConnectionStageTracker()
-        tracker.attemptEndedUnreachable()
+        tracker.enterUnreachable()
         let controller = try makeBannerController(
             sessionID: "session-banner-unreachable", state: .running, root: root, connectionStageTracker: tracker)
         controller.debugSimulateStateStreamConnectionDidChange()
@@ -4526,7 +4526,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         var tracker = TerminalConnectionStageTracker()
-        tracker.attemptEndedUnreachable()
+        tracker.enterUnreachable()
         let controller = try makeBannerController(
             sessionID: "session-banner-typing-unreachable", state: .running, root: root, connectionStageTracker: tracker)
         controller.debugSimulateStateStreamConnectionDidChange()
@@ -4574,7 +4574,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         _ = controller.handleKeyEvent(try keyEvent(keyCode: kVK_ANSI_A, characters: "a", modifiers: []))
         XCTAssertEqual(controller.debugInputStatus, TerminalPaneBannerNotice.disconnected.message)
 
-        provider.connectionStageTracker.attemptEndedUnreachable()
+        provider.connectionStageTracker.enterUnreachable()
         controller.debugSimulateStateStreamConnectionDidChange()
 
         XCTAssertEqual(controller.debugInputStatus, TerminalPaneBannerNotice.unreachable.message)

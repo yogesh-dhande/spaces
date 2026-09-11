@@ -43,29 +43,25 @@ public struct TerminalConnectionStageTracker: Sendable, Equatable {
         isBannerVisible = true
     }
 
-    /// A redial attempt ended with every candidate address failing to dial. Moves to `.unreachable` with
-    /// the banner visible immediately (no grace, since this is the strongest evidence the tracker can
-    /// have that the device is actually down), and returns the delay before the caller's next automatic
-    /// redial. Safe to call from `.connected` too, even though a dial failing while a stream is still
-    /// live should not happen in practice: it is treated the same as a stream loss immediately followed
-    /// by exhausted candidates.
-    @discardableResult public mutating func attemptEndedUnreachable() -> TimeInterval {
-        enterUnreachable()
-        return nextRedialDelay()
-    }
-
-    /// The evidence half of `attemptEndedUnreachable()` on its own: stage 2 with the banner up, without
-    /// pacing anything. A caller that runs several redials at once (iOS races a stale dial against a
-    /// fresh one, see `TerminalViewerModel.armUnreachableRedialTick`) reports each attempt's failure
-    /// through this, so a losing attempt cannot spend a ladder rung the cadence has not reached yet.
+    /// A redial attempt ended with every candidate address failing to dial: the evidence half of stage 2,
+    /// reported on its own so it paces nothing. Moves to `.unreachable` with the banner visible
+    /// immediately (no grace, since this is the strongest evidence the tracker can have that the device is
+    /// actually down). Safe to call from `.connected` too, even though a dial failing while a stream is
+    /// still live should not happen in practice: it is treated the same as a stream loss immediately
+    /// followed by exhausted candidates.
+    ///
+    /// Both clients race several redials at once in stage 2 (see
+    /// `TerminalViewerModel.armUnreachableRedialTick` and
+    /// `DeviceTerminalSessionStateModel.armUnreachableRedialTick`), so every attempt's failure is reported
+    /// through this and no failing attempt can spend a ladder rung the cadence has not reached yet.
     public mutating func enterUnreachable() {
         stage = .unreachable
         isBannerVisible = true
     }
 
-    /// The pacing half of `attemptEndedUnreachable()` on its own: the delay before the caller's next
-    /// automatic redial, advancing the ladder by exactly one rung. A caller whose redials are paced by a
-    /// cadence rather than by attempt failures calls this once per tick.
+    /// The pacing half of stage 2: the delay before the caller's next automatic redial, advancing the
+    /// ladder by exactly one rung. The redial cadence calls this once per tick, which is the only thing
+    /// that walks the ladder.
     public mutating func nextRedialDelay() -> TimeInterval { backoff.nextDelay() }
 
     /// The user tapped Retry. Resets the backoff ladder so the next automatic redial after this one is

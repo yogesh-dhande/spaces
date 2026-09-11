@@ -46,6 +46,8 @@ MAC_DEVICE_SECTION_TITLE="MAC RECONNECT LANE"
 # The seeded device's sidebar rows appear only once the app has loaded that device's overview through
 # the shaped link, which on the poor profile follows a first-launch setup probe of up to 25 seconds.
 MAC_SIDEBAR_TIMEOUT_SECONDS=90
+# How long the Mac scenario waits for another profile's Spaces instance to release desktop control.
+MAC_DESKTOP_CONTROL_TIMEOUT_SECONDS=180
 # Read by the accessibility automation in e2e_ui_automation.sh.
 ACTION_TIMEOUT_SECONDS="${ACTION_TIMEOUT_SECONDS:-20}"
 AX_PROBE_TIMEOUT_SECONDS="${AX_PROBE_TIMEOUT_SECONDS:-3}"
@@ -997,6 +999,15 @@ ensure_mac_app() {
     return 0
   fi
 
+  # Accessibility automation reaches the app through System Events, whose process specifiers are
+  # keyed by process name: with a second Spaces instance running, every deep query the lane makes is
+  # answered by whichever instance System Events resolves the name to, and the lane reads another
+  # profile's sidebar. An app instance holds desktop-global control while it runs, so waiting for
+  # that lease is how this lane knows its app will be the only one on the desktop.
+  log "waiting for desktop control before launching the Mac app"
+  spaces_wait_for_desktop_control "$SPACES_E2E_BIN" --timeout-seconds "$MAC_DESKTOP_CONTROL_TIMEOUT_SECONDS" >/dev/null \
+    || fail "another Spaces instance owns desktop control; run the mac-reconnect scenario once it exits"
+
   local app_log="$RUN_ROOT/mac-app.log"
   log "no Mac app owns this profile; launching $SPACES_APP_BIN"
   SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$DEVICE_PERF_LOG" nohup "$SPACES_APP_BIN" >"$app_log" 2>&1 &
@@ -1014,6 +1025,13 @@ ensure_mac_app() {
 
   LANE_LAUNCHED_MAC_APP_PID="$owner_pid"
   SPACES_PID="$owner_pid"
+  # The wait above can be overtaken by another profile's app launching in the same moment, and the
+  # lane would then drive that instance's UI, so the staged app is required to hold desktop control.
+  local desktop_owner_pid
+  desktop_owner_pid="$("$SPACES_E2E_BIN" profile-desktop-control-owner --json \
+    | python3 -c 'import json,sys; print((json.load(sys.stdin).get("owner") or {}).get("pid", ""))')"
+  [[ "$desktop_owner_pid" == "$owner_pid" ]] \
+    || fail "the staged Mac app does not own desktop control (owner pid ${desktop_owner_pid:-none}); run the mac-reconnect scenario when no other Spaces instance is running"
   log "staged Mac app pid $owner_pid owns the profile"
 }
 
@@ -1162,10 +1180,11 @@ perf_log_line_count() {
 }
 
 # Blocks until device-perf.jsonl grows a line from `source` named `name` for `session_id` whose
-# attributes match every `key=value` argument, considering only lines past `since_line`. This is how
-# the Mac scenario watches the app: the Mac client has no XCUITest runner in this lane, and the
-# events it emits are the same ones the report reads, so the procedure and the measurement agree on
-# what "the banner appeared" means.
+# attributes match every `key=value` argument, considering only lines past `since_line`, and prints
+# that event's wall clock so a caller can line it up against another log. This is how the Mac
+# scenario watches the app: the Mac client has no XCUITest runner in this lane, and the events it
+# emits are the same ones the report reads, so the procedure and the measurement agree on what "the
+# banner appeared" means.
 wait_for_app_event() {
   local since_line="$1" timeout="$2" source="$3" name="$4" session_id="$5"
   shift 5
@@ -1194,6 +1213,7 @@ while True:
             continue
         attributes = event.get("attributes") or {}
         if all(str(attributes.get(key)) == value for key, value in pairs):
+            print(event.get("emittedAt", ""))
             sys.exit(0)
     if time.monotonic() >= deadline:
         sys.exit(1)
@@ -1201,41 +1221,109 @@ while True:
 PY
 }
 
-# Line count of the shaping proxy's log, so a wait only considers what it appends after an action.
-shaper_log_line_count() {
-  wc -l <"$SHAPER_LOG" | tr -d ' '
-}
-
-# Blocks until the shaping proxy logs `event` past `since_line`. The Mac scenario waits on
-# `conn_open` this way to learn when the pane has parked a fresh dial in the dead link, which is the
-# moment the measured recovery has to start from.
-wait_for_shaper_event() {
-  local since_line="$1" timeout="$2" event="$3"
-  python3 - "$SHAPER_LOG" "$since_line" "$timeout" "$event" <<'PY'
+# Blocks until every connection the pane's connect attempt opens has been accepted into the dead
+# link, at or after `dial_at`. The pane's `stream_dial_begin` fires when the attempt starts, which
+# is before any of its dials reach the proxy; bringing the link back in that gap would let the
+# subscription dial connect normally and measure an ordinary reconnect.
+#
+# One attempt opens one or two connections, and which of the two cannot be pinned down ahead of
+# time: `DeviceTerminalSessionStateModel.beginConnectAttempt` starts a catch-up `refreshState()`
+# request alongside the subscription dial, and that request is suppressed by its own
+# `refreshInFlight` guard whenever an earlier one is still hanging in the dead link, which is the
+# normal state after the first redial of an outage. Correlating every `stream_dial_begin` with the
+# proxy's accepts across all three profiles of run 20260910T231811Z shows both shapes in one outage
+# (two accepts for the attempt that redials first, one for the next), the pair landing within two
+# milliseconds of each other and every accept within six milliseconds of its dial event. So the wait
+# takes the attempt's accepts as complete once `settle_seconds` passes with no further one, rather
+# than counting to a fixed number the code does not guarantee.
+wait_for_shaper_dial_accept() {
+  local dial_at="$1" timeout="$2" settle_seconds="$3"
+  python3 - "$SHAPER_LOG" "$dial_at" "$timeout" "$settle_seconds" <<'PY'
 import json
 import sys
 import time
+from datetime import datetime
 
-log_path, since_text, timeout_text, event = sys.argv[1:5]
-since = int(since_text)
+
+def parse(text):
+    try:
+        return datetime.strptime(text, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except (TypeError, ValueError):
+        return None
+
+
+log_path, dial_at_text, timeout_text, settle_text = sys.argv[1:5]
+dial_at = parse(dial_at_text)
+if dial_at is None:
+    sys.exit(1)
 deadline = time.monotonic() + float(timeout_text)
+settle_seconds = float(settle_text)
+accepted = 0
+last_accept_at = None
 while True:
     try:
         with open(log_path) as handle:
-            lines = handle.readlines()[since:]
+            lines = handle.readlines()
     except FileNotFoundError:
         lines = []
+    matches = 0
     for line in lines:
         try:
             record = json.loads(line)
         except json.JSONDecodeError:
             # The proxy appends to this file concurrently, so the tail can be a partial line.
             continue
-        if record.get("event") == event:
-            sys.exit(0)
+        if record.get("event") != "conn_open" or record.get("link") != "down":
+            continue
+        accepted_at = parse(record.get("at"))
+        if accepted_at is not None and accepted_at >= dial_at:
+            matches += 1
+    if matches > accepted:
+        accepted = matches
+        last_accept_at = time.monotonic()
+    if accepted and last_accept_at is not None and time.monotonic() - last_accept_at >= settle_seconds:
+        sys.exit(0)
     if time.monotonic() >= deadline:
         sys.exit(1)
-    time.sleep(0.2)
+    time.sleep(0.1)
+PY
+}
+
+# The scenario's own validity check, read back from the report so the lane and the table can never
+# disagree about what a run measured: "stranded dials" counts the connections this outage left
+# parked in the dead link, and is zero unless a LATER attempt than the parked one recovered the
+# pane. Zero means the link came back before the measured dial was stranded, which is an ordinary
+# reconnect and not the race this scenario exists to time.
+mac_reconnect_stranded_dials() {
+  local profile="$1"
+  python3 - "$REPORT_SCRIPT" "$RUN_ROOT" "$profile" <<'PY'
+import datetime
+import pathlib
+import sys
+import time
+
+script, run_root, profile = sys.argv[1:4]
+sys.path.insert(0, str(pathlib.Path(script).resolve().parent))
+import ios_device_baseline_report as report
+
+root = pathlib.Path(run_root)
+# The report closes a scenario window at its `runner_scenario_finish` marker, and this check decides
+# the status that marker will carry, so the window is closed here with an in-memory marker instead.
+# Only the lane's own copy of the event list gets it: the run's log keeps the single final marker the
+# scenario writes once the status is known.
+now = datetime.datetime.now(datetime.timezone.utc)
+finish = {
+    "sessionID": "lane",
+    "source": "lane-runner",
+    "name": "lane_marker",
+    "emittedAt": now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z",
+    "emittedUptimeNanoseconds": time.monotonic_ns(),
+    "attributes": {"profile": profile, "scenario": "mac-reconnect", "marker": "runner_scenario_finish"},
+}
+events = report.load_device_events(root) + [finish]
+windows = report.build_scenario_windows(events, report.load_shaper_events(root))
+metrics = report.metric_mac_reconnect(windows.get((profile, "mac-reconnect")), report.load_sessions(root), profile)
+print((metrics or {}).get("stranded_dials") or 0)
 PY
 }
 
@@ -1331,7 +1419,14 @@ open_mac_paired_device_pane() {
 # is a result about the client, so it fails only this scenario and lets the next profile run.
 run_mac_reconnect_scenario() {
   local profile="$1" scenario="$2" session_id="$3"
-  [[ "$MAC_DEVICE_SEEDED" -eq 1 ]] || seed_mac_paired_device
+  if [[ "$MAC_DEVICE_SEEDED" -ne 1 ]]; then
+    # `seed-paired-device` writes the client database directly, and a running app never reads it
+    # again, so an app another scenario staged (cold-open-owned launches one) would show no seeded
+    # device at all. The record is written while no app is running, and the app that reads it is
+    # launched afterwards.
+    quit_mac_app
+    seed_mac_paired_device
+  fi
   ensure_mac_app
   local status=0
   mac_reconnect_procedure "$profile" "$scenario" "$session_id" || status=1
@@ -1358,12 +1453,17 @@ mac_reconnect_procedure() {
 
   # The link comes back while one of the pane's redials is in flight, because that is the case #694
   # is about: the dial the path change stranded holds the pane for its whole budget while the
-  # network is already back. Waiting for the proxy to accept a dial puts every profile at the same
-  # point of that budget instead of wherever a fixed hold happens to land.
-  local shaper_since
-  shaper_since="$(shaper_log_line_count)"
-  if ! wait_for_shaper_event "$shaper_since" 40 "conn_open"; then
+  # network is already back. The pane's own `stream_dial_begin` is what says a stream dial is in
+  # flight; the proxy's connection count cannot, since the catch-up request and the sidebar's own
+  # traffic reach the same device over connections of their own.
+  local dial_since dial_at
+  dial_since="$(perf_log_line_count)"
+  if ! dial_at="$(wait_for_app_event "$dial_since" 40 "mac-pane" "stream_dial_begin" "$session_id")"; then
     log "mac-reconnect: the pane did not redial within 40s of the banner appearing"
+    return 1
+  fi
+  if ! wait_for_shaper_dial_accept "$dial_at" 20 1; then
+    log "mac-reconnect: the proxy never accepted the pane's redial into the dead link"
     return 1
   fi
 
@@ -1450,6 +1550,19 @@ run_scenario() {
     run_ui_test "$test_method" "$xcodebuild_log" || status="failed"
   fi
 
+  # A Mac reconnect number only means anything when the outage stranded the dial the pane was
+  # waiting on, so the scenario fails rather than reporting a recovery it did not gate. The check
+  # runs before the finish marker is written, so the run's log carries one marker and it carries the
+  # status this check decided.
+  if [[ "$scenario" == "mac-reconnect" && "$status" == "ok" ]]; then
+    local stranded_dials
+    stranded_dials="$(mac_reconnect_stranded_dials "$profile")"
+    if [[ "$stranded_dials" -lt 1 ]]; then
+      log "mac-reconnect: the outage stranded no dial, so this run measured an ordinary reconnect"
+      status="failed"
+    fi
+  fi
+
   append_marker "runner_scenario_finish" "$profile" "$scenario" "{\"status\":\"$status\"}"
 
   local stop_payload
@@ -1476,20 +1589,23 @@ main() {
     open -a Simulator >/dev/null 2>&1 || true
   fi
 
-  if [[ "$REMOTE" -eq 1 ]]; then
-    open_remote_pairing_window
-  else
-    open_local_pairing_window
-  fi
-  pair_client
-
-  if [[ "$REMOTE" -eq 1 ]]; then
-    resolve_remote_fixture_workspace
-  else
-    resolve_local_fixture_workspace
-  fi
-
+  # The iOS target daemon is the iOS scenarios' subject: pairing this runner with it and seeding its
+  # fixture project both write to it, so a Mac-only run skips them and touches nothing but its own
+  # throwaway upstream.
   if ios_scenarios_selected; then
+    if [[ "$REMOTE" -eq 1 ]]; then
+      open_remote_pairing_window
+    else
+      open_local_pairing_window
+    fi
+    pair_client
+
+    if [[ "$REMOTE" -eq 1 ]]; then
+      resolve_remote_fixture_workspace
+    else
+      resolve_local_fixture_workspace
+    fi
+
     build_ios
   fi
 
