@@ -1700,6 +1700,96 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: ghostty-mirror")
     }
 
+    /// A pane's own attachment can disappear without the pane asking for it — stale-client expiry, a
+    /// termination detach-all, a daemon that lost it. The attachment broadcast is the only thing that says
+    /// so, and the pane re-attaches off it with no user action. Ownership stays where the session says it
+    /// is: reclaimed here because nothing else holds it.
+    @MainActor func testPaneReattachesAsOwnerAfterItsAttachmentDisappears() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-attachment-lost-ownerless"
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "lost", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
+            paths: paths)
+
+        let capture = ClientCapture()
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths,
+            attachClientAction: { client, mode in
+                capture.attachedModes.append(mode)
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: "2026-05-20T00:00:02Z")
+            }, detachClientAction: { _ in })
+
+        controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
+        XCTAssertEqual(capture.attachedModes, [.owner])
+
+        // What stale-client expiry leaves behind: the pane's attachment row is gone and nobody owns the session.
+        try TerminalSessionPersistence.detachClient(id: controller.clientID, paths: paths, detachedAt: "2026-05-20T00:01:05Z")
+        controller.debugForceRefresh()
+        await controller.debugAwaitPendingClientControl()
+
+        XCTAssertEqual(capture.attachedModes, [.owner, .owner], "the pane must reattach itself exactly once, at the mode it held")
+        XCTAssertEqual(
+            try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == controller.clientID }?.mode, .owner)
+        XCTAssertEqual(controller.attachmentMode, .owner)
+
+        controller.debugForceRefresh()
+        await controller.debugAwaitPendingClientControl()
+        XCTAssertEqual(capture.attachedModes, [.owner, .owner], "a confirmed attachment must not draw further reattaches")
+    }
+
+    @MainActor func testPaneReattachesAsViewerAfterItsAttachmentDisappearsWhileAnotherClientOwnsTheSession() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-attachment-lost-taken-over"
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "lost", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
+            paths: paths)
+
+        let capture = ClientCapture()
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths,
+            attachClientAction: { client, mode in
+                capture.attachedModes.append(mode)
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: "2026-05-20T00:00:02Z")
+            }, detachClientAction: { _ in })
+
+        controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
+        XCTAssertEqual(capture.attachedModes, [.owner])
+
+        try TerminalSessionPersistence.detachClient(id: controller.clientID, paths: paths, detachedAt: "2026-05-20T00:01:05Z")
+        let remoteOwner = TerminalClient(
+            id: "remote-owner", kind: .remote, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            connectedAt: "2026-05-20T00:01:06Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:01:06Z")
+        controller.debugForceRefresh()
+        await controller.debugAwaitPendingClientControl()
+
+        XCTAssertEqual(capture.attachedModes, [.owner, .viewer], "a pane whose attachment expired must not displace the session's new owner")
+        XCTAssertEqual(
+            try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.mode == .owner }?.clientID, remoteOwner.id)
+        XCTAssertEqual(controller.attachmentMode, .viewer)
+    }
+
     @MainActor func testRequestOwnershipDoesNotAttachAgainWhenAlreadyActiveOwner() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

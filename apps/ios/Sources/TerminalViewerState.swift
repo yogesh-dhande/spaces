@@ -100,3 +100,64 @@ enum TerminalViewerSceneState: Equatable {
     case active(resume: ResumeEvaluation)
     case backgrounded(resume: ResumeEvaluation)
 }
+
+/// Which attachment this client holds, as the daemon records it, or what is known about it when the
+/// daemon has not named one. Read by `isAttachmentEvidence` to decide whether a snapshot naming this
+/// client is about the attachment it holds now.
+///
+/// The middle case is what keeps a snapshot from before an expiry authoritative for the window between
+/// learning the attachment is gone and the re-attach being acknowledged: the identity that would have
+/// caught it has been cleared by then, and treating "no identity" as "judge by client id alone" lets the
+/// daemon's pre-expiry backlog re-arm the confirmation just in time for the expiry behind it to read as a
+/// second loss.
+enum TerminalViewerAttachmentIdentity: Equatable {
+    /// Before this lifecycle's first attach, and after a teardown: this client has never held an
+    /// attachment the daemon named, so a snapshot naming it is about an attachment it made and nothing
+    /// else, which is all such a model can judge by.
+    case unattached
+    /// An attach is unresolved: the attachment this client held is known to be gone (or was given up)
+    /// and the identity of its replacement is not known until the daemon acknowledges it. `replacing` is
+    /// the identity of the attachment that went away, when the daemon ever named it, so a snapshot still
+    /// carrying that one is recognizably about an attachment that is over.
+    case unresolved(replacing: String?)
+    /// The daemon acknowledged the attach but its answer carried no session state, so the attachment
+    /// exists and this model cannot name it yet. The daemon loads the post-control state with `try?`
+    /// (`SpacesDeviceAPIServer`), so an acknowledgement without one is an ordinary answer, not a failure.
+    /// It counts as acknowledged — there is an attachment for a snapshot's silence to be about — while a
+    /// snapshot naming this client by id alone is not evidence about it, exactly as in `unresolved`: the
+    /// id is the same across every attachment this client ever made, so matching on it would admit the
+    /// backlog the daemon exported for the attachment that just ended.
+    ///
+    /// Nothing rests here: the attach path answers it immediately with a `.state` read on the same command
+    /// channel (`resolveAttachmentIdentityWithStateRead`), which is ordered after the attach on the daemon
+    /// and names this client's `connectedAt`, so the state lasts one round trip. A read that throws hands
+    /// recovery to the redial, whose own attach is acknowledged with state; a loss moves the identity on
+    /// through `afterAttachmentDropped`; and a teardown resets it to `unattached`.
+    case acknowledgedWithoutIdentity
+    /// The daemon named this client's attachment in the acknowledgement of the attach that established
+    /// it: the `connectedAt` its snapshots carry for this client id.
+    case resolved(String)
+
+    /// Whether the daemon has named this client's attachment, which is what makes a snapshot with no row
+    /// for this client answerable: there is an attachment for it to be about.
+    var isAcknowledged: Bool {
+        switch self {
+        case .resolved, .acknowledgedWithoutIdentity: true
+        case .unattached, .unresolved: false
+        }
+    }
+
+    /// The state this one moves to when the model learns the attachment it describes is gone, keeping
+    /// whatever is known about the attachment being replaced: a second telling of the same loss knows no
+    /// more than the first, so it never lowers a known identity to `nil`.
+    var afterAttachmentDropped: Self {
+        switch self {
+        case .unattached: .unresolved(replacing: nil)
+        case .unresolved: self
+        // Acknowledged but never named, so there is no identity to carry into the window: a snapshot
+        // about the attachment that ended is unrecognizable either way, and both states refuse one.
+        case .acknowledgedWithoutIdentity: .unresolved(replacing: nil)
+        case .resolved(let identity): .unresolved(replacing: identity)
+        }
+    }
+}

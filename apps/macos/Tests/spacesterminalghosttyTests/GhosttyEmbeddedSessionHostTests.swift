@@ -698,6 +698,177 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
+    /// The `connectedAt` a snapshot publishes for a remote client is this daemon's own attach stamp rather
+    /// than the value the client sent (`clientForAttachLease`), and a client that has to tell one of its own
+    /// attachments from the next has nothing else to go by: the iOS viewer matches every snapshot it
+    /// receives against the `connectedAt` its attach was acknowledged with, so that a snapshot the daemon
+    /// exported for an attachment that has since expired cannot speak for the one that replaced it. A
+    /// recovery's re-attach and the redial behind it land milliseconds apart, so at whole-second precision
+    /// the two would share one identity: the expired attachment's own backlog would arm the replacement's
+    /// confirmation, and the expiry behind it in that backlog would read as a fresh loss, sending a second
+    /// viewer attach that gives reclaimed ownership straight back.
+    func testTwoAttachesInsideOneSecondGetDistinctConnectedAtStamps() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-attach-identity-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+                shell: "/bin/zsh", command: nil, createdAt: "2026-06-02T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            defer { host.terminate() }
+            GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in Self.snapshot(text: "attached") }
+            defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
+            try host.startIfNeeded()
+
+            let viewer = TerminalClient(
+                id: "remote-iphone", kind: .remote, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
+                connectedAt: "2026-06-02T00:00:00Z")
+            let publishedConnectedAt = { () -> String? in
+                host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.attachmentState.rawValue)?.attachmentSnapshot?.clients
+                    .first { $0.id == viewer.id }?.connectedAt
+            }
+
+            XCTAssertTrue(host.core.handleControlRequest(.init(command: "attach", client: viewer, attachmentMode: .viewer)).ok)
+            let firstIdentity = try XCTUnwrap(publishedConnectedAt(), "the attach must publish a client row for this viewer")
+            // What a redial does: the same client attaches again, in the same mode, right behind the first.
+            XCTAssertTrue(host.core.handleControlRequest(.init(command: "attach", client: viewer, attachmentMode: .viewer)).ok)
+            let secondIdentity = try XCTUnwrap(publishedConnectedAt(), "the re-attach must publish a client row for this viewer")
+
+            XCTAssertNotEqual(firstIdentity, secondIdentity, "two attaches this close together must not be published under one identity")
+            let firstDate = try XCTUnwrap(TerminalSessionTimestamp.date(from: firstIdentity))
+            let secondDate = try XCTUnwrap(TerminalSessionTimestamp.date(from: secondIdentity))
+            XCTAssertGreaterThan(secondDate, firstDate, "the replacement's lease must be dated after the one it replaces, whatever the clock did")
+            XCTAssertNotEqual(firstIdentity, viewer.connectedAt, "the lease is this daemon's to grant, so the client's own stamp is not the identity")
+            for identity in [firstIdentity, secondIdentity] {
+                XCTAssertNotNil(
+                    TerminalSessionTimestamp.date(from: identity), "the stamp must stay readable as one of the formats every reader parses")
+                XCTAssertTrue(
+                    identity.contains("."), "the stamp must carry sub-second precision, or two attaches inside one second would be one attachment")
+            }
+        }
+    }
+
+    /// The published `connectedAt` is an identity and the lease is a clock reading, so a clock that steps
+    /// backwards must move only the first. Derived from the row it replaces, the identity stays ahead of
+    /// the attachment it supersedes; the lease stays at the server time the attach was granted, because the
+    /// stale-client sweep measures liveness against it and a lease dated in the future would keep a device
+    /// that has gone away counted as live until the clock caught up with it.
+    func testAnAttachWhoseClockSteppedBackKeepsItsLeaseAtServerTime() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-attach-lease-clock-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+                shell: "/bin/zsh", command: nil, createdAt: "2026-06-02T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            defer { host.terminate() }
+            GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in Self.snapshot(text: "attached") }
+            let clock = MutableBox(Date())
+            GhosttyEmbeddedSessionCore.attachLeaseClockForTesting = { clock.value }
+            defer {
+                GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil
+                GhosttyEmbeddedSessionCore.attachLeaseClockForTesting = nil
+            }
+            try host.startIfNeeded()
+
+            let viewer = TerminalClient(
+                id: "remote-iphone", kind: .remote, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
+                connectedAt: "2026-06-02T00:00:00Z")
+            let publishedRow = { () -> TerminalClient? in
+                host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.attachmentState.rawValue)?.attachmentSnapshot?.clients
+                    .first { $0.id == viewer.id }
+            }
+
+            XCTAssertTrue(host.core.handleControlRequest(.init(command: "attach", client: viewer, attachmentMode: .viewer)).ok)
+            let firstIdentity = try XCTUnwrap(publishedRow()?.connectedAt, "the attach must publish a client row for this viewer")
+
+            // The daemon's clock steps back a second (an NTP correction, a suspended host waking up) and the
+            // client re-attaches on the redial behind its recovery.
+            let steppedBack = clock.value.addingTimeInterval(-1)
+            clock.value = steppedBack
+            XCTAssertTrue(host.core.handleControlRequest(.init(command: "attach", client: viewer, attachmentMode: .viewer)).ok)
+            let republished = try XCTUnwrap(publishedRow(), "the re-attach must publish a client row for this viewer")
+
+            let firstDate = try XCTUnwrap(TerminalSessionTimestamp.date(from: firstIdentity))
+            let secondDate = try XCTUnwrap(TerminalSessionTimestamp.date(from: republished.connectedAt))
+            XCTAssertGreaterThan(secondDate, firstDate, "the replacement attachment must still be identifiable apart from the one it replaced")
+            XCTAssertEqual(
+                republished.leaseRefreshedAt, TerminalSessionTimestamp.fractionalString(from: steppedBack),
+                "the lease must be the server time the attach was granted, never the identity derived from the row it replaced")
+        }
+    }
+
+    /// The identity floor cannot be the published row alone, because the row is unreadable in exactly the
+    /// window where two attaches collide: an empty attachment cache whose reseeding disk read also fails
+    /// leaves the mint with nothing to order against, and a clock that stepped backwards (or a second round
+    /// trip inside the same millisecond) then republishes a `connectedAt` this client already held. The
+    /// in-memory record covers that window; the durable row covers the daemon restart that empties it.
+    func testAnAttachWhoseSnapshotIsUnreadableStillPublishesALaterIdentity() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-attach-identity-unreadable-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
+                workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-06-02T00:00:00Z", workspaceID: "workspace-1", kind: .shell
+            )
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            defer { host.terminate() }
+            GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in Self.snapshot(text: "attached") }
+            let clock = MutableBox(Date())
+            GhosttyEmbeddedSessionCore.attachLeaseClockForTesting = { clock.value }
+            defer {
+                GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil
+                GhosttyEmbeddedSessionCore.attachLeaseClockForTesting = nil
+                host.debugSetForceAttachmentSnapshotReseedFailureForTesting(false)
+            }
+            try host.startIfNeeded()
+
+            let viewer = TerminalClient(
+                id: "remote-iphone", kind: .remote, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
+                connectedAt: "2026-06-02T00:00:00Z")
+            let publishedRow = { () -> TerminalClient? in
+                host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.attachmentState.rawValue)?.attachmentSnapshot?.clients
+                    .first { $0.id == viewer.id }
+            }
+
+            XCTAssertTrue(host.core.handleControlRequest(.init(command: "attach", client: viewer, attachmentMode: .viewer)).ok)
+            let firstIdentity = try XCTUnwrap(publishedRow()?.connectedAt, "the attach must publish a client row for this viewer")
+            host.debugDrainPersistenceQueue()
+
+            // The window the row cannot cover: cache empty, reseed failing, so the re-attach below has no
+            // published stamp to order its mint against.
+            host.debugInvalidateAttachmentSnapshotCacheForTesting()
+            host.debugSetForceAttachmentSnapshotReseedFailureForTesting(true)
+            let steppedBack = clock.value.addingTimeInterval(-1)
+            clock.value = steppedBack
+            XCTAssertTrue(host.core.handleControlRequest(.init(command: "attach", client: viewer, attachmentMode: .viewer)).ok)
+
+            host.debugSetForceAttachmentSnapshotReseedFailureForTesting(false)
+            host.debugDrainPersistenceQueue()
+            let republished = try XCTUnwrap(publishedRow(), "the re-attach must publish a client row for this viewer")
+
+            let firstDate = try XCTUnwrap(TerminalSessionTimestamp.date(from: firstIdentity))
+            let secondDate = try XCTUnwrap(TerminalSessionTimestamp.date(from: republished.connectedAt))
+            XCTAssertGreaterThan(
+                secondDate, firstDate, "an attach the daemon cannot read a row for must still publish an identity later than the one it replaces")
+            XCTAssertEqual(
+                republished.leaseRefreshedAt, TerminalSessionTimestamp.fractionalString(from: steppedBack),
+                "the lease must stay the server time the attach was granted, whatever the identity had to be advanced to")
+        }
+    }
+
     func testScreenStateChangeBroadcastsRemoteOwnerFrame() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -4720,6 +4891,69 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
 
         await fulfillment(of: [attachmentNotifications], timeout: 2)
+    }
+
+    /// The whole recovery loop for a client stale-client expiry detached: the daemon rejects its heartbeat
+    /// with `notFound`, the state it broadcasts drops the client's attachment — the fact the client acts on,
+    /// since the heartbeats an attached client relies on are sent by the daemon's own subscription relay and
+    /// their answers never leave the daemon — and the re-attach that follows restores both the lease and the
+    /// ownership of a session nothing else claimed, so the client's input is accepted again.
+    func testExpiredClientHeartbeatIsRejectedAndReattachRestoresAcceptedInput() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-expired-reattach", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let remoteClient = TerminalClient(
+            id: "expired-remote-owner", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"),
+            connectedAt: "2026-05-17T00:00:00Z")
+
+        try await TerminalEngineActor.run {
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.attachClient(
+                sessionID: launchConfiguration.sessionID, client: remoteClient, mode: .owner, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+
+            let expiredAt = ISO8601DateFormatter().date(from: "2026-05-17T00:01:05Z")!
+            XCTAssertEqual(host.expireStaleRemoteClientsIfNeeded(now: expiredAt), [remoteClient.id])
+            host.debugDrainPersistenceQueue()
+            // A heartbeat lands as `ok` while the expiry is still pending: that is the veto window, where the
+            // client's own heartbeat rescues it. The next sweep tick sees the detach committed and retires the
+            // pending marker, which is when the client becomes durably gone.
+            XCTAssertTrue(host.handleControlRequest(.init(command: "heartbeat", clientID: remoteClient.id)).ok)
+            XCTAssertEqual(host.expireStaleRemoteClientsIfNeeded(now: expiredAt), [])
+
+            let rejectedHeartbeat = host.handleControlRequest(.init(command: "heartbeat", clientID: remoteClient.id))
+            XCTAssertFalse(rejectedHeartbeat.ok, "a durably detached client must not be told its lease was refreshed")
+            XCTAssertEqual(rejectedHeartbeat.errorCode, .notFound)
+            let rejectedSend = host.handleControlRequest(
+                .init(command: "send", text: "echo zombie\n", clientID: remoteClient.id, ownerEpoch: host.core.debugOwnerEpoch))
+            XCTAssertFalse(rejectedSend.ok, "an expired client owns nothing, so its input must be rejected")
+
+            let expiredPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.attachmentState.rawValue))
+            XCTAssertFalse(
+                expiredPayload.attachmentSnapshot?.attachments.contains { $0.clientID == remoteClient.id && $0.detachedAt == nil } ?? true,
+                "the broadcast state must show the expired client detached; it is the only signal the client gets")
+
+            let reattach = host.handleControlRequest(.init(command: "attach", client: remoteClient, attachmentMode: .owner))
+            XCTAssertTrue(reattach.ok, "the existing attach path must be able to restore an expired attachment")
+            host.debugDrainPersistenceQueue()
+
+            XCTAssertTrue(
+                host.handleControlRequest(.init(command: "heartbeat", clientID: remoteClient.id)).ok,
+                "the reattached client's lease must refresh again")
+            let acceptedSend = host.handleControlRequest(
+                .init(command: "send", text: "echo recovered\n", clientID: remoteClient.id, ownerEpoch: host.core.debugOwnerEpoch))
+            XCTAssertTrue(acceptedSend.ok, "the reattached owner's input must be accepted")
+            let reattachedPayload = try XCTUnwrap(
+                host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.attachmentState.rawValue))
+            XCTAssertEqual(
+                reattachedPayload.attachmentSnapshot?.attachments.first { $0.clientID == remoteClient.id && $0.detachedAt == nil }?.mode, .owner)
+        }
     }
 
     func testExpiringStaleRemoteOwnerTransfersOwnershipBackToActiveLocalWindow() async throws {

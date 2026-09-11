@@ -520,16 +520,20 @@ struct SpacesDeviceAPIClient: Sendable {
         return sessionState
     }
 
-    func attach(
+    /// - Returns: The session state the daemon answers the attach with. The request asks for it, so the
+    ///   acknowledgement carries the daemon's own `emittedAt` for the moment the attachment came into
+    ///   existence, which is what `TerminalViewerModel` records as that attachment's provenance floor.
+    @discardableResult func attach(
         sessionID: String, client: TerminalClient, mode: TerminalAttachmentMode, appearance: ThemeAppearance,
         commandChannel: SpacesDeviceAPICommandChannel? = nil
-    ) async throws {
+    ) async throws -> GhosttyRemoteSessionStatePayload? {
         let request = SpacesDeviceAPIRequest(
             command: .terminalControl(
                 .init(action: .attach, sessionID: sessionID, client: client, attachmentMode: mode, appearance: appearance, includesRenderUpdate: true)
             ), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
         let response = try await sendRequest(request, commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+        return response.sessionState
     }
 
     func detach(sessionID: String, clientID: String, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil)

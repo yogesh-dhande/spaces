@@ -482,6 +482,13 @@
         /// touching the database, so a test can exercise the `pendingAttachmentMutations` path deterministically.
         /// See `debugSetForceAttachmentSnapshotReseedFailureForTesting`.
         private var forceAttachmentSnapshotReseedFailureForTesting = false
+        /// The last `connectedAt` this core published for each client, kept independently of the attachment
+        /// cache because `attachIdentityStamp` must never hand out a value it has already handed out. The row
+        /// it otherwise reads is unavailable exactly when the cache is empty and the reseeding disk read
+        /// fails, and that is when two attaches inside one millisecond (or one across a backwards clock step)
+        /// would collide. Empty after a daemon restart, which is harmless: the durable row it reads then
+        /// carries the same floor.
+        private var lastPublishedAttachIdentityByClientID: [String: Date] = [:]
         /// Last heartbeat instant per remote client, recorded synchronously on the engine the moment a
         /// heartbeat lands — independent of when its coalesced durable lease write commits and of the
         /// attachment-snapshot cache's invalidation lifecycle. `expireStaleRemoteClientsIfNeeded` consults
@@ -585,7 +592,10 @@
             let currentAttachment = activeAttachments.first { $0.clientID == client.id }
             let previousOwnerClientID = activeAttachments.first { $0.mode == .owner }?.clientID
             if currentAttachment?.mode != mode {
-                applyAttach(client: client, mode: mode, attachedAt: TerminalSessionTimestamp.string(from: Date()))
+                // Plain mint, not `attachLeaseStamp`: this path hands the client record through untouched
+                // (no `clientForAttachLease`), so what it stamps is the attachment and its lease, never the
+                // `connectedAt` a client reads back as an identity.
+                applyAttach(client: client, mode: mode, attachedAt: nowAttachLeaseISO8601())
                 leaseTouchCoalescer.forget(clientID: client.id)
                 if mode == .owner, previousOwnerClientID != client.id { advanceOwnerEpoch(reason: "attach") }
                 postAttachmentStateDidChange()
@@ -928,11 +938,17 @@
         }
 
         /// Applies a client upsert to the in-memory snapshot and enqueues its durable mirror.
-        private func applyClientUpsert(_ client: TerminalClient) {
-            mutateAttachmentSnapshot { $0.applyingClientUpsert(client, leaseRefreshedAt: client.connectedAt) }
+        /// Writes this client's row, in memory and durably, with the lease the caller granted.
+        ///
+        /// The lease is passed rather than read off `client.connectedAt`, which the two would otherwise
+        /// share: that field is the attachment's published identity and can sit a millisecond or two ahead
+        /// of the clock (see `attachIdentityStamp`), and a lease dated in the future is a client the stale
+        /// sweep cannot expire.
+        private func applyClientUpsert(_ client: TerminalClient, leaseRefreshedAt: String) {
+            mutateAttachmentSnapshot { $0.applyingClientUpsert(client, leaseRefreshedAt: leaseRefreshedAt) }
             let paths = paths
             enqueueLifecycleWrite("client_upsert") { databasePath in
-                try TerminalSessionPersistence.upsertClient(client, paths: paths, databasePath: databasePath)
+                try TerminalSessionPersistence.upsertClient(client, paths: paths, leaseRefreshedAt: leaseRefreshedAt, databasePath: databasePath)
             }
         }
 
@@ -1402,8 +1418,16 @@
                 return TerminalControlResponse(ok: false, message: "Missing client payload.", errorCode: .invalidArgument)
             }
             let mode = request.attachmentMode ?? .viewer
-            let attachedAt = nowISO8601()
-            let authoritativeClient = Self.clientForAttachLease(client, attachedAt: attachedAt)
+            // Two facts, deliberately taken apart. `attachedAt` is server time: the instant this daemon
+            // granted the lease, which is what the stale-client sweep measures a client's liveness against,
+            // so it is never moved forward -- a lease dated ahead of the clock would keep a device that has
+            // gone away counted as live until the clock caught up with it. The published `connectedAt` is
+            // an identity: strictly later than the one this client's row already carries, so two attaches
+            // can always be told apart (`attachIdentityStamp`). The two are the same instant whenever the
+            // clock behaves, and differ by a millisecond or two when it does not.
+            let attachedAt = nowAttachLeaseISO8601()
+            let identity = attachIdentityStamp(forClientID: client.id, mintedAt: attachedAt)
+            let authoritativeClient = Self.clientForAttachLease(client, connectedAt: identity)
             // Adopt the attaching client's light/dark appearance. The Ghostty color scheme is
             // app-scoped (one ghostty_app_t per daemon), so this re-themes every live surface in
             // the daemon on a last-writer-wins basis. The io thread applies the colors
@@ -1414,7 +1438,7 @@
             // always-fresh initial-frame export for subscribers that connect afterwards).
             let appearanceChanged = request.appearance.map { GhosttyEmbeddedAppService.shared.applyColorScheme($0) } ?? false
             let previousOwnerClientID = activeOwnerClientID()
-            applyClientUpsert(authoritativeClient)
+            applyClientUpsert(authoritativeClient, leaseRefreshedAt: attachedAt)
             // An attach is liveness evidence in its own right, not just a lease write: record it in the same
             // heartbeat map and generation gate a lease touch would (see `enqueueClientLeaseTouch`). Without
             // this, a client that just reattached has a fresh in-memory lease but an unrecorded heartbeat; if
@@ -2662,8 +2686,7 @@
             let ownerKind = activeOwnerClient()?.kind
             // A `state_change` this owner receives without screen state carries no frame to compare
             // against, so it goes out for its metadata exactly as it would have.
-            guard Self.remoteStateShouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.stateChange.rawValue, ownerKind: ownerKind)
-            else {
+            guard Self.remoteStateShouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.stateChange.rawValue, ownerKind: ownerKind) else {
                 broadcastCurrentState(reason: .stateChange)
                 return
             }
@@ -2677,8 +2700,7 @@
                 // carry, and only a frame that actually goes out drains them. An identical screen still
                 // owes a mirror that movement — repeated or blank rows scroll without changing a cell —
                 // and a drag-selection anchor cannot rebase until it arrives, so publish instead.
-                !renderUpdateProducer.hasPendingScrollCarry,
-                !didExportScreenOutsideTheStream
+                !renderUpdateProducer.hasPendingScrollCarry, !didExportScreenOutsideTheStream
             {
                 // The stream's baseline deliberately stays where it is, revision included. It names the
                 // frame every subscriber actually received, and the next delta is diffed against it; moving
@@ -2703,6 +2725,64 @@
 
         private func nowISO8601() -> String { TerminalSessionTimestamp.string(from: Date()) }
 
+        /// The instant an attach stamps: the attachment's `attachedAt`, the lease it seeds, and — for every
+        /// client whose liveness the lease decides — the `connectedAt` the client row carries from then on,
+        /// since `clientForAttachLease` replaces whatever the client sent with this value.
+        ///
+        /// Minted with fractional seconds because that published `connectedAt` is how a client tells one of
+        /// its own attachments from the next: the iOS viewer matches every snapshot it receives against the
+        /// value its attach was acknowledged with, and a recovery's re-attach and the redial behind it are
+        /// milliseconds apart, so at whole-second precision the two would share one identity and a snapshot
+        /// of the attachment that ended would pass as evidence about the one that replaced it. Precision
+        /// alone does not make the value unique, though -- two attaches can share a millisecond too -- so
+        /// what a client reads as an identity comes from `attachIdentityStamp`, which orders this mint
+        /// against the row it is replacing -- and only that published `connectedAt` is ordered, never the
+        /// lease this mint dates. The format family is unchanged: every reader of these
+        /// stamps parses both (`TerminalSessionTimestamp.date` and `GhosttyRemoteSessionStateTimestamp
+        /// .date`, which the durable lease reader goes through), so this is a precision change rather than
+        /// a wire-format one.
+        /// The clock the attach lease reads. Set only by tests, which need one that can step backwards to
+        /// exercise the identity/lease split above; every shipping path leaves it nil and reads `Date()`.
+        nonisolated(unsafe) static var attachLeaseClockForTesting: (@Sendable () -> Date)?
+
+        private func nowAttachLeaseISO8601() -> String {
+            TerminalSessionTimestamp.fractionalString(from: Self.attachLeaseClockForTesting?() ?? Date())
+        }
+
+        /// The value a control attach publishes as this client's `connectedAt`: `mintedAt`, or the
+        /// smallest stamp strictly later than the one this client's row already carries.
+        ///
+        /// The clock's resolution is not what makes that value an identity; this guard is. Two attaches by
+        /// one client can land inside the same millisecond -- a recovery's re-attach and the redial behind
+        /// it are back-to-back round trips on the one command channel that client holds -- and a client
+        /// that matches every snapshot it receives against the value its attach was acknowledged with would
+        /// then read a snapshot of the attachment that ended as evidence about the one that replaced it:
+        /// a false confirmation whose next expiry reads as a fresh loss. So when the freshly minted stamp
+        /// is not strictly greater than the row's, it is advanced one millisecond past it. Only the
+        /// published identity moves: the attach's lease keeps the freshly minted server time, so a clock
+        /// that stepped backwards cannot hand a client a lease the stale sweep is unable to expire.
+        ///
+        /// The floor is the later of two facts, because neither alone is always there. The client's row is
+        /// the value this daemon last published and survives a restart, but it is unreadable precisely when
+        /// a collision is possible: the attachment cache empty and the reseeding disk read failing leaves
+        /// this function with nothing to order against, and the raw mint it would return is the one another
+        /// attach in that same millisecond also gets. `lastPublishedAttachIdentityByClientID` covers that
+        /// window, and the row covers the restart that empties it.
+        private func attachIdentityStamp(forClientID clientID: String, mintedAt minted: String) -> String {
+            // Compared as instants rather than as strings: a row written before this precision landed (or
+            // by another daemon) carries a whole-second stamp, which sorts after a fractional one inside
+            // the same second.
+            let published: String? = currentAttachmentSnapshot()?.clients.first(where: { $0.id == clientID })?.connectedAt
+            let publishedDate = published.flatMap { TerminalSessionTimestamp.date(from: $0) }
+            let floor = [publishedDate, lastPublishedAttachIdentityByClientID[clientID]].compactMap { $0 }.max()
+            var identity = minted
+            if let floor, !(TerminalSessionTimestamp.date(from: minted).map { $0 > floor } ?? false) {
+                identity = TerminalSessionTimestamp.fractionalString(from: floor.addingTimeInterval(0.001))
+            }
+            lastPublishedAttachIdentityByClientID[clientID] = TerminalSessionTimestamp.date(from: identity)
+            return identity
+        }
+
         private static func clampedInt(_ value: UInt64) -> Int {
             guard value <= UInt64(Int.max) else { return Int.max }
             return Int(value)
@@ -2714,14 +2794,16 @@
             return trimmed.isEmpty ? nil : trimmed
         }
 
-        /// Normalizes the attaching client's `connectedAt` to the daemon's own attach instant rather than
-        /// trusting whatever the client reported. `upsertClient` writes `lease_refreshed_at` from
-        /// `connectedAt` (see `TerminalSessionPersistence.upsertClient`), so a stale or clock-skewed
-        /// self-reported value would seed a lease that reads as already-expired the moment it lands.
-        /// Applied to every kind alike: a `local` client's lease governs its expiry exactly as a
-        /// `remote` client's does, so both need a trustworthy starting point.
-        private static func clientForAttachLease(_ client: TerminalClient, attachedAt: String) -> TerminalClient {
-            TerminalClient(id: client.id, kind: client.kind, identity: client.identity, connectedAt: attachedAt, disconnectedAt: nil)
+        /// The client row an attach writes: this daemon's own record of the attachment, not the record the
+        /// client sent. No client dates its own attachment, whatever its kind: its lease governs its
+        /// expiry, and a stale or clock-skewed self-reported value would seed one that reads as already
+        /// expired the moment it lands. The value written here is the stamp this daemon published for the
+        /// attachment, which is also what makes it an identity the client can match its snapshots against,
+        /// see `attachIdentityStamp`. It is deliberately not the lease itself: the caller passes the lease
+        /// separately to `applyClientUpsert`, so an identity advanced past the row it replaces never dates
+        /// a lease ahead of the daemon's clock.
+        private static func clientForAttachLease(_ client: TerminalClient, connectedAt: String) -> TerminalClient {
+            TerminalClient(id: client.id, kind: client.kind, identity: client.identity, connectedAt: connectedAt, disconnectedAt: nil)
         }
 
         private func activeOwnerClient() -> TerminalClient? {

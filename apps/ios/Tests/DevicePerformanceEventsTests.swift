@@ -268,7 +268,8 @@
         /// Hands back one payload through `onEvent` before returning its stream handle, reproducing the
         /// real backend's race where a subscription can start delivering frames before `subscribe()`
         /// itself returns (see `StageTrackerTestBackend.setDeliverInitialFrameBeforeReturningHandle` in
-        /// `TerminalViewerModelTests.swift` for the same pattern). Every request is answered `ok`.
+        /// `TerminalViewerModelTests.swift` for the same pattern). Every request is answered the way the
+        /// daemon answers it: `ok`, with the attach carrying the attachment it made.
         private final class FrameDeliveringBackend: SpacesDeviceAPIBackend, @unchecked Sendable {
             private let payload: GhosttyRemoteSessionStatePayload
             private let host: String?
@@ -292,7 +293,10 @@
 
         private struct AlwaysOKTransport: SpacesDeviceAPIRequestTransport {
             func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
-                SpacesDeviceAPIResponse(ok: true, message: "ok")
+                // Except the attach, which the daemon answers with the attachment it made. A bare `ok`
+                // there is an attach the daemon could not name, which the viewer resolves with a `.state`
+                // read -- one this backend cannot answer, so the connect fails before the stream delivers.
+                TerminalAttachAcknowledgementFixture.acknowledgement(for: request) ?? SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             func close() async {}
         }

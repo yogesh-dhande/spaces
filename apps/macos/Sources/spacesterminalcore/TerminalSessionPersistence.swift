@@ -613,11 +613,18 @@ public enum TerminalSessionPersistence {
         }
     }
 
-    public static func upsertClient(_ client: TerminalClient, paths: TerminalSessionPaths, databasePath: String? = nil) throws {
+    /// Writes a client's row. `leaseRefreshedAt` defaults to the client's own `connectedAt` — the two are
+    /// the same instant for a caller that has just created the record — and is passed separately by a core
+    /// whose published `connectedAt` is an attachment identity rather than a clock reading, so that the
+    /// lease this row is judged live by stays the server time that granted it.
+    public static func upsertClient(
+        _ client: TerminalClient, paths: TerminalSessionPaths, leaseRefreshedAt: String? = nil, databasePath: String? = nil
+    ) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
         try withProfileDatabaseTransaction(at: databasePath) { database in
             let sessionID = try existingSessionID(rootDirectory: root, database: database)
-            try upsertClient(client, sessionID: sessionID, rootDirectory: root, leaseRefreshedAt: client.connectedAt, database: database)
+            try upsertClient(
+                client, sessionID: sessionID, rootDirectory: root, leaseRefreshedAt: leaseRefreshedAt ?? client.connectedAt, database: database)
         }
     }
 
@@ -1018,8 +1025,9 @@ public enum TerminalSessionPersistence {
                 // is detached anyway. That window is microseconds against a 20s heartbeat cadence, and no
                 // check placement can remove it — closing it would require the engine's heartbeat accept to
                 // block on this transaction, the exact engine-blocks-on-SQLite coupling the persistence
-                // queue removes. The client's next heartbeat gets a notFound rejection and recovers by
-                // re-attaching (client-side reaction tracked in issue #223).
+                // queue removes. The expiry that detached the client broadcasts the post-expiry attachment
+                // state, so the client sees its own attachment gone and re-attaches on that (see the
+                // detached-client recovery bullet in docs/implementation.md).
                 if heartbeatGate.generationAdvanced(forClientID: client.clientID, since: observedHeartbeatGenerations) {
                     worldMoved = true
                     continue
