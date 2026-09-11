@@ -564,16 +564,17 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     @MainActor func testAnUnreachableDeviceRaisesTheNoticeAndKeepsAskingUntilItAnswers() async throws {
         let sessionID = "session-\(UUID().uuidString)"
         let model = try makeModel(sessionID: sessionID)
-        model.reconnectBackoff.retryDelay = .milliseconds(1)
-        model.reconnectBackoff.maxRetryDelay = .milliseconds(1)
+        // Far beyond this test's own runtime: the reconnect the device's answer arms below is what this
+        // asserts on, and one that fired would clear itself and dial the unreachable fixture device.
+        model.reconnectBackoff.retryDelay = .seconds(600)
+        model.reconnectBackoff.maxRetryDelay = .seconds(600)
         model.reconnectBackoff.retryJitterFraction = { 0 }
-        // A second attempt is what proves the first failure was re-asked rather than swallowed; bounding the
-        // wait on it makes a recheck that goes quiescent fail here instead of hanging the suite.
-        let askedTwice = expectation(description: "the recheck asked again after an unreachable attempt")
-        askedTwice.expectedFulfillmentCount = 2
-        askedTwice.assertForOverFulfill = false
-        let script = LivenessFetchScript(
-            repeating: .failure(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused")), onAttempt: { _ in askedTwice.fulfill() })
+        // The cadence between the recheck's attempts is held rather than timed, so re-asking is something
+        // this test performs. A parked wait also proves the attempt before it was fully settled, which is
+        // what makes the script safe to reconfigure below without racing an attempt still in flight.
+        let recheckCadence = DelayGate()
+        model.livenessRecheckWaitForTesting = { await recheckCadence.wait($0) }
+        let script = LivenessFetchScript(repeating: .failure(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused")))
         model.livenessStateFetchOverrideForTesting = { await script.answer() }
         let generation = model.installStreamClientForTesting(FakeStreamClient())
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
@@ -581,26 +582,22 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
 
         model.handleStreamDisconnect(nil, generation: generation)
 
-        await fulfillment(of: [askedTwice], timeout: 5)
+        await waitUntil("the recheck paced itself after the unreachable attempt") { recheckCadence.isHeld }
         XCTAssertTrue(model.isStateStreamDisconnected, "a device that cannot answer is an outage the pane must report")
         XCTAssertTrue(model.hasArmedLivenessRecheckForTesting, "a failed request must leave the question open")
         XCTAssertFalse(model.hasArmedReconnectForTesting, "nothing is worth reconnecting to until the device says the session is live")
 
-        // The device comes back and answers. Hold the recheck's next attempt open first, so the cadence
-        // stretch below and the new answer land atomically: the recheck loop calls `answer()` only once
-        // per iteration after fully settling the last one, so a parked call proves nothing is still
-        // running against the old (1ms) cadence — without this, an attempt already past the script but not
-        // yet through `settleLivenessRecheck` could still read the stretched cadence and arm the reconnect
-        // on it instead of on the answer that reaches it after (issue confirmed via a full-verify flake).
-        await script.armHold()
-        await script.waitUntilHeld()
-        // Stretch the shared cadence: the reconnect the held answer arms is what this asserts on, and at
-        // the 1ms cadence above it would fire (and dial the unreachable fixture device) before the
-        // assertion could read it.
-        model.reconnectBackoff.retryDelay = .seconds(600)
-        model.reconnectBackoff.maxRetryDelay = .seconds(600)
+        // A second attempt is what proves the first failure was re-asked rather than swallowed.
+        recheckCadence.release()
+        await waitUntil("the recheck asked again and paced itself") { recheckCadence.isHeld }
+        let attemptsBeforeTheDeviceAnswered = await script.attemptCount
+        XCTAssertEqual(attemptsBeforeTheDeviceAnswered, 2, "an unreachable attempt must be re-asked, not swallowed")
+
+        // The device comes back and answers. Safe to reconfigure here with no handshake of its own: the
+        // parked cadence is proof the last attempt was fully settled and that no next one can start until
+        // this test releases it.
         await script.setRepeating(.success(runningStatePayload(sessionID: sessionID)))
-        await script.release()
+        recheckCadence.release()
         await waitForLivenessRecheckToSettle(model)
 
         XCTAssertTrue(model.hasArmedReconnectForTesting, "the device's answer must re-arm the reconnect")
@@ -648,9 +645,11 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     @MainActor func testAConfirmedEndedSessionQuiescesAndClearsTheNotice() async throws {
         let sessionID = "session-\(UUID().uuidString)"
         let model = try makeModel(sessionID: sessionID)
-        model.reconnectBackoff.retryDelay = .milliseconds(1)
-        model.reconnectBackoff.maxRetryDelay = .milliseconds(1)
+        model.reconnectBackoff.retryDelay = .seconds(600)
+        model.reconnectBackoff.maxRetryDelay = .seconds(600)
         model.reconnectBackoff.retryJitterFraction = { 0 }
+        let recheckCadence = DelayGate()
+        model.livenessRecheckWaitForTesting = { await recheckCadence.wait($0) }
         // One unreachable attempt first, so the notice this test watches get cleared was really raised.
         let script = LivenessFetchScript(
             queued: [.failure(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused"))],
@@ -661,6 +660,9 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         model.applyControlResponseState(endedStatePayload(sessionID: sessionID))
 
         model.handleStreamDisconnect(nil, generation: generation)
+        // The unreachable attempt parks the cadence; releasing it is what asks the device again.
+        await waitUntil("the recheck paced itself after the unreachable attempt") { recheckCadence.isHeld }
+        recheckCadence.release()
         await waitForLivenessRecheckToSettle(model)
 
         XCTAssertFalse(model.isStateStreamDisconnected, "an ended session's refused stream is the expected answer, not an outage")
@@ -708,18 +710,18 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     @MainActor func testAnUnclassifiableFailureKeepsAskingInsteadOfSettling() async throws {
         let sessionID = "session-\(UUID().uuidString)"
         let model = try makeModel(sessionID: sessionID)
-        model.reconnectBackoff.retryDelay = .milliseconds(1)
-        model.reconnectBackoff.maxRetryDelay = .milliseconds(1)
+        // Far beyond this test's own runtime: see the matching comment in
+        // `testAnUnreachableDeviceRaisesTheNoticeAndKeepsAskingUntilItAnswers`.
+        model.reconnectBackoff.retryDelay = .seconds(600)
+        model.reconnectBackoff.maxRetryDelay = .seconds(600)
         model.reconnectBackoff.retryJitterFraction = { 0 }
-        let askedAgain = expectation(description: "the recheck asked again after failures it cannot read as an answer")
-        askedAgain.expectedFulfillmentCount = 3
-        askedAgain.assertForOverFulfill = false
+        let recheckCadence = DelayGate()
+        model.livenessRecheckWaitForTesting = { await recheckCadence.wait($0) }
         let script = LivenessFetchScript(
             queued: [
                 .failure(TerminalServiceTLSError.certificatePinMismatch(expected: "SHA256:aa", actual: "SHA256:bb")),
                 .failure(DeviceTerminalSessionStateModel.StateFetchError.missingState),
-            ], repeating: .failure(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused")), onAttempt: { _ in askedAgain.fulfill() }
-        )
+            ], repeating: .failure(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused")))
         model.livenessStateFetchOverrideForTesting = { await script.answer() }
         let generation = model.installStreamClientForTesting(FakeStreamClient())
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
@@ -727,20 +729,21 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
 
         model.handleStreamDisconnect(nil, generation: generation)
 
-        await fulfillment(of: [askedAgain], timeout: 5)
+        // Each unreadable failure is re-asked, driven one attempt at a time: a pin mismatch, then an `ok`
+        // response carrying no state, then a request that never arrived.
+        for attempt in 1...2 {
+            await waitUntil("the recheck paced itself after unreadable failure \(attempt)") { recheckCadence.isHeld }
+            recheckCadence.release()
+        }
+        await waitUntil("the recheck paced itself after the third unreadable failure") { recheckCadence.isHeld }
+        let attemptsBeforeTheDeviceAnswered = await script.attemptCount
+        XCTAssertEqual(attemptsBeforeTheDeviceAnswered, 3, "no unreadable failure may end the asking")
         XCTAssertTrue(model.isStateStreamDisconnected, "a pane that cannot reach its session must say so")
         XCTAssertTrue(model.hasArmedLivenessRecheckForTesting, "no unreadable failure may close the question")
 
-        // The device answers properly, and the question closes on that. Hold the next attempt open first
-        // (see the matching comment in `testAnUnreachableDeviceRaisesTheNoticeAndKeepsAskingUntilItAnswers`)
-        // so the cadence stretch and the new answer below land atomically, rather than racing an attempt
-        // still in flight at the old 1ms cadence.
-        await script.armHold()
-        await script.waitUntilHeld()
-        model.reconnectBackoff.retryDelay = .seconds(600)
-        model.reconnectBackoff.maxRetryDelay = .seconds(600)
+        // The device answers properly, and the question closes on that.
         await script.setRepeating(.success(runningStatePayload(sessionID: sessionID)))
-        await script.release()
+        recheckCadence.release()
         await waitForLivenessRecheckToSettle(model)
 
         XCTAssertTrue(model.hasArmedReconnectForTesting, "the device's answer must re-arm the reconnect")
@@ -752,9 +755,11 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     @MainActor func testADaemonRefusingTheSessionSettlesTheRecheck() async throws {
         let sessionID = "session-\(UUID().uuidString)"
         let model = try makeModel(sessionID: sessionID)
-        model.reconnectBackoff.retryDelay = .milliseconds(1)
-        model.reconnectBackoff.maxRetryDelay = .milliseconds(1)
+        model.reconnectBackoff.retryDelay = .seconds(600)
+        model.reconnectBackoff.maxRetryDelay = .seconds(600)
         model.reconnectBackoff.retryJitterFraction = { 0 }
+        let recheckCadence = DelayGate()
+        model.livenessRecheckWaitForTesting = { await recheckCadence.wait($0) }
         let script = LivenessFetchScript(
             queued: [.failure(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused"))],
             repeating: .failure(
@@ -765,6 +770,9 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         model.applyControlResponseState(endedStatePayload(sessionID: sessionID))
 
         model.handleStreamDisconnect(nil, generation: generation)
+        // The unreachable attempt parks the cadence; releasing it is what asks the device again.
+        await waitUntil("the recheck paced itself after the unreachable attempt") { recheckCadence.isHeld }
+        recheckCadence.release()
         await waitForLivenessRecheckToSettle(model)
 
         XCTAssertFalse(model.isStateStreamDisconnected, "a daemon that answered about this session is not an outage")
@@ -781,15 +789,15 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     @MainActor func testAnUnauthorizedRefusalKeepsAskingInsteadOfSettling() async throws {
         let sessionID = "session-\(UUID().uuidString)"
         let model = try makeModel(sessionID: sessionID)
-        model.reconnectBackoff.retryDelay = .milliseconds(1)
-        model.reconnectBackoff.maxRetryDelay = .milliseconds(1)
+        // Far beyond this test's own runtime: see the matching comment in
+        // `testAnUnreachableDeviceRaisesTheNoticeAndKeepsAskingUntilItAnswers`.
+        model.reconnectBackoff.retryDelay = .seconds(600)
+        model.reconnectBackoff.maxRetryDelay = .seconds(600)
         model.reconnectBackoff.retryJitterFraction = { 0 }
-        let askedAgain = expectation(description: "the recheck asked again after an unauthorized refusal")
-        askedAgain.expectedFulfillmentCount = 3
-        askedAgain.assertForOverFulfill = false
+        let recheckCadence = DelayGate()
+        model.livenessRecheckWaitForTesting = { await recheckCadence.wait($0) }
         let script = LivenessFetchScript(
-            queued: [], repeating: .failure(DeviceTerminalSessionStateModel.StateFetchError.rejected(message: "Unauthorized.", code: .unauthorized)),
-            onAttempt: { _ in askedAgain.fulfill() })
+            queued: [], repeating: .failure(DeviceTerminalSessionStateModel.StateFetchError.rejected(message: "Unauthorized.", code: .unauthorized)))
         model.livenessStateFetchOverrideForTesting = { await script.answer() }
         let generation = model.installStreamClientForTesting(FakeStreamClient())
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
@@ -797,20 +805,19 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
 
         model.handleStreamDisconnect(nil, generation: generation)
 
-        await fulfillment(of: [askedAgain], timeout: 5)
+        for attempt in 1...2 {
+            await waitUntil("the recheck paced itself after unauthorized refusal \(attempt)") { recheckCadence.isHeld }
+            recheckCadence.release()
+        }
+        await waitUntil("the recheck paced itself after the third unauthorized refusal") { recheckCadence.isHeld }
+        let attemptsBeforeTheDeviceAnswered = await script.attemptCount
+        XCTAssertEqual(attemptsBeforeTheDeviceAnswered, 3, "a refusal about credentials must be re-asked, not swallowed")
         XCTAssertTrue(model.isStateStreamDisconnected, "a pane whose credentials were refused still cannot reach its session")
         XCTAssertTrue(model.hasArmedLivenessRecheckForTesting, "a refusal about credentials must not close the question")
 
-        // Re-authorized, the device answers about the session, and that settles it. Hold the next attempt
-        // open first (see the matching comment in
-        // `testAnUnreachableDeviceRaisesTheNoticeAndKeepsAskingUntilItAnswers`) so the cadence stretch and
-        // the new answer below land atomically.
-        await script.armHold()
-        await script.waitUntilHeld()
-        model.reconnectBackoff.retryDelay = .seconds(600)
-        model.reconnectBackoff.maxRetryDelay = .seconds(600)
+        // Re-authorized, the device answers about the session, and that settles it.
         await script.setRepeating(.success(runningStatePayload(sessionID: sessionID)))
-        await script.release()
+        recheckCadence.release()
         await waitForLivenessRecheckToSettle(model)
 
         XCTAssertTrue(model.hasArmedReconnectForTesting, "the device's answer must re-arm the reconnect")
@@ -828,6 +835,10 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         model.reconnectBackoff.retryJitterFraction = { 0 }
         let heldRequest = HeldLivenessFetch()
         model.livenessStateFetchOverrideForTesting = { await heldRequest.request() }
+        // The live recheck parking on its cadence is the proof that it has fully settled the answer below;
+        // the abandoned one never reaches the cadence at all, since a cancelled loop breaks before it.
+        let recheckCadence = DelayGate()
+        model.livenessRecheckWaitForTesting = { await recheckCadence.wait($0) }
         let subscriber = model.makeHostStateStreamSubscriber()
 
         // A pane opens, its stream drops against a stale `.exited` cache, and the recheck's request goes out.
@@ -852,8 +863,11 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
 
         // Both requests answer at once: the abandoned one and the live one.
         await heldRequest.answer(.failure(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused")))
-        await waitForLivenessRecheckToRaiseTheNotice(model)
-        await Task { @MainActor in }.value
+        await waitUntil("the live recheck settled its answer and paced itself") { recheckCadence.isHeld }
+        XCTAssertTrue(model.isStateStreamDisconnected, "the live recheck must have reported the unreachable device")
+        // The abandoned recheck hands back no handle of its own (it is not the model's current recheck), so
+        // its own resumption is ordered with a main-actor barrier: everything already enqueued there,
+        // including its exit through `finishLivenessRecheck`, has run by the time this returns.
         await Task { @MainActor in }.value
 
         XCTAssertTrue(model.hasArmedLivenessRecheckForTesting, "the abandoned recheck must not release the live recheck's slot")
@@ -893,6 +907,13 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         // Only the stream connect is stubbed; the catch-up `.state` this registration fires reaches the real
         // server, so the session reads as running for the rest of the test.
         model.stateStreamConnectOverrideForTesting = { _ in true }
+        // The throttle's window is wall-clock, and everything between the stamping subscribe and the
+        // replacement below is real work: a dial, a socket teardown, a live server. On a loaded runner
+        // that outran 500ms, the replacement took the ordinary connect path, and the test failed against
+        // behavior that was correct at that timing (issue #646). Pinning the model's throttle clock makes
+        // "inside the window" a fact this test states rather than a race it has to win.
+        let throttleNow = Date()
+        model.subscribeThrottleClockForTesting = { throttleNow }
         let subscriber = model.makeHostStateStreamSubscriber()
 
         // A pane subscribes, which stamps the throttle.
@@ -909,7 +930,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertFalse(model.hasActiveStreamClientForTesting)
         XCTAssertFalse(model.hasArmedReconnectForTesting, "with no listener there is nothing to arm a retry for")
 
-        // Its replacement registers immediately — well inside the throttle window.
+        // Its replacement registers inside the throttle window, which the pinned clock guarantees.
         let replacementHandle = try subscriber(sessionID, { _ in }, { _ in })
 
         XCTAssertTrue(model.hasArmedReconnectForTesting, "a subscribe the throttle turned away must leave a retry armed behind it")
@@ -958,9 +979,10 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
                 installationID: "INSTALLATION-GUARD-\(UUID().uuidString)", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
                 deviceName: "Mac", appVersion: "1.0"),
             preparedCredentials: .init(certificateFingerprint: identity.certificateFingerprint, authToken: pairingStore.authToken))
-        model.reconnectBackoff.retryDelay = .milliseconds(5)
-        model.reconnectBackoff.maxRetryDelay = .milliseconds(5)
-        model.reconnectBackoff.retryJitterFraction = { 0 }
+        // The armed retry is released on demand rather than paced by a short real delay: what this test
+        // asserts is what the retry does, not how long it waited to do it.
+        let reconnects = DelayGate()
+        model.reconnectWaitForTesting = { await reconnects.wait($0) }
 
         // Installing a client before any listener registers keeps registration from dialing: the model
         // treats an installed stream as a live subscription.
@@ -985,6 +1007,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertTrue(model.hasArmedReconnectForTesting)
 
         // Nothing dead is left installed, so the armed retry reaches the device and resubscribes.
+        reconnects.release()
         await model.drainPendingReconnectForTesting()
 
         XCTAssertTrue(model.hasActiveStreamClientForTesting, "the armed retry must reconnect the session")
@@ -1143,6 +1166,10 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         let model = try makeModel(sessionID: sessionID)
         model.installStreamClientForTesting(FakeStreamClient())
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        // The ladder's rung is held rather than slept through, so the redial below is started by this test
+        // instead of by a real second elapsing.
+        let rungs = DelayGate()
+        model.unreachableRedialWaitForTesting = { await rungs.wait($0) }
 
         // A distinct, short-but-not-ladder delay makes the stale stage 1 timer unmistakable below: none
         // of the stage 2 ladder's rungs (1/2/4/8/15s) land on it.
@@ -1170,7 +1197,10 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         // not twice.
         model.stateStreamConnectOverrideForTesting = { _ in false }
         model.lastDialExhaustedAllCandidatesForTesting = true
-        await model.drainPendingReconnectForTesting()
+        let tick = model.unreachableRedialTaskForTesting
+        rungs.release()
+        await tick?.value
+        await model.drainPendingConnectForTesting()
 
         XCTAssertEqual(model.connectionStageTracker.stage, .unreachable)
         XCTAssertEqual(
@@ -1192,6 +1222,10 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         let model = try makeModel(sessionID: sessionID)
         model.installStreamClientForTesting(FakeStreamClient())
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        // The ladder's rung is held rather than slept through, so the redial below is started by this test
+        // instead of by a real second elapsing.
+        let rungs = DelayGate()
+        model.unreachableRedialWaitForTesting = { await rungs.wait($0) }
 
         // A single-address refusal first: stage 1, with a reconnect armed.
         XCTAssertTrue(model.reportFailedInputSend(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused")))
@@ -1223,7 +1257,10 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
             connectOverrideInvoked = true
             return false
         }
-        await model.drainPendingReconnectForTesting()
+        let tick = model.unreachableRedialTaskForTesting
+        rungs.release()
+        await tick?.value
+        await model.drainPendingConnectForTesting()
 
         XCTAssertTrue(connectOverrideInvoked, "the ladder redial must actually dial instead of being turned away by a stale in-flight attempt")
     }
@@ -1320,17 +1357,10 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
                 installationID: "INSTALLATION-RACE-\(UUID().uuidString)", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
                 deviceName: "Mac", appVersion: "1.0"),
             preparedCredentials: .init(certificateFingerprint: identity.certificateFingerprint, authToken: pairingStore.authToken))
-        model.reconnectBackoff.retryDelay = .milliseconds(5)
-        model.reconnectBackoff.maxRetryDelay = .milliseconds(5)
-        model.reconnectBackoff.retryJitterFraction = { 0 }
-
-        // Fires once for the initial connect `startStateStream` triggers, and again when the retry
-        // `reportFailedInputSend` arms below actually runs (and is eaten by the in-flight guard, since
-        // the controlled connect below is still pending at that point). Awaiting a second fulfillment
-        // proves that retry ran its course for real, instead of guessing how long a real delay takes.
-        let ensureSubscriptionStartedInvoked = expectation(description: "ensureSubscriptionStarted ran for the initial connect and the eaten retry")
-        ensureSubscriptionStartedInvoked.expectedFulfillmentCount = 2
-        model.ensureSubscriptionStartedInvokedForTesting = { ensureSubscriptionStartedInvoked.fulfill() }
+        // Both armed retries below fire when this test says so rather than after a short real delay, so
+        // the ordering the bug depends on is stated rather than timed.
+        let reconnects = DelayGate()
+        model.reconnectWaitForTesting = { await reconnects.wait($0) }
 
         // Holds the first connect open until the test resumes it, reproducing `streamClient` being
         // cleared while that connect is still in flight without racing real network timing.
@@ -1357,11 +1387,11 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
 
         // Let the retry the failed send armed actually fire — and be dropped by the in-flight guard,
         // because the connect above is still running. This is the exact ordering the bug depends on.
-        await fulfillment(of: [ensureSubscriptionStartedInvoked], timeout: 5)
-        // Detach the hook now that both fulfillments it needs have landed: the retry the armed reconnect
-        // below fires calls `ensureSubscriptionStarted` too, and firing into an already-satisfied
-        // expectation crashes XCTest's bookkeeping instead of just failing the assertion.
-        model.ensureSubscriptionStartedInvokedForTesting = nil
+        // Captured before releasing it: the retry clears the model's own reference as its first act.
+        let eatenRetry = model.reconnectTaskForTesting
+        XCTAssertNotNil(eatenRetry, "the failed send must have armed a retry")
+        reconnects.release()
+        await eatenRetry?.value
         XCTAssertFalse(model.hasArmedReconnectForTesting, "the eaten retry must have cleared its own armed state")
 
         // Resolve the connect as successful now that the client backing it has already been cleared and
@@ -1372,6 +1402,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertTrue(model.hasArmedReconnectForTesting, "a connect that finished without installing a client must leave a retry armed")
 
         // Let the armed retry run its course against the real server; it must actually reconnect.
+        reconnects.release()
         await model.drainPendingReconnectForTesting()
         XCTAssertTrue(model.hasActiveStreamClientForTesting, "the armed retry must reconnect the session")
         // See the matching comment in `testADropFromTheInstalledStreamIsHonoredAndLeavesTheModelAbleToResubscribe`:
@@ -1488,6 +1519,9 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         await fulfillment(of: [reachedFirstConnect], timeout: 5)
         XCTAssertEqual(connectCount, 1)
         XCTAssertTrue(model.hasActiveStreamClientForTesting, "the in-flight connect must have installed its stream client")
+        // Captured before Retry retires this attempt, which takes it out of `drainPendingConnectForTesting`'s
+        // reach: holding the handle is what lets its belated completion be awaited rather than guessed at.
+        let staleAttempt = model.connectAttemptTasksForTesting.first
 
         model.retryStateStreamConnection()
         await model.drainPendingConnectForTesting()
@@ -1498,11 +1532,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         // The stale first attempt finally resolves, long after Retry's own connect already installed a
         // healthy client: it must not be able to act on that installation.
         resumeFirstConnect?(true)
-        // There is nothing to await the stale task's resumption directly (it is not the current
-        // `subscriptionConnectTask`), so give its continuation a turn to run before asserting nothing
-        // changed as a result.
-        await Task.yield()
-        await Task.yield()
+        await staleAttempt?.value
 
         XCTAssertEqual(connectCount, 2, "the stale attempt's belated completion must not trigger another connect")
         XCTAssertTrue(model.hasActiveStreamClientForTesting, "the stale attempt's belated completion must not disturb Retry's healthy client")
@@ -1557,6 +1587,9 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
         await fulfillment(of: [reachedFirstConnect], timeout: 5)
         XCTAssertEqual(connectCount, 1)
+        // Captured before Retry retires this attempt: see the matching comment in
+        // `testRetryDuringAnInFlightConnectStartsAFreshAttemptRatherThanNoOpping`.
+        let staleAttempt = model.connectAttemptTasksForTesting.first
 
         model.retryStateStreamConnection()
         await model.drainPendingConnectForTesting()
@@ -1579,10 +1612,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         // `.unreachable` over the replacement's already-healthy stream.
         model.lastDialExhaustedAllCandidatesForTesting = true
         resumeFirstConnect?(false)
-        // Nothing awaits the stale task directly (it is not the current `subscriptionConnectTask`), so
-        // give its continuation's resumption a turn to run to completion before asserting nothing changed.
-        await Task.yield()
-        await Task.yield()
+        await staleAttempt?.value
 
         XCTAssertEqual(
             model.connectionStageTracker.stage, .connected,
@@ -2051,11 +2081,19 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         // A keystroke times out on that first stream and its corroboration probe goes out.
         XCTAssertFalse(model.reportFailedInputSend(SpacesDeviceAPIRequestClientError.timeout("Timed out.")))
         await fulfillment(of: [firstProbeStarted], timeout: 5)
+        // Captured before the replacement stream's own probe takes the slot: a superseded probe is out of
+        // `drainPendingLinkCorroborationProbeForTesting`'s reach, and holding the handle is what lets its
+        // late verdict be awaited to completion rather than yielded at.
+        let firstStreamProbe = model.pendingLinkCorroborationProbeTaskForTesting
 
         // The first stream's dial fails, the bootstrap answers, and the same attempt opens a second stream.
         dials.resumeOldest(started: false)
-        // Generous, because the bootstrap re-runs the catch-up `.state` request before the retry and this
-        // fixture's device address answers nothing, so that request spends its whole budget first.
+        // The one wait here that is a real duration rather than an act this test performs. Between the
+        // failed dial and the retried subscribe the attempt re-runs the catch-up `.state` request, whose
+        // deadline lives in the request client rather than in this model, so there is no seam to hold it
+        // on; against `makeModel`'s deliberately dead device address it spends that whole budget. Bounded
+        // generously for that reason, and it is a wait for an event rather than an assertion about timing:
+        // the assertions below are made on the replacement stream, not on how long it took to appear.
         await waitUntil("the attempt opened a replacement stream", timeout: 30) {
             model.installedStreamClientGenerationForTesting != nil && model.installedStreamClientGenerationForTesting != firstStreamGeneration
         }
@@ -2068,9 +2106,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         // The first socket's probe reports the outage it was sent to confirm, long after that socket was
         // replaced: it is about a stream that no longer exists.
         resumeProbes[0](SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused"))
-        // Nothing hands back a handle for a superseded probe's remaining work, so give its resumption a few
-        // turns to run to completion before asserting nothing moved.
-        for _ in 0..<4 { await Task.yield() }
+        await firstStreamProbe?.value
 
         XCTAssertEqual(model.installedStreamClientGenerationForTesting, replacementGeneration, "a stale verdict must not drop the replacement stream")
         XCTAssertFalse(model.isStateStreamDisconnected, "a stale verdict must not put the disconnected notice on a pane whose stream is fine")
@@ -2216,7 +2252,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         let model = try makeModel(sessionID: "session-\(UUID().uuidString)")
         let dials = DialGate()
         model.stateStreamConnectOverrideForTesting = { _ in await dials.dial() }
-        let rungs = RungGate()
+        let rungs = DelayGate()
         model.unreachableRedialWaitForTesting = { await rungs.wait($0) }
         model.installStreamClientForTesting(FakeStreamClient())
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
@@ -2241,7 +2277,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         // A prefix, because arming the next rung is what records it and the tick that does so is already
         // running by now: what this pins is the order the cadence spent them, one per tick.
         XCTAssertEqual(
-            Array(rungs.waitedRungs.prefix(2)),
+            Array(rungs.waitedDelays.prefix(2)),
             [.seconds(TerminalUnreachableBackoff.ladderSeconds[0]), .seconds(TerminalUnreachableBackoff.ladderSeconds[1])],
             "each tick spends exactly one rung")
     }
@@ -2292,7 +2328,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         let model = try makeModel(sessionID: "session-\(UUID().uuidString)")
         let dials = DialGate()
         model.stateStreamConnectOverrideForTesting = { _ in await dials.dial() }
-        let rungs = RungGate()
+        let rungs = DelayGate()
         model.unreachableRedialWaitForTesting = { await rungs.wait($0) }
         model.installStreamClientForTesting(FakeStreamClient())
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
@@ -2336,7 +2372,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
             return false
         }
         model.lastDialExhaustedAllCandidatesForTesting = true
-        let rungs = RungGate()
+        let rungs = DelayGate()
         model.unreachableRedialWaitForTesting = { await rungs.wait($0) }
 
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
@@ -2367,7 +2403,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
             returnedDialCount += 1
             return started
         }
-        let rungs = RungGate()
+        let rungs = DelayGate()
         model.unreachableRedialWaitForTesting = { await rungs.wait($0) }
         model.installStreamClientForTesting(FakeStreamClient())
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
@@ -2384,6 +2420,9 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         guard let winningGeneration = model.installedStreamClientGenerationForTesting else {
             return XCTFail("the newest attempt must have opened a stream before its dial resolves")
         }
+        // Oldest first, so this is the attempt the winning frame below retires mid-dial; captured while it
+        // is still live, since a retired attempt is out of `drainPendingConnectForTesting`'s reach.
+        let losingAttempt = model.connectAttemptTasksForTesting.first
 
         // The second attempt's stream delivers first, which retires the first attempt mid-dial.
         model.applyStreamEvent(runningStatePayload(sessionID: sessionID), generation: winningGeneration)
@@ -2393,10 +2432,8 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         // The retired attempt's dial finally answers, with every candidate address unreachable.
         model.lastDialExhaustedAllCandidatesForTesting = true
         dials.resumeOldest(started: false)
-        await waitUntil("the retired attempt's dial answered") { returnedDialCount == 1 }
-        // Nothing hands back a handle for a retired attempt's remaining work, so give its resumption a few
-        // turns to run to completion before asserting nothing moved.
-        for _ in 0..<4 { await Task.yield() }
+        await losingAttempt?.value
+        XCTAssertEqual(returnedDialCount, 1, "the retired attempt's dial answered")
 
         XCTAssertEqual(model.connectionStageTracker.stage, .connected, "a loser's belated failure must not tear the winner down")
         XCTAssertFalse(model.connectionStageTracker.isBannerVisible)
@@ -2412,7 +2449,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         let model = try makeModel(sessionID: "session-\(UUID().uuidString)")
         model.stateStreamConnectOverrideForTesting = { _ in false }
         model.lastDialExhaustedAllCandidatesForTesting = true
-        let rungs = RungGate()
+        let rungs = DelayGate()
         model.unreachableRedialWaitForTesting = { await rungs.wait($0) }
         model.installStreamClientForTesting(FakeStreamClient())
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
@@ -2426,7 +2463,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         }
 
         XCTAssertEqual(
-            Array(rungs.waitedRungs.prefix(2)),
+            Array(rungs.waitedDelays.prefix(2)),
             [.seconds(TerminalUnreachableBackoff.ladderSeconds[0]), .seconds(TerminalUnreachableBackoff.ladderSeconds[1])],
             "the cadence spent the ladder in order, one rung per tick")
         XCTAssertEqual(
@@ -2443,7 +2480,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         let model = try makeModel(sessionID: sessionID)
         let dials = DialGate()
         model.stateStreamConnectOverrideForTesting = { _ in await dials.dial() }
-        let rungs = RungGate()
+        let rungs = DelayGate()
         model.unreachableRedialWaitForTesting = { await rungs.wait($0) }
         model.installStreamClientForTesting(FakeStreamClient())
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
@@ -2489,7 +2526,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
             return false
         }
         model.lastDialExhaustedAllCandidatesForTesting = true
-        let rungs = RungGate()
+        let rungs = DelayGate()
         model.unreachableRedialWaitForTesting = { await rungs.wait($0) }
 
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
@@ -2531,16 +2568,6 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
             sessionID: sessionID, reason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue, emittedAt: emittedAt, sessionStateRevision: nil,
             sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: title, workingDirectory: "/tmp",
             outputByteCount: nil, clipboardWrite: TerminalClipboardWritePayload(targetClientID: targetClientID, text: text))
-    }
-
-    /// Waits for the open liveness question to raise the disconnected notice, bounded so a recheck that
-    /// never acts fails the test rather than hanging it.
-    @MainActor private func waitForLivenessRecheckToRaiseTheNotice(
-        _ model: DeviceTerminalSessionStateModel, timeout: TimeInterval = 5, file: StaticString = #filePath, line: UInt = #line
-    ) async {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline, !model.isStateStreamDisconnected { try? await Task.sleep(for: .milliseconds(5)) }
-        XCTAssertTrue(model.isStateStreamDisconnected, "the recheck never reported the unreachable device", file: file, line: line)
     }
 
     /// Waits for the open liveness question to close, bounded so a recheck that never settles fails the
@@ -2703,28 +2730,41 @@ private final class DialGate {
     }
 }
 
-/// Stands in for `Task.sleep` inside the stage 2 redial cadence via `unreachableRedialWaitForTesting`,
-/// so a test drives the ladder rung by rung instead of waiting out real seconds, and can read back the
-/// rungs the cadence actually spent. Releasing before the cadence reaches its wait is credited, mirroring
-/// `GraceGate`'s already-released case.
+/// Stands in for `Task.sleep` inside every delay the model paces itself with — the stage 2 redial
+/// cadence (`unreachableRedialWaitForTesting`), the stage 1 reconnect timer (`reconnectWaitForTesting`),
+/// and the liveness recheck's cadence (`livenessRecheckWaitForTesting`) — so a test drives each one
+/// delay by delay instead of waiting out real seconds, and can read back the delays actually spent.
+/// Releasing before the timer reaches its wait is credited, mirroring `GraceGate`'s already-released case.
 @MainActor
-private final class RungGate {
-    /// The rungs the cadence has waited on, in order.
-    private(set) var waitedRungs: [Duration] = []
+private final class DelayGate {
+    /// The delays waited on, in order. For the stage 2 cadence these are the ladder's rungs.
+    private(set) var waitedDelays: [Duration] = []
     private var creditedReleases = 0
     /// Parked waits in the order they arrived, rather than a single slot: a cancelled tick stays parked
     /// here until it is released (cancelling a task does not resume a continuation it is suspended on),
     /// and a test that cancels one by pressing Retry has to be able to let it finish.
     private var parked: [CheckedContinuation<Void, Never>] = []
 
-    func wait(_ rung: Duration) async {
-        waitedRungs.append(rung)
+    func wait(_ delay: Duration) async {
+        waitedDelays.append(delay)
         guard creditedReleases == 0 else {
             creditedReleases -= 1
             return
         }
         await withCheckedContinuation { parked.append($0) }
     }
+
+    /// Whether a wait is parked here right now. For a loop that asks and then paces itself (the liveness
+    /// recheck), a parked wait is the proof that the previous attempt has been fully settled and that no
+    /// further attempt can start until `release()` runs — which is what lets a test change what the next
+    /// attempt answers without racing the one before it.
+    ///
+    /// Deliberately a flag polled through the bounded `waitUntil` rather than a continuation a test
+    /// suspends on: a model that regresses and never reaches its paced delay must fail the test on
+    /// `waitUntil`'s deadline, naming the wait that never arrived, instead of hanging the suite until the
+    /// outer CI timeout. It stays true from the moment the wait parks until `release()` takes it, so
+    /// polling can no more miss it than a signal could.
+    var isHeld: Bool { !parked.isEmpty }
 
     func release() {
         guard !parked.isEmpty else {
@@ -2747,64 +2787,29 @@ private final class FakeStreamClient: TerminalRemoteStateStreamClient, @unchecke
 /// that state machine through unreachable attempts and device answers without a device. It also counts how
 /// many times it was asked, which is how a test observes that a failed attempt was re-asked rather than
 /// swallowed.
+///
+/// Reconfiguring it mid-test needs no handshake of its own: the recheck's cadence is held through
+/// `livenessRecheckWaitForTesting`, and a wait parked there means the attempt before it was fully settled
+/// and no next one can start, so a test changes what the device answers while the loop cannot be looking.
 private actor LivenessFetchScript {
     private var queued: [Result<GhosttyRemoteSessionStatePayload, any Error>]
     private var repeating: Result<GhosttyRemoteSessionStatePayload, any Error>
     private var attempts = 0
-    private let onAttempt: @Sendable (Int) -> Void
 
-    // Holds one attempt open for a test that needs to change `repeating` (and something outside this
-    // actor, like the model's own backoff) atomically with respect to the recheck loop: see `armHold()`.
-    private var isHoldArmed = false
-    private var heldContinuation: CheckedContinuation<Result<GhosttyRemoteSessionStatePayload, any Error>, Never>?
-    private var heldWaiter: CheckedContinuation<Void, Never>?
-
-    init(
-        queued: [Result<GhosttyRemoteSessionStatePayload, any Error>] = [], repeating: Result<GhosttyRemoteSessionStatePayload, any Error>,
-        onAttempt: @escaping @Sendable (Int) -> Void = { _ in }
-    ) {
+    init(queued: [Result<GhosttyRemoteSessionStatePayload, any Error>] = [], repeating: Result<GhosttyRemoteSessionStatePayload, any Error>) {
         self.queued = queued
         self.repeating = repeating
-        self.onAttempt = onAttempt
     }
 
     var attemptCount: Int { attempts }
 
     func answer() async -> Result<GhosttyRemoteSessionStatePayload, any Error> {
         attempts += 1
-        onAttempt(attempts)
-        guard isHoldArmed else { return queued.isEmpty ? repeating : queued.removeFirst() }
-        isHoldArmed = false
-        return await withCheckedContinuation { continuation in
-            heldContinuation = continuation
-            heldWaiter?.resume()
-            heldWaiter = nil
-        }
+        return queued.isEmpty ? repeating : queued.removeFirst()
     }
 
     /// What every attempt from now on answers with — the device coming back, or going away.
     func setRepeating(_ result: Result<GhosttyRemoteSessionStatePayload, any Error>) { repeating = result }
-
-    /// Arms a one-shot hold on the next call to `answer()`: instead of answering immediately, it parks
-    /// until `release()` runs. A test uses this to reconfigure `repeating` and the model's backoff
-    /// together without racing the recheck loop's own cadence — the loop calls `answer()` only once per
-    /// iteration, after fully settling the last one, so a parked call proves nothing is mid-flight against
-    /// the pre-transition state (see `waitUntilHeld()`).
-    func armHold() { isHoldArmed = true }
-
-    /// Suspends until a call to `answer()` has actually parked on the armed hold, confirming the previous
-    /// attempt was already fully processed and no further attempt can start until `release()` runs.
-    func waitUntilHeld() async {
-        guard heldContinuation == nil else { return }
-        await withCheckedContinuation { heldWaiter = $0 }
-    }
-
-    /// Resolves the parked call with whatever `repeating` (or the next queued answer) reads right now.
-    func release() {
-        guard let heldContinuation else { return }
-        self.heldContinuation = nil
-        heldContinuation.resume(returning: queued.isEmpty ? repeating : queued.removeFirst())
-    }
 }
 
 /// Holds one liveness request open until the test answers it, so a test can act while the question is
