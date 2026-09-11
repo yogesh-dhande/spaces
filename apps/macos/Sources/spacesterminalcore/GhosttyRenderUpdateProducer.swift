@@ -60,6 +60,12 @@ public struct GhosttyRenderUpdateProducer: Sendable {
         pendingSubscriberBaselineReset = true
     }
 
+    /// Whether an export has drained scroll rects out of the terminal that no stream frame has carried
+    /// yet (or has poisoned the carry by overflowing it). Read by a host that would otherwise publish
+    /// nothing: the movement those rects describe reaches a mirror's drag-selection anchor only on a
+    /// stream frame, and only `makeUpdate` drains the carry, so a suppressed frame strands it.
+    public var hasPendingScrollCarry: Bool { !scrollRectCarry.rects.isEmpty || scrollRectCarry.overflowed }
+
     /// Folds scroll rects an export drained out of Ghostty but did not ship into the carry, so the
     /// next stream delta still reports how far content moved. See `TerminalStreamScrollRectCarry`.
     public mutating func foldScrollRects(_ rects: [GhosttyRenderScrollRectOperation], overflowed: Bool) {

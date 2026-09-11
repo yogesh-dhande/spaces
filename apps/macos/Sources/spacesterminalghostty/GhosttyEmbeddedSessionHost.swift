@@ -391,6 +391,11 @@
         private var lastSessionStateFlags: GhosttyEmbeddedSessionStateChange.Flags?
         private var lastScreenStateRevision: UInt64?
         private var lastExportedScreenStateRevision: UInt64?
+        /// Whether a one-shot `.state` read has handed a reader a screen the stream's delta baseline does
+        /// not describe since the last stream broadcast. While it is set, the content gate in
+        /// `broadcastScreenStateChangeUnlessSubscribersHoldTheScreen` cannot conclude anything from a
+        /// baseline match, so the next screen broadcast is published whatever it carries.
+        private var didExportScreenOutsideTheStream = false
         /// Ghostty's state revision as of the most recent live capture. See `captureLiveSessionScreenState`.
         private var lastCapturedSessionStateRevision: UInt64?
         /// The shared full-vs-delta policy, the stream's delta baseline, the pending subscriber-baseline
@@ -2612,19 +2617,82 @@
                 self.requestSurfaceRefreshAction()
                 GhosttyEmbeddedAppService.shared.tick()
                 guard self.screenStateRevisionNeedsExport(revision) else { return }
-                self.broadcastCurrentState(reason: .stateChange)
+                self.broadcastScreenStateChangeUnlessSubscribersHoldTheScreen()
             }
         }
 
-        /// Whether a screen revision still owes subscribers a frame. An export records the revision it
+        /// Whether a screen revision has yet to be marked as shipped. An export records the revision it
         /// shipped from Ghostty's own live counter (see `captureLiveSessionScreenState`), so the revision
-        /// Ghostty raised while processing a keystroke echo is already marked exported by the `output`
-        /// broadcast that carried those bytes, and the coalesced screen-state broadcast trailing it
-        /// publishes nothing: one screen broadcast per screen revision, not two.
+        /// Ghostty raised while processing a keystroke echo is usually already marked exported by the
+        /// `output` broadcast that carried those bytes. This is a lower bound on what subscribers hold,
+        /// not the decision itself: see `broadcastScreenStateChangeUnlessSubscribersHoldTheScreen`.
         private func screenStateRevisionNeedsExport(_ revision: UInt64?) -> Bool {
             guard let revision else { return true }
             guard let lastExportedScreenStateRevision else { return true }
             return lastExportedScreenStateRevision < revision
+        }
+
+        /// Publishes the coalesced `state_change` frame, unless the screen it would carry is the one
+        /// subscribers already hold.
+        ///
+        /// The revision gate above is a lower bound rather than the decision, because one PTY chunk raises
+        /// TWO Ghostty screen revisions: the parse queues a coalesced screen change that a later app tick
+        /// turns into a bump, and the reader thread bumps a second time once the parse returns. An export
+        /// reads Ghostty's live counter between the tick and the capture, so it can read the odd value
+        /// between that pair; the second bump then arrives here naming a revision the `output` export never
+        /// claimed even though its frame already carried those pixels. Gating on the counter alone
+        /// therefore re-ships the screen the reader is already showing, once per keystroke on a busy host.
+        ///
+        /// The screen itself is the truth the counter only approximates. Capture once, and when the
+        /// picture the capture read (cells, cursor, selection, scrollbar, mouse mode — everything a frame
+        /// conveys) matches the stream's delta baseline under the same owner epoch, with nothing left in
+        /// Ghostty's scroll-rect ring, claim the captured revision and publish nothing. Otherwise the same
+        /// capture rides into the broadcast, so the frame that goes out is the one this gate inspected
+        /// rather than a second read racing it. The baseline only speaks for a subscriber that has applied
+        /// every frame the stream sent it, so the gate stands down while a subscriber is owed a full frame,
+        /// while a one-shot read has handed one a different screen (`didExportScreenOutsideTheStream`), and
+        /// while the producer still carries scroll rects no frame has shipped.
+        private func broadcastScreenStateChangeUnlessSubscribersHoldTheScreen() {
+            let ownerKind = activeOwnerClient()?.kind
+            // A `state_change` this owner receives without screen state carries no frame to compare
+            // against, so it goes out for its metadata exactly as it would have.
+            guard Self.remoteStateShouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.stateChange.rawValue, ownerKind: ownerKind)
+            else {
+                broadcastCurrentState(reason: .stateChange)
+                return
+            }
+            let capturedScreenState = captureLiveSessionScreenState()
+            if let snapshot = capturedScreenState.snapshot, let baseline = renderUpdateProducer.baseline, baseline.ownerEpoch == ownerEpoch,
+                baseline.snapshot == snapshot, capturedScreenState.scrollRects.isEmpty, !capturedScreenState.scrollRectsOverflowed,
+                // A subscriber owed a full frame holds no baseline at all, so a match against the stream's
+                // baseline says nothing about what it is showing: keep that promise instead of suppressing.
+                renderUpdateProducer.forcedFullReason(for: .stateChange, exportMode: .streamDeltaAllowed) == nil,
+                // Rects an earlier export drained out of Ghostty but did not ship sit in the producer's
+                // carry, and only a frame that actually goes out drains them. An identical screen still
+                // owes a mirror that movement — repeated or blank rows scroll without changing a cell —
+                // and a drag-selection anchor cannot rebase until it arrives, so publish instead.
+                !renderUpdateProducer.hasPendingScrollCarry,
+                !didExportScreenOutsideTheStream
+            {
+                // The stream's baseline deliberately stays where it is, revision included. It names the
+                // frame every subscriber actually received, and the next delta is diffed against it; moving
+                // it to a revision nothing was ever published under would make that delta cite a base
+                // revision no subscriber holds. What has to agree with it instead is a one-shot `.state`
+                // read of this same unchanged screen — see `exportedFrameRevision`.
+                claimExportedScreenStateRevision()
+                return
+            }
+            broadcastCurrentState(reason: .stateChange, preCapturedScreenState: capturedScreenState)
+        }
+
+        /// Marks subscribers as holding the screen the most recent capture read, so the coalesced
+        /// `state_change` broadcast trailing an export recognizes those revisions as already shipped. The
+        /// claim covers Ghostty's live counter as of that capture as well as the last delivered screen
+        /// revision: the capture's screen is at least as new as both.
+        private func claimExportedScreenStateRevision() {
+            let exportedRevision = max(lastScreenStateRevision ?? 0, lastCapturedSessionStateRevision ?? 0)
+            guard exportedRevision > 0 else { return }
+            lastExportedScreenStateRevision = max(lastExportedScreenStateRevision ?? 0, exportedRevision)
         }
 
         private func nowISO8601() -> String { TerminalSessionTimestamp.string(from: Date()) }
@@ -3021,7 +3089,9 @@
                 let resolvedScreenState = resolveRemoteScreenState(
                     runtimeState: runtimeState, reason: reason, ownerKind: ownerClient?.kind, preCapturedScreenState: preCapturedScreenState)
                 let snapshot = resolvedScreenState.snapshot
-                let frame = snapshot.map { GhosttyRenderFrame(sessionRevision: renderFrameRevision(for: $0), ownerEpoch: ownerEpoch, snapshot: $0) }
+                let frame = snapshot.map {
+                    GhosttyRenderFrame(sessionRevision: exportedFrameRevision(for: $0, exportMode: exportMode), ownerEpoch: ownerEpoch, snapshot: $0)
+                }
                 // The reader already displays this exact frame, so exporting it would spend a full-grid
                 // encode on bytes the reader drops. Skipping `makeRenderUpdate` leaves the stream's delta
                 // baseline exactly where it was, which is correct: the reader's picture and the baseline
@@ -3052,9 +3122,22 @@
                     renderUpdateProducer.armSubscriberBaselineReset()
                 }
                 let renderUpdateConstructionMS = TerminalPerformance.elapsedMS(since: renderUpdateConstructionStartedAt)
-                if renderUpdateValue != nil, exportMode == .streamDeltaAllowed {
-                    let exportedRevision = max(lastScreenStateRevision ?? 0, lastCapturedSessionStateRevision ?? 0)
-                    if exportedRevision > 0 { lastExportedScreenStateRevision = max(lastExportedScreenStateRevision ?? 0, exportedRevision) }
+                switch exportMode {
+                case .streamDeltaAllowed:
+                    if renderUpdateValue != nil {
+                        claimExportedScreenStateRevision()
+                        didExportScreenOutsideTheStream = false
+                    }
+                case .selfContained:
+                    // A one-shot `.state` read answers its reader off the stream's delta chain, so that
+                    // reader ends up holding this frame rather than the stream's baseline. When the two
+                    // differ, the baseline has stopped describing what the reader shows, and the content
+                    // gate in `broadcastScreenStateChangeUnlessSubscribersHoldTheScreen` can no longer
+                    // speak for it: the next screen broadcast goes out regardless of content so the
+                    // reader's own base-revision guard sees that it diverged.
+                    if let snapshot, let baselineSnapshot = renderUpdateProducer.baseline?.snapshot, baselineSnapshot != snapshot {
+                        didExportScreenOutsideTheStream = true
+                    }
                 }
                 trace(
                     "render_frame_export_end reason=\(reason) render_update=\(renderUpdateValue == nil ? 0 : 1) frame_size=\(traceSize(columns: snapshot?.columns, rows: snapshot?.rows)) source=\(resolvedScreenState.source) owner_epoch=\(ownerEpoch)"
@@ -3140,6 +3223,29 @@
             renderUpdateProducer.makeUpdate(
                 for: frame, reason: TerminalRemoteSessionStateReason(rawValue: reason), nativeScrollRects: nativeScrollRects,
                 nativeScrollRectsOverflowed: nativeScrollRectsOverflowed, exportMode: exportMode)
+        }
+
+        /// The session revision this export stamps on a frame carrying `snapshot`.
+        ///
+        /// A one-shot `.state` read answers its reader off the stream's delta chain, so the revision it
+        /// stamps has to agree with the revision the stream is already using for that same picture. Ghostty
+        /// raises a screen revision for bytes that changed nothing visible, and the coalesced broadcast
+        /// trailing them publishes no frame (see `broadcastScreenStateChangeUnlessSubscribersHoldTheScreen`),
+        /// which leaves the stream's baseline correctly naming the current picture by the older revision.
+        /// Pulling the newer number from `lastScreenStateRevision` for a one-shot read of that unchanged
+        /// screen would hand its reader a revision the session's next delta does not cite, and the reader
+        /// would refuse that delta as `base_revision_mismatch` and resync — the cost the suppression exists
+        /// to save. So an unchanged screen keeps the baseline's revision: one revision names one picture.
+        ///
+        /// Only a self-contained export takes this path. A stream broadcast must keep advancing the
+        /// revision it publishes, because the frame it publishes is what the baseline then becomes.
+        private func exportedFrameRevision(for snapshot: GhosttyTerminalSnapshot, exportMode: RenderStateExportMode) -> UInt64 {
+            if exportMode == .selfContained, let baseline = renderUpdateProducer.baseline, baseline.ownerEpoch == ownerEpoch,
+                baseline.snapshot == snapshot, let baselineRevision = baseline.sessionRevision
+            {
+                return baselineRevision
+            }
+            return renderFrameRevision(for: snapshot)
         }
 
         private func renderFrameRevision(for snapshot: GhosttyTerminalSnapshot) -> UInt64 {
@@ -3240,6 +3346,9 @@
         var debugOwesOverviewSignalForMetadata: Bool { owesOverviewSignalForMetadata }
         var debugCurrentWorkingDirectory: String? { currentWorkingDirectory }
         func debugHandleIncomingOutput(_ data: Data) { appendOutput(data, interactiveResync: interactiveOutputGate.consumeIfActive()) }
+        /// Nil once the coalesced screen-state broadcast turn has run, so a test can order one screen
+        /// state change's decision ahead of the next rather than racing the coalescer.
+        var debugPendingScreenStateChangeBroadcastRevision: UInt64? { pendingScreenStateChangeBroadcastRevision }
         func debugBufferIncomingOutputForStateExport(_ data: Data) { _ = incomingOutputBuffer.append(data, interactive: false) }
         func debugStartStateStreamServerForTesting() throws { try startStateStreamServer() }
         func debugStopStateStreamServerForTesting() {
@@ -3437,6 +3546,7 @@
         var debugOwesOverviewSignalForMetadata: Bool { core.debugOwesOverviewSignalForMetadata }
         var debugCurrentWorkingDirectory: String? { core.debugCurrentWorkingDirectory }
         func debugHandleIncomingOutput(_ data: Data) { core.debugHandleIncomingOutput(data) }
+        var debugPendingScreenStateChangeBroadcastRevision: UInt64? { core.debugPendingScreenStateChangeBroadcastRevision }
         func debugBufferIncomingOutputForStateExport(_ data: Data) { core.debugBufferIncomingOutputForStateExport(data) }
         func debugStartStateStreamServerForTesting() throws { try core.debugStartStateStreamServerForTesting() }
         func debugStopStateStreamServerForTesting() { core.debugStopStateStreamServerForTesting() }
