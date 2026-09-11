@@ -9,6 +9,8 @@ import {
   CodePaneSetModeEvent,
   CodePaneThemeChangedEvent,
   DiffFileEntry,
+  DiffSignatureEvent,
+  FileListSignatureEvent,
   PendingAgentLaunch,
   SpacesBridgeError,
   WorkspaceDiffManifestChunkResult,
@@ -25,6 +27,7 @@ import { EditorView } from "./editorView";
 import { diff3MergeLines } from "./editorView";
 import { renderFileList, updateFileListRow } from "./fileList";
 import { attachFileListDivider } from "./fileListDivider";
+import { createLiveRefreshNotice } from "./liveRefreshNotice";
 import { QuickOpen } from "./quickOpen";
 import { RefSearchDialog } from "./refSearchDialog";
 import { afterBrowserPaint, aggregateContentUnits, browserPaint } from "./renderMetrics";
@@ -197,6 +200,17 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
   let agentResumeFinalReconciliation = false;
   let agentResumeGeneration = 0;
   let unsubscribeSignature: (() => void) | undefined;
+  let unsubscribeFileListSignature: (() => void) | undefined;
+  /** The `liveRefreshError` carried by whichever stream's push frame arrived most recently,
+   *  `undefined` once that frame is clean. Both streams share one daemon-side workspace watcher
+   *  (see docs/implementation.md): a scope switch can reinstall it and clear one stream's error
+   *  while the other stream's last frame still carries the stale reason, so this is a single
+   *  latest-frame-wins value rather than two per-stream ones a caller would have to merge. */
+  let liveRefreshError: string | undefined;
+  /** True from a Retry click until the next push frame from either stream: drives the notice's
+   *  "Retrying…" disabled state. Not reset by an ordinary scope-switch resubscription: that already
+   *  requests a fresh watcher retry on the daemon, so its own next frame will report the outcome. */
+  let liveRefreshRetrying = false;
   // Bumped at the start of every refreshDiff call; a call only applies its result (or lets its
   // error propagate) if its token is still the current one once the awaited call settles. This
   // is what makes a scope switch (or another refresh) latest-wins: a slower, superseded request
@@ -266,11 +280,20 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
   const diffAreaEl = document.createElement("div");
   diffAreaEl.className = "diff-area";
   diffAreaEl.tabIndex = -1;
-  diffAreaEl.style.position = "relative"; // hosts the comments controller's absolutely-positioned error banner
+  // Hosts the comments controller's absolutely-positioned error banner and, reparented in here on
+  // every renderBody() while in diff mode, the live-refresh notice below.
+  diffAreaEl.style.position = "relative";
 
   const editorContainerEl = document.createElement("div");
   editorContainerEl.className = "diff-area";
   editorContainerEl.tabIndex = -1;
+
+  // Persistent corner notice for a failed workspace file watcher (see liveRefreshNotice.ts). One
+  // shared element, re-attached by renderBody() into whichever mode's content area is showing:
+  // `diffAreaEl` directly, or `editorView`'s own content pane via `overlayHost()` (constructed
+  // further down, see its use there) so it shares that view's own banner slot below the open-file
+  // bar, and so its Diff-mode-and-Editor-mode-shared observer can watch that view's banner too.
+  const liveRefreshNotice = createLiveRefreshNotice();
 
   function pendingStartingAgentSessionId(): string | undefined {
     return pendingAgentLaunch?.status === "starting" ? pendingAgentLaunch.sessionId : undefined;
@@ -1158,6 +1181,10 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
     body.appendChild(fileListEl);
     body.appendChild(fileListDividerEl);
     body.appendChild(showingDiff ? diffAreaEl : editorContainerEl);
+    // The Files sidebar gets no notice of its own (docs/spec.md's Editor section): only the content
+    // area does, in either mode.
+    if (showingDiff) liveRefreshNotice.attachTo(diffAreaEl);
+    else liveRefreshNotice.attachTo(editorView.overlayHost());
   }
 
   /**
@@ -2485,8 +2512,52 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
     // Only one scope is observed at a time (see SpacesBridge.subscribeDiffSignature's
     // doc comment): replace the previous subscription rather than layering another.
     unsubscribeSignature?.();
-    unsubscribeSignature = bridge.subscribeDiffSignature(state.scope, () => {
+    unsubscribeSignature = bridge.subscribeDiffSignature(state.scope, (event: DiffSignatureEvent) => {
+      liveRefreshError = event.liveRefreshError;
+      liveRefreshRetrying = false;
+      updateLiveRefreshNotice();
       void refreshDiff(true, "workspaceChange");
+    });
+  }
+
+  /** Mirrors `resubscribeDiffSignature` for the Files-list membership stream, which every
+   *  workspace has regardless of `isGitRepository`. Called once, at startup. */
+  function resubscribeFileListSignature(): void {
+    unsubscribeFileListSignature?.();
+    unsubscribeFileListSignature = bridge.subscribeFileListSignature((event: FileListSignatureEvent) => {
+      liveRefreshError = event.liveRefreshError;
+      liveRefreshRetrying = false;
+      updateLiveRefreshNotice();
+      // Workspace membership changes are independent of the active diff scope: non-git workspaces
+      // have no diff-signature stream at all, and "Last commit" intentionally ignores plain worktree
+      // churn. The shared listing cache therefore owns its own workspace-scoped invalidation signal.
+      refreshFileListConsumers();
+    });
+  }
+
+  /** Shows or hides the persistent notice from `liveRefreshError`'s current value. */
+  function updateLiveRefreshNotice(): void {
+    if (liveRefreshError === undefined) {
+      liveRefreshNotice.hide();
+      return;
+    }
+    liveRefreshNotice.show(liveRefreshError, retryLiveRefresh);
+    liveRefreshNotice.setRetrying(liveRefreshRetrying);
+  }
+
+  /** The notice's one recovery action: asks the host to reopen both signature streams, which is
+   *  what makes the daemon retry the workspace's file watcher. The button stays disabled until
+   *  whichever stream responds first reports the outcome (cleared inside `resubscribeDiffSignature`/
+   *  `resubscribeFileListSignature`'s own push-frame callbacks above, not here, since which stream
+   *  answers first is not predictable). A rejection means the host could not even reopen the
+   *  streams, so the retrying state is cleared here instead and the banner stays up with its
+   *  existing reason. */
+  function retryLiveRefresh(): void {
+    liveRefreshRetrying = true;
+    liveRefreshNotice.setRetrying(true);
+    void bridge.retryLiveRefresh().catch(() => {
+      liveRefreshRetrying = false;
+      updateLiveRefreshNotice();
     });
   }
 
@@ -2626,13 +2697,8 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
   // same serial-queue ordering rule `openInEditor` applies (read before the mode dispatch that
   // triggers the listing).
   if (state.mode === "editor") editorSidebar.reattach();
-  const unsubscribeFileListSignature = bridge.subscribeFileListSignature(() => {
-    // Workspace membership changes are independent of the active diff scope: non-git workspaces
-    // have no diff-signature stream at all, and "Last commit" intentionally ignores plain worktree
-    // churn. The shared listing cache therefore owns its own workspace-scoped invalidation signal.
-    refreshFileListConsumers();
-  });
-  teardown.push(() => unsubscribeFileListSignature());
+  resubscribeFileListSignature();
+  teardown.push(() => unsubscribeFileListSignature?.());
   // Install the one scope listener before an initial manifest starts streaming. A file patch can
   // take arbitrarily long under agent churn; subscribing after that await drops any signature
   // change that arrives in the visible sidebar/placeholder interval.

@@ -48,6 +48,7 @@ import Testing
         }
 
         func stop() {}
+        func addPaths(_ paths: [String]) {}
     }
 
     /// The freeze this guards against: the daemon's main actor is its terminal-I/O
@@ -203,6 +204,8 @@ import Testing
             lock.unlock()
             if !alreadyStopped { counter.onStop() }
         }
+
+        func addPaths(_ paths: [String]) {}
     }
 
     /// Awaits `tracker.parkedCounts` until `target` parked watchers have been observed, racing that
@@ -323,6 +326,8 @@ import Testing
             lock.unlock()
             if !alreadyStopped { counter.onStop() }
         }
+
+        func addPaths(_ paths: [String]) {}
     }
 
     /// Counts the watcher-stream failures the service reports through `onError`, ignoring any other

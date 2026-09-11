@@ -33,7 +33,10 @@ file, a rename, an addition, a deletion, an untracked file, a binary file, a nes
 checked out inside it), and a submodule pointer that is not checked out). A floating "Simulate
 remote change" button
 (`src/dev/harnessControls.ts`) fires a `spaces:diffSignature` event so the live-refresh path
-(preserve scroll, re-fetch, re-render) is exercisable without a real daemon or git repo. The
+(preserve scroll, re-fetch, re-render) is exercisable without a real daemon or git repo. A
+"Toggle live refresh error" button fires `liveRefreshError` (`FIXTURE_LIVE_REFRESH_ERROR`) on both
+signature streams so the persistent notice is exercisable the same way; clicking it again clears
+the error, simulating the daemon's watcher recovering. The
 harness controls and the mock bridge/fixtures are dev-only: `src/bridge/index.ts` dynamically
 imports the mock only under `import.meta.env.DEV`, so Rollup tree-shakes all of it out of the
 production build.
@@ -112,6 +115,16 @@ production build.
 - `subscribeDiffSignature(scope, listener)` — returns an unsubscribe function. Only one scope
   is observed at a time; calling it again is expected to replace the previous subscription's
   effective scope rather than layer another live one.
+- `subscribeFileListSignature(listener)`: returns an unsubscribe function for the Files-list
+  membership stream.
+- Both signature events carry `liveRefreshError` (a string) whenever the daemon's file watcher for
+  the workspace is down; that stream stops recomputing on git/membership changes until the watcher
+  is retried successfully. root.ts shows the persistent notice (`src/app/liveRefreshNotice.ts`,
+  element id `code-pane-live-refresh-notice`) with the error text verbatim while either stream
+  carries one.
+- `retryLiveRefresh()`, the notice's Retry action: resolves with no payload once the host has
+  stopped and reopened both signature streams; the daemon re-attempts the workspace's file watcher
+  as a result, and whichever stream answers first reports the outcome on its next push frame.
 - `reviewCommentList()` — every draft comment in the workspace, called once from `root.ts` after
   mount to rehydrate `CommentsController`'s in-memory mirror; never called again afterward (see
   "Comments" below for why).
@@ -188,6 +201,34 @@ branch on `.code`.
   - `spaces:diffSignature` when the active scope's git signature changes. The page refreshes by
     requesting a new manifest; stale responses are ignored and transient typed/untyped failures use
     the bounded retry path, while durable request errors remain visible.
+  - `spaces:fileListSignature` when the authoritative `workspaceFileList` result changes; the page
+    invalidates the shared file-listing cache (see `workspaceFileList()` above).
+  - Both of these carry `liveRefreshError` on every frame while the workspace's watcher is down
+    (see the `subscribeDiffSignature`/`subscribeFileListSignature` entries above).
+
+### Live-refresh notice
+
+`src/app/liveRefreshNotice.ts` renders the persistent corner banner (`code-pane-live-refresh-notice`)
+root.ts shows while `liveRefreshError` is set: one line, top-trailing, in the Diff pane's
+content area or, in Editor mode, `EditorView`'s own content pane below the open-file bar
+(`EditorView.overlayHost()`); the Files sidebar never gets one. Its text is "Live refresh off:
+`<reason>`", the daemon's error text verbatim, with a single Retry action at its trailing end that
+sends `retryLiveRefresh` (the host reopens both streams, and the daemon retries the watcher as a
+result) and reads "Retrying…", disabled, until the next frame from either stream or until the
+request itself is rejected, whichever comes first. Only the Retry button takes clicks; the label
+and the banner's own chrome are `pointer-events: none`, so a click beside it reaches the diff or
+editor content underneath, per docs/design.md's persistent-banner pattern. `liveRefreshError` holds
+whichever stream's push frame arrived most recently, not a merge of both: the two streams share one
+daemon-side workspace watcher, but a scope switch can reinstall it and clear one stream's error
+before the other stream's next frame does, so tracking the latest frame rather than combining both
+streams' last-known state keeps the banner from showing a reason that already cleared.
+
+A pane has one banner (docs/design.md): root.ts's `attachTo` call moves the notice's element into
+its current content-area container and watches that container with a `MutationObserver` for the
+`style` changes `editorView.ts`'s, `diffView.ts`'s, and `commentsController.ts`'s own transient
+`.banner` elements toggle their visibility through. Whenever any of those is visible, the notice
+stays hidden regardless of `liveRefreshError`; it reappears once every transient banner in that
+container clears. None of those three owners knows this notice exists.
 
 ## Editor changes view
 

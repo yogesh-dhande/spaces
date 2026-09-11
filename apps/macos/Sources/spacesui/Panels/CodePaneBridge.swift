@@ -545,6 +545,12 @@ enum CodePaneBridge {
         case workspaceFileList
         /// Lists the branches and recent commits the Compare dialog's ref search offers. No params.
         case workspaceRefList
+        /// The persistent live-refresh notice's Retry action (`liveRefreshNotice.ts`). No params.
+        /// Tears down and reopens both signature streams so the daemon retries whichever workspace
+        /// watcher failed; resolves as soon as the reopen has been issued, without waiting for a
+        /// resulting frame; the page learns the outcome from the next ordinary
+        /// `spaces:diffSignature`/`spaces:fileListSignature` push.
+        case retryLiveRefresh
         case reviewCommentList
         /// `commentID` is `nil` for a new draft — the daemon mints its id — or names an existing
         /// draft this workspace owns when the web app is editing one.
@@ -651,6 +657,7 @@ enum CodePaneBridge {
             return .success(.workspaceFileWrite(path: path, content: content, baseSHA256: baseSHA256, requiresDirectPath: requiresDirectPath))
         case "workspaceFileList": return .success(.workspaceFileList)
         case "workspaceRefList": return .success(.workspaceRefList)
+        case "retryLiveRefresh": return .success(.retryLiveRefresh)
         case "reviewCommentList": return .success(.reviewCommentList)
         case "reviewCommentUpsert":
             guard let filePath = request.params["filePath"] as? String, let sideRaw = request.params["side"] as? String,
@@ -972,7 +979,15 @@ enum CodePaneBridge {
     struct SetModePayload: Encodable, Equatable { let mode: String }
 
     /// `spaces:diffSignature`'s detail, dispatched whenever the subscribed scope's git state changes.
-    struct DiffSignaturePayload: Encodable, Equatable { let scopeSignature: String }
+    /// `liveRefreshError` is nil-omitted except when the workspace's file watcher failed to start (or
+    /// stopped running), in which case it carries the daemon's OS error text (mirrors
+    /// `CodePaneWeb/src/bridge/types.ts`'s `DiffSignatureEvent.liveRefreshError`). The page keeps
+    /// showing a persistent notice for as long as this keeps arriving set; a Retry there re-subscribes
+    /// both signature streams, which makes the daemon retry the watcher.
+    struct DiffSignaturePayload: Encodable, Equatable {
+        let scopeSignature: String
+        let liveRefreshError: String?
+    }
 
     /// `spaces:fileSignature`'s detail, dispatched whenever the currently-open file's on-disk content
     /// changes or the file disappears. Mirrors `CodePaneWeb/src/bridge/types.ts`'s `FileSignatureEvent`:
@@ -986,8 +1001,13 @@ enum CodePaneBridge {
     }
 
     /// `spaces:fileListSignature`'s detail, dispatched whenever the authoritative
-    /// `workspaceFileList` result changes for this workspace.
-    struct FileListSignaturePayload: Encodable, Equatable { let fileListSignature: String }
+    /// `workspaceFileList` result changes for this workspace. `liveRefreshError` has the same
+    /// meaning and nil-omission as `DiffSignaturePayload.liveRefreshError`: both streams share one
+    /// file watcher, so a set value here is the same string as the diff stream's.
+    struct FileListSignaturePayload: Encodable, Equatable {
+        let fileListSignature: String
+        let liveRefreshError: String?
+    }
 
     /// `spaces:agents`'s detail, dispatched whenever this workspace's running-agent set changes after
     /// startup (`spaces:init`'s `agents` field carries the set at page-load time).

@@ -38,22 +38,29 @@
     ///   `deinit` safety net remains reachable and callers need not call `stop()` to
     ///   avoid a leak (though `WorktreeDiscoveryService` does, on every removal path).
     public final class FileSystemWatcher: @unchecked Sendable {
-        public enum WatchError: Error {
+        public enum WatchError: Error, CustomStringConvertible {
             case noPaths
             case streamUnavailable
+
+            public var description: String {
+                switch self {
+                case .noPaths: "no paths to watch"
+                case .streamUnavailable: "the file watcher could not start"
+                }
+            }
         }
 
         private let paths: [String]
         private let latency: TimeInterval
         private let queue: DispatchQueue
-        private let onChange: @Sendable ([String]) -> Void
+        private let onChange: @Sendable (_ paths: [String], _ mustRescan: Bool) -> Void
         /// Only read or written on `queue`, except in `deinit` where no other
         /// reference to `self` can exist so the access is race-free.
         private var stream: FSEventStreamRef?
 
         public init(
             paths: [String], latency: TimeInterval = 0.5, queue: DispatchQueue = DispatchQueue(label: "spaces.filesystemwatcher", qos: .utility),
-            onChange: @escaping @Sendable ([String]) -> Void
+            onChange: @escaping @Sendable (_ paths: [String], _ mustRescan: Bool) -> Void
         ) {
             self.paths = paths
             self.latency = latency
@@ -86,11 +93,19 @@
             let flags = UInt32(
                 kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer
                     | kFSEventStreamCreateFlagWatchRoot)
-            let callback: FSEventStreamCallback = { _, info, count, eventPaths, _, _ in
+            let callback: FSEventStreamCallback = { _, info, count, eventPaths, eventFlags, _ in
                 guard let info, count > 0 else { return }
                 let callbackContext = Unmanaged<FSEventCallbackContext>.fromOpaque(info).takeUnretainedValue()
                 let changed = (unsafeBitCast(eventPaths, to: NSArray.self) as? [String]) ?? []
-                callbackContext.onChange(changed)
+                // Any of these on any event in the batch means FSEvents coalesced past what it could
+                // report precisely (a burst it dropped, or a moved/replaced watch root), so the caller
+                // must treat the batch as "something changed somewhere under the root" rather than trust
+                // the reported paths.
+                let rescanFlags = FSEventStreamEventFlags(
+                    kFSEventStreamEventFlagMustScanSubDirs | kFSEventStreamEventFlagUserDropped | kFSEventStreamEventFlagKernelDropped
+                        | kFSEventStreamEventFlagRootChanged)
+                let mustRescan = UnsafeBufferPointer(start: eventFlags, count: count).contains { $0 & rescanFlags != 0 }
+                callbackContext.onChange(changed, mustRescan)
             }
             // The context retains this box (never `self`) via the thunks below, so a
             // callback can never observe a freed object; see the type's ownership
@@ -140,6 +155,12 @@
             self.stream = nil
         }
 
+        /// No-op on macOS: FSEvents watches `paths` recursively, so every directory under a watched root
+        /// is already covered without registering it explicitly. Present only so callers that support both
+        /// backends (`WorkspaceWatch`) have one surface to call; `throws` only to match that shared
+        /// surface (the Linux backend's `inotify_add_watch` can fail), never actually thrown here.
+        public func addPaths(_ paths: [String]) throws {}
+
         deinit {
             // At deinit no other reference to `self` can exist, so reading `stream`
             // directly is race-free. This safety net is reachable precisely because the
@@ -174,8 +195,8 @@
     /// watcher, so the watcher can deinit independently and tear its stream down; the
     /// stream's `FSEventStreamInvalidate` then releases this box.
     private final class FSEventCallbackContext {
-        let onChange: @Sendable ([String]) -> Void
-        init(onChange: @escaping @Sendable ([String]) -> Void) { self.onChange = onChange }
+        let onChange: @Sendable (_ paths: [String], _ mustRescan: Bool) -> Void
+        init(onChange: @escaping @Sendable (_ paths: [String], _ mustRescan: Bool) -> Void) { self.onChange = onChange }
     }
 
 #elseif os(Linux)
@@ -198,14 +219,66 @@
     /// to `queue` — also the read source's event queue — via `async` dispatch, keeping
     /// them off the caller's thread and free of data races.
     public final class FileSystemWatcher: @unchecked Sendable {
-        public enum WatchError: Error {
+        /// `noPaths` and `streamUnavailable` cover setup failures with no per-syscall detail to report.
+        /// `initFailed` and `watchFailed` carry the failing syscall's own errno and `strerror` text (plus,
+        /// for `watchFailed`, the path it was registering) so the daemon's live-refresh banner can name the
+        /// actual cause (e.g. an exhausted `fs.inotify.max_user_watches`) instead of a generic message.
+        public enum WatchError: Error, CustomStringConvertible {
             case noPaths
             case streamUnavailable
+            case initFailed(errno: Int32)
+            case watchFailed(path: String, errno: Int32)
+
+            public var description: String {
+                switch self {
+                case .noPaths: "no paths to watch"
+                case .streamUnavailable: "the file watcher could not start"
+                case .initFailed(let code): "inotify_init1: \(Self.errnoText(code))"
+                case .watchFailed(let path, let code): "inotify_add_watch(\(path)): \(Self.errnoText(code))"
+                }
+            }
+
+            /// `strerror`'s human-readable message plus the errno's own macro name (`ENOSPC`, not just its
+            /// numeric value), since the macro name is what an operator recognizes and searches for.
+            private static func errnoText(_ code: Int32) -> String {
+                "\(String(cString: strerror(code))) (\(errnoName(code)))"
+            }
+
+            /// Only the errno values `inotify_init1`/`inotify_add_watch` actually document (see their man
+            /// pages); anything else falls back to the bare number rather than guessing a name.
+            private static func errnoName(_ code: Int32) -> String {
+                switch code {
+                case EACCES: return "EACCES"
+                case EBADF: return "EBADF"
+                case EEXIST: return "EEXIST"
+                case EFAULT: return "EFAULT"
+                case EINVAL: return "EINVAL"
+                case EMFILE: return "EMFILE"
+                case ENAMETOOLONG: return "ENAMETOOLONG"
+                case ENFILE: return "ENFILE"
+                case ENOMEM: return "ENOMEM"
+                case ENOSPC: return "ENOSPC"
+                case ENOTDIR: return "ENOTDIR"
+                default: return "errno \(code)"
+                }
+            }
         }
+
+        /// Metadata git rewrites on worktree/HEAD changes, plus the directory-level create/delete/move
+        /// events that signal a worktree (or, for `WorkspaceWatch`, any other directory) added or removed,
+        /// and self-delete/move so a vanished directory drops its watch. `IN_ATTRIB` covers a `chmod`,
+        /// `chown`, `utimes`, or `truncate` on a tracked file (all report through `setattr`, never through
+        /// `IN_MODIFY` alone), which is what `chmod +x` on a tracked file needs to be observed: it changes
+        /// the rendered diff and `scopeSignature` without writing any new file content. `IN_ATTRIB` fires
+        /// only from those `setattr`-driven changes, not from an inode's atime updating on an ordinary
+        /// read, so this adds no read-driven churn. Shared by `startOnQueue` and `addPaths` so a directory
+        /// registered after start gets the identical mask.
+        private static let watchMask = UInt32(
+            IN_MODIFY | IN_ATTRIB | IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MOVE_SELF | IN_DELETE_SELF | IN_ONLYDIR)
 
         private let paths: [String]
         private let queue: DispatchQueue
-        private let onChange: @Sendable ([String]) -> Void
+        private let onChange: @Sendable (_ paths: [String], _ mustRescan: Bool) -> Void
         /// Only read or written on `queue`, except in `deinit` where no other
         /// reference to `self` can exist so the access is race-free.
         private var fileDescriptor: Int32 = -1
@@ -214,7 +287,7 @@
 
         public init(
             paths: [String], latency _: TimeInterval = 0.5, queue: DispatchQueue = DispatchQueue(label: "spaces.filesystemwatcher", qos: .utility),
-            onChange: @escaping @Sendable ([String]) -> Void
+            onChange: @escaping @Sendable (_ paths: [String], _ mustRescan: Bool) -> Void
         ) {
             self.paths = paths
             self.queue = queue
@@ -236,19 +309,27 @@
             }
         }
 
-        /// Serialized on `queue`; see the type's lifecycle invariant.
+        /// Serialized on `queue`; see the type's lifecycle invariant. A path missing by the time its watch
+        /// is registered (`ENOENT`, e.g. it was created and removed again between listing and this call)
+        /// is not a failure: it is simply skipped, and the loop continues with the remaining paths. Any
+        /// other `inotify_add_watch` failure (most commonly `ENOSPC`, the `fs.inotify.max_user_watches`
+        /// limit) stops the whole install immediately rather than silently leaving the workspace with
+        /// partial coverage the caller has no way to know about.
         private func startOnQueue() throws {
             guard fileDescriptor < 0 else { return }
             guard !paths.isEmpty else { throw WatchError.noPaths }
             let descriptor = inotify_init1(Int32(IN_NONBLOCK) | Int32(IN_CLOEXEC))
-            guard descriptor >= 0 else { throw WatchError.streamUnavailable }
-            // File metadata that git rewrites on worktree/HEAD changes plus the
-            // directory-level create/delete/move events that signal a worktree added
-            // or removed; self-delete/move so a vanished directory drops its watch.
-            let mask = UInt32(IN_MODIFY | IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MOVE_SELF | IN_DELETE_SELF | IN_ONLYDIR)
+            guard descriptor >= 0 else { throw WatchError.initFailed(errno: errno) }
             for path in paths {
-                let watchDescriptor = inotify_add_watch(descriptor, path, mask)
-                if watchDescriptor >= 0 { watchedDirectoriesByDescriptor[watchDescriptor] = path }
+                let watchDescriptor = inotify_add_watch(descriptor, path, Self.watchMask)
+                if watchDescriptor >= 0 {
+                    watchedDirectoriesByDescriptor[watchDescriptor] = path
+                    continue
+                }
+                let failureErrno = errno
+                if failureErrno == ENOENT { continue }
+                close(descriptor)
+                throw WatchError.watchFailed(path: path, errno: failureErrno)
             }
             guard !watchedDirectoriesByDescriptor.isEmpty else {
                 close(descriptor)
@@ -279,6 +360,32 @@
             watchedDirectoriesByDescriptor.removeAll()
         }
 
+        /// Registers additional directories on a running watcher, e.g. one created or moved in after
+        /// `start()`. Serialized on `queue` like the other lifecycle calls, synchronously (`queue.sync`,
+        /// not `queue.async`) so a failure can actually propagate back to the caller instead of being
+        /// swallowed by an untracked background dispatch. A no-op while the watcher is not running;
+        /// `WorkspaceWatch` only calls this once its own `start()` has succeeded, so this arises only from
+        /// a caller-side race and is not worth reporting.
+        ///
+        /// Same `ENOENT`-is-not-a-failure rule as `startOnQueue`: a directory that vanished between being
+        /// listed and registered here is skipped, not thrown; any other `inotify_add_watch` failure stops
+        /// the batch and throws immediately.
+        public func addPaths(_ paths: [String]) throws {
+            try queue.sync {
+                guard fileDescriptor >= 0 else { return }
+                for path in paths {
+                    let watchDescriptor = inotify_add_watch(fileDescriptor, path, Self.watchMask)
+                    if watchDescriptor >= 0 {
+                        watchedDirectoriesByDescriptor[watchDescriptor] = path
+                        continue
+                    }
+                    let failureErrno = errno
+                    if failureErrno == ENOENT { continue }
+                    throw WatchError.watchFailed(path: path, errno: failureErrno)
+                }
+            }
+        }
+
         /// Reads all currently-available inotify events in one pass (the read source
         /// fires once per readable burst, which coalesces a change burst into one
         /// `onChange`) and reports the affected absolute paths.
@@ -286,6 +393,11 @@
             let headerSize = MemoryLayout<inotify_event>.size
             var buffer = [UInt8](repeating: 0, count: 8192)
             var changedPaths: [String] = []
+            // The kernel reports a lost-events window as one event with `wd == -1` and `IN_Q_OVERFLOW`
+            // set (never paired with a watch descriptor), meaning some events between the last drain and
+            // this one were dropped rather than delivered. There is no way to know which paths those were,
+            // so this is macOS's `mustScanSubDirs`/dropped-flags equivalent: the caller must rescan.
+            var mustRescan = false
             while true {
                 let bytesRead = buffer.withUnsafeMutableBytes { read(fileDescriptor, $0.baseAddress, $0.count) }
                 if bytesRead <= 0 { break }
@@ -293,6 +405,11 @@
                 while offset + headerSize <= bytesRead {
                     let event = buffer.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: inotify_event.self) }
                     let nameLength = Int(event.len)
+                    if event.wd == -1, event.mask & UInt32(IN_Q_OVERFLOW) != 0 {
+                        mustRescan = true
+                        offset += headerSize + nameLength
+                        continue
+                    }
                     let directory = watchedDirectoriesByDescriptor[event.wd]
                     if let directory {
                         if nameLength > 0 {
@@ -301,13 +418,46 @@
                             let name = String(decoding: nameBytes, as: UTF8.self)
                             changedPaths.append(name.isEmpty ? directory : directory + "/" + name)
                         } else {
+                            // `IN_MOVE_SELF` (the watched directory itself was moved or renamed, to
+                            // anywhere, including outside this watcher's root) and `IN_DELETE_SELF` both
+                            // land here with no name payload, so this also reports the old path for a
+                            // self-move: a destination still inside the workspace is re-registered through
+                            // the parent's `IN_MOVED_TO`, which `WorkspaceWatch` already treats as a new
+                            // directory, so nothing else needs to observe the new location from here.
                             changedPaths.append(directory)
                         }
+                    }
+                    // An INSTALL ROOT (one of `paths`) disappearing or moving mirrors FSEvents'
+                    // RootChanged (above): nothing watches its parent, so a directory recreated at the
+                    // same path would go unnoticed. `WorkspaceWatch` answers a rescan with a full
+                    // reinstall, which fails outright with the root gone (`streamUnavailable`, every root
+                    // `ENOENT`), surfacing the live-refresh notice with Retry instead of a silent freeze;
+                    // a root recreated later is picked up by Retry or the next subscribe.
+                    if event.mask & UInt32(IN_DELETE_SELF | IN_MOVE_SELF) != 0, let directory, paths.contains(directory) {
+                        mustRescan = true
+                    }
+                    // `IN_MOVE_SELF` does not make the kernel drop the watch (a delete does, via
+                    // `IN_IGNORED`): left alone, the descriptor keeps reporting events from wherever the
+                    // directory ended up, still mapped to its OLD path. inotify is not recursive, so a
+                    // directory watched beneath the moved one (`root/a/b` under `root/a`) has its own
+                    // descriptor and gets no `IN_MOVE_SELF` of its own; it goes just as stale. So every
+                    // descriptor at or beneath the moved path is removed, from a snapshot since the table
+                    // is mutated in the loop. `IN_IGNORED` (delete, unmount, or the `inotify_rm_watch`
+                    // just below, which queues one for the same descriptor) drops the mapping too.
+                    if event.mask & UInt32(IN_MOVE_SELF) != 0, let movedPath = directory {
+                        let staleDescriptors = watchedDirectoriesByDescriptor.filter { $0.value == movedPath || $0.value.hasPrefix(movedPath + "/") }
+                            .keys
+                        for descriptor in staleDescriptors {
+                            inotify_rm_watch(fileDescriptor, descriptor)
+                            watchedDirectoriesByDescriptor.removeValue(forKey: descriptor)
+                        }
+                    } else if event.mask & UInt32(IN_IGNORED) != 0 {
+                        watchedDirectoriesByDescriptor.removeValue(forKey: event.wd)
                     }
                     offset += headerSize + nameLength
                 }
             }
-            if !changedPaths.isEmpty { onChange(changedPaths) }
+            if !changedPaths.isEmpty || mustRescan { onChange(changedPaths, mustRescan) }
         }
 
         deinit {

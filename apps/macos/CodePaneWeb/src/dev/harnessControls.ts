@@ -70,9 +70,24 @@ export function installHarnessControls(container: HTMLElement): void {
     getMockBridgeForHarness()?.simulateFileDeleted();
   });
 
+  const liveRefreshErrorButton = document.createElement("button");
+  liveRefreshErrorButton.type = "button";
+  liveRefreshErrorButton.textContent = "Toggle live refresh error";
+  liveRefreshErrorButton.style.padding = "6px 10px";
+  liveRefreshErrorButton.style.marginLeft = "8px";
+  liveRefreshErrorButton.style.borderRadius = "6px";
+  liveRefreshErrorButton.style.border = "1px solid #888";
+  liveRefreshErrorButton.style.background = "#222";
+  liveRefreshErrorButton.style.color = "#fff";
+  liveRefreshErrorButton.style.cursor = "pointer";
+  liveRefreshErrorButton.addEventListener("click", () => {
+    getMockBridgeForHarness()?.simulateLiveRefreshError();
+  });
+
   bar.appendChild(button);
   bar.appendChild(agentsButton);
   bar.appendChild(fileChangeButton);
   bar.appendChild(fileDeleteButton);
+  bar.appendChild(liveRefreshErrorButton);
   container.appendChild(bar);
 }

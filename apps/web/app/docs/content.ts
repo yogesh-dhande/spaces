@@ -9,7 +9,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/installation",
     title: "Installation & Setup",
     summary:
-      "Get Spaces installed, its dependencies in place, and your environment verified, then grant permission to control Google Chrome on first launch. Includes installing and updating the daemon on Linux, plus the SSH access, network reachability, and background-service requirements a remote machine or cloud VM has to meet before it can pair.",
+      "Get Spaces installed, its dependencies in place, and your environment verified, then grant permission to control Google Chrome on first launch. Includes installing and updating the daemon on Linux, plus the SSH access, network reachability, and background-service requirements a remote machine or cloud VM has to meet before it can pair. If the Editor shows a persistent \"Live refresh off\" notice naming the device's inotify watch limit, raise fs.inotify.max_user_watches on that device.",
   },
   {
     href: "/docs/getting-started",

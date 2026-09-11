@@ -508,8 +508,9 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     /// Delivers a `spaces:diffSignature`-worthy frame on the subscription opened at `index` (0-based,
     /// subscribe-call arrival order), standing in for the daemon's `DeviceOverviewStreamServer`
     /// pushing a signature over the live stream (dedupe tests).
-    func triggerFrame(at index: Int, scopeSignature: String) {
-        subscribedFrameHandlers[index](SpacesDeviceWorkspaceDiffSignatureFrame(workspaceID: "workspace-1", scopeSignature: scopeSignature))
+    func triggerFrame(at index: Int, scopeSignature: String, liveRefreshError: String? = nil) {
+        subscribedFrameHandlers[index](
+            SpacesDeviceWorkspaceDiffSignatureFrame(workspaceID: "workspace-1", scopeSignature: scopeSignature, liveRefreshError: liveRefreshError))
     }
 
     private func drainDiffArrivalWaiters() {
@@ -687,8 +688,9 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
     func triggerPendingFileListSignatureDisconnect(at index: Int) { pendingFileListSignatureSubscribeCalls[index].onDisconnect(nil) }
 
-    func triggerFileListSignatureFrame(at index: Int, signature: String) {
-        subscribedFileListFrameHandlers[index](SpacesDeviceWorkspaceFileListSignatureFrame(workspaceID: "workspace-1", fileListSignature: signature))
+    func triggerFileListSignatureFrame(at index: Int, signature: String, liveRefreshError: String? = nil) {
+        subscribedFileListFrameHandlers[index](
+            SpacesDeviceWorkspaceFileListSignatureFrame(workspaceID: "workspace-1", fileListSignature: signature, liveRefreshError: liveRefreshError))
     }
 
     private func drainFileListArrivalWaiters() {
@@ -1843,6 +1845,77 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         await gateway.triggerFrame(at: 0, scopeSignature: "sig-2")
         await settle()
         #expect(diffSignatureScripts(evaluator).count == 1, "a repeat of the signature just forwarded must not forward again")
+    }
+
+    /// `frame.liveRefreshError` (the daemon's file-watcher failure text, see
+    /// `SpacesDeviceWorkspaceDiffSignatureFrame`'s doc comment) must ride along on the dispatched
+    /// `spaces:diffSignature` detail exactly as the frame carries it: present when the watcher failed,
+    /// absent again once a later frame reports it healthy.
+    @Test func aFrameCarryingALiveRefreshErrorDispatchesItAndALaterFrameWithoutItDispatchesWithoutIt() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+
+        content.dispatch(diffRequest(id: "req-1", scopeKind: "uncommitted"))
+        await gateway.waitForDiffCallCount(1)
+        await gateway.completeDiffCall(
+            at: 0, result: SpacesDeviceWorkspaceDiffManifestChunkResult(manifestID: "test-manifest", scopeSignature: "sig-1", files: []))
+        await gateway.waitForSubscribeCallCount(1)
+
+        await gateway.triggerFrame(at: 0, scopeSignature: "sig-2", liveRefreshError: "watcher failed: too many open files")
+        await waitUntil { !self.diffSignatureScripts(evaluator).isEmpty }
+
+        #expect(diffSignatureScripts(evaluator).count == 1)
+        #expect(diffSignatureScripts(evaluator)[0].contains("sig-2"))
+        #expect(diffSignatureScripts(evaluator)[0].contains("watcher failed: too many open files"))
+
+        await gateway.triggerFrame(at: 0, scopeSignature: "sig-3")
+        await waitUntil { self.diffSignatureScripts(evaluator).count == 2 }
+
+        #expect(diffSignatureScripts(evaluator)[1].contains("sig-3"))
+        #expect(!diffSignatureScripts(evaluator)[1].contains("liveRefreshError"), "a healthy frame must not carry the liveRefreshError key at all")
+    }
+
+    /// Regression for the dedupe-key fix: a failed watch freezes `scopeSignature` (it never recomputes
+    /// again on its own), so the frame that reports a `performRetryLiveRefresh`-driven recovery (or a
+    /// later mid-stream failure) repeats the SAME signature as every frame around it, differing only in
+    /// `liveRefreshError`. Keying dedupe on `scopeSignature` alone would suppress that frame and leave
+    /// the persistent notice stuck forever.
+    @Test func aFrameCarryingTheSameSignatureButADifferentLiveRefreshErrorStillDispatchesAndARepeatOfThatPairDoesNot() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+
+        content.dispatch(diffRequest(id: "req-1", scopeKind: "uncommitted"))
+        await gateway.waitForDiffCallCount(1)
+        await gateway.completeDiffCall(
+            at: 0, result: SpacesDeviceWorkspaceDiffManifestChunkResult(manifestID: "test-manifest", scopeSignature: "sig-1", files: []))
+        await gateway.waitForSubscribeCallCount(1)
+
+        // A failed watch: same signature the initial fetch already recorded, but now carrying an error.
+        await gateway.triggerFrame(at: 0, scopeSignature: "sig-1", liveRefreshError: "watcher failed: too many open files")
+        await waitUntil { !self.diffSignatureScripts(evaluator).isEmpty }
+        #expect(diffSignatureScripts(evaluator).count == 1)
+        #expect(diffSignatureScripts(evaluator)[0].contains("watcher failed: too many open files"))
+
+        // A successful retry's connect-time frame: same signature, error cleared. Must still forward,
+        // or the persistent notice could never clear when nothing else about the diff has changed.
+        await gateway.triggerFrame(at: 0, scopeSignature: "sig-1")
+        await waitUntil { self.diffSignatureScripts(evaluator).count == 2 }
+        #expect(!diffSignatureScripts(evaluator)[1].contains("liveRefreshError"))
+
+        // An exact repeat of the now-acted-on (signature, error) pair must go quiet.
+        await gateway.triggerFrame(at: 0, scopeSignature: "sig-1")
+        await settle()
+        #expect(diffSignatureScripts(evaluator).count == 2, "a repeat of the identical (signature, error) pair must not forward again")
     }
 
     @Test func aReconnectsConnectFrameRepeatingTheLastForwardedSignatureStaysQuietButANewOneAfterItForwards() async {
@@ -3160,6 +3233,257 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         await settle()
 
         #expect(fileListSignatureScripts(evaluator).count == 2)
+    }
+
+    /// Mirrors `aFrameCarryingALiveRefreshErrorDispatchesItAndALaterFrameWithoutItDispatchesWithoutIt`
+    /// for the file-list-signature stream: `frame.liveRefreshError` rides along on the dispatched
+    /// `spaces:fileListSignature` detail exactly as the frame carries it.
+    @Test func aFileListFrameCarryingALiveRefreshErrorDispatchesItAndALaterFrameWithoutItDispatchesWithoutIt() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+
+        await gateway.setFileListResult(.success(.init(paths: ["a.ts"], truncated: false)))
+        content.dispatch(.init(id: "req-1", method: "workspaceFileList", params: [:]))
+        await gateway.waitForFileListSignatureSubscribeCount(1)
+
+        await gateway.triggerFileListSignatureFrame(at: 0, signature: "list-2", liveRefreshError: "watcher failed: ENOSPC")
+        await waitUntil { !self.fileListSignatureScripts(evaluator).isEmpty }
+
+        #expect(fileListSignatureScripts(evaluator).count == 1)
+        #expect(fileListSignatureScripts(evaluator)[0].contains("list-2"))
+        #expect(fileListSignatureScripts(evaluator)[0].contains("watcher failed: ENOSPC"))
+
+        await gateway.triggerFileListSignatureFrame(at: 0, signature: "list-3")
+        await waitUntil { self.fileListSignatureScripts(evaluator).count == 2 }
+
+        #expect(fileListSignatureScripts(evaluator)[1].contains("list-3"))
+        #expect(!fileListSignatureScripts(evaluator)[1].contains("liveRefreshError"), "a healthy frame must not carry the liveRefreshError key at all")
+    }
+
+    /// Regression for the dedupe-key fix: a failed watch freezes `fileListSignature`, so the frame
+    /// that reports a retry's recovery (or a later mid-stream failure) repeats the SAME signature as
+    /// every frame around it, differing only in `liveRefreshError`. Keying dedupe on the signature
+    /// alone would suppress that frame and leave the persistent notice stuck forever.
+    @Test func aFileListFrameCarryingTheSameSignatureButADifferentLiveRefreshErrorStillDispatchesAndARepeatOfThatPairDoesNot() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+
+        let baseline = SpacesDeviceWorkspaceFileListResult(paths: ["a.ts"], truncated: false)
+        let baselineSignature = SpacesDeviceWorkspaceFileListSignature.value(for: baseline)
+
+        await gateway.setFileListResult(.success(baseline))
+        content.dispatch(.init(id: "req-1", method: "workspaceFileList", params: [:]))
+        await gateway.waitForFileListSignatureSubscribeCount(1)
+
+        // A failed watch: same signature the initial pull already recorded, but now carrying an error.
+        await gateway.triggerFileListSignatureFrame(at: 0, signature: baselineSignature, liveRefreshError: "watcher failed: ENOSPC")
+        await waitUntil { !self.fileListSignatureScripts(evaluator).isEmpty }
+        #expect(fileListSignatureScripts(evaluator).count == 1)
+        #expect(fileListSignatureScripts(evaluator)[0].contains("watcher failed: ENOSPC"))
+
+        // A successful retry's connect-time frame: same signature, error cleared. Must still forward.
+        await gateway.triggerFileListSignatureFrame(at: 0, signature: baselineSignature)
+        await waitUntil { self.fileListSignatureScripts(evaluator).count == 2 }
+        #expect(!fileListSignatureScripts(evaluator)[1].contains("liveRefreshError"))
+
+        // An exact repeat of the now-acted-on (signature, error) pair must go quiet.
+        await gateway.triggerFileListSignatureFrame(at: 0, signature: baselineSignature)
+        await settle()
+        #expect(fileListSignatureScripts(evaluator).count == 2, "a repeat of the identical (signature, error) pair must not forward again")
+    }
+
+    // MARK: - retryLiveRefresh dispatch (persistent notice's Retry action)
+
+    @Test func retryLiveRefreshResolvesWithAnAcknowledgementWithoutWaitingForAFrame() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.dispatch(.init(id: "retry-1", method: "retryLiveRefresh", params: [:]))
+
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains("retry-1") } }
+        #expect(evaluator.evaluatedScripts.contains(#"window.__spacesBridge.resolve("retry-1", {"ok":true});"#))
+    }
+
+    /// The diff half of `performRetryLiveRefresh`: it must reissue `resubscribeDiffSignature` with
+    /// the exact `(refName, lastCommit)` already subscribed, forcing past that method's own
+    /// same-scope no-op guard so the daemon actually sees a brand-new subscription (which is what
+    /// makes it retry a failed watch (see `addWorkspaceDiffSignatureSubscriber`'s doc comment).
+    @Test func retryLiveRefreshStopsAndReopensTheDiffStreamForTheSameScope() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.dispatch(diffRequest(id: "req-1", scopeKind: "ref", refName: "feature-branch"))
+        await gateway.waitForDiffCallCount(1)
+        await gateway.completeDiffCall(
+            at: 0, result: SpacesDeviceWorkspaceDiffManifestChunkResult(manifestID: "test-manifest", scopeSignature: "sig-1", files: []))
+        await gateway.waitForSubscribeCallCount(1)
+
+        content.dispatch(.init(id: "retry-1", method: "retryLiveRefresh", params: [:]))
+
+        await gateway.waitForSubscribeCallCount(2)
+        #expect(await gateway.subscribedRefName(at: 1) == "feature-branch", "retry must reopen the same scope it was already subscribed to")
+        #expect(await gateway.subscribedLastCommit(at: 1) == false)
+
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains("retry-1") } }
+    }
+
+    /// A pane that has never subscribed a diff scope (no `workspaceDiffManifestChunk` call has landed
+    /// yet, or the workspace isn't a git repository so the page never asks) has nothing to reopen: the
+    /// diff half of retry must be a no-op rather than opening a fresh subscription out of nowhere.
+    @Test func retryLiveRefreshWithNoActiveDiffSubscriptionDoesNotOpenOne() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.dispatch(.init(id: "retry-1", method: "retryLiveRefresh", params: [:]))
+
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains("retry-1") } }
+        #expect(await gateway.subscribeCallCount() == 0, "nothing has ever subscribed a diff scope in this pane life, so retry has nothing to reopen")
+    }
+
+    /// Mirrors `retryLiveRefreshStopsAndReopensTheDiffStreamForTheSameScope` for the file-list half:
+    /// it must stop the existing stream and open a fresh one via `ensureFileListSignatureSubscription`.
+    @Test func retryLiveRefreshStopsAndReopensTheFileListStream() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        await gateway.setFileListResult(.success(.init(paths: ["a.ts"], truncated: false)))
+        content.dispatch(.init(id: "list-1", method: "workspaceFileList", params: [:]))
+        await gateway.waitForFileListSignatureSubscribeCount(1)
+
+        content.dispatch(.init(id: "retry-1", method: "retryLiveRefresh", params: [:]))
+
+        await gateway.waitForFileListSignatureSubscribeCount(2)
+        #expect(await gateway.subscribedFileListSignatureCallCount() == 2, "retry must tear down and reopen a fresh file-list subscription")
+
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains("retry-1") } }
+    }
+
+    /// Regression: a file-list subscribe attempt already in flight when Retry fires (its own async
+    /// subscribe call still awaiting the daemon) leaves `fileListSignatureStream` nil with
+    /// `fileListSignatureSubscriptionAttemptGeneration` set. Retry must invalidate that attempt (not
+    /// just find the stream already nil and treat the in-flight one as "already attempting"), open a
+    /// genuinely fresh subscribe call, and discard the stale attempt's result whenever it eventually
+    /// resolves, rather than letting the very connection Retry was meant to replace win the race and
+    /// get installed. Mirrors the diff-signature stale-attempt test's technique (`completeHeldSubscribeCall`
+    /// / `stopCount`) for the file-list stream.
+    @Test func retryLiveRefreshDiscardsAFileListSubscribeAttemptAlreadyInFlightAndOpensAFreshOne() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        // Hold the initial subscribe attempt open so it's still outstanding when Retry fires.
+        await gateway.holdNextFileListSignatureSubscribeAttempts(1)
+        await gateway.setFileListResult(.success(.init(paths: ["a.ts"], truncated: false)))
+        content.dispatch(.init(id: "list-1", method: "workspaceFileList", params: [:]))
+        await gateway.waitForFileListSignatureSubscribeAttemptCount(1)  // the initial attempt has arrived and is now held
+
+        // Retry fires while that attempt is still outstanding. It must issue a genuinely fresh subscribe
+        // call rather than finding the stream nil, reading the in-flight attempt as "already attempting",
+        // and only scheduling a delayed reconnect.
+        content.dispatch(.init(id: "retry-1", method: "retryLiveRefresh", params: [:]))
+        await gateway.waitForFileListSignatureSubscribeAttemptCount(2)
+        await gateway.waitForFileListSignatureSubscribeCount(1)  // the retry's own (unheld) attempt succeeded
+
+        // The original held attempt finally resolves, LAST, and for the exact same subscription this
+        // pane already has active from the retry. It must be discarded, not installed.
+        let staleHandle = await gateway.completeHeldFileListSignatureSubscribeCall(at: 0)
+        await settle()
+
+        #expect(staleHandle.stopCount == 1, "a stale in-flight attempt superseded by Retry must be stopped, not installed")
+    }
+
+    /// Regression: a retry that doesn't fix anything (the watcher fails again for the exact same
+    /// reason) must still forward the reopened diff stream's connect-time frame, not suppress it as a
+    /// repeat of the pre-retry (signature, error) pair: otherwise the page's "Retrying…" state, which
+    /// only a forwarded frame clears, would be stuck forever.
+    @Test func retryLiveRefreshForcesTheNextDiffFrameThroughEvenIfItRepeatsTheSameSignatureAndError() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+
+        content.dispatch(diffRequest(id: "req-1", scopeKind: "uncommitted"))
+        await gateway.waitForDiffCallCount(1)
+        await gateway.completeDiffCall(
+            at: 0, result: SpacesDeviceWorkspaceDiffManifestChunkResult(manifestID: "test-manifest", scopeSignature: "sig-1", files: []))
+        await gateway.waitForSubscribeCallCount(1)
+
+        await gateway.triggerFrame(at: 0, scopeSignature: "sig-1", liveRefreshError: "watcher failed: too many open files")
+        await waitUntil { !self.diffSignatureScripts(evaluator).isEmpty }
+        #expect(diffSignatureScripts(evaluator).count == 1)
+
+        content.dispatch(.init(id: "retry-1", method: "retryLiveRefresh", params: [:]))
+        await gateway.waitForSubscribeCallCount(2)
+
+        // The reopened stream's connect-time frame repeats the exact (signature, error) pair already
+        // recorded as acted on. It must still forward.
+        await gateway.triggerFrame(at: 1, scopeSignature: "sig-1", liveRefreshError: "watcher failed: too many open files")
+        await waitUntil { self.diffSignatureScripts(evaluator).count == 2 }
+        #expect(diffSignatureScripts(evaluator)[1].contains("watcher failed: too many open files"))
+    }
+
+    /// Mirrors `retryLiveRefreshForcesTheNextDiffFrameThroughEvenIfItRepeatsTheSameSignatureAndError`
+    /// for the file-list stream.
+    @Test func retryLiveRefreshForcesTheNextFileListFrameThroughEvenIfItRepeatsTheSameSignatureAndError() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+
+        let baseline = SpacesDeviceWorkspaceFileListResult(paths: ["a.ts"], truncated: false)
+        let baselineSignature = SpacesDeviceWorkspaceFileListSignature.value(for: baseline)
+
+        await gateway.setFileListResult(.success(baseline))
+        content.dispatch(.init(id: "list-1", method: "workspaceFileList", params: [:]))
+        await gateway.waitForFileListSignatureSubscribeCount(1)
+
+        await gateway.triggerFileListSignatureFrame(at: 0, signature: baselineSignature, liveRefreshError: "watcher failed: ENOSPC")
+        await waitUntil { !self.fileListSignatureScripts(evaluator).isEmpty }
+        #expect(fileListSignatureScripts(evaluator).count == 1)
+
+        content.dispatch(.init(id: "retry-1", method: "retryLiveRefresh", params: [:]))
+        await gateway.waitForFileListSignatureSubscribeCount(2)
+
+        // The reopened stream's connect-time frame repeats the exact (signature, error) pair already
+        // recorded as acted on. It must still forward.
+        await gateway.triggerFileListSignatureFrame(at: 1, signature: baselineSignature, liveRefreshError: "watcher failed: ENOSPC")
+        await waitUntil { self.fileListSignatureScripts(evaluator).count == 2 }
+        #expect(fileListSignatureScripts(evaluator)[1].contains("watcher failed: ENOSPC"))
     }
 
     // MARK: - workspaceRefList dispatch (Compare dialog's ref search)

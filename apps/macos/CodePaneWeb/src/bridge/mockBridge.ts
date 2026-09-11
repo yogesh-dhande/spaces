@@ -3,6 +3,7 @@ import {
   FIXTURE_ALL_PATHS,
   FIXTURE_FILE_CONTENTS,
   FIXTURE_INIT_PAYLOAD,
+  FIXTURE_LIVE_REFRESH_ERROR,
   FIXTURE_REF_LIST,
   FIXTURE_SUBMODULES,
   fixtureDiffFiles,
@@ -95,6 +96,41 @@ export class MockSpacesBridge implements SpacesBridge {
       listener({ scopeSignature });
     }
     window.dispatchEvent(new CustomEvent(DIFF_SIGNATURE_EVENT, { detail: { scopeSignature } }));
+  }
+
+  private liveRefreshErrorActive = false;
+
+  /** Dev-harness-only control, not part of `SpacesBridge`: toggles a simulated file-watcher failure
+   *  on both signature streams, so the live-refresh persistent notice (`liveRefreshNotice.ts`) and
+   *  its Retry action are exercisable without a real daemon. Retry itself is the real
+   *  `retryLiveRefresh` RPC below, which always clears the error and pushes a clean frame on both
+   *  streams: toggling this control again after a successful Retry is how the harness re-arms the
+   *  failure for another run. */
+  simulateLiveRefreshError(): void {
+    this.liveRefreshErrorActive = !this.liveRefreshErrorActive;
+    const liveRefreshError = this.liveRefreshErrorActive ? FIXTURE_LIVE_REFRESH_ERROR : undefined;
+    this.version += 1;
+    const scopeSignature = `fixture-v${this.version}`;
+    for (const listener of this.listeners) listener({ scopeSignature, liveRefreshError });
+    window.dispatchEvent(new CustomEvent(DIFF_SIGNATURE_EVENT, { detail: { scopeSignature, liveRefreshError } }));
+    const fileListSignature = `fixture-file-list-v${this.version}`;
+    for (const listener of this.fileListSignatureListeners) listener({ fileListSignature, liveRefreshError });
+    window.dispatchEvent(new CustomEvent(FILE_LIST_SIGNATURE_EVENT, { detail: { fileListSignature, liveRefreshError } }));
+  }
+
+  /** Real `SpacesBridge` RPC, not a dev-harness-only control: demonstrates recovery by clearing the
+   *  simulated watcher failure and pushing a clean frame on both signature streams, mirroring the
+   *  host reopening both streams and the daemon's watcher retry succeeding. */
+  async retryLiveRefresh(): Promise<void> {
+    this.liveRefreshErrorActive = false;
+    this.version += 1;
+    const scopeSignature = `fixture-v${this.version}`;
+    for (const listener of this.listeners) listener({ scopeSignature });
+    window.dispatchEvent(new CustomEvent(DIFF_SIGNATURE_EVENT, { detail: { scopeSignature } }));
+    const fileListSignature = `fixture-file-list-v${this.version}`;
+    for (const listener of this.fileListSignatureListeners) listener({ fileListSignature });
+    window.dispatchEvent(new CustomEvent(FILE_LIST_SIGNATURE_EVENT, { detail: { fileListSignature } }));
+    await delay(undefined);
   }
 
   /** Dev-harness-only control, not part of `SpacesBridge`: cycles the running-agent set (two agents

@@ -91,6 +91,7 @@ function makeBridge(): SpacesBridge & {
     notifyReady: () => {},
     startWorkspaceCommand: notUsed,
     resumeWorkspaceCommandTracking: notUsed,
+    retryLiveRefresh: notUsed,
     async reviewCommentList() {
       if (bridge.failNextList) {
         const err = bridge.failNextList;
