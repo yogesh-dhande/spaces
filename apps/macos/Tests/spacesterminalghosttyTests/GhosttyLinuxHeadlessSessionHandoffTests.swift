@@ -146,8 +146,7 @@
 
         private static func remoteOwnerClient(id: String) -> TerminalClient {
             TerminalClient(
-                id: id, kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
-                connectedAt: "2026-07-12T00:00:00Z")
+                id: id, kind: .remote, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-07-12T00:00:00Z")
         }
 
         // MARK: - Engine-isolated helpers (call from inside a run/runSynchronously bridge)

@@ -81,15 +81,14 @@ private final class NotificationObserverBag: @unchecked Sendable {
     /// The mode this pane wants presented, regardless of whether it is seeking ownership.
     var preferredAttachmentMode: TerminalAttachmentMode {
         get { ownershipIntent.presentedMode }
-        set {
-            ownershipIntent = ownerAttachmentRequested ? .seekingOwner(presentedMode: newValue) : .contentWithViewer(presentedMode: newValue)
-        }
+        set { ownershipIntent = ownerAttachmentRequested ? .seekingOwner(presentedMode: newValue) : .contentWithViewer(presentedMode: newValue) }
     }
     /// Whether this pane wants its client to hold the session's owner attachment.
     private var ownerAttachmentRequested: Bool {
         get { if case .seekingOwner = ownershipIntent { return true } else { return false } }
         set {
-            ownershipIntent = newValue ? .seekingOwner(presentedMode: preferredAttachmentMode) : .contentWithViewer(presentedMode: preferredAttachmentMode)
+            ownershipIntent =
+                newValue ? .seekingOwner(presentedMode: preferredAttachmentMode) : .contentWithViewer(presentedMode: preferredAttachmentMode)
         }
     }
     let titleLabel = NSTextField(labelWithString: "")
@@ -102,11 +101,23 @@ private final class NotificationObserverBag: @unchecked Sendable {
     let interruptButton = NSButton(title: "Ctrl+C", target: nil, action: nil)
     let newlineButton = NSButton(title: "Enter", target: nil, action: nil)
     let takeoverButton = NSButton(title: "Take Over", target: nil, action: nil)
+    /// Bold headline of the State-B overlay: "Owned by <device>", or "No device owns this terminal" when
+    /// the session is ownerless (see `currentGhosttyTakeoverStatusText`).
+    let takeoverTitleLabel = NSTextField(labelWithString: "")
+    /// Secondary line of the State-B overlay, e.g. "Take over to view and type here."
     let takeoverMessageLabel = NSTextField(labelWithString: "")
+    /// Lock glyph atop the State-B overlay, signaling this pane is read-only while another client owns
+    /// the session.
+    let takeoverIconView = NSImageView()
     let inputRowStackView = NSStackView()
     let actionButtonStackView = NSStackView()
     let takeoverRowStackView = NSStackView()
     let takeoverContainerView = NSView()
+    /// Light full-bleed scrim behind `takeoverContainerView`. It dims the pane body underneath (the
+    /// plain-text output view on the terminal background in this state) rather than replacing it with
+    /// an opaque screen; see `resolveVisibleRenderer`'s doc comment for why this overlay means exactly
+    /// one thing: another client owns the session, so its live output is not mirrored here.
+    let takeoverScrimView = TakeoverScrimView()
     let outputView = NSTextView(frame: NSRect(x: 0, y: 0, width: 880, height: 400))
     let outputScrollView = NSScrollView()
     let terminalContainer = NSView()
@@ -273,7 +284,12 @@ private final class NotificationObserverBag: @unchecked Sendable {
     public init(
         sessionID: String, paths: TerminalSessionPaths, stateProvider: any TerminalSessionStateProviding,
         preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true, reusableOwnerClientID: String? = nil,
-        sendInputAction: (@Sendable (String, Bool) throws -> TerminalControlResponse)? = nil,
+        // Whether this pane's session lives on this Mac's own daemon (`.local`) or a different paired
+        // device's (`.remote`). Purely a locality label — see `TerminalClientKind` — defaulted to `.local`
+        // because most callers (every test, and the ad hoc built-in terminal launcher) open a pane onto
+        // this device's own daemon; `TerminalPaneService` is the one production caller that resolves the
+        // session's actual owning device and passes `.remote` for a pane onto a different one.
+        clientKind: TerminalClientKind = .local, sendInputAction: (@Sendable (String, Bool) throws -> TerminalControlResponse)? = nil,
         sendKeyAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         pasteImageAction: (@MainActor (TerminalPasteboardImage) async throws -> TerminalControlResponse)? = nil,
         pasteboardImageReadAction: (@MainActor () -> TerminalPasteboardImageReadResult)? = nil,
@@ -300,14 +316,17 @@ private final class NotificationObserverBag: @unchecked Sendable {
         let now = TerminalSessionTimestamp.string(from: Date())
         // Reuse the owner client id this device stored on its last successful owner attach/takeover
         // for this session, when the caller supplies one; otherwise mint a fresh id. A relaunched
-        // window (e.g. after an app upgrade) then presents the SAME id to the daemon, so its
-        // orphaned `localWindow` owner attachment — which never expires — matches and the pane
-        // silently reclaims ownership instead of attaching as a viewer behind the manual takeover UI.
+        // window (e.g. after an app upgrade) then presents the SAME id to the daemon, so as long as the
+        // daemon still shows that id's owner attachment as live — its lease has not lapsed past
+        // `TerminalSessionPersistence.remoteClientLeaseInterval` — the pane silently reclaims ownership
+        // instead of attaching as a viewer behind the manual takeover UI. A lapsed lease means the row
+        // already expired (or a daemon start/handoff already cleared it), in which case this attach is
+        // an ordinary fresh attach and behaves exactly as attaching with a brand-new id would.
         // Safety: the stored UUID exists only on this Mac, so it can only ever match THIS device's own
         // prior attachment. If another device owns the session, the ids differ and the pane attaches
         // as a viewer with the takeover UI unchanged.
         client = TerminalClient(
-            id: reusableOwnerClientID ?? UUID().uuidString, kind: .localWindow,
+            id: reusableOwnerClientID ?? UUID().uuidString, kind: clientKind,
             identity: TerminalClientIdentity(label: "Spaces window", hostName: Host.current().name, deviceName: Host.current().localizedName),
             connectedAt: now)
         self.sendInputAction =
@@ -397,7 +416,8 @@ private final class NotificationObserverBag: @unchecked Sendable {
             // run). The outstanding request stays represented, exactly as `refreshNow`'s
             // confirmed-attachment sync does — jumping to `.attached` here would disagree with
             // `pendingAttach` until that completion lands.
-            clientAttachmentLifecycle = pendingAttach.map { .attaching(id: $0.id, requestedMode: $0.mode, priorMode: .owner) } ?? .attached(mode: .owner)
+            clientAttachmentLifecycle =
+                pendingAttach.map { .attaching(id: $0.id, requestedMode: $0.mode, priorMode: .owner) } ?? .attached(mode: .owner)
             lastObservedAttachmentMode = .owner
             ensureGhosttyHostAttached(reason: "request_owner_mode")
             refreshNow()
@@ -530,7 +550,8 @@ private final class NotificationObserverBag: @unchecked Sendable {
             // before this runs, so without it the lifecycle would read `.detached` despite the pane
             // holding the owner surface.
             if defersInitialOwnerClientAttach {
-                clientAttachmentLifecycle = pendingAttach.map { .attaching(id: $0.id, requestedMode: $0.mode, priorMode: .owner) } ?? .attached(mode: .owner)
+                clientAttachmentLifecycle =
+                    pendingAttach.map { .attaching(id: $0.id, requestedMode: $0.mode, priorMode: .owner) } ?? .attached(mode: .owner)
             }
             // The pane's own record of its attachment stays the requested mode even while the host is
             // held at viewer: it is what the attachment-transition rules in `refreshNow` compare a
@@ -543,9 +564,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
             logFocusMetric(
                 "terminal_window_attach_owner_surface", startedAt: startedAt, requestID: requestID,
                 detail: "reason=\(reason) mode=\(attachmentMode.rawValue)")
-        } catch {
-            updateInputStatus(message: String(describing: error), isError: true)
-        }
+        } catch { updateInputStatus(message: String(describing: error), isError: true) }
     }
 
     private func ensureGhosttyFinalRenderSurfaceAttached(reason: String) {
@@ -566,9 +585,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
             logFocusMetric(
                 "terminal_window_attach_final_surface", startedAt: startedAt, requestID: nil,
                 detail: "reason=\(reason) mode=\(TerminalAttachmentMode.viewer.rawValue)")
-        } catch {
-            updateOutputPlainText("Final terminal render unavailable.")
-        }
+        } catch { updateOutputPlainText("Final terminal render unavailable.") }
     }
 
     private func releaseGhosttySurfaceIfNeeded() {
@@ -766,10 +783,29 @@ private final class NotificationObserverBag: @unchecked Sendable {
             let viewportState = captureOutputViewportState()
             switch visibleRenderer {
             case .ghosttyTakeoverStatus:
-                let statusMessage = currentGhosttyStatusMessage(isOwner: isOwner, runtimeState: runtimeState, ownerClient: currentOwnerClient)
-                takeoverMessageLabel.stringValue = statusMessage
-                updateOutputPlainText(statusMessage)
-                restoreOutputViewportState(viewportState)
+                let statusText = currentGhosttyTakeoverStatusText(runtimeState: runtimeState, ownerClient: currentOwnerClient)
+                takeoverTitleLabel.stringValue = statusText.title
+                takeoverMessageLabel.stringValue = statusText.subtitle
+                // The overlay itself is hidden while this pane is mid-request for ownership (see
+                // `isWaitingForRequestedOwnership`), so that moment gets its own plain body-text line
+                // instead, shown in the same body position the overlay would otherwise dim. Before the
+                // session has even started there is no other owner to be waiting on, so that moment
+                // keeps showing the overlay's own "Preparing terminal…" text rather than the generic
+                // ownership-wait line.
+                if isWaitingForRequestedOwnership(isOwner: isOwner) {
+                    let bodyText =
+                        runtimeState?.state == .starting
+                        ? [statusText.title, statusText.subtitle].filter { !$0.isEmpty }.joined(separator: "\n") : "Waiting for terminal ownership…"
+                    updateOutputPlainText(bodyText)
+                    restoreOutputViewportState(viewportState)
+                } else {
+                    // No viewer mirror exists for another client's session: clear whatever text the
+                    // body last held (e.g. a stale "Waiting for terminal ownership…" line, or leftover
+                    // output from before this pane lost ownership) so the scrim dims only the terminal
+                    // background, not accidental leftover text.
+                    updateOutputPlainText("")
+                    restoreOutputViewportState(viewportState)
+                }
                 completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "takeover_status")
             case .ghosttyEndedFinalRender:
                 ensureGhosttyFinalRenderSurfaceAttached(reason: "final_render")
@@ -972,14 +1008,23 @@ private final class NotificationObserverBag: @unchecked Sendable {
         ghosttyRendererHost?.setFocused(true, for: client.id)
     }
 
+    /// Resolves which renderer the pane shows. An interactive session this pane owns always resolves to
+    /// `.ghosttyOwner`, whether or not a frame has actually landed on its mirror surface yet
+    /// (`hasRenderableSurface()`): the owner-with-no-frame-yet case used to fall through to
+    /// `.ghosttyTakeoverStatus` here, sharing one status screen with the unrelated "another client owns
+    /// this session" case below and leaving both indistinguishable from a plain blank pane. That case is
+    /// now covered by the connection banner instead (`stateProvider.connectionStageTracker`,
+    /// `TerminalPaneBannerNotice`) — a normal missing-first-frame moment shows nothing extra and clears
+    /// itself the instant a frame lands, and a frame that is missing because a subscription actually
+    /// dropped shows "Reconnecting…" once the grace elapses. `.ghosttyTakeoverStatus` is left to mean
+    /// exactly one thing: this pane is attached as a viewer because another client owns the session.
     private func resolveVisibleRenderer(isOwner: Bool?) -> VisibleRenderer {
         guard case .ghosttyEmbedded = rendererMode else { return .textView }
         if isExplicitlyNonInteractiveRuntimeState(lastObservedRuntimeState) {
             return hasGhosttyFinalRenderStateAvailable() ? .ghosttyEndedFinalRender : .unavailable
         }
         if isOwner == true {
-            if ghosttyRendererHost?.hasRenderableSurface() == true { return .ghosttyOwner }
-            if isInteractiveRuntimeState(lastObservedRuntimeState) { return .ghosttyTakeoverStatus }
+            if isInteractiveRuntimeState(lastObservedRuntimeState) { return .ghosttyOwner }
             return hasGhosttyFinalRenderStateAvailable() ? .ghosttyEndedFinalRender : .unavailable
         }
         return .ghosttyTakeoverStatus
@@ -1112,33 +1157,35 @@ private final class NotificationObserverBag: @unchecked Sendable {
 
     private var hasRenderableGhosttySurface: Bool { ghosttyRendererHost?.hasRenderableSurface() == true }
 
-    /// True when the pane is already showing the live Ghostty mirror: it holds the owner surface
-    /// and that surface has a frame. Every other renderer state is either presenting something
-    /// derived elsewhere (the plain-text tail, the frozen final render) or waiting for a first
-    /// frame it cannot see until the pane re-resolves its renderer.
-    private var isPresentingLiveGhosttyMirror: Bool { visibleRenderer == .ghosttyOwner && hasRenderableGhosttySurface }
-
     /// Whether a screen-content payload can change what this pane presents, and so whether it is
     /// worth a refresh. Screen content arrives at interaction frequency, and a refresh re-resolves
     /// attachment, ownership, and the renderer and re-derives every title in the panel, so a pane
     /// that would present exactly what it already presents must not pay for one.
     ///
-    /// - The live mirror has painted the payload itself.
+    /// - The live mirror has already painted the payload itself once its surface was available AS OF
+    ///   THE LAST REFRESH (`surfaceAvailabilityAtLastPresentation`, not a fresh read of the host):
+    ///   reading the host live here instead would treat a surface that just became renderable as
+    ///   already painted, when this pane has not yet run a refresh to actually attach and present it.
     /// - The takeover status screen presents no session content at all: a mostly blank pane behind
-    ///   a Take Over button, shown to a viewer watching a session another client owns and to an
-    ///   owner whose first frame has not landed. Its message is derived from runtime state,
-    ///   ownership, and metadata, each broadcast under its own state reason, so the only change a
-    ///   screen-content payload can make to it is the surface becoming renderable — which promotes
-    ///   the pane to the mirror. While surface availability is unchanged there is nothing to
-    ///   re-present, however chatty the session is.
+    ///   a Take Over button, shown to a viewer watching a session another client owns. Its message is
+    ///   derived from runtime state, ownership, and metadata, each broadcast under its own state
+    ///   reason, so the only change a screen-content payload can make to it is the surface becoming
+    ///   renderable — which promotes the pane to the mirror. While surface availability is unchanged
+    ///   there is nothing to re-present, however chatty the session is.
+    /// - An owner pane with no renderable surface yet (`.ghosttyOwner` with a last-presented surface
+    ///   of `false`) is in the exact same position: it is waiting on the same surface-availability
+    ///   flip, so the check below applies to it too instead of refreshing on every payload while it
+    ///   waits.
     /// - Every other renderer re-derives what it presents from the session host on each refresh, so
     ///   it keeps refreshing: the ended session's final render refills the pane's copy buffer from
     ///   the host snapshot as an ended-scrollback replay scrolls it, and the "render unavailable"
     ///   and plain-text screens are waiting for a final render that reaches them as a host snapshot
     ///   without the pane ever holding a renderable surface of its own.
     private var screenContentCanChangePresentation: Bool {
-        if isPresentingLiveGhosttyMirror { return false }
-        if visibleRenderer == .ghosttyTakeoverStatus { return hasRenderableGhosttySurface != surfaceAvailabilityAtLastPresentation }
+        if visibleRenderer == .ghosttyTakeoverStatus || visibleRenderer == .ghosttyOwner {
+            if surfaceAvailabilityAtLastPresentation == true { return false }
+            return hasRenderableGhosttySurface != surfaceAvailabilityAtLastPresentation
+        }
         return true
     }
 

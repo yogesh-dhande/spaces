@@ -98,8 +98,7 @@
         /// state policy gates screen frames on an attached local/remote owner).
         @TerminalEngineActor private static func attachRemoteOwner(to core: GhosttyEmbeddedSessionCore, id: String) {
             let client = TerminalClient(
-                id: id, kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
-                connectedAt: "2026-07-20T00:00:00Z")
+                id: id, kind: .remote, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-07-20T00:00:00Z")
             let response = core.handleControlRequest(TerminalControlRequest(command: "attach", client: client, attachmentMode: .owner))
             #expect(response.ok, "attaching a remote owner must succeed: \(response.message)")
         }

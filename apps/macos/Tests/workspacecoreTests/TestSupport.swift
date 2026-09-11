@@ -31,9 +31,7 @@ private final class TemporaryDirectoryTracker: @unchecked Sendable {
         directories.append(url)
         guard !registered else { return }
         registered = true
-        atexit {
-            TemporaryDirectoryTracker.shared.sweep()
-        }
+        atexit { TemporaryDirectoryTracker.shared.sweep() }
     }
 
     private func sweep() {
@@ -41,9 +39,7 @@ private final class TemporaryDirectoryTracker: @unchecked Sendable {
         let toRemove = directories
         directories = []
         lock.unlock()
-        for url in toRemove {
-            try? FileManager.default.removeItem(at: url)
-        }
+        for url in toRemove { try? FileManager.default.removeItem(at: url) }
     }
 }
 
@@ -204,7 +200,7 @@ func markBuiltInSessionLive(sessionID: String, attachedAt: String = "2026-06-06T
     try paths.ensureDirectories()
     _ = FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
     let client = TerminalClient(
-        id: "owner-\(sessionID)", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+        id: "owner-\(sessionID)", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
         connectedAt: attachedAt)
     let attachment = TerminalAttachment(sessionID: sessionID, clientID: client.id, mode: .owner, attachedAt: attachedAt)
     try TerminalSessionPersistence.writeAttachmentSnapshot(

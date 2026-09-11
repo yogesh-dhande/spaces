@@ -364,6 +364,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private var hasSentStopDetach: Bool { runState == .stopped(detachSent: true) }
     private var runState = TerminalViewerRunState.running
     private var hasAttachedToSession = false
+    /// Armed by `connect()`, consumed by `applyReducedState`: see `TerminalReattachCheckAfterReconnect`'s
+    /// doc comment for why the reattach decision is settled there rather than fixed to the bootstrap read.
+    private var reattachCheckAfterReconnect: TerminalReattachCheckAfterReconnect?
+    /// Set exactly when `applyReducedState` starts a `reattachAfterReconnect` call for the check it just
+    /// consumed, and cleared once that call is over: the "in flight" marker `attemptAutomaticTakeoverIfNeeded`
+    /// reads, kept separate from `reattachCheckAfterReconnect` itself so a stream payload landing while the
+    /// attach is still in flight (this session's stream delivers hundreds a second under a streaming agent)
+    /// finds nothing left to consume and starts nothing a second time.
+    private var reattachAfterReconnectTask: Task<Void, Never>?
     private var viewerAttachmentLifecycle: UInt64 = 0
     /// `viewerAttachmentLifecycle` at the moment `latestState` last received a payload that actually
     /// contributed a frame (`reduction.frameToApply != nil`), not every `latestState = reduction.storedPayload`
@@ -613,7 +622,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     private static func makeRemoteClient(settings: SpacesMobileConnectionSettings) -> TerminalClient {
         TerminalClient(
-            kind: .remoteViewer,
+            kind: .remote,
             identity: TerminalClientIdentity(
                 label: UIDevice.current.name, hostName: nil, deviceName: UIDevice.current.name, networkAddress: settings.primaryHost),
             connectedAt: ISO8601DateFormatter().string(from: Date()))
@@ -1155,6 +1164,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         cancelAutomaticTakeover()
         takeoverAttemptState = .none
         hasAttachedToSession = false
+        // The lifecycle bump above already makes a stale check's lifecycle comparison fail on its own,
+        // but clearing it here keeps no armed check outliving the run it was armed for even in principle.
+        reattachCheckAfterReconnect = nil
+        // Cancelling this does not cancel the attach operation `reattachAfterReconnect` may be awaiting
+        // (`attachViewerForCurrentLifecycle` joins a shared, independently-owned `Task` another lifecycle
+        // can also be awaiting, and cancelling this wrapper does not propagate to it), so this only stops
+        // treating a reattach as in flight; it never tears down an attach this stop's own detach depends on.
+        reattachAfterReconnectTask?.cancel()
+        reattachAfterReconnectTask = nil
         hasAttemptedAutomaticTakeover = false
         sceneState = isSceneActive ? .active(resume: .none) : .backgrounded(resume: .none)
         hasConfirmedOwnerInputReadiness = false
@@ -2560,6 +2578,20 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
 
         guard let attempt = connectAttempts[reconnectAttempt] else { return }
+        // Arms this connect's reattach check with what this client held going into it, before the
+        // pre-subscribe attach below can change it: see `TerminalReattachCheckAfterReconnect`'s doc
+        // comment for why the check is settled at the first snapshot `applyReducedState` applies, not
+        // fixed here to whatever the bootstrap read below answers. A first connect always has
+        // `hasAttachedToSession == false` here (its only attach is the pre-subscribe one, via
+        // `shouldAttachBeforeSubscribing`), so this arms nothing for it. `submittedStateCount` is read
+        // here, before this connect's own bootstrap read or subscribe submits anything, so it names the
+        // last submission the connection being replaced could possibly own; see the field's own doc
+        // comment for why that boundary, not `lifecycle`/`clientID`, is what catches a snapshot that
+        // connection submitted just before disconnecting and that lands only after this arm.
+        reattachCheckAfterReconnect =
+            hasAttachedToSession
+            ? TerminalReattachCheckAfterReconnect(
+                wasOwner: isOwner, lifecycle: lifecycle, clientID: clientID, submissionBoundary: submittedStateCount) : nil
         let reconnectSilently = shouldReconnectSilently
         // Anchors this attempt's timing events. They live on the attempt, not on the model: a losing
         // stage 2 dial must report its own numbers when it ends, not the winner's.
@@ -2737,6 +2769,77 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard viewerAttachmentLifecycle == operation.lifecycle, !isStopping, remoteClient.id == operation.clientID else { return }
         hasAttachedToSession = true
         lastAppearanceSentToSession = operation.appearance
+    }
+
+    /// Consumes a reattach check `applyReducedState` found still due: this client held an attachment
+    /// going into the connect the check was armed for, and the settling snapshot no longer names it. The
+    /// daemon publishes this client's attachment (if it has one) in every snapshot it answers, so being
+    /// told, authoritatively, that the attachment is gone is what a daemon restart looks like (it wipes
+    /// every `terminal_clients`/`terminal_attachments` row), and a lease expiry during an outage that
+    /// outlived it reads the same way. This mirrors the Mac pane's `refreshNow`
+    /// (`TerminalSessionPaneViewController.swift`, `attachmentModeToRequest`), which re-attaches under the
+    /// identical condition.
+    ///
+    /// A former owner is handed back its one automatic takeover so it reclaims the session it owned,
+    /// restoring pre-restart ownership instead of leaving the session ownerless until some other client
+    /// takes over; a former viewer simply becomes an attached viewer again, matching what it was. The Mac
+    /// pane does the equivalent by re-attaching directly as owner; this client re-attaches as viewer first
+    /// and then takes over, since `attachViewerForCurrentLifecycle` has no owner mode.
+    ///
+    /// The reclaim is gated on `activeOwnerClientID == nil`: a former owner reclaims only a session the
+    /// settling snapshot still shows as ownerless (the daemon-restart rule in docs/spec.md). A session
+    /// another client took over while this client was away comes back as a viewer of that owner, exactly
+    /// like a former viewer, and the ordinary Take Over affordance is how the user gets it back from
+    /// there; `attemptAutomaticTakeoverIfNeeded` itself has no such guard, so this check is what keeps a
+    /// returning owner from displacing a newer, legitimate one. The residual is accepted: the check reads
+    /// the settling snapshot, so another client attaching as owner in the brief window between that
+    /// snapshot and this takeover is preempted, the same one-round-trip race the Mac pane's attach path
+    /// documents (`attachLocalClientIfNeeded`), and the attachment broadcast that follows shows both
+    /// clients the true state.
+    ///
+    /// A failed re-attach is handled exactly like a failed pre-subscribe attach: retiring the live
+    /// stream's attempt and handing the error to `handleConnectError`, so it schedules the redial whose
+    /// own pre-subscribe attach (`shouldAttachBeforeSubscribing`) is the retry. The stream this reattach's
+    /// connect subscribed is deliberately not kept: a subscriber with no attachment looks alive, since
+    /// frames keep arriving, while every input and takeover it sends is refused, and a fresh dial costs
+    /// less than leaving that state in place with nothing scheduled to end it. The accepted residual: a
+    /// former owner recovering through that redial captures no prior attachment (the redial's own
+    /// `connect()` finds `hasAttachedToSession` false and arms no check for itself), so it comes back as a
+    /// viewer of an ownerless session; the Take Over affordance is how it reclaims it from there.
+    ///
+    /// `applyReducedState` clears `reattachCheckAfterReconnect` the moment it reads it, before ever
+    /// spawning this call, so this function tracks its own "in flight" state through the separate
+    /// `reattachAfterReconnectTask` instead: `applyReducedState`'s own consume site checks that field's
+    /// nil-ness before starting a second call while one is still running, and `attemptAutomaticTakeoverIfNeeded`
+    /// reads the same field as "a reattach is in flight" and refuses to fire while it is, which is what
+    /// keeps the pre-existing "claim an ownerless session" mechanism from racing this call's own attach
+    /// to the daemon. The `defer` below is what clears it, so every exit path (success, stale, and
+    /// failure) is covered by the one line rather than repeated at each return.
+    private func reattachAfterReconnect(_ check: TerminalReattachCheckAfterReconnect) async {
+        defer { reattachAfterReconnectTask = nil }
+        do {
+            try await attachViewerForCurrentLifecycle()
+            guard isCurrentStateRefresh(lifecycle: check.lifecycle, clientID: check.clientID) else { return }
+            // Cleared before the explicit re-arm below, which calls `attemptAutomaticTakeoverIfNeeded`
+            // directly and needs its guard on this field already open; the `defer` above re-clears it
+            // harmlessly on the way out regardless of which branch below runs.
+            reattachAfterReconnectTask = nil
+            trace("connect_reattach_success owner_before=\(check.wasOwner ? 1 : 0)")
+            if check.wasOwner, activeOwnerClientID == nil {
+                hasAttemptedAutomaticTakeover = false
+                attemptAutomaticTakeoverIfNeeded()
+            }
+        } catch {
+            guard isCurrentStateRefresh(lifecycle: check.lifecycle, clientID: check.clientID) else { return }
+            trace("connect_reattach_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
+            // Retires whichever attempt currently owns the live stream, exactly like round 4's pre-subscribe
+            // failure path: `streamAttemptGeneration` names it regardless of which connect this check was
+            // armed for, and by the time a reattach fails that connect's own dial work is long since over.
+            guard let generation = streamAttemptGeneration, let attempt = connectAttempts[generation] else { return }
+            retireConnectAttempt(generation)
+            connectionState = .idle
+            await handleConnectError(error, attempt: attempt)
+        }
     }
 
     /// - Parameter includesRenderUpdate: Whether this read asks the daemon for the session's screen. Only
@@ -3260,6 +3363,19 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard !hasAttemptedAutomaticTakeover else { return }
         guard !isOwner else { return }
         guard !isSessionUnavailable else { return }
+        // A reattach `applyReducedState` just started (`reattachAfterReconnect`, still in flight) has not
+        // yet told the daemon this client is attached, so a takeover sent here races it there: whichever
+        // request the daemon serializes first decides whether the takeover is rejected (as intended) or,
+        // if the reattach's own attach wins that race, accepted from a client the reattach itself has not
+        // finished earning any standing for. This guard removes the race outright rather than depend on
+        // its outcome: the reattach either succeeds, in which case its own gated re-arm
+        // (`reattachAfterReconnect`, `activeOwnerClientID == nil`) is the only path back to a takeover, or
+        // it fails, in which case `hasAttemptedAutomaticTakeover` is untouched and this fires again the
+        // next time something calls it once `reattachAfterReconnectTask` clears. Reading the task, not the
+        // check, matters because the check itself is cleared as soon as `applyReducedState` reads it
+        // (before this call's own attach even starts), so it would already read nil for the whole
+        // stretch this guard needs to cover.
+        guard reattachAfterReconnectTask == nil else { return }
         let state = latestState?.runtimeState?.state ?? session.state
         guard state == .running else { return }
         beginAutomaticTakeover()
@@ -3613,6 +3729,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         cancelTrailingRenderUpdateResync()
         bufferedInputText = ""
         hasAttachedToSession = false
+        // This tears the viewer down without bumping `viewerAttachmentLifecycle` (see the comment on
+        // `runState` above), so a stale check's lifecycle comparison alone would not catch it: cleared
+        // here so no armed check outlives this run.
+        reattachCheckAfterReconnect = nil
+        // Same cancellation note as `beginStop`'s: this does not cancel the shared attach operation
+        // `reattachAfterReconnect` may be awaiting, only this wrapper's own "in flight" bookkeeping.
+        reattachAfterReconnectTask?.cancel()
+        reattachAfterReconnectTask = nil
         hasConfirmedOwnerInputReadiness = false
         isInputSurfaceReady = false
         reportedOwnerReadyEpochID = nil
@@ -3972,6 +4096,37 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // `takeOver()` currently holds instead of assuming the attempt is settled.
             takeoverAttemptState = TerminalViewerTakeoverAttemptState(isBusy: isBusy, isAwaitingTakeoverConfirmation: false)
             hasAttachedToSession = activeAttachmentExists(in: payload.attachmentSnapshot)
+            // This is the first authoritative snapshot a reconnect's armed reattach check settles
+            // against, from whichever source produced it: the bootstrap read's own reduction, or the
+            // subscription's stream payload when the bootstrap read answered nothing (a request failure,
+            // or its fixed timeout) before the stream did. See `TerminalReattachCheckAfterReconnect`'s
+            // doc comment for why deciding here, rather than fixing the decision to the bootstrap read
+            // alone, is what covers both sources with one rule; see `reattachAfterReconnect` for what the
+            // reattach itself does and how a failure recovers.
+            // Cleared here unconditionally, the moment it is read, regardless of whether a reattach
+            // actually starts below: this call site runs once per snapshot (hundreds a second under a
+            // streaming agent), so leaving the check itself set as an "in flight" signal would have this
+            // same `if let` spawn a brand new `reattachAfterReconnect` Task on every later snapshot that
+            // arrives while an earlier one is still running. `reattachAfterReconnectTask` is the separate,
+            // dedicated in-flight marker for that; only its own nil check below decides whether this
+            // snapshot starts a reattach.
+            // `applicationSubmission` (computed above, before this apply's own `noteStateApplied` runs)
+            // names the highest submission this output stands for. A reconnect keeps the same
+            // `viewerAttachmentLifecycle` and the same remote client as the connection it replaces, so a
+            // snapshot that connection submitted just before disconnecting can still land here after this
+            // reconnect's own arm and pass both those checks; only the submission boundary distinguishes
+            // it, since it is a fact about when the snapshot was produced rather than what it names. A
+            // submission at or below the boundary predates this reconnect and is left unconsumed — the
+            // check stays armed for whichever later snapshot (this reconnect's own bootstrap read or
+            // stream) actually settles it.
+            if let reattachCheck = reattachCheckAfterReconnect, applicationSubmission > reattachCheck.submissionBoundary {
+                reattachCheckAfterReconnect = nil
+                if isCurrentStateRefresh(lifecycle: reattachCheck.lifecycle, clientID: reattachCheck.clientID), !hasAttachedToSession, !isEndedState,
+                    reattachAfterReconnectTask == nil
+                {
+                    reattachAfterReconnectTask = Task { [weak self] in await self?.reattachAfterReconnect(reattachCheck) }
+                }
+            }
         }
         if isEndedState {
             cancelAllConnectAttempts()

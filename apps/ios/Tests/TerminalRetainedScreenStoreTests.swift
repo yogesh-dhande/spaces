@@ -15,7 +15,8 @@
             let settings = SpacesMobileConnectionSettings()
             let overview = makeOverview(sessions: [
                 Self.sessionSummary(id: "session-live"), Self.sessionSummary(id: "session-ended", state: .exited),
-                Self.sessionSummary(id: "session-owned-elsewhere", ownedBy: "mac-owner"), Self.sessionSummary(id: "session-open", ownedBy: "phone-viewer"),
+                Self.sessionSummary(id: "session-owned-elsewhere", ownedBy: "mac-owner"),
+                Self.sessionSummary(id: "session-open", ownedBy: "phone-viewer"),
             ])
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
                 SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
@@ -59,12 +60,17 @@
             )
         }
 
-        private static func sessionSummary(id: String, state: TerminalSessionState = .running, ownedBy ownerClientID: String? = nil) -> SpacesDeviceTerminalSessionSummary {
-            let attachmentSnapshot = ownerClientID.map { clientID in
-                TerminalSessionAttachmentSnapshot(
-                    clients: [TerminalClient(id: clientID, kind: .localWindow, identity: TerminalClientIdentity(label: clientID), connectedAt: "2026-01-01T00:00:00Z")],
-                    attachments: [TerminalAttachment(sessionID: id, clientID: clientID, mode: .owner, attachedAt: "2026-01-01T00:00:00Z")])
-            } ?? TerminalSessionAttachmentSnapshot()
+        private static func sessionSummary(id: String, state: TerminalSessionState = .running, ownedBy ownerClientID: String? = nil)
+            -> SpacesDeviceTerminalSessionSummary
+        {
+            let attachmentSnapshot =
+                ownerClientID.map { clientID in
+                    TerminalSessionAttachmentSnapshot(
+                        clients: [
+                            TerminalClient(
+                                id: clientID, kind: .local, identity: TerminalClientIdentity(label: clientID), connectedAt: "2026-01-01T00:00:00Z")
+                        ], attachments: [TerminalAttachment(sessionID: id, clientID: clientID, mode: .owner, attachedAt: "2026-01-01T00:00:00Z")])
+                } ?? TerminalSessionAttachmentSnapshot()
             return SpacesDeviceTerminalSessionSummary(
                 id: id, title: "terminal", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil, state: state, backend: .ghosttyEmbedded,
                 lifetimePolicy: .persistent, servicePID: 100, childPID: 200, workspaceID: "workspace-feature", workspaceTitle: nil, projectID: nil,

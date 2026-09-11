@@ -3,6 +3,12 @@ import Foundation
 import spacesterminalcore
 import spacesterminalghostty
 
+/// Title/subtitle pair for the State-B overlay — see `TerminalSessionPaneViewController.currentGhosttyTakeoverStatusText`.
+struct GhosttyTakeoverStatusText: Equatable {
+    let title: String
+    let subtitle: String
+}
+
 extension TerminalSessionPaneViewController {
     func buildUI() {
         let contentView = view
@@ -120,8 +126,22 @@ extension TerminalSessionPaneViewController {
         inputRowStackView.addArrangedSubview(inputField)
         inputRowStackView.addArrangedSubview(actionButtonStackView)
 
+        takeoverIconView.translatesAutoresizingMaskIntoConstraints = false
+        takeoverIconView.image = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: "Read-only")?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 22, weight: .medium))
+        takeoverIconView.contentTintColor = .activeTheme(\.muted)
+
+        takeoverTitleLabel.font = Typography.emptyStateTitle
+        takeoverTitleLabel.textColor = .activeTheme(\.text)
+        takeoverTitleLabel.alignment = .center
+        takeoverTitleLabel.lineBreakMode = .byWordWrapping
+        takeoverTitleLabel.maximumNumberOfLines = 0
+        takeoverTitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        takeoverTitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        takeoverTitleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 360).isActive = true
+
         takeoverMessageLabel.font = Typography.body
-        takeoverMessageLabel.textColor = .secondaryLabelColor
+        takeoverMessageLabel.textColor = .activeTheme(\.muted)
         takeoverMessageLabel.alignment = .center
         takeoverMessageLabel.lineBreakMode = .byWordWrapping
         takeoverMessageLabel.maximumNumberOfLines = 0
@@ -135,8 +155,19 @@ extension TerminalSessionPaneViewController {
         takeoverRowStackView.orientation = .vertical
         takeoverRowStackView.alignment = .centerX
         takeoverRowStackView.spacing = 14
+        takeoverRowStackView.addArrangedSubview(takeoverIconView)
+        takeoverRowStackView.addArrangedSubview(takeoverTitleLabel)
         takeoverRowStackView.addArrangedSubview(takeoverMessageLabel)
         takeoverRowStackView.addArrangedSubview(takeoverButton)
+        takeoverRowStackView.setCustomSpacing(6, after: takeoverIconView)
+        takeoverRowStackView.setCustomSpacing(4, after: takeoverTitleLabel)
+
+        // A light scrim, not an opaque replacement screen: it dims the pane body underneath rather than
+        // hiding it. In this state the body is the plain-text output view on the terminal background
+        // (`updateRendererVisibility` hides `terminalContainer` and the demotion path releases the
+        // Ghostty surface), not the session's live output: another client owns the session, so its
+        // output is never mirrored to this pane. Taking over is what brings the live surface here.
+        takeoverScrimView.translatesAutoresizingMaskIntoConstraints = false
 
         takeoverContainerView.translatesAutoresizingMaskIntoConstraints = false
         takeoverContainerView.addSubview(takeoverRowStackView)
@@ -172,7 +203,9 @@ extension TerminalSessionPaneViewController {
         bodyStackView.addArrangedSubview(outputScrollView)
         outputScrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
 
-        [headerStackView, bodyStackView, takeoverContainerView].forEach(contentView.addSubview)
+        // `takeoverScrimView` is added before `takeoverContainerView` so the container's icon/title/
+        // button paint on top of the dimming layer rather than under it.
+        [headerStackView, bodyStackView, takeoverScrimView, takeoverContainerView].forEach(contentView.addSubview)
 
         bodyTopToContentConstraint = bodyStackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12)
         bodyBottomToContentConstraint = bodyStackView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16)
@@ -191,6 +224,12 @@ extension TerminalSessionPaneViewController {
 
             bodyLeadingConstraint!, bodyTrailingConstraint!, takeoverLeadingConstraint!, takeoverTrailingConstraint!,
             takeoverContainerView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor), takeoverBottomConstraint!,
+
+            // Full-bleed regardless of where the centered card sits, so the dimming covers the whole pane.
+            takeoverScrimView.topAnchor.constraint(equalTo: contentView.topAnchor),
+            takeoverScrimView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            takeoverScrimView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            takeoverScrimView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
         ])
 
         // Realized after the content subviews so the banner overlays the pane it describes.
@@ -217,8 +256,7 @@ extension TerminalSessionPaneViewController {
         let action: TerminalPaneBannerAction? =
             notice.kind == .unreachable
             ? TerminalPaneBannerAction(
-                title: TerminalConnectionNotice.retryActionTitle,
-                handler: { [weak self] in self?.stateProvider.retryStateStreamConnection() }) : nil
+                title: TerminalConnectionNotice.retryActionTitle, handler: { [weak self] in self?.stateProvider.retryStateStreamConnection() }) : nil
         banner.showPersistent(notice, action: action)
     }
 
@@ -261,15 +299,30 @@ extension TerminalSessionPaneViewController {
         updateHeaderLayoutVisibility()
     }
 
+    /// True while this pane itself has requested ownership and the daemon has not yet confirmed it: an
+    /// owner-preferred open (`preferredAttachmentMode` is `.owner` from the start), or a Take Over the
+    /// user clicked (`isTakeoverAttemptPending`; `takeOverOwnership` leaves the preferred mode at
+    /// `.viewer` until the daemon grants the request). The State-B overlay's icon/title/button would be
+    /// misleading in that moment — this client IS the one trying to become owner — so that window shows a
+    /// plain "Waiting for terminal ownership…" line in the body instead (see `refreshNow`'s
+    /// `.ghosttyTakeoverStatus` case).
+    func isWaitingForRequestedOwnership(isOwner: Bool) -> Bool { !isOwner && (preferredAttachmentMode == .owner || isTakeoverAttemptPending) }
+
     func updateInputOwnershipUI(isOwner: Bool, isInteractive: Bool) {
         view.setAccessibilityValue(isOwner ? "owner" : "viewer")
         let usesInlineControls = visibleRenderer == .textView && isOwner
         inputRowStackView.isHidden = !usesInlineControls
-        let isWaitingForRequestedOwnership = !isOwner && preferredAttachmentMode == .owner
+        let isWaitingForRequestedOwnership = isWaitingForRequestedOwnership(isOwner: isOwner)
+        // `visibleRenderer == .ghosttyTakeoverStatus` already implies `!isOwner` (see
+        // `resolveVisibleRenderer`'s doc comment), so this is exactly the State-B overlay: this pane is
+        // attached as a viewer because another client owns the session.
         let showsTakeoverShell = visibleRenderer == .ghosttyTakeoverStatus && backend == .ghosttyEmbedded && !isWaitingForRequestedOwnership
-        takeoverContainerView.isHidden = !(showsTakeoverShell && !isOwner)
+        takeoverContainerView.isHidden = !showsTakeoverShell
+        takeoverScrimView.isHidden = takeoverContainerView.isHidden
         takeoverRowStackView.isHidden = takeoverContainerView.isHidden
         isViewerTakeoverShellActive = !takeoverContainerView.isHidden
+        takeoverIconView.isHidden = !isViewerTakeoverShellActive
+        takeoverTitleLabel.isHidden = !isViewerTakeoverShellActive
         takeoverMessageLabel.isHidden = !isViewerTakeoverShellActive
         takeoverBottomConstraint?.isActive = !isViewerTakeoverShellActive
         takeoverCenterYConstraint?.isActive = isViewerTakeoverShellActive
@@ -303,16 +356,18 @@ extension TerminalSessionPaneViewController {
     func updateHeaderLayoutVisibility() {
         // Session metadata remains available through debug accessors, but panes render
         // the terminal surface only — the header stack never shows.
-        if isViewerTakeoverShellActive {
-            bodyStackView.isHidden = true
-            outputScrollView.isHidden = true
-            bodyTopToContentConstraint?.isActive = true
-            bodyBottomToTakeoverConstraint?.isActive = false
-            bodyBottomToContentConstraint?.isActive = false
-            return
-        }
         bodyStackView.isHidden = false
         bodyTopToContentConstraint?.isActive = true
+        if isViewerTakeoverShellActive {
+            // The State-B overlay is a scrim over the pane body, not a replacement screen for it:
+            // `bodyStackView` (and whatever `updateRendererVisibility` chose within it, here the
+            // plain-text output view on the terminal background) stays full-bleed and visible
+            // underneath, dimmed by the scrim. The session's live output is not mirrored to a pane
+            // another device owns; taking over is what brings it here (see `refreshNow`).
+            bodyBottomToTakeoverConstraint?.isActive = false
+            bodyBottomToContentConstraint?.isActive = true
+            return
+        }
         bodyBottomToTakeoverConstraint?.isActive = !takeoverContainerView.isHidden
         bodyBottomToContentConstraint?.isActive = takeoverContainerView.isHidden
     }
@@ -384,19 +439,29 @@ extension TerminalSessionPaneViewController {
         updateOutputPlainText(GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot))
     }
 
-    func currentGhosttyStatusMessage(isOwner: Bool, runtimeState: TerminalSessionRuntimeState?, ownerClient: TerminalClient?) -> String {
-        if runtimeState?.state == .starting { return "Preparing terminal...\nThe shell is still starting." }
-        if runtimeState?.state.isInteractive == true {
-            if isOwner { return "" }
-            let ownerLabel = ownerClient.map(Self.displayLabel(for:)) ?? "another client"
-            if isTakeoverAttemptPending || preferredAttachmentMode == .owner {
-                return "Waiting for terminal ownership…\nCurrent owner: \(ownerLabel)"
-            }
-            return "Live terminal rendering is limited to the active owner.\nCurrent owner: \(ownerLabel)"
+    /// The State-B overlay's two-line status: a bold title naming the owning device, and a secondary line
+    /// explaining the pane is read-only. `resolveVisibleRenderer` reaches `.ghosttyTakeoverStatus` only
+    /// when this pane is NOT the owner, so this has nothing left to say about an owner's own
+    /// no-frame-yet moment (that case resolves to `.ghosttyOwner` and shows the connection banner
+    /// instead, never this screen).
+    ///
+    /// Called even while this pane itself is mid-request for ownership (`isWaitingForRequestedOwnership`)
+    /// so its title/subtitle stay current, but `refreshNow`'s `.ghosttyTakeoverStatus` case hides the
+    /// overlay entirely in that moment — the Take Over affordance and "owned by" framing would be
+    /// misleading while THIS client is the one trying to become owner — and shows a plain body-text
+    /// "Waiting for terminal ownership…" line instead.
+    func currentGhosttyTakeoverStatusText(runtimeState: TerminalSessionRuntimeState?, ownerClient: TerminalClient?) -> GhosttyTakeoverStatusText {
+        guard let runtimeState else { return GhosttyTakeoverStatusText(title: "Terminal session state unavailable.", subtitle: "") }
+        if runtimeState.state == .starting {
+            return GhosttyTakeoverStatusText(title: "Preparing terminal…", subtitle: "The shell is still starting.")
         }
-
-        guard let runtimeState else { return "Terminal session state unavailable." }
-        return "Terminal session \(runtimeState.state.rawValue)."
+        // Reached only while interactive: `resolveVisibleRenderer` routes an explicitly non-interactive
+        // runtime state (exited/failed) to `.ghosttyEndedFinalRender`/`.unavailable` before this screen.
+        // The overlay never claims an owner it cannot name: with no owner in the snapshot (every earlier
+        // owner detached or expired, and this pane is a viewer that has not taken over) it says so, and
+        // the same Take Over is what makes this pane the owner.
+        let title = ownerClient.map { "Owned by \(Self.displayLabel(for: $0))" } ?? "No device owns this terminal"
+        return GhosttyTakeoverStatusText(title: title, subtitle: "Take over to view and type here.")
     }
 
     func updateOutputPlainText(_ text: String) {
@@ -419,7 +484,10 @@ extension TerminalSessionPaneViewController {
         }
         switch visibleRenderer {
         case .ghosttyOwner: return "Renderer: ghostty-mirror"
-        case .ghosttyTakeoverStatus: return "Renderer: preparing owner surface"
+        // Unreachable in practice: `resolveVisibleRenderer` never returns `.ghosttyTakeoverStatus` for an
+        // owner (it resolves straight to `.ghosttyOwner`, no-frame-yet included — see that function's doc
+        // comment). Kept only because `VisibleRenderer`'s cases must stay exhaustive here.
+        case .ghosttyTakeoverStatus: return "Renderer: takeover status"
         case .ghosttyEndedFinalRender: return "Renderer: final Ghostty render"
         case .unavailable: return "Renderer: unavailable"
         case .textView: return "Renderer: owner render unavailable"

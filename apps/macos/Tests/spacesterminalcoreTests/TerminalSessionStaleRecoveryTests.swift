@@ -61,8 +61,7 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
     /// Attaches a live owner client so the sweep's `detachActiveClients` step has something to detach.
     private func seedLiveOwnerClient(sessionID: String, paths: TerminalSessionPaths) throws {
         let client = TerminalClient(
-            id: "client-\(sessionID)", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"),
-            connectedAt: "2026-05-08T00:00:00Z")
+            id: "client-\(sessionID)", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-08T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: client, mode: .owner, paths: paths, attachedAt: "2026-05-08T00:00:01Z")
     }

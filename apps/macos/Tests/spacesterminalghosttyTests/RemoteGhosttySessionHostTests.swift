@@ -490,7 +490,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let display = makeDisplayedPaneContainer(width: 320, height: 180)
         try host.attach(
             client: TerminalClient(
-                id: clientID, kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-28T00:00:02Z"),
+                id: clientID, kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-28T00:00:02Z"),
             mode: .owner, into: display.container)
 
         let pasteboard = NSPasteboard(name: NSPasteboard.Name("remote-clipboard-\(UUID().uuidString)"))
@@ -509,7 +509,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     /// Re-emits a running payload with an attachment snapshot naming `ownerClientID` as the live owner.
     private func payloadClaimingOwner(_ payload: GhosttyRemoteSessionStatePayload, ownerClientID: String) -> GhosttyRemoteSessionStatePayload {
         let owner = TerminalClient(
-            id: ownerClientID, kind: .localWindow, identity: TerminalClientIdentity(label: ownerClientID), connectedAt: "2026-07-28T00:00:00Z")
+            id: ownerClientID, kind: .local, identity: TerminalClientIdentity(label: ownerClientID), connectedAt: "2026-07-28T00:00:00Z")
         return GhosttyRemoteSessionStatePayload(
             sessionID: payload.sessionID, reason: payload.reason, emittedAt: payload.emittedAt, sessionStateRevision: payload.sessionStateRevision,
             sessionStateFlags: payload.sessionStateFlags, screenStateRevision: payload.screenStateRevision, runtimeState: payload.runtimeState,
@@ -1305,7 +1305,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("ended host renders final state") { host.snapshotText() == "done" }
         host.debugSetBindingActionHandler { _ in true }
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:02Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:02Z"),
             mode: .viewer, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
 
         XCTAssertEqual(host.snapshotText(), "done")
@@ -1353,7 +1353,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("ended host renders final state") { host.snapshotText()?.contains("final-01") == true }
 
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:02Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:02Z"),
             mode: .viewer, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
 
         // A positive vertical with precise deltas scrolls up into scrollback (the normalizer maps it to
@@ -1369,7 +1369,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         // is showing a scrolled viewport they must not clobber it with the daemon's final frame.
         host.requestSurfaceRefresh()
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:03Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:03Z"),
             mode: .viewer, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
         guard let text = host.snapshotText() else { return XCTFail("ended host lost its rendered surface after refresh") }
         XCTAssertTrue(text.contains("row-0"), "refresh clobbered the scrolled ended viewport: \(text)")
@@ -1411,7 +1411,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("ended host renders final state") { host.snapshotText()?.contains("final-01") == true }
 
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:02Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:02Z"),
             mode: .viewer, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
 
         XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
@@ -1460,7 +1460,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         defer { window.orderOut(nil) }
 
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:02Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:02Z"),
             mode: .viewer, into: container)
 
         XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
@@ -1477,7 +1477,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertFalse(host.hasRenderableSurface())
 
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:03Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:03Z"),
             mode: .viewer, into: container)
         host.requestSurfaceRefresh()
 
@@ -1541,7 +1541,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("ended host renders final state") { host.snapshotText()?.contains("final-01") == true }
 
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:03Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:03Z"),
             mode: .viewer, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
 
         // Fetch A begins for the first ended run and suspends on the gate.
@@ -1634,7 +1634,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("ended host renders run A final state") { host.snapshotText()?.contains("final-A") == true }
 
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:03Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:03Z"),
             mode: .viewer, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
 
         // Scroll run A into its transcript replay; the scrolled viewport shows the old run's rows.
@@ -1703,7 +1703,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("ended host renders run A final state") { host.snapshotText()?.contains("final-A") == true }
 
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:03Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:03Z"),
             mode: .viewer, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
 
         // The scroll arms the replay and fetches; the mismatched-identity response latches `.unavailable`.
@@ -1745,7 +1745,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
         host.debugSetBindingActionHandler { _ in true }
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:02Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:02Z"),
             mode: .viewer, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
 
         XCTAssertFalse(host.performBindingAction("select_all"))
@@ -1893,7 +1893,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let display = makeDisplayedPaneContainer()
         defer { display.window.orderOut(nil) }
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-18T00:00:00Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-18T00:00:00Z"),
             mode: .viewer, into: display.container)
 
         waitForCondition("initial live snapshot") { host.snapshotText() == "alpha" }
@@ -1914,7 +1914,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(host.snapshot()?.rows, 2)
 
         let ownerClient = TerminalClient(
-            id: "owner-client", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad"), connectedAt: "2026-05-18T00:00:02Z")
+            id: "owner-client", kind: .remote, identity: TerminalClientIdentity(label: "iPad"), connectedAt: "2026-05-18T00:00:02Z")
         let attachmentSnapshot = TerminalSessionAttachmentSnapshot(
             clients: [ownerClient],
             attachments: [TerminalAttachment(sessionID: "remote-live", clientID: ownerClient.id, mode: .owner, attachedAt: "2026-05-18T00:00:02Z")])
@@ -2050,7 +2050,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         defer { window.orderOut(nil) }
 
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-19T00:00:00Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-19T00:00:00Z"),
             mode: .viewer, into: container)
 
         waitForCondition("rendered viewer text") { (host.snapshotText() ?? "").contains("alpha") }
@@ -2096,7 +2096,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         try host.attach(
             client: TerminalClient(
-                id: "owner-client", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-02T00:00:00Z"),
+                id: "owner-client", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-02T00:00:00Z"),
             mode: .owner, into: container)
         waitForCondition("initial owner first responder") { window.firstResponder is GhosttyMirrorTerminalView }
 
@@ -2173,7 +2173,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         defer { window.orderOut(nil) }
 
         let client = TerminalClient(
-            id: "owner-client", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-02T00:00:00Z")
+            id: "owner-client", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-02T00:00:00Z")
         try host.attach(client: client, mode: .owner, into: container)
         waitForCondition("initial owner first responder") { window.firstResponder is GhosttyMirrorTerminalView }
 
@@ -2230,7 +2230,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         defer { window.orderOut(nil) }
 
         let client = TerminalClient(
-            id: "owner-client", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-02T00:00:00Z")
+            id: "owner-client", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-02T00:00:00Z")
         try host.attach(client: client, mode: .owner, into: container)
         waitForCondition("initial owner first responder") { window.firstResponder is GhosttyMirrorTerminalView }
 
@@ -2275,13 +2275,13 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         defer { window.orderOut(nil) }
 
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-20T00:00:00Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-20T00:00:00Z"),
             mode: .viewer, into: container)
 
         waitForCondition("initial rendered viewer text") { self.normalize(self.visibleText(for: host)).contains("alpha") }
 
         let ownerClient = TerminalClient(
-            id: "ipad-owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad"), connectedAt: "2026-05-20T00:00:01Z")
+            id: "ipad-owner", kind: .remote, identity: TerminalClientIdentity(label: "iPad"), connectedAt: "2026-05-20T00:00:01Z")
         let attachmentSnapshot = TerminalSessionAttachmentSnapshot(
             clients: [ownerClient],
             attachments: [
@@ -2333,7 +2333,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         defer { window.orderOut(nil) }
 
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-21T00:00:00Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-21T00:00:00Z"),
             mode: .viewer, into: container)
 
         try "WRONG\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
@@ -2392,7 +2392,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         window.makeKeyAndOrderFront(nil)
         defer { window.orderOut(nil) }
 
-        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-29T00:00:00Z")
+        let client = TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-29T00:00:00Z")
         try host.attach(client: client, mode: .owner, into: container)
 
         try "WRONG\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
@@ -2426,7 +2426,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
-        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-30T00:00:00Z")
+        let client = TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-30T00:00:00Z")
         let attachmentSnapshot = TerminalSessionAttachmentSnapshot(
             clients: [client],
             attachments: [
@@ -2505,7 +2505,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         defer { window.orderOut(nil) }
 
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-22T00:00:00Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-22T00:00:00Z"),
             mode: .owner, into: container)
 
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
@@ -2545,7 +2545,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         defer { window.orderOut(nil) }
 
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-28T00:00:00Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-28T00:00:00Z"),
             mode: .owner, into: container)
 
         let renderedText = normalize(visibleText(for: host))
@@ -2587,7 +2587,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertThrowsError(try TerminalSessionPersistence.readRemoteSessionState(paths: paths))
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180))
-        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-10T00:00:02Z")
+        let client = TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-10T00:00:02Z")
         try host.attach(client: client, mode: .owner, into: container)
 
         XCTAssertTrue(host.clearScreenAndScrollback())
@@ -2628,7 +2628,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertFalse(recorder.requests().contains { if case .state = $0.command { return true } else { return false } })
 
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
             mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
 
         waitForCondition("attach requests a full frame") {
@@ -2666,7 +2666,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         // The attach's own eager resync stamps the throttle and comes back with nothing to paint.
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
             mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
         waitForCondition("the attach's state fetch lands") { self.stateRequestCount(recorder) == 1 }
 
@@ -2704,7 +2704,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("host subscribes to the state stream") { subscriber.isSubscribed }
 
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
             mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
         waitForCondition("the attach's state fetch is in flight") { sender.stateRequestCount == 1 }
 
@@ -2749,7 +2749,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let display = makeDisplayedPaneContainer()
         defer { display.window.orderOut(nil) }
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
             mode: .owner, into: display.container)
         waitForCondition("the attach's state fetch is in flight") { sender.stateRequestCount == 1 }
 
@@ -2790,7 +2790,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         // The attach's eager resync stamps the throttle and its read is held open.
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
             mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
         waitForCondition("the attach's state fetch is in flight") { sender.stateRequestCount == 1 }
 
@@ -2830,7 +2830,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         // The attach's eager resync stamps the throttle and its read is held open.
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
             mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
         waitForCondition("the attach's state fetch is in flight") { sender.stateRequestCount == 1 }
 
@@ -2868,7 +2868,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         host.renderUpdateResyncIntervalForTesting = 0.2
         waitForCondition("host subscribes to the state stream") { subscriber.isSubscribed }
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
             mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
         waitForCondition("the attach's state fetch lands") { self.stateRequestCount(recorder) == 1 }
 
@@ -2919,7 +2919,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let display = makeDisplayedPaneContainer()
         defer { display.window.orderOut(nil) }
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
             mode: .owner, into: display.container)
         waitForCondition("the attach's state fetch is in flight") { sender.stateRequestCount == 1 }
 
@@ -3051,7 +3051,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: recorder.send,
             stateStreamSubscriber: subscriber.subscribe)
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
             mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
 
         XCTAssertFalse(
@@ -3099,7 +3099,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("host renders the streamed frame") { host.snapshotText() == "alpha" }
 
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
             mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
 
@@ -3126,7 +3126,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let display = makeDisplayedPaneContainer()
         defer { display.window.orderOut(nil) }
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:00Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:00Z"),
             mode: .viewer, into: display.container)
 
         var frames: [GhosttyRenderFrame] = []
@@ -3339,7 +3339,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             })
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180))
-        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:02Z")
+        let client = TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:02Z")
         try host.attach(client: client, mode: .owner, into: container)
 
         XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil))
@@ -3381,7 +3381,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         window.contentView = container
         window.makeKeyAndOrderFront(nil)
         defer { window.orderOut(nil) }
-        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:02Z")
+        let client = TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:02Z")
         try host.attach(client: client, mode: .owner, into: container)
         // `attach` already sends the initial viewport size for an owner; drain that attempt (whether or
         // not one actually started) before forcing a second, deliberate resize request, so the second's
@@ -3421,7 +3421,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             inputFailureHandler: { _ in true })
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 0, height: 0))
-        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:02Z")
+        let client = TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:02Z")
         try host.attach(client: client, mode: .owner, into: container)
 
         XCTAssertTrue(host.sendTextAsPaste("first"))
@@ -3456,7 +3456,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             })
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 0, height: 0))
-        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:02Z")
+        let client = TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:02Z")
         try host.attach(client: client, mode: .owner, into: container)
 
         XCTAssertTrue(host.sendTextAsPaste("first"))
@@ -3493,7 +3493,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             })
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 0, height: 0))
-        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:02Z")
+        let client = TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:02Z")
         try host.attach(client: client, mode: .owner, into: container)
 
         XCTAssertTrue(host.sendTextAsPaste("first"))
@@ -3597,7 +3597,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         defer { window.orderOut(nil) }
 
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-20T00:00:00Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-20T00:00:00Z"),
             mode: .owner, into: container)
 
         func screenPayload(text: String, sequence: Int) throws -> GhosttyRemoteSessionStatePayload {
@@ -3680,7 +3680,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         defer { window.orderOut(nil) }
 
         try host.attach(
-            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-20T00:00:00Z"),
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-20T00:00:00Z"),
             mode: .owner, into: container)
 
         server.broadcast(

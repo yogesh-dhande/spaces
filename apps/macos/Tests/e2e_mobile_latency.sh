@@ -1208,7 +1208,7 @@ def attach_pair(session_id: str, terminal_target: str) -> tuple[str, str, subpro
     desktop_client_id = str(uuid.uuid4()).upper()
     desktop_owner = {
         "id": desktop_client_id,
-        "kind": "localWindow",
+        "kind": "local",
         "identity": {"label": "Spaces window", "hostName": "localhost", "deviceName": "Mac", "networkAddress": "127.0.0.1"},
         "connectedAt": "2026-06-02T12:00:00Z",
         "disconnectedAt": None,
@@ -1229,7 +1229,7 @@ def attach_pair(session_id: str, terminal_target: str) -> tuple[str, str, subpro
     mobile_client_id = str(uuid.uuid4()).upper()
     mobile_client = {
         "id": mobile_client_id,
-        "kind": "remoteViewer",
+        "kind": "remote",
         "identity": {"label": "iPhone Latency Harness", "deviceName": "iPhone Latency Harness", "networkAddress": "127.0.0.1"},
         "connectedAt": "2026-06-02T12:00:00Z",
         "disconnectedAt": None,

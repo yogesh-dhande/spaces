@@ -375,7 +375,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID,
             client: TerminalClient(
-                id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z"),
+                id: "remote-client", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z"),
             mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
         try TerminalSessionPersistence.writeRuntimeState(makeRunningState(sessionID: launchConfiguration.sessionID, title: "shell"), paths: paths)
         XCTAssertFalse(try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty)
@@ -464,12 +464,9 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         let queue = TerminalCorePersistenceQueue(label: "test.persistence.lifecycle-unresolved-profile")
         let writeAttempts = AttemptCounter()
         let failureReported = DispatchSemaphore(value: 0)
-        queue.enqueueLifecycleWrite(
-            "launch-configuration",
-            write: { _ in writeAttempts.record() }, onFailure: { failureReported.signal() })
+        queue.enqueueLifecycleWrite("launch-configuration", write: { _ in writeAttempts.record() }, onFailure: { failureReported.signal() })
 
-        XCTAssertEqual(
-            failureReported.wait(timeout: .now() + 5), .success, "an unresolved enqueue-time profile must be reported as a final failure")
+        XCTAssertEqual(failureReported.wait(timeout: .now() + 5), .success, "an unresolved enqueue-time profile must be reported as a final failure")
         queue.drain()
         XCTAssertEqual(writeAttempts.count, 0, "the write closure must never run when there is no database to write it against")
     }

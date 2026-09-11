@@ -258,7 +258,7 @@ final class TerminalSessionModelTests: XCTestCase {
         let sessionPaths = try TerminalSessionPaths.forSession(id: sessionID)
         try writeLaunchConfiguration(sessionID: sessionID, paths: sessionPaths)
         let client = TerminalClient(
-            id: "client-1", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-08T00:00:00Z")
+            id: "client-1", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-08T00:00:00Z")
 
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: client, mode: .owner, paths: sessionPaths, attachedAt: "2026-05-08T00:00:01Z")
@@ -269,8 +269,8 @@ final class TerminalSessionModelTests: XCTestCase {
             snapshot.clients,
             [
                 TerminalClient(
-                    id: "client-1", kind: .localWindow, identity: client.identity, connectedAt: client.connectedAt,
-                    leaseRefreshedAt: "2026-05-08T00:00:01Z")
+                    id: "client-1", kind: .local, identity: client.identity, connectedAt: client.connectedAt, leaseRefreshedAt: "2026-05-08T00:00:01Z"
+                )
             ])
         XCTAssertEqual(snapshot.attachments.count, 1)
         XCTAssertEqual(snapshot.attachments.first?.mode, .owner)
@@ -282,6 +282,70 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertEqual(snapshot.clients.first?.disconnectedAt, "2026-05-08T00:00:02Z")
         XCTAssertEqual(snapshot.attachments.first?.detachedAt, "2026-05-08T00:00:02Z")
         XCTAssertTrue(try TerminalSessionPersistence.activeAttachments(paths: sessionPaths).isEmpty)
+    }
+
+    /// `clearAllClientsAndAttachments` is the daemon-start/handoff-resume safeguard against a ghost owner
+    /// attachment: every `terminal_clients`/`terminal_attachments` row is wiped, on the theory that no
+    /// client transport survives a process replacing itself. This test proves the two halves of that
+    /// contract that matter for handoff specifically: the wipe reaches every session in the database (not
+    /// just one root directory, unlike most of this file's other persistence calls), while the session
+    /// records themselves — the launch configuration and runtime state a handoff exists to carry forward,
+    /// standing in for the PTY/child-process survival a unit test cannot observe directly — are left
+    /// completely untouched. A regression that scoped the delete to one session, or that accidentally
+    /// touched `terminal_sessions`, would fail this test; a no-op stub for `clearAllClientsAndAttachments`
+    /// would also fail it, since the clients/attachments would still read back non-empty.
+    func testClearAllClientsAndAttachmentsWipesRowsButLeavesSessionsIntact() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        defer {
+            if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        // Two distinct sessions, each with an attached owner, to prove the wipe is not scoped to a single
+        // root directory the way most other persistence calls in this file are.
+        let firstSessionID = "session-clear-1"
+        let secondSessionID = "session-clear-2"
+        let firstPaths = try TerminalSessionPaths.forSession(id: firstSessionID)
+        let secondPaths = try TerminalSessionPaths.forSession(id: secondSessionID)
+        try writeLaunchConfiguration(sessionID: firstSessionID, paths: firstPaths)
+        try writeLaunchConfiguration(sessionID: secondSessionID, paths: secondPaths)
+
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: firstSessionID, backend: .ghosttyEmbedded, servicePID: 4242, childPID: 4343, state: .running, updatedAt: "2026-05-08T00:00:00Z"
+        )
+        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: firstPaths)
+
+        let firstClient = TerminalClient(
+            id: "client-clear-1", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-08T00:00:00Z")
+        let secondClient = TerminalClient(
+            id: "client-clear-2", kind: .remote, identity: TerminalClientIdentity(label: "Paired Mac"), connectedAt: "2026-05-08T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: firstSessionID, client: firstClient, mode: .owner, paths: firstPaths, attachedAt: "2026-05-08T00:00:01Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: secondSessionID, client: secondClient, mode: .owner, paths: secondPaths, attachedAt: "2026-05-08T00:00:01Z")
+
+        XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: firstPaths).count, 1)
+        XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: secondPaths).count, 1)
+
+        try TerminalSessionPersistence.clearAllClientsAndAttachments()
+
+        let firstSnapshot = try TerminalSessionPersistence.readAttachmentSnapshot(paths: firstPaths)
+        let secondSnapshot = try TerminalSessionPersistence.readAttachmentSnapshot(paths: secondPaths)
+        XCTAssertTrue(firstSnapshot.clients.isEmpty)
+        XCTAssertTrue(firstSnapshot.attachments.isEmpty)
+        XCTAssertTrue(secondSnapshot.clients.isEmpty)
+        XCTAssertTrue(secondSnapshot.attachments.isEmpty)
+        XCTAssertTrue(try TerminalSessionPersistence.activeAttachments(paths: firstPaths).isEmpty)
+        XCTAssertTrue(try TerminalSessionPersistence.activeAttachments(paths: secondPaths).isEmpty)
+
+        // The session records themselves — what a handoff resume rebuilds the PTY and pane state from —
+        // are untouched by the clear.
+        XCTAssertEqual(try TerminalSessionPersistence.readLaunchConfiguration(paths: firstPaths).sessionID, firstSessionID)
+        XCTAssertEqual(try TerminalSessionPersistence.readLaunchConfiguration(paths: secondPaths).sessionID, secondSessionID)
+        XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: firstPaths), runtimeState)
     }
 
     func testLiveAttachmentsIgnoreLeaseExpiredRemoteViewer() throws {
@@ -298,7 +362,7 @@ final class TerminalSessionModelTests: XCTestCase {
         let sessionPaths = try TerminalSessionPaths.forSession(id: sessionID)
         try writeLaunchConfiguration(sessionID: sessionID, paths: sessionPaths)
         let remoteClient = TerminalClient(
-            id: "remote-client", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-05-08T00:00:00Z")
+            id: "remote-client", kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-05-08T00:00:00Z")
 
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: remoteClient, mode: .viewer, paths: sessionPaths, attachedAt: "2026-05-08T00:00:00Z")
@@ -322,9 +386,9 @@ final class TerminalSessionModelTests: XCTestCase {
         let sessionPaths = try TerminalSessionPaths.forSession(id: sessionID)
         try writeLaunchConfiguration(sessionID: sessionID, paths: sessionPaths)
         let remoteClient = TerminalClient(
-            id: "remote-client", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-05-08T00:00:00Z")
+            id: "remote-client", kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-05-08T00:00:00Z")
         let staleRemoteClient = TerminalClient(
-            id: "stale-remote-client", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad"), connectedAt: "2026-05-08T00:00:00Z")
+            id: "stale-remote-client", kind: .remote, identity: TerminalClientIdentity(label: "iPad"), connectedAt: "2026-05-08T00:00:00Z")
 
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: remoteClient, mode: .viewer, paths: sessionPaths, attachedAt: "2026-05-08T00:00:00Z")
@@ -340,10 +404,12 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertEqual(snapshot.clients.first(where: { $0.id == staleRemoteClient.id })?.connectedAt, "2026-05-08T00:00:00Z")
     }
 
-    /// The off-device cleanup path judges liveness from a wire snapshot (no DB), so the
-    /// snapshot helper must apply the same lease rule: an expired remote viewer that never
-    /// sent a detach is not live, a freshly leased remote viewer is, and a local window —
-    /// which carries no lease — is always live while attached.
+    /// The off-device cleanup path judges liveness from a wire snapshot (no DB), so the snapshot helper
+    /// must apply the same lease rule to every kind alike: an expired lease that never sent a detach is
+    /// not live, a freshly leased one is, and no kind is exempt — a `.local` client with no lease at all
+    /// (never attached with one seeded, and never touched) is not live either, exactly like a `.remote`
+    /// one in the same state. A regression that reintroduces a `.local` exemption would make the third
+    /// assertion below observe a live attachment where this asserts none.
     func testSnapshotLiveAttachmentsApplyLeaseRuleOffDevice() {
         let now = ISO8601DateFormatter().date(from: "2026-05-08T00:01:01Z")!
         func snapshot(kind: TerminalClientKind, leaseRefreshedAt: String?, detachedAt: String? = nil) -> TerminalSessionAttachmentSnapshot {
@@ -351,17 +417,72 @@ final class TerminalSessionModelTests: XCTestCase {
                 id: "client", kind: kind, identity: TerminalClientIdentity(label: "device"), connectedAt: "2026-05-08T00:00:00Z",
                 leaseRefreshedAt: leaseRefreshedAt)
             let attachment = TerminalAttachment(
-                sessionID: "session", clientID: "client", mode: kind == .localWindow ? .owner : .viewer, attachedAt: "2026-05-08T00:00:00Z",
+                sessionID: "session", clientID: "client", mode: kind == .local ? .owner : .viewer, attachedAt: "2026-05-08T00:00:00Z",
                 detachedAt: detachedAt)
             return TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment])
         }
 
-        XCTAssertTrue(snapshot(kind: .remoteViewer, leaseRefreshedAt: "2026-05-08T00:00:00Z").liveAttachments(now: now).isEmpty)
-        XCTAssertEqual(snapshot(kind: .remoteViewer, leaseRefreshedAt: "2026-05-08T00:00:45Z").liveAttachments(now: now).map(\.clientID), ["client"])
-        XCTAssertEqual(snapshot(kind: .localWindow, leaseRefreshedAt: nil).liveAttachments(now: now).map(\.clientID), ["client"])
+        XCTAssertTrue(snapshot(kind: .remote, leaseRefreshedAt: "2026-05-08T00:00:00Z").liveAttachments(now: now).isEmpty)
+        XCTAssertEqual(snapshot(kind: .remote, leaseRefreshedAt: "2026-05-08T00:00:45Z").liveAttachments(now: now).map(\.clientID), ["client"])
+        XCTAssertTrue(snapshot(kind: .local, leaseRefreshedAt: nil).liveAttachments(now: now).isEmpty)
+        XCTAssertTrue(snapshot(kind: .local, leaseRefreshedAt: "2026-05-08T00:00:00Z").liveAttachments(now: now).isEmpty)
+        XCTAssertEqual(snapshot(kind: .local, leaseRefreshedAt: "2026-05-08T00:00:45Z").liveAttachments(now: now).map(\.clientID), ["client"])
         XCTAssertTrue(
-            snapshot(kind: .remoteViewer, leaseRefreshedAt: "2026-05-08T00:00:45Z", detachedAt: "2026-05-08T00:00:50Z").liveAttachments(now: now)
-                .isEmpty)
+            snapshot(kind: .remote, leaseRefreshedAt: "2026-05-08T00:00:45Z", detachedAt: "2026-05-08T00:00:50Z").liveAttachments(now: now).isEmpty)
+    }
+
+    /// The regression this closes: a session hosted by one device whose owner is a `.local` pane on
+    /// that same device must not stay ownerless-blocking forever just because the owning client stopped
+    /// heartbeating. A pane that keeps refreshing its lease across a span far longer than a single
+    /// expiry window stays live throughout — proving the fix does not merely shorten the window but
+    /// actually judges `.local` clients by it, the same way `.remote` ones always were.
+    func testIdleLocalOwnerStaysLiveAcrossRepeatedLeaseTouches() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        defer {
+            if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let sessionID = "session-idle-local-owner"
+        let sessionPaths = try TerminalSessionPaths.forSession(id: sessionID)
+        try writeLaunchConfiguration(sessionID: sessionID, paths: sessionPaths)
+        let localOwner = TerminalClient(
+            id: "local-owner", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-08T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: localOwner, mode: .owner, paths: sessionPaths, attachedAt: "2026-05-08T00:00:00Z")
+
+        // Five heartbeats spaced 20s apart (the pane's own cadence — see
+        // `TerminalPaneService.RemoteTerminalWindowClientStore.heartbeatInterval`) span 100s, comfortably
+        // past the 60s `remoteClientLeaseInterval`. At every point along the way the owner must read as
+        // live and never as a candidate for expiry.
+        let start = ISO8601DateFormatter().date(from: "2026-05-08T00:00:00Z")!
+        for tick in 1...5 {
+            let touchedAt = start.addingTimeInterval(TimeInterval(tick) * 20)
+            try TerminalSessionPersistence.touchClient(
+                id: localOwner.id, paths: sessionPaths, touchedAt: ISO8601DateFormatter().string(from: touchedAt))
+            XCTAssertEqual(
+                try TerminalSessionPersistence.liveAttachments(paths: sessionPaths, now: touchedAt).map(\.clientID), [localOwner.id],
+                "the idle owner must still be live right after heartbeat \(tick)")
+            XCTAssertTrue(
+                try TerminalSessionPersistence.staleRemoteClientIDs(paths: sessionPaths, now: touchedAt).isEmpty,
+                "a heartbeating owner must never appear as a stale-expiry candidate")
+        }
+
+        // Contrast, and the control that stops this test from being tautological: the loop above proves the
+        // owner stays live only because each tick refreshed the lease, so let the lease lapse instead. The
+        // last touch landed at start+100s; asked about a moment a full expiry interval beyond that, the very
+        // same attachment must read as gone. Without this, a `liveAttachments` that returned every attached
+        // client unconditionally would satisfy every assertion above.
+        let pastExpiry = start.addingTimeInterval(100 + TerminalSessionPersistence.remoteClientLeaseInterval + 1)
+        XCTAssertTrue(
+            try TerminalSessionPersistence.liveAttachments(paths: sessionPaths, now: pastExpiry).isEmpty,
+            "an owner that stopped heartbeating must stop reading as live once its lease lapses")
+        XCTAssertEqual(
+            try TerminalSessionPersistence.staleRemoteClientIDs(paths: sessionPaths, now: pastExpiry), [localOwner.id],
+            "and it must become a stale-expiry candidate, exactly as a remote client would")
     }
 
     func testTransferOwnershipKeepsOldOwnerAttachedAsViewer() throws {
@@ -378,9 +499,9 @@ final class TerminalSessionModelTests: XCTestCase {
         let sessionPaths = try TerminalSessionPaths.forSession(id: sessionID)
         try writeLaunchConfiguration(sessionID: sessionID, paths: sessionPaths)
         let owner = TerminalClient(
-            id: "client-owner", kind: .localWindow, identity: TerminalClientIdentity(label: "Owner"), connectedAt: "2026-05-08T00:00:00Z")
+            id: "client-owner", kind: .local, identity: TerminalClientIdentity(label: "Owner"), connectedAt: "2026-05-08T00:00:00Z")
         let viewer = TerminalClient(
-            id: "client-viewer", kind: .localWindow, identity: TerminalClientIdentity(label: "Viewer"), connectedAt: "2026-05-08T00:00:00Z")
+            id: "client-viewer", kind: .local, identity: TerminalClientIdentity(label: "Viewer"), connectedAt: "2026-05-08T00:00:00Z")
 
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: owner, mode: .owner, paths: sessionPaths, attachedAt: "2026-05-08T00:00:01Z")
@@ -415,7 +536,7 @@ final class TerminalSessionModelTests: XCTestCase {
         DispatchQueue.concurrentPerform(iterations: 16) { index in
             let timestamp = String(format: "2026-05-08T00:00:%02dZ", index)
             let client = TerminalClient(
-                id: "client-\(index)", kind: .remoteViewer, identity: TerminalClientIdentity(label: "Client \(index)"), connectedAt: timestamp)
+                id: "client-\(index)", kind: .remote, identity: TerminalClientIdentity(label: "Client \(index)"), connectedAt: timestamp)
             do {
                 try TerminalSessionPersistence.attachClient(
                     sessionID: sessionID, client: client, mode: .owner, paths: sessionPaths, attachedAt: timestamp)
@@ -492,8 +613,8 @@ final class TerminalSessionModelTests: XCTestCase {
         let history = TerminalSessionAttachmentSnapshot(
             clients: (0..<20).map { index in
                 TerminalClient(
-                    id: "client-\(index)", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"),
-                    connectedAt: "2026-05-08T00:00:00Z", disconnectedAt: "2026-05-08T00:00:01Z")
+                    id: "client-\(index)", kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-05-08T00:00:00Z",
+                    disconnectedAt: "2026-05-08T00:00:01Z")
             },
             attachments: (0..<20).map { index in
                 TerminalAttachment(
@@ -580,10 +701,9 @@ final class TerminalSessionModelTests: XCTestCase {
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         let sessionID = "session-detach-all"
         try writeLaunchConfiguration(sessionID: sessionID, paths: paths)
-        let owner = TerminalClient(
-            id: "owner", kind: .localWindow, identity: TerminalClientIdentity(label: "Owner"), connectedAt: "2026-05-08T00:00:00Z")
+        let owner = TerminalClient(id: "owner", kind: .local, identity: TerminalClientIdentity(label: "Owner"), connectedAt: "2026-05-08T00:00:00Z")
         let viewer = TerminalClient(
-            id: "viewer", kind: .remoteViewer, identity: TerminalClientIdentity(label: "Viewer"), connectedAt: "2026-05-08T00:00:00Z")
+            id: "viewer", kind: .remote, identity: TerminalClientIdentity(label: "Viewer"), connectedAt: "2026-05-08T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-08T00:00:01Z")
         try TerminalSessionPersistence.attachClient(

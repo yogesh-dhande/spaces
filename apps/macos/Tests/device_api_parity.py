@@ -269,7 +269,7 @@ def terminal_control_payload(action: str, session_id: str, **values: object) -> 
 def terminal_client(client_id: str, label: str) -> dict:
     return {
         "id": client_id,
-        "kind": "remoteViewer",
+        "kind": "remote",
         "identity": {
             "label": label,
             "deviceName": label,

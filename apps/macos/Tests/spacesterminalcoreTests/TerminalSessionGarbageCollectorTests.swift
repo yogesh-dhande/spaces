@@ -65,7 +65,7 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         FileManager.default.createFile(atPath: paths.outputPath, contents: Data("transcript".utf8))
         if attachment {
             let client = TerminalClient(
-                id: "client-\(id)", kind: .localWindow, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-07-19T00:00:00Z")
+                id: "client-\(id)", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-07-19T00:00:00Z")
             let attach = TerminalAttachment(sessionID: id, clientID: client.id, mode: .owner, attachedAt: "2026-07-19T00:00:00Z")
             try TerminalSessionPersistence.writeAttachmentSnapshot(
                 TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attach]), paths: paths)

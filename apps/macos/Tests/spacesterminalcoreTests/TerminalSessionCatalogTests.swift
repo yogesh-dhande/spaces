@@ -90,7 +90,7 @@ final class TerminalSessionCatalogTests: XCTestCase {
         let paths = try seedSession(id: "alive", shape: .live)
         try seedSession(id: "ended", shape: .ended)
         let client = TerminalClient(
-            id: "viewer", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-01-01T00:00:06Z")
+            id: "viewer", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-01-01T00:00:06Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: "alive", client: client, mode: .owner, paths: paths, attachedAt: "2026-01-01T00:00:06Z")
 

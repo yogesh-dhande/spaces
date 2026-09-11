@@ -155,7 +155,7 @@ request = {
     "command": "attach",
     "client": {
         "id": client_id,
-        "kind": "remoteViewer",
+        "kind": "remote",
         "identity": {
             "label": "Terminal Profile Viewer",
             "deviceName": "Terminal Profile Viewer",

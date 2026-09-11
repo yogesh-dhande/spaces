@@ -98,8 +98,7 @@ final class TerminalClientLeaseTouchCoalescerTests: XCTestCase {
             let snapshot = TerminalSessionAttachmentSnapshot(
                 clients: [
                     TerminalClient(
-                        id: clientID, kind: .remoteViewer, identity: .init(label: "iPhone"),
-                        connectedAt: TerminalSessionTimestamp.string(from: start),
+                        id: clientID, kind: .remote, identity: .init(label: "iPhone"), connectedAt: TerminalSessionTimestamp.string(from: start),
                         leaseRefreshedAt: TerminalSessionTimestamp.string(from: durableLeaseRefreshedAt))
                 ],
                 attachments: [
@@ -131,7 +130,7 @@ final class TerminalClientLeaseTouchCoalescerTests: XCTestCase {
         let snapshot = TerminalSessionAttachmentSnapshot(
             clients: [
                 TerminalClient(
-                    id: clientID, kind: .remoteViewer, identity: .init(label: "iPhone"), connectedAt: TerminalSessionTimestamp.string(from: start),
+                    id: clientID, kind: .remote, identity: .init(label: "iPhone"), connectedAt: TerminalSessionTimestamp.string(from: start),
                     leaseRefreshedAt: TerminalSessionTimestamp.string(from: durableLeaseRefreshedAt))
             ],
             attachments: [

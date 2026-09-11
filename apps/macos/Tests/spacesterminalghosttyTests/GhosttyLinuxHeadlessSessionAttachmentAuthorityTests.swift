@@ -117,9 +117,9 @@
         }
 
         private static let localOwner = TerminalClient(
-            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-26T00:00:00Z")
-        private static let remoteViewer = TerminalClient(
-            id: "remote-iphone", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
+            id: "local-window", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-26T00:00:00Z")
+        private static let remoteClient = TerminalClient(
+            id: "remote-iphone", kind: .remote, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
             connectedAt: "2026-07-26T00:00:01Z")
 
         private func makeTemporaryPaths() throws -> TerminalSessionPaths {
@@ -212,14 +212,14 @@
 
             TerminalEngineActor.runSynchronously {
                 Self.attach(core, client: Self.localOwner, mode: .owner)
-                Self.attach(core, client: Self.remoteViewer, mode: .viewer)
-                let takeover = core.handleControlRequest(TerminalControlRequest(command: "takeover", clientID: Self.remoteViewer.id))
+                Self.attach(core, client: Self.remoteClient, mode: .viewer)
+                let takeover = core.handleControlRequest(TerminalControlRequest(command: "takeover", clientID: Self.remoteClient.id))
                 #expect(takeover.ok, "a takeover by an attached viewer must be accepted: \(takeover.message)")
-                #expect(Self.broadcastOwnerClientID(of: core) == Self.remoteViewer.id, "the broadcast must advertise the new owner immediately")
+                #expect(Self.broadcastOwnerClientID(of: core) == Self.remoteClient.id, "the broadcast must advertise the new owner immediately")
             }
 
             await core.drainPersistenceForShutdown()
-            #expect(try durableOwnerClientID(paths: paths) == Self.remoteViewer.id, "the durable mirror must converge on the new owner")
+            #expect(try durableOwnerClientID(paths: paths) == Self.remoteClient.id, "the durable mirror must converge on the new owner")
 
             await shutDownAndDrain(core)
         }
@@ -291,9 +291,7 @@
 
             TerminalEngineActor.runSynchronously {
                 Self.attach(core, client: Self.localOwner, mode: .owner)
-                #expect(
-                    core.hasLiveAttachments(),
-                    "the in-memory attachment authority must report the attach live on the same hop that applied it")
+                #expect(core.hasLiveAttachments(), "the in-memory attachment authority must report the attach live on the same hop that applied it")
             }
 
             await core.drainPersistenceForShutdown()
@@ -311,7 +309,7 @@
             let core = try await startCore(makeConfiguration(named: "attachment-has-live-attachments-stale-lease"), paths: paths).value
             defer { TerminalEngineActor.runSynchronously { core.terminate() } }
 
-            TerminalEngineActor.runSynchronously { Self.attach(core, client: Self.remoteViewer, mode: .owner) }
+            TerminalEngineActor.runSynchronously { Self.attach(core, client: Self.remoteClient, mode: .owner) }
             await core.drainPersistenceForShutdown()
 
             #expect(
@@ -355,9 +353,7 @@
 
             TerminalEngineActor.runSynchronously { Self.attach(core, client: Self.localOwner, mode: .owner) }
             await core.drainPersistenceForShutdown()
-            #expect(
-                TerminalEngineActor.runSynchronously { core.hasLiveOwnerAttachment() },
-                "the attached owner must read as a live owner attachment")
+            #expect(TerminalEngineActor.runSynchronously { core.hasLiveOwnerAttachment() }, "the attached owner must read as a live owner attachment")
 
             // Park the queue so the detach's durable mirror write is enqueued but cannot commit yet.
             let gate = TerminalEngineActor.runSynchronously { core.debugHoldPersistenceQueue() }
@@ -449,14 +445,10 @@
         /// there) or where a valid main file is visible without its WAL.
         private static func restoreDatabase(at databasePath: String) throws {
             for suffix in ["-wal", "-shm"] where FileManager.default.fileExists(atPath: databasePath + ".unbroken" + suffix) {
-                if FileManager.default.fileExists(atPath: databasePath + suffix) {
-                    try FileManager.default.removeItem(atPath: databasePath + suffix)
-                }
+                if FileManager.default.fileExists(atPath: databasePath + suffix) { try FileManager.default.removeItem(atPath: databasePath + suffix) }
                 try FileManager.default.moveItem(atPath: databasePath + ".unbroken" + suffix, toPath: databasePath + suffix)
             }
-            guard rename(databasePath + ".unbroken", databasePath) == 0 else {
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-            }
+            guard rename(databasePath + ".unbroken", databasePath) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
             TerminalSessionPersistence.closeDatabaseConnection()
         }
 
@@ -512,7 +504,8 @@
                 "a core terminated over a failed launch-configuration write must call onSessionClosed so the daemon's session registry forgets it")
             #expect(
                 TerminalSessionPendingLaunchRegistry.shared.pendingLaunchConfiguration(sessionID: configuration.sessionID) == nil,
-                "the final write failure must clear the pending-launch entry along with terminating the core, or a launch-pending probe would keep reporting a launch in flight for a session that no longer exists")
+                "the final write failure must clear the pending-launch entry along with terminating the core, or a launch-pending probe would keep reporting a launch in flight for a session that no longer exists"
+            )
 
             // The reconcile's own `terminate()` (and the regression branch's, above) enqueued exited-state,
             // detach-all, and terminated-payload writes after the drain that gated the restore; wait for

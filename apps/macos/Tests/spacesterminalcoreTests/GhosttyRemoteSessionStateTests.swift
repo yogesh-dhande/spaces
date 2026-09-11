@@ -874,8 +874,7 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
 
     private func attachmentSnapshot(ownerID: String) -> TerminalSessionAttachmentSnapshot {
         let client = TerminalClient(
-            id: ownerID, kind: ownerID.hasPrefix("mac") ? .localWindow : .remoteViewer, identity: .init(label: ownerID),
-            connectedAt: "2026-05-20T00:00:00Z")
+            id: ownerID, kind: ownerID.hasPrefix("mac") ? .local : .remote, identity: .init(label: ownerID), connectedAt: "2026-05-20T00:00:00Z")
         return TerminalSessionAttachmentSnapshot(
             clients: [client],
             attachments: [TerminalAttachment(sessionID: "session-1", clientID: ownerID, mode: .owner, attachedAt: "2026-05-20T00:00:00Z")])

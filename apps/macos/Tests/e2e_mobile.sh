@@ -1030,7 +1030,7 @@ payload = {
     "sessionID": session_id,
     "client": {
         "id": client_id,
-        "kind": "remoteViewer",
+        "kind": "remote",
         "identity": {
             "label": "Remote E2E Primer",
             "deviceName": "Remote E2E Primer",
@@ -3745,7 +3745,7 @@ client_app = {
 }
 mobile_client = {
     "id": str(uuid.uuid4()).upper(),
-    "kind": "remoteViewer",
+    "kind": "remote",
     "identity": {"label": f"ownership-guard-{mobile_device_key}", "deviceName": mobile_device_label, "networkAddress": "127.0.0.1"},
     "connectedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     "disconnectedAt": None,

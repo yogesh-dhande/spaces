@@ -429,6 +429,22 @@ enum SpacesDaemonErrorClassification {
         #if os(macOS)
             trimOversizedRuntimeLogs()
         #endif
+        // No client transport — a control-socket connection, a subscription stream — survives this
+        // process replacing itself, whether that is an ordinary restart or an in-place `execv` handoff:
+        // both close every unix-domain socket this daemon held. A `terminal_clients`/`terminal_attachments`
+        // row a predecessor left behind is therefore never evidence of a real attached client, so clearing
+        // both tables here — before any session core exists to read them, and before the handoff resume
+        // below rebuilds cores from `terminal_sessions` — makes a ghost owner attachment (a client that
+        // vanished without detaching, permanently holding a session's ownership and demoting every other
+        // attempt to viewer) structurally impossible rather than relying on lease expiry to catch it
+        // eventually. Placed ahead of `resumeSessionsFromHandoffIfNeeded()` below, this one call covers
+        // both "daemon start" and "handoff resume": a handoff resume runs later in this very method, as
+        // part of an ordinary daemon start, so clearing here first means every session it rebuilds starts
+        // from an already-clean client/attachment slate. Every real client re-attaches on its own from the
+        // fresh snapshot its reconnect reads, in the role it held (the Mac pane's `refreshNow`; the iOS
+        // viewer's `reattachAfterReconnect`, settled by the first snapshot its reconnect applies), so
+        // nothing here touches `terminal_sessions` or the PTY a handoff exists to carry forward.
+        try TerminalSessionPersistence.clearAllClientsAndAttachments()
         // Startup is the one lifecycle transition NOT excluded against teardown (issue #391). A signal
         // landing in the adoption suspension below runs `shutdownOnce()` concurrently, so cores adopted
         // after its engine snapshot escape termination and `startSharedServices()` can restart services
@@ -2546,7 +2562,8 @@ enum SpacesDaemonErrorClassification {
                 deviceID: deviceID, childTerminalSessionID: payload.agentSessionID,
                 resolveDevice: { try SpacesClientDatabase.defaultDatabase().pairedDevice(id: $0) }, deviceName: { $0.name },
                 fetchRows: {
-                    try SpacesDeviceClient.listAgentSessions(sessionID: payload.agentSessionID, context: DeviceRequestContext(device: $0, clientApp: clientApp))
+                    try SpacesDeviceClient.listAgentSessions(
+                        sessionID: payload.agentSessionID, context: DeviceRequestContext(device: $0, clientApp: clientApp))
                 })
             try orchestrator.store.insertAgentRemoteSubscription(
                 subscriberTerminalSessionID: payload.subscriberTerminalSessionID, deviceID: deviceID, agentSessionID: payload.agentSessionID,
@@ -2817,9 +2834,7 @@ enum SpacesDaemonErrorClassification {
     /// read.
     @TerminalEngineActor private func liveCoreOneShotStatePayload(sessionID: String, read: TerminalOneShotStateRead)
         -> GhosttyRemoteSessionStatePayload?
-    {
-        sessionCores[sessionID]?.currentOneShotStatePayload(read)
-    }
+    { sessionCores[sessionID]?.currentOneShotStatePayload(read) }
 
     /// The non-live state read: persisted final/ended state, or a live unix-socket connect+read against the
     /// session's subscription socket (2s timeout). No main-actor state, so it is `nonisolated` and runs on

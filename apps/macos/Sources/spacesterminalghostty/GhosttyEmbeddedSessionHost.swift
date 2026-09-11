@@ -603,7 +603,7 @@
             // (enforcement's source) — NOT by reseeding from the durable mirror, whose matching detach is
             // enqueued and not yet committed. `activeLocalWindowClientID(excluding:)` reads the same snapshot.
             var remainingOwnerClientID = currentActiveAttachments().first(where: { $0.mode == .owner })?.clientID
-            if detachedClientWasOwner, remainingOwnerClientID == nil, let localOwnerClientID = activeLocalWindowClientID(excluding: clientID) {
+            if detachedClientWasOwner, remainingOwnerClientID == nil, let localOwnerClientID = activeLocalWindowClientID(excluding: [clientID]) {
                 applyOwnershipTransfer(to: localOwnerClientID, transferredAt: TerminalSessionTimestamp.string(from: Date()))
                 remainingOwnerClientID = localOwnerClientID
                 advanceOwnerEpoch(reason: "detach_transfer")
@@ -662,12 +662,24 @@
             return snapshot.liveAttachments(now: now).contains { $0.mode == .owner }
         }
 
-        private func activeLocalWindowClientID(excluding excludedClientID: String) -> String? {
+        /// A `.local` client still attached to this session that ownership can be handed to, excluding the
+        /// ids the caller is in the middle of removing.
+        ///
+        /// The exclusion is a SET rather than one id because both callers are mid-detach and the detach has
+        /// not been applied to the snapshot yet: a stale-client expiry removes every id in its stale set at
+        /// once. Every `.local` client used to be exempt from lease expiry, so a stale set could never
+        /// contain one and picking the first `.local` attachment was always safe; now that `.local` clients
+        /// expire on their lease exactly like `.remote` ones (see `TerminalClientKind`), the client being
+        /// expired is itself still in `snapshot.attachments` here and is typically FIRST in it, being the
+        /// older attachment. Excluding only a single id would hand ownership straight back to the client
+        /// this expiry is detaching, and the atomic `expireClients` write then refuses a transfer to a
+        /// client it is detaching in the same transaction — leaving the session with no owner at all.
+        private func activeLocalWindowClientID(excluding excludedClientIDs: Set<String>) -> String? {
             guard let snapshot = currentAttachmentSnapshot() else { return nil }
             let clientsByID = Dictionary(uniqueKeysWithValues: snapshot.clients.map { ($0.id, $0) })
-            return snapshot.attachments.filter { $0.detachedAt == nil && $0.clientID != excludedClientID }.compactMap {
+            return snapshot.attachments.filter { $0.detachedAt == nil && !excludedClientIDs.contains($0.clientID) }.compactMap {
                 attachment -> TerminalClient? in
-                guard let client = clientsByID[attachment.clientID], client.kind == .localWindow, client.disconnectedAt == nil else { return nil }
+                guard let client = clientsByID[attachment.clientID], client.kind == .local, client.disconnectedAt == nil else { return nil }
                 return client
             }.first?.id
         }
@@ -982,10 +994,12 @@
         /// The in-memory half runs on EVERY touch, for every client kind — it is what keeps this session's own
         /// stale-client expiry and owner gating honest. The daemon's own inactive-session reaper reads that
         /// same in-memory snapshot (`hasLiveAttachments`) rather than the durable column, so it never lags
-        /// behind an uncommitted touch either. The durable write is performed only for a client whose
-        /// liveness the lease actually decides, and then only once per coalescing interval
-        /// (`leaseTouchCoalescer`); only readers of `lease_refreshed_at` that have no live core to ask (the
-        /// session garbage collector, a fresh core reseeding after handoff) see that lag.
+        /// behind an uncommitted touch either. The durable write runs for every kind too — a `local` client
+        /// is a separate process reaching this daemon over a unix socket, exactly as exposed to going stale
+        /// without a detach as a `remote` one — gated only by `leaseTouchCoalescer` so a burst of control
+        /// requests writes at most once per coalescing interval; only readers of `lease_refreshed_at` that
+        /// have no live core to ask (the session garbage collector, a fresh core reseeding after handoff)
+        /// see that lag.
         private func enqueueClientLeaseTouch(clientID: String) {
             let touchedAtDate = Date()
             let touchedAt = TerminalSessionTimestamp.string(from: touchedAtDate)
@@ -996,7 +1010,6 @@
             // detach sits FIFO-ahead of this touch — vetoes detaching this client when it commits (finding R7-2).
             heartbeatGenerationGate.recordHeartbeat(forClientID: clientID)
             recordClientLeaseTouchInCache(clientID: clientID, leaseRefreshedAt: touchedAt)
-            guard clientLivenessDependsOnLease(clientID: clientID) else { return }
             guard leaseTouchCoalescer.isDurableTouchDue(clientID: clientID, now: touchedAtDate) else { return }
             let paths = paths
             enqueueCoalescedPersistenceWrite(key: "lease:\(clientID)") { databasePath in
@@ -1004,19 +1017,6 @@
                 // client, so a stray touch enqueued for one can never resurrect its lease; the result is unused.
                 _ = try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: touchedAt, databasePath: databasePath)
             }
-        }
-
-        /// Whether `clientID`'s durable lease has any reader (`TerminalClientKind.livenessDependsOnLease`).
-        ///
-        /// A local window client is judged live by its attachment row alone: `liveAttachments` counts it live
-        /// while attached whatever its lease says, `staleRemoteClients` never returns it, and this core answers
-        /// its heartbeats from in-memory attachment state rather than from the write's result. Its
-        /// `lease_refreshed_at` is therefore read by nobody, so writing it is contention on the profile
-        /// database for no information. Unknown clients keep writing: a client with no row in the snapshot has
-        /// no kind to exempt it, and the write is a no-op against a row that does not exist.
-        private func clientLivenessDependsOnLease(clientID: String) -> Bool {
-            guard let kind = currentAttachmentSnapshot()?.clients.first(where: { $0.id == clientID })?.kind else { return true }
-            return kind.livenessDependsOnLease
         }
 
         /// Updates the in-memory snapshot's client lease in place (no disk read). Deliberately reads
@@ -2130,15 +2130,20 @@
         /// expiries can never block the engine on the DB lock.
         ///
         /// This runs once a second for every live session, so it first asks the in-memory attachment
-        /// snapshot whether the session has any client a lease could expire at all, and does nothing when it
-        /// does not. That is the overwhelming majority of sessions and of ticks: a local window client is
-        /// lease-exempt and a session nobody has attached to has no clients. The cache is authoritative for
-        /// this question by the same single-writer invariant that lets owner gating read it (see
-        /// `cachedAttachmentSnapshot`) — a lease-governed client can only appear through an attach on this
-        /// core, which invalidates the cache — so the gate can only skip a tick that had nothing to expire.
+        /// snapshot whether any attached, connected client holds a lease older than
+        /// `remoteClientLeaseInterval` (`hasLapsedLeaseGovernedAttachedClient`), and does nothing when none
+        /// does. That covers both a session nobody has attached to and the common steady state of a session
+        /// whose only attached client is a heartbeating pane, so an idle session never reads the database on
+        /// this tick. The cache is authoritative for this question by the same single-writer invariant that
+        /// lets owner gating read it (see `cachedAttachmentSnapshot`): a client can only appear through an
+        /// attach on this core, and every lease touch is applied to the cache on the engine before its durable
+        /// write is even enqueued (`enqueueClientLeaseTouch`), so memory is never behind the database on a
+        /// lease. A lease memory judges fresh would be exempted by the `latestRemoteClientHeartbeat` filter
+        /// below even if the database still showed it stale, so the gate can only skip a tick that had
+        /// nothing to expire.
         ///
         /// The gate also requires `expiredRemoteClientIDs` to be empty. A client already marked expired here
-        /// is, by construction, no longer in `hasLeaseGovernedAttachedClient()`'s view — `markClientsExpiredInCache`
+        /// is, by construction, no longer in `hasLapsedLeaseGovernedAttachedClient(now:)`'s view — `markClientsExpiredInCache`
         /// optimistically detaches it in the same cache this gate reads, before its durable detach write has
         /// committed. Without this second condition, the very first tick after an expiry decision would see
         /// no lease-governed attached client and take the fast path below, which clears `expiredRemoteClientIDs`.
@@ -2154,7 +2159,7 @@
             // Keep only fresh heartbeats: an entry older than the cutoff can no longer protect a client and
             // would otherwise accumulate for the daemon's lifetime.
             latestRemoteClientHeartbeat = latestRemoteClientHeartbeat.filter { $0.value >= cutoff }
-            guard hasLeaseGovernedAttachedClient() || !expiredRemoteClientIDs.isEmpty else {
+            guard hasLapsedLeaseGovernedAttachedClient(now: now) || !expiredRemoteClientIDs.isEmpty else {
                 expiredRemoteClientIDs.removeAll(keepingCapacity: true)
                 return []
             }
@@ -2210,7 +2215,8 @@
                 $0.mode == .owner && $0.detachedAt == nil && !staleClientIDSet.contains($0.clientID)
             }?.clientID
             let ownershipTransferTarget: String?
-            if detachedClientWasOwner, remainingOwnerClientID == nil, let localOwnerClientID = activeLocalWindowClientID(excluding: "") {
+            if detachedClientWasOwner, remainingOwnerClientID == nil, let localOwnerClientID = activeLocalWindowClientID(excluding: staleClientIDSet)
+            {
                 ownershipTransferTarget = localOwnerClientID
                 remainingOwnerClientID = localOwnerClientID
                 advanceOwnerEpoch(reason: "stale_client_transfer")
@@ -2585,7 +2591,7 @@
                 name: "owner_input_activity", count: byteCount,
                 attributes: ["owner_kind": ownerClient.kind.rawValue, "interactive": interactiveInput ? "1" : "0"])
             if interactiveInput { interactiveOutputGate.markActivity(windowNanoseconds: Self.interactiveInputFlushWindowNanoseconds) }
-            if ownerClient.kind == .localWindow {
+            if ownerClient.kind == .local {
                 inputOutputResyncScheduler.noteLocalOwnerInput()
                 return
             }
@@ -2593,7 +2599,7 @@
         }
 
         private func markLocalOwnerCommandInputOutputResyncPending() {
-            guard activeOwnerClient()?.kind == .localWindow else { return }
+            guard activeOwnerClient()?.kind == .local else { return }
             inputOutputResyncScheduler.noteLocalOwnerCommand()
         }
 
@@ -2708,9 +2714,14 @@
             return trimmed.isEmpty ? nil : trimmed
         }
 
+        /// Normalizes the attaching client's `connectedAt` to the daemon's own attach instant rather than
+        /// trusting whatever the client reported. `upsertClient` writes `lease_refreshed_at` from
+        /// `connectedAt` (see `TerminalSessionPersistence.upsertClient`), so a stale or clock-skewed
+        /// self-reported value would seed a lease that reads as already-expired the moment it lands.
+        /// Applied to every kind alike: a `local` client's lease governs its expiry exactly as a
+        /// `remote` client's does, so both need a trustworthy starting point.
         private static func clientForAttachLease(_ client: TerminalClient, attachedAt: String) -> TerminalClient {
-            guard client.kind != .localWindow else { return client }
-            return TerminalClient(id: client.id, kind: client.kind, identity: client.identity, connectedAt: attachedAt, disconnectedAt: nil)
+            TerminalClient(id: client.id, kind: client.kind, identity: client.identity, connectedAt: attachedAt, disconnectedAt: nil)
         }
 
         private func activeOwnerClient() -> TerminalClient? {
@@ -2783,14 +2794,16 @@
             (currentAttachmentSnapshot()?.attachments ?? []).filter { $0.detachedAt == nil }
         }
 
-        /// Whether any still-attached client is one whose liveness the lease decides, i.e. whether the
-        /// stale-client sweep has anything it could possibly expire. Mirrors the predicate
-        /// `TerminalSessionPersistence.staleRemoteClients` runs in SQL — attached, connected, and a kind
-        /// `livenessDependsOnLease` covers — against `currentAttachmentSnapshot()` instead of the database.
-        private func hasLeaseGovernedAttachedClient() -> Bool {
+        /// Whether the in-memory snapshot holds a client the stale-client sweep could expire: attached,
+        /// connected, and with a lease older than `remoteClientLeaseInterval` as of `now` (or never
+        /// refreshed). Mirrors what `TerminalSessionPersistence.staleRemoteClients` computes from the database,
+        /// judged by the single liveness rule (`liveAttachments`) against `currentAttachmentSnapshot()`, so a
+        /// session whose every attached client is still heartbeating never reaches the database query.
+        private func hasLapsedLeaseGovernedAttachedClient(now: Date) -> Bool {
             guard let snapshot = currentAttachmentSnapshot() else { return false }
+            let liveClientIDs = Set(snapshot.liveAttachments(now: now).map(\.clientID))
             let attachedClientIDs = Set(snapshot.attachments.filter { $0.detachedAt == nil }.map(\.clientID))
-            return snapshot.clients.contains { $0.disconnectedAt == nil && $0.kind.livenessDependsOnLease && attachedClientIDs.contains($0.id) }
+            return snapshot.clients.contains { $0.disconnectedAt == nil && attachedClientIDs.contains($0.id) && !liveClientIDs.contains($0.id) }
         }
 
         /// Drops the in-memory attachment snapshot so the next read reseeds from the durable mirror. Called
@@ -3258,9 +3271,7 @@
             }
 
             let baseline = renderUpdateProducer.baseline
-            if let baselineRevision = baseline?.sessionRevision, baselineRevision > renderUpdateRevision {
-                renderUpdateRevision = baselineRevision
-            }
+            if let baselineRevision = baseline?.sessionRevision, baselineRevision > renderUpdateRevision { renderUpdateRevision = baselineRevision }
             if let baseline, baseline.sessionRevision == Optional(renderUpdateRevision), baseline.snapshot != snapshot {
                 if renderUpdateRevision < UInt64.max { renderUpdateRevision += 1 }
             }

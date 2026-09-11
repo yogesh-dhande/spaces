@@ -91,9 +91,9 @@ extension TerminalSessionPaneViewController {
         let searchState = debugTerminalSearchState
         return .init(
             renderedOutput: renderedOutput, visibleSurfaceOutput: visibleSurfaceOutput, surfaceSelectionText: surfaceSelectionText,
-            showsTerminalSurface: !terminalContainer.isHidden, showsTextRenderer: !outputScrollView.isHidden, rendererSummary: rendererLabel.stringValue,
-            summary: summaryLabel.stringValue,
-            state: stateLabel.stringValue, windowTitle: window?.title ?? "", didCloseWindow: didCloseWindow, surfaceColumns: surfaceSnapshot?.columns,
+            showsTerminalSurface: !terminalContainer.isHidden, showsTextRenderer: !outputScrollView.isHidden,
+            rendererSummary: rendererLabel.stringValue, summary: summaryLabel.stringValue, state: stateLabel.stringValue,
+            windowTitle: window?.title ?? "", didCloseWindow: didCloseWindow, surfaceColumns: surfaceSnapshot?.columns,
             surfaceRows: surfaceSnapshot?.rows, windowIsKey: window?.isKeyWindow == true, firstResponderTypeName: debugFirstResponderTypeName,
             searchVisible: searchState.isVisible, searchQuery: searchState.query, searchTotal: searchState.total,
             searchSelected: searchState.selected, attachmentMode: preferredAttachmentMode.rawValue, takeoverPending: isTakeoverAttemptPending,
@@ -121,8 +121,7 @@ extension TerminalSessionPaneViewController {
     func debugSetTakeoverAttemptStartedAt(_ date: Date?) {
         switch takeoverAttemptState {
         case .none: break
-        case .queued(let id), .inFlight(let id, _):
-            takeoverAttemptState = date.map { .inFlight(id: id, startedAt: $0) } ?? .queued(id: id)
+        case .queued(let id), .inFlight(let id, _): takeoverAttemptState = date.map { .inFlight(id: id, startedAt: $0) } ?? .queued(id: id)
         }
     }
     var debugShowsInlineControls: Bool { !inputRowStackView.isHidden }
@@ -136,6 +135,10 @@ extension TerminalSessionPaneViewController {
     var debugShowsHeader: Bool { !headerStackView.isHidden }
     var debugShowsTakeoverMessage: Bool { !takeoverMessageLabel.isHidden }
     var debugTakeoverMessage: String { takeoverMessageLabel.stringValue }
+    /// The State-B overlay's bold headline (see `currentGhosttyTakeoverStatusText`), e.g. "Owned by iPhone".
+    var debugTakeoverTitle: String { takeoverTitleLabel.stringValue }
+    var debugShowsTakeoverScrim: Bool { !takeoverScrimView.isHidden }
+    var debugTakeoverScrimColor: CGColor? { takeoverScrimView.layer?.backgroundColor }
     var debugBannerVisible: Bool { banner.debugIsVisible }
     var debugBannerMessage: String { banner.debugMessage }
     var debugBannerHasPersistentNotice: Bool { banner.debugHasPersistentNotice }

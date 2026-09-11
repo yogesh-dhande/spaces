@@ -7,7 +7,7 @@ import XCTest
 final class TerminalControlProtocolTests: XCTestCase {
     func testRequestAndResponseRoundTripThroughCodec() throws {
         let client = TerminalClient(
-            id: "client-1", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
+            id: "client-1", kind: .remote, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
             connectedAt: "2026-05-15T00:00:00Z")
         let request = TerminalControlRequest(
             command: "attach", authToken: "SECRET", text: "hello", bytes: Data([0, 10, 255]), clientID: "client-1", client: client,
@@ -142,8 +142,7 @@ final class TerminalControlProtocolTests: XCTestCase {
     func testSetSelectionRequestRoundTripsThroughCodec() throws {
         let request = TerminalControlRequest(
             command: .setSelection(
-                TerminalControlSetSelectionPayload(clientID: "viewer-1", startColumn: 4, startRow: 100, endColumn: 20, endRow: 102, rectangle: true))
-        )
+                TerminalControlSetSelectionPayload(clientID: "viewer-1", startColumn: 4, startRow: 100, endColumn: 20, endRow: 102, rectangle: true)))
 
         let decoded = try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request))
 
@@ -169,8 +168,7 @@ final class TerminalControlProtocolTests: XCTestCase {
     }
 
     func testSetSelectionWithoutEndpointsReportsMissingPayload() throws {
-        let request = try TerminalControlCodec.decodeRequest(
-            #"{"command":"setSelection","clientID":"viewer-1","asPaste":false}"#.data(using: .utf8)!)
+        let request = try TerminalControlCodec.decodeRequest(#"{"command":"setSelection","clientID":"viewer-1","asPaste":false}"#.data(using: .utf8)!)
         XCTAssertEqual(request.commandValue.requiredPayloadFailureMessage, "Missing selection endpoints.")
     }
 

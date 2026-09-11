@@ -3,9 +3,11 @@ import Foundation
 /// Persists the stable `TerminalClient` id this Mac uses to attach to a terminal session as OWNER,
 /// in the client database. The mac app mints a fresh client id per launch, so without a stable id a
 /// relaunched window (e.g. after an app upgrade) re-attaches to its still-running daemon session as a
-/// viewer: the dead instance's `localWindow` owner attachment never expires and keeps ownership,
-/// forcing a manual "take over" click. Reusing the stored id makes the daemon see the relaunched
-/// window as the same owner, so it silently reclaims ownership through the normal attach path.
+/// viewer: while the dead instance's owner attachment's lease has not yet lapsed, it still keeps
+/// ownership, forcing a manual "take over" click. Reusing the stored id makes the daemon see the
+/// relaunched window as the same owner, so it silently reclaims ownership through the normal attach
+/// path — and once the lease has lapsed (or a daemon start/handoff already cleared the row), the same
+/// reused id just attaches fresh, no differently than a new one would.
 ///
 /// Scoped to the local device (a terminal owner "window" is a client/desktop-local concept, not
 /// daemon state). The stored UUID exists only on this Mac and can only ever match THIS device's own

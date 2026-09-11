@@ -1,21 +1,27 @@
 import Foundation
 
+/// Where a client sits relative to the session it attaches to — purely locality, not a trust or
+/// liveness distinction. `local` names a client that talks to the daemon on the same machine (this
+/// Mac's own window onto its own daemon's session); `remote` names a client reaching the session over
+/// a network hop, whether that is another paired Mac, an iPhone, or a Mac's own pane onto a session
+/// hosted by a different paired device.
+///
+/// Every client kind is judged live the same way: by whether `lease_refreshed_at` was refreshed within
+/// `TerminalSessionPersistence.remoteClientLeaseInterval` (`TerminalSessionAttachmentSnapshot.liveAttachments`,
+/// `TerminalSessionPersistence.staleRemoteClients`). A `local` client reaches the daemon as a separate
+/// process over a unix socket exactly like a `remote` one reaches it over the network — a force-quit or
+/// a hung app leaves the identical kind of ghost attachment either way — so no kind is exempt from
+/// expiry; every attached client, local or remote, keeps its lease fresh (see
+/// `TerminalSessionPaneViewController`'s heartbeat and the touch-on-every-control-request pattern in
+/// `GhosttyEmbeddedSessionHost`).
+///
+/// The one place `kind` still changes behavior is `TerminalRemoteSessionStatePolicy.shouldIncludeScreenState`'s
+/// `.inputOutput` case: a `local` owner gets the terminal's own local echo instead of a duplicate
+/// broadcast frame, an optimization that only makes sense when the owner is rendering the same PTY
+/// output the daemon is.
 public enum TerminalClientKind: String, Codable, Sendable, CaseIterable {
-    case localWindow
-    case remoteViewer
-
-    /// Whether a client of this kind is judged live by its attachment lease.
-    ///
-    /// A client that can vanish without sending a detach — anything reaching the session over a network or a
-    /// separate process — proves it is still there by refreshing `lease_refreshed_at`. A local window client
-    /// runs inside the app that talks to the daemon on the same machine, so its attachment row alone says
-    /// whether it is there: `TerminalSessionAttachmentSnapshot.liveAttachments` counts it live while attached
-    /// regardless of its lease, and `staleRemoteClients` never considers it for expiry.
-    ///
-    /// This is the single declaration of that rule. Every reader of `lease_refreshed_at` derives its
-    /// kind filter from it, and the embedded core skips the durable lease write for a kind that answers
-    /// `false` — a write no reader would consult.
-    public var livenessDependsOnLease: Bool { self != .localWindow }
+    case local
+    case remote
 }
 
 public struct TerminalClientIdentity: Codable, Sendable, Equatable {

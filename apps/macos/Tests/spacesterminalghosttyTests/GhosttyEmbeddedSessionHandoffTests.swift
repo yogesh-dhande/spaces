@@ -452,7 +452,7 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         let configuration = Self.makeConfiguration(
             sessionID: "handoff-epoch-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(marker)'; cat")
         let owner = TerminalClient(
-            id: "remote-owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
+            id: "remote-owner", kind: .remote, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
             connectedAt: "2026-07-12T00:00:00Z")
         let sourceCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
             let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
@@ -583,7 +583,7 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         let configuration = Self.makeConfiguration(
             sessionID: "handoff-rebind-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(marker)'; cat")
         let owner = TerminalClient(
-            id: "remote-owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
+            id: "remote-owner", kind: .remote, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
             connectedAt: "2026-07-12T00:00:00Z")
         let coreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
             let core = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)

@@ -34,9 +34,9 @@ import Testing
     // MARK: - Fixtures
 
     private static let localOwner = TerminalClient(
-        id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-07-21T00:00:00Z")
-    private static let remoteViewer = TerminalClient(
-        id: "remote-iphone", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-07-21T00:00:01Z")
+        id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-07-21T00:00:00Z")
+    private static let remoteClient = TerminalClient(
+        id: "remote-iphone", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-07-21T00:00:01Z")
 
     /// A session with the local window attached as owner and the remote viewer attached as viewer — the
     /// shape every ownership mutation below starts from.
@@ -54,7 +54,7 @@ import Testing
             sessionID: launchConfiguration.sessionID, client: Self.localOwner, mode: .owner, paths: paths, attachedAt: "2026-07-21T00:00:00Z",
             databasePath: databasePath)
         try TerminalSessionPersistence.attachClient(
-            sessionID: launchConfiguration.sessionID, client: Self.remoteViewer, mode: .viewer, paths: paths, attachedAt: "2026-07-21T00:00:01Z",
+            sessionID: launchConfiguration.sessionID, client: Self.remoteClient, mode: .viewer, paths: paths, attachedAt: "2026-07-21T00:00:01Z",
             databasePath: databasePath)
         return (paths, launchConfiguration.sessionID)
     }
@@ -86,14 +86,14 @@ import Testing
 
         let attachedAt = "2026-07-21T00:00:02Z"
         try TerminalSessionPersistence.attachClient(
-            sessionID: session.sessionID, client: Self.remoteViewer, mode: .owner, paths: session.paths, attachedAt: attachedAt,
+            sessionID: session.sessionID, client: Self.remoteClient, mode: .owner, paths: session.paths, attachedAt: attachedAt,
             databasePath: databasePath)
         let durable = try TerminalSessionPersistence.readAttachmentSnapshot(paths: session.paths, databasePath: databasePath)
 
-        let inMemory = before.applyingAttach(client: Self.remoteViewer, mode: .owner, sessionID: session.sessionID, attachedAt: attachedAt)
+        let inMemory = before.applyingAttach(client: Self.remoteClient, mode: .owner, sessionID: session.sessionID, attachedAt: attachedAt)
         expectMirrors(inMemory, durable, "attaching a viewer as owner must detach the previous owner and re-mode the viewer's attachment")
         #expect(
-            inMemory.attachments.filter { $0.detachedAt == nil && $0.mode == .owner }.map(\.clientID) == [Self.remoteViewer.id],
+            inMemory.attachments.filter { $0.detachedAt == nil && $0.mode == .owner }.map(\.clientID) == [Self.remoteClient.id],
             "exactly one client owns the session after the attach")
     }
 
@@ -102,11 +102,10 @@ import Testing
         let before = try TerminalSessionPersistence.readAttachmentSnapshot(paths: session.paths, databasePath: databasePath)
 
         let newViewer = TerminalClient(
-            id: "remote-ipad", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-07-21T00:00:03Z")
+            id: "remote-ipad", kind: .remote, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-07-21T00:00:03Z")
         let attachedAt = "2026-07-21T00:00:03Z"
         try TerminalSessionPersistence.attachClient(
-            sessionID: session.sessionID, client: newViewer, mode: .viewer, paths: session.paths, attachedAt: attachedAt,
-            databasePath: databasePath)
+            sessionID: session.sessionID, client: newViewer, mode: .viewer, paths: session.paths, attachedAt: attachedAt, databasePath: databasePath)
         let durable = try TerminalSessionPersistence.readAttachmentSnapshot(paths: session.paths, databasePath: databasePath)
 
         let inMemory = before.applyingAttach(client: newViewer, mode: .viewer, sessionID: session.sessionID, attachedAt: attachedAt)
@@ -124,7 +123,7 @@ import Testing
         let inMemory = before.applyingDetach(clientID: Self.localOwner.id, detachedAt: detachedAt)
         expectMirrors(inMemory, durable, "detaching must disconnect the client and end every attachment it holds")
         #expect(
-            inMemory.attachments.filter { $0.detachedAt == nil }.map(\.clientID) == [Self.remoteViewer.id],
+            inMemory.attachments.filter { $0.detachedAt == nil }.map(\.clientID) == [Self.remoteClient.id],
             "only the still-attached viewer remains active after the owner detaches")
     }
 
@@ -134,11 +133,11 @@ import Testing
 
         let transferredAt = "2026-07-21T00:00:05Z"
         try TerminalSessionPersistence.transferOwnership(
-            sessionID: session.sessionID, newOwnerClientID: Self.remoteViewer.id, paths: session.paths, transferredAt: transferredAt,
+            sessionID: session.sessionID, newOwnerClientID: Self.remoteClient.id, paths: session.paths, transferredAt: transferredAt,
             databasePath: databasePath)
         let durable = try TerminalSessionPersistence.readAttachmentSnapshot(paths: session.paths, databasePath: databasePath)
 
-        let inMemory = before.applyingOwnershipTransfer(to: Self.remoteViewer.id, sessionID: session.sessionID, transferredAt: transferredAt)
+        let inMemory = before.applyingOwnershipTransfer(to: Self.remoteClient.id, sessionID: session.sessionID, transferredAt: transferredAt)
         expectMirrors(inMemory, durable, "a takeover must demote the previous owner to viewer and promote the new owner in place")
     }
 
@@ -149,27 +148,27 @@ import Testing
         let touchedAt = "2026-07-21T00:01:00Z"
         #expect(
             try TerminalSessionPersistence.touchClient(
-                id: Self.remoteViewer.id, paths: session.paths, touchedAt: touchedAt, databasePath: databasePath))
+                id: Self.remoteClient.id, paths: session.paths, touchedAt: touchedAt, databasePath: databasePath))
         let durable = try TerminalSessionPersistence.readAttachmentSnapshot(paths: session.paths, databasePath: databasePath)
 
-        let inMemory = before.applyingClientLeaseTouch(clientID: Self.remoteViewer.id, leaseRefreshedAt: touchedAt)
+        let inMemory = before.applyingClientLeaseTouch(clientID: Self.remoteClient.id, leaseRefreshedAt: touchedAt)
         expectMirrors(inMemory, durable, "a heartbeat must refresh only the heartbeating client's lease")
     }
 
     @Test func touchingADisconnectedClientLeavesItsLeaseAloneOnBothSides() throws {
         let session = try makeAttachedSession()
         try TerminalSessionPersistence.detachClient(
-            id: Self.remoteViewer.id, paths: session.paths, detachedAt: "2026-07-21T00:00:06Z", databasePath: databasePath)
+            id: Self.remoteClient.id, paths: session.paths, detachedAt: "2026-07-21T00:00:06Z", databasePath: databasePath)
         let before = try TerminalSessionPersistence.readAttachmentSnapshot(paths: session.paths, databasePath: databasePath)
 
         let touchedAt = "2026-07-21T00:02:00Z"
         #expect(
             try TerminalSessionPersistence.touchClient(
-                id: Self.remoteViewer.id, paths: session.paths, touchedAt: touchedAt, databasePath: databasePath) == false,
+                id: Self.remoteClient.id, paths: session.paths, touchedAt: touchedAt, databasePath: databasePath) == false,
             "a disconnected client's lease touch must report that it changed nothing")
         let durable = try TerminalSessionPersistence.readAttachmentSnapshot(paths: session.paths, databasePath: databasePath)
 
-        let inMemory = before.applyingClientLeaseTouch(clientID: Self.remoteViewer.id, leaseRefreshedAt: touchedAt)
+        let inMemory = before.applyingClientLeaseTouch(clientID: Self.remoteClient.id, leaseRefreshedAt: touchedAt)
         expectMirrors(inMemory, durable, "a stray heartbeat must never resurrect a client the session already let go of")
     }
 
@@ -180,8 +179,8 @@ import Testing
         // The identity a client reports can change between connections (a renamed device), and the upsert is
         // what carries the newest one; the lease follows the client's connection instant, as the SQL does.
         let renamed = TerminalClient(
-            id: Self.remoteViewer.id, kind: .remoteViewer, identity: .init(label: "iPhone 17", deviceName: "iPhone 17"),
-            connectedAt: "2026-07-21T00:03:00Z")
+            id: Self.remoteClient.id, kind: .remote, identity: .init(label: "iPhone 17", deviceName: "iPhone 17"), connectedAt: "2026-07-21T00:03:00Z"
+        )
         try TerminalSessionPersistence.upsertClient(renamed, paths: session.paths, databasePath: databasePath)
         let durable = try TerminalSessionPersistence.readAttachmentSnapshot(paths: session.paths, databasePath: databasePath)
 

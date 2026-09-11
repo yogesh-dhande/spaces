@@ -21,16 +21,16 @@ public enum TerminalRemoteSessionStatePolicy {
     public static func shouldIncludeScreenState(reason: String, ownerKind: TerminalClientKind? = nil) -> Bool {
         guard let reasonKind = TerminalRemoteSessionStateReason(rawValue: reason) else { return false }
         switch reasonKind {
-        case .initial, .attachmentState: return ownerKind == .localWindow || ownerKind == .remoteViewer
-        case .resize: return ownerKind == .localWindow || ownerKind == .remoteViewer
-        case .output: return ownerKind == .localWindow || ownerKind == .remoteViewer
-        case .stateChange: return ownerKind == .localWindow || ownerKind == .remoteViewer
+        case .initial, .attachmentState: return ownerKind == .local || ownerKind == .remote
+        case .resize: return ownerKind == .local || ownerKind == .remote
+        case .output: return ownerKind == .local || ownerKind == .remote
+        case .stateChange: return ownerKind == .local || ownerKind == .remote
         case .scroll: return true
         case .clearScreen: return true
         case .selection: return true
         case .terminated: return true
         case .input: return false
-        case .inputOutput: return ownerKind == .localWindow
+        case .inputOutput: return ownerKind == .local
         // A clipboard write announces no screen change: the output turn that carried the OSC 52
         // already broadcast the frame. Exporting one here would put a second frame on the delta
         // chain for a payload the mirror does not render.
