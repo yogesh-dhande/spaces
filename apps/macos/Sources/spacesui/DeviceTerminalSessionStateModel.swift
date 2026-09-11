@@ -530,11 +530,8 @@
             }
         }
 
-        private func ensureSubscriptionStarted(now: Date = Date()) {
-            // Test seam: fires on every call, including one the guard below immediately turns away, so
-            // `spacesuiTests` can observe a delayed retry actually running (and being eaten by the
-            // in-flight guard) instead of guessing whether real time has passed. Nil in production.
-            ensureSubscriptionStartedInvokedForTesting?()
+        private func ensureSubscriptionStarted() {
+            let now = subscribeThrottleNow
             // A live attempt is either dialing or holding a stream, and in both cases this pane already has
             // recovery under way. Only the stage 2 ladder tick deliberately dials alongside one, and it
             // bypasses this entry point (see `startConcurrentUnreachableRedial`).
@@ -1168,6 +1165,12 @@
         /// deterministically instead of polling. A no-op when no probe is running.
         func drainPendingLinkCorroborationProbeForTesting() async { await linkCorroborationProbe?.task.value }
 
+        /// The in-flight corroboration probe's task, if any. A test captures it before a replacement
+        /// stream's probe takes the slot, so the superseded probe's verdict can be awaited to completion
+        /// rather than yielded at: a superseded probe is out of `drainPendingLinkCorroborationProbeForTesting`'s
+        /// reach. Mirrors `connectAttemptTasksForTesting`.
+        var pendingLinkCorroborationProbeTaskForTesting: Task<Void, Never>? { linkCorroborationProbe?.task }
+
         /// Whether a corroboration probe is in flight; `spacesuiTests` uses it to prove a second timeout
         /// arriving during one does not spawn a competing probe.
         var hasInFlightLinkCorroborationProbeForTesting: Bool { linkCorroborationProbe != nil }
@@ -1308,8 +1311,20 @@
         /// instead.
         var lastDialExhaustedAllCandidatesForTesting = false
 
-        /// See the call site in `ensureSubscriptionStarted`.
-        var ensureSubscriptionStartedInvokedForTesting: (@MainActor () -> Void)?
+        /// The clock the subscribe throttle stamps and measures its 500ms window against. Nil in
+        /// production, where every stamp and every comparison reads the real `Date()`.
+        ///
+        /// `spacesuiTests` pins it so a test about what the throttle does INSIDE its window states that
+        /// window as a fact rather than racing it: the steps between the stamping subscribe and the
+        /// subscribe under test are a real server, a real dial and a real socket teardown, and on a loaded
+        /// runner they outran 500ms and made the test assert against the un-throttled path instead
+        /// (issue #646).
+        var subscribeThrottleClockForTesting: (@MainActor () -> Date)?
+
+        /// What the subscribe throttle reads for "now": the pinned test clock when one is installed, the
+        /// real one otherwise. Every throttle stamp and comparison goes through here, so a pinned clock
+        /// governs the whole window rather than half of it.
+        private var subscribeThrottleNow: Date { subscribeThrottleClockForTesting?() ?? Date() }
 
         /// Overrides the `.state` request the liveness recheck makes, so `spacesuiTests` can hand it a
         /// chosen answer — a transport failure, a coded refusal, a running session, an exited one — and a
@@ -1330,6 +1345,35 @@
 
         /// Whether a delayed reconnect is currently armed and waiting to fire.
         var hasArmedReconnectForTesting: Bool { reconnectTask != nil }
+
+        /// The stage 1 reconnect timer's current task, if any. A test captures it before releasing the
+        /// held `reconnectWaitForTesting` and then awaits the captured handle, which proves what the retry
+        /// did instead of waiting out a real delay; mirrors `graceTaskForTesting`. Reading the live
+        /// property afterwards would not work: the retry clears it as its first act.
+        var reconnectTaskForTesting: Task<Void, Never>? { reconnectTask }
+
+        /// Overrides what the stage 1 reconnect timer awaits in place of `Task.sleep`, mirroring
+        /// `graceWaitForTesting` and `unreachableRedialWaitForTesting`: a test holds the armed retry and
+        /// releases it when it wants it to fire, so "the timer fired" is an act the test performs rather
+        /// than a short real delay it has to outlast. It receives the delay it stands in for. Nil in
+        /// production, where every retry is a real sleep.
+        var reconnectWaitForTesting: (@MainActor (Duration) async -> Void)?
+
+        /// Overrides what the liveness recheck's own cadence awaits between attempts in place of
+        /// `Task.sleep`, mirroring `reconnectWaitForTesting`. Holding the cadence is also what makes the
+        /// loop's state readable: the recheck asks exactly once per iteration, after fully settling the
+        /// last answer, so a test that sees a wait parked here knows nothing is in flight and can change
+        /// what the next attempt answers without racing one. Nil in production, where the cadence is the
+        /// same real `reconnectBackoff` delay the reconnect timer uses.
+        var livenessRecheckWaitForTesting: (@MainActor (Duration) async -> Void)?
+
+        /// Every live connect attempt's dial task, oldest attempt first. A test captures the task of an
+        /// attempt it is about to have retired (by Retry, by the stage 2 cap, or by a racing attempt's
+        /// first payload) so it can await that attempt running to completion after resolving its dial:
+        /// a retired attempt is out of `drainPendingConnectForTesting`'s reach, and without the handle the
+        /// only way to assert its belated completion changed nothing is to guess how many `Task.yield()`s
+        /// it takes.
+        var connectAttemptTasksForTesting: [Task<Void, Never>] { connectAttempts.keys.sorted().compactMap { connectAttempts[$0]?.task } }
 
         /// The stage 2 cadence's current tick, non-nil exactly while a rung is being waited out. A test
         /// captures it before releasing the held `unreachableRedialWaitForTesting`, then awaits the
@@ -1412,8 +1456,13 @@
             }
             let resolvedDelay = reconnectBackoff.nextDelay()
             lastReconnectDelayForTesting = resolvedDelay
+            let wait = reconnectWaitForTesting
             reconnectTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: resolvedDelay)
+                if let wait {
+                    await wait(resolvedDelay)
+                } else {
+                    try? await Task.sleep(for: resolvedDelay)
+                }
                 // `try?` turns the sleep's `CancellationError` into a plain return from that line, not
                 // from this task: without checking `Task.isCancelled` explicitly, a caller that cancels
                 // this task (Retry, or an escalation rearming on the stage 2 ladder) would only stop the
@@ -1562,7 +1611,11 @@
                     let result = await fetch()
                     guard !Task.isCancelled, let outcome = self?.settleLivenessRecheck(with: result) else { break }
                     guard case .retryAfter(let retryDelay) = outcome else { break }
-                    try? await Task.sleep(for: retryDelay)
+                    if let wait = self?.livenessRecheckWaitForTesting {
+                        await wait(retryDelay)
+                    } else {
+                        try? await Task.sleep(for: retryDelay)
+                    }
                     guard !Task.isCancelled else { break }
                     // Re-resolve a local daemon that may have moved before asking again. An idle-shut-down
                     // daemon comes back on a fresh ephemeral port, so every attempt made through the request
@@ -1787,7 +1840,7 @@
             // on the same short budget the cadence's own redials use, and the cadence keeps running
             // across it, so a Retry whose dial black-holes on the address that was down is raced by the
             // next rung instead of holding the pane for its whole budget.
-            lastSubscriptionAttemptAt = Date()
+            lastSubscriptionAttemptAt = subscribeThrottleNow
             beginConnectAttempt(dialTimeoutSeconds: Self.unreachableRedialDialTimeoutSeconds)
             armUnreachableRedialTick()
         }
