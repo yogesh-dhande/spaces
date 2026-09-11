@@ -1914,6 +1914,64 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             scrollUpdate.changedCellCount, columns * rows / 2, "a viewport scroll ships the rows ghostty moved as scroll rects, not the whole grid")
     }
 
+    /// Output a program prints on its own costs one screen frame per chunk, exported by the `output`
+    /// broadcast, not a second one from the screen turn trailing it. The bytes reach the transcript on an
+    /// engine turn the delivery schedules, while Ghostty raises the screen revision from its reader thread
+    /// the moment it parses them, and nothing orders those two turns. Output that follows no keystroke
+    /// takes the drain's coalescing delay, so the screen turn reliably arrives first here: it is the case
+    /// that proves the bytes still go out under `output` and that the screen turn publishes nothing.
+    func testSpontaneousOutputPublishesOneScreenFramePerChunk() async throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+
+        let tickCount = 12
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "spontaneous-frame-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "ticker",
+            workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh",
+            command: "stty -echo; i=0; while [ $i -lt \(tickCount) ]; do i=$((i+1)); printf 'tick %d\\n' $i; sleep 0.2; done; cat",
+            createdAt: "2026-09-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let owner = TerminalClient(
+            id: "remote-ipad", kind: .remote, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"), connectedAt: "2026-09-09T00:00:00Z"
+        )
+
+        let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try host.attach(client: owner, mode: .owner, into: nil)
+            return Box(host)
+        }
+        let host = hostBox.value
+        defer { TerminalEngineActor.runSynchronously { host.terminate() } }
+
+        let receivedPayloads = RemoteSessionStatePayloadCollector()
+        let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
+        try client.start()
+        defer { client.stop() }
+        let cursor = RenderUpdateCursorBox()
+        // Measure from the second tick so the startup frames (the attach, the first screen the session ever
+        // paints) sit outside the window.
+        try await waitUntil(timeout: 60) { cursor.applyingUpdates(receivedPayloads.snapshot).contains("tick 2") }
+        let measuredFrom = receivedPayloads.snapshot.count
+        try await waitUntil(timeout: 60) { cursor.applyingUpdates(receivedPayloads.snapshot).contains("tick \(tickCount)") }
+        // The screen turn trailing the last tick is a coalesced engine turn, so give it room to arrive
+        // before reading what did and did not go out.
+        try await Task.sleep(for: .seconds(1))
+
+        let measured = receivedPayloads.snapshot[measuredFrom...]
+        let outputCount = measured.filter { $0.reason == TerminalRemoteSessionStateReason.output.rawValue && $0.renderUpdate != nil }.count
+        let stateChangeCount = measured.filter { $0.reason == TerminalRemoteSessionStateReason.stateChange.rawValue && $0.renderUpdate != nil }.count
+        XCTAssertGreaterThan(outputCount, 0, "the ticks a subscriber received have to reach it as `output` frames")
+        XCTAssertEqual(
+            stateChangeCount, 0,
+            "ticks=\(tickCount) output=\(outputCount) state_change=\(stateChangeCount): a terminal's own output is published by the "
+                + "`output` export, never by the screen turn trailing it")
+    }
+
     /// A keystroke echo costs one screen frame, not two. The `output` broadcast exports the frame Ghostty
     /// holds after the bytes are processed and claims the screen revision Ghostty had raised for them, so
     /// the coalesced `state_change` broadcast trailing it finds that revision already shipped and publishes
@@ -4909,8 +4967,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-expired-reattach", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
             command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let remoteClient = TerminalClient(
-            id: "expired-remote-owner", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"),
-            connectedAt: "2026-05-17T00:00:00Z")
+            id: "expired-remote-owner", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
 
         try await TerminalEngineActor.run {
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
