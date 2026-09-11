@@ -2544,6 +2544,75 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
             "Retry resets the ladder, so the cadence it leaves armed starts from the shortest rung")
     }
 
+    /// A pane's state model can have its last reference dropped by a background thread — any async caller
+    /// holding the pane that owns it — in which case its `deinit` runs there. Cleanup that runs only on the
+    /// main thread leaves the device's stream client connected and reading, with nothing left to deliver
+    /// its payloads to.
+    @MainActor func testLastReleaseOffMainStopsTheInstalledStreamClient() throws {
+        let client = StoppableFakeStreamClient()
+        let box = StateModelBox()
+        let weakReference = WeakStateModelReference()
+        try autoreleasepool {
+            try makeModelReadyForRelease(installing: client, into: box)
+            weakReference.model = box.model
+        }
+
+        let releaseFinished = DispatchSemaphore(value: 0)
+        let deallocatedOnReleasingThread = ReleasingThreadOutcome()
+        Thread.detachNewThread {
+            autoreleasepool { box.model = nil }
+            // Read from the releasing thread: a model that is gone by the time this line runs was
+            // deallocated by that thread's release, which is the scenario under test.
+            deallocatedOnReleasingThread.value = weakReference.model == nil
+            releaseFinished.signal()
+        }
+        waitForReleaseCondition("the releasing thread finishes") { releaseFinished.wait(timeout: .now()) == .success }
+
+        XCTAssertTrue(deallocatedOnReleasingThread.value, "the background thread did not perform the model's last release")
+        waitForReleaseCondition("the released model stops its stream client") { client.stopCount == 1 }
+    }
+
+    /// The control: the same model released on the main thread, where the cleanup runs inline.
+    @MainActor func testLastReleaseOnMainStopsTheInstalledStreamClient() throws {
+        let client = StoppableFakeStreamClient()
+        let box = StateModelBox()
+        let weakReference = WeakStateModelReference()
+        try autoreleasepool {
+            try makeModelReadyForRelease(installing: client, into: box)
+            weakReference.model = box.model
+        }
+
+        autoreleasepool { box.model = nil }
+
+        XCTAssertNil(weakReference.model, "the model was still referenced, so its deinit never ran")
+        waitForReleaseCondition("the released model stops its stream client") { client.stopCount == 1 }
+    }
+
+    /// Builds a model with `client` installed as its stream into `box`, which then holds its only strong
+    /// reference: the caller alone decides which thread performs the model's last release.
+    @MainActor private func makeModelReadyForRelease(installing client: StoppableFakeStreamClient, into box: StateModelBox) throws {
+        let model = try makeModel(sessionID: "session-\(UUID().uuidString)")
+        model.installStreamClientForTesting(client)
+        XCTAssertTrue(model.hasActiveStreamClientForTesting, "the model did not install the test stream client")
+        XCTAssertEqual(client.stopCount, 0, "the stream client was already stopped before the model was released")
+        box.model = model
+    }
+
+    /// Pumps the main run loop until `condition` holds. The release tests are synchronous (the releasing
+    /// thread is a plain `Thread`, so the moment of the last release is pinned rather than scheduled), so
+    /// they cannot use the async `waitUntil` above. `condition` is evaluated until it first holds and never
+    /// again, since one of them consumes a semaphore signal.
+    @MainActor private func waitForReleaseCondition(
+        _ description: String, timeout: TimeInterval = 10, file: StaticString = #filePath, line: UInt = #line, _ condition: () -> Bool
+    ) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTFail("Timed out waiting for \(description)", file: file, line: line)
+    }
+
     /// Polls `condition` on the main actor until it holds, bounded so a model that never gets there fails
     /// the test instead of hanging it. Used where the thing being waited for is started by a task the
     /// model owns and hands back no handle (an attempt's dial reaching the connect seam).
@@ -2849,6 +2918,15 @@ private actor HeldLivenessFetch {
         for continuation in held { continuation.resume(returning: result) }
     }
 }
+
+/// Carries the model across to the thread that performs its last release, and watches it without keeping
+/// it alive. `@unchecked Sendable` because the model is `@MainActor` and not `Sendable`: each box is
+/// written once by the test and once by the releasing thread, never concurrently.
+private final class StateModelBox: @unchecked Sendable { var model: DeviceTerminalSessionStateModel? }
+private final class WeakStateModelReference: @unchecked Sendable { weak var model: DeviceTerminalSessionStateModel? }
+
+/// Carries the releasing thread's verdict back to the test.
+private final class ReleasingThreadOutcome: @unchecked Sendable { var value = false }
 
 /// A stream client that records being stopped, so a test can prove a dropped subscription was cancelled
 /// rather than merely dereferenced.

@@ -106,6 +106,11 @@
             surfaceActionHandlers.removeValue(forKey: token.surfaceKey)
         }
 
+        /// Whether a handler is registered for `surfaceKey`. The table is private and a pane's own
+        /// unregistration happens in its `deinit`, after every reference a test could hold is gone, so
+        /// this is how a test reads that the pane took its registration with it.
+        func debugHasActionHandler(forSurfaceKey surfaceKey: UInt) -> Bool { surfaceActionHandlers[surfaceKey] != nil }
+
         func handleAction(_ event: GhosttyActionEvent, surfaceKey: UInt) {
             guard let registered = surfaceActionHandlers[surfaceKey] else { return }
             Task { @MainActor in registered.handler(event) }

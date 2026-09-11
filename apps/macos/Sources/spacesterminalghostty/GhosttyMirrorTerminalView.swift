@@ -71,7 +71,10 @@
         private let searchUpButton = NSButton()
         private let searchDownButton = NSButton()
         private let searchCloseButton = NSButton()
-        private var mirror: ghostty_mirror_t?
+        /// `nonisolated(unsafe)` so `deinit` can read the pointer it has to free: a `deinit` is nonisolated
+        /// and cannot touch a non-`Sendable` isolated property. It has exclusive access to `self` by then,
+        /// and every other access to the mirror stays on the main actor.
+        private nonisolated(unsafe) var mirror: ghostty_mirror_t?
         /// The app-wide terminal text size this pane renders at. Held here rather than pushed once at
         /// a surface, because `GhosttyMirrorSurfaceMRU` frees and rebuilds surfaces as panes leave and
         /// re-enter the screen: a rebuilt surface takes its font size from the generated Ghostty config
@@ -95,7 +98,9 @@
         private var pendingSearchQueryTask: Task<Void, Never>?
         private var mouseTrackingArea: NSTrackingArea?
         private var windowVisibilityObservation: NSKeyValueObservation?
-        private var windowOcclusionObserver: (any NSObjectProtocol)?
+        /// `nonisolated(unsafe)` for the same reason as `mirror`: `deinit` has to hand this token back to
+        /// `NotificationCenter` (which is thread-safe), and an observer token is not `Sendable`.
+        private nonisolated(unsafe) var windowOcclusionObserver: (any NSObjectProtocol)?
         private var actionHandlerToken: GhosttyMirrorActionHandlerToken?
         private var searchTotal: Int?
         private var searchSelected: Int?
@@ -173,13 +178,22 @@
 
         @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
+        /// Makes no isolation assumption: a `deinit` runs on whichever thread dropped the last reference, so
+        /// `MainActor.assumeIsolated` here would trap the process on a background one. AppKit happens to
+        /// defer an `NSView`'s deallocation to the main thread even when the final release lands off it, but
+        /// nothing in the cleanup below leans on that: task cancellation and observer removal are
+        /// thread-safe on their own, and the two resources that genuinely belong to the main-actor Ghostty
+        /// app service — the surface's handler registration and the C mirror — are captured as values and
+        /// released there.
         deinit {
-            MainActor.assumeIsolated {
-                pendingFirstResponderRestoreTask?.cancel()
-                pendingSearchQueryTask?.cancel()
-                pendingSurfacePresentationTask?.cancel()
-                pendingFrameApplyRetryTask?.cancel()
-                if let windowOcclusionObserver { NotificationCenter.default.removeObserver(windowOcclusionObserver) }
+            pendingFirstResponderRestoreTask?.cancel()
+            pendingSearchQueryTask?.cancel()
+            pendingSurfacePresentationTask?.cancel()
+            pendingFrameApplyRetryTask?.cancel()
+            if let windowOcclusionObserver { NotificationCenter.default.removeObserver(windowOcclusionObserver) }
+            let actionHandlerToken = actionHandlerToken
+            let mirror = mirror
+            MainThreadDeinitCleanup.run {
                 GhosttyMirrorAppService.shared.unregisterActionHandler(actionHandlerToken)
                 if let mirror { ghostty_mirror_free(mirror) }
             }
@@ -1384,6 +1398,10 @@
         static func remoteKeySpecifier(for event: NSEvent) -> String? { GhosttyTerminalInputTranslator.keySpecifier(for: event) }
 
         var debugHasLiveMirrorSurface: Bool { mirror != nil }
+
+        /// The address `GhosttyMirrorAppService` keys this pane's action handler under, so a test can ask
+        /// the service whether the registration is still there once the pane is gone.
+        var debugMirrorSurfaceKey: UInt? { mirrorSurface().map { UInt(bitPattern: $0) } }
         /// Text read back from the live mirror surface, ignoring the retained frame and text cache, so
         /// a test can tell an actually repainted surface from a remembered one. Nil with no mirror.
         var debugMirrorSurfaceText: String? { GhosttyTerminalSnapshotCapture.captureText(from: mirrorSurface()) }

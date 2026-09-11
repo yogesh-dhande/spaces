@@ -197,20 +197,28 @@
             return PreparedCredentials(certificateFingerprint: credentials.certificateFingerprint, authToken: credentials.authToken)
         }
 
+        /// Makes no isolation assumption: a `deinit` runs on whichever thread dropped the last reference —
+        /// a background one whenever an async caller holds the final reference to the pane that owns this
+        /// model — so it can neither assume the main actor nor skip its cleanup off it. Skipping leaves the
+        /// device's stream client connected and reading with nothing left to deliver its payloads to.
+        ///
+        /// Task cancellation and the request client's `cancel()` are thread-safe on their own (the client
+        /// is lock-guarded), so they run here. The connect attempts are main-actor objects, so they are
+        /// captured as values and torn down there.
         deinit {
-            guard Thread.isMainThread else { return }
-            MainActor.assumeIsolated {
-                for attempt in connectAttempts.values {
+            stateRefreshRetryTask?.cancel()
+            reconnectTask?.cancel()
+            unreachableRedialTask?.cancel()
+            livenessRecheckTask?.cancel()
+            graceTask?.cancel()
+            linkCorroborationProbe?.task.cancel()
+            requestClientBox.current.client.cancel()
+            let attempts = Array(connectAttempts.values)
+            MainThreadDeinitCleanup.run {
+                for attempt in attempts {
                     attempt.task?.cancel()
                     attempt.client?.stop()
                 }
-                stateRefreshRetryTask?.cancel()
-                reconnectTask?.cancel()
-                unreachableRedialTask?.cancel()
-                livenessRecheckTask?.cancel()
-                graceTask?.cancel()
-                linkCorroborationProbe?.task.cancel()
-                requestClientBox.current.client.cancel()
             }
         }
 
