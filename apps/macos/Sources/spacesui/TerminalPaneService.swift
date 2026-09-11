@@ -430,14 +430,8 @@ import workspacecore
         /// Bumped on every `set(_:)`; see the generation guard above.
         private var generation = 0
         private let heartbeatAction: @Sendable (String) -> Bool
-        private let heartbeatInterval: TimeInterval
 
-        init(
-            heartbeatAction: @escaping @Sendable (String) -> Bool, heartbeatInterval: TimeInterval = RemoteTerminalWindowClientStore.heartbeatInterval
-        ) {
-            self.heartbeatAction = heartbeatAction
-            self.heartbeatInterval = heartbeatInterval
-        }
+        init(heartbeatAction: @escaping @Sendable (String) -> Bool) { self.heartbeatAction = heartbeatAction }
 
         func set(_ clientID: String?) {
             lock.lock()
@@ -453,28 +447,40 @@ import workspacecore
             return clientID
         }
 
+        /// Whether the heartbeat timer is currently armed. Read by tests, which drive `sendHeartbeat()`
+        /// directly instead of waiting on the real timer: a global-queue timer on a loaded CI runner can go
+        /// tens of seconds without a tick, so a test that waited on one measured the runner, not the rule.
+        var isHeartbeatArmed: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return heartbeatTimer != nil
+        }
+
         private func armHeartbeatTimerIfNeeded() {
             lock.lock()
             defer { lock.unlock() }
             guard heartbeatTimer == nil else { return }
             heartbeatActivity = ProcessInfo.processInfo.beginActivity(options: .background, reason: "Terminal pane lease heartbeat")
             let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
-            timer.schedule(deadline: .now() + heartbeatInterval, repeating: heartbeatInterval)
-            timer.setEventHandler { [weak self] in
-                guard let self else { return }
-                self.lock.lock()
-                let clientID = self.clientID
-                let generationBeforeSend = self.generation
-                self.lock.unlock()
-                guard let clientID else { return }
-                guard !self.heartbeatAction(clientID) else { return }
-                self.lock.lock()
-                defer { self.lock.unlock() }
-                guard self.generation == generationBeforeSend else { return }
-                self.stopHeartbeatTimerLocked()
-            }
+            timer.schedule(deadline: .now() + Self.heartbeatInterval, repeating: Self.heartbeatInterval)
+            timer.setEventHandler { [weak self] in self?.sendHeartbeat() }
             timer.resume()
             heartbeatTimer = timer
+        }
+
+        /// One heartbeat tick: sends for the current client and applies the stop rule and generation
+        /// guard described on the class. What the timer calls every interval.
+        func sendHeartbeat() {
+            lock.lock()
+            let clientID = clientID
+            let generationBeforeSend = generation
+            lock.unlock()
+            guard let clientID else { return }
+            guard !heartbeatAction(clientID) else { return }
+            lock.lock()
+            defer { lock.unlock() }
+            guard generation == generationBeforeSend else { return }
+            stopHeartbeatTimerLocked()
         }
 
         private func cancelHeartbeatTimer() {
