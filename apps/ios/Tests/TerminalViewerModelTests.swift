@@ -5564,6 +5564,7 @@
             model.connectionBannerGraceSecondsForTesting = 0.05
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
             await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
             await waitUntil("the banner to appear", timeout: .seconds(2)) { model.isConnectionBannerVisible }
@@ -5597,6 +5598,7 @@
             model.connectionBannerGraceSecondsForTesting = 30
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
             await backend.setAllStreamCandidatesFailed(true)
             await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
@@ -6096,8 +6098,7 @@
             model.connectionBannerGraceSecondsForTesting = 0.05
             model.start()
             await backend.waitForSubscribeCount(1)
-            // Ownership is granted only after the stream is up, so the bootstrap read `connect()` performs
-            // on a fresh subscribe (an empty attachment snapshot) cannot clobber this synthetic ownership.
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
             await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
             await waitUntil("the banner to appear", timeout: .seconds(2)) { model.isConnectionBannerVisible }
@@ -6126,6 +6127,7 @@
             model.connectionBannerGraceSecondsForTesting = 0.05
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
             await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
             await waitUntil("the banner to appear", timeout: .seconds(2)) { model.isConnectionBannerVisible }
@@ -6160,6 +6162,7 @@
             answeredModel.inputTimeoutCorroborationProbeTimeoutForTesting = .milliseconds(50)
             answeredModel.start()
             await answeredBackend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(answeredModel)
             await answeredModel.configureOwnerInteractiveForTesting(ownerEpoch: 1)
             await answeredBackend.setPingOutcome(nil)
 
@@ -6181,6 +6184,7 @@
             failedModel.connectionBannerGraceSecondsForTesting = 0.05
             failedModel.start()
             await failedBackend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(failedModel)
             await failedModel.configureOwnerInteractiveForTesting(ownerEpoch: 1)
             await failedBackend.setPingOutcome(SpacesDeviceAPIClientError.requestFailed("ping failed", code: nil))
 
@@ -6210,6 +6214,7 @@
             model.connectionBannerGraceSecondsForTesting = 30
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
 
             await backend.setHoldNextPing(true)
@@ -6251,6 +6256,7 @@
             model.connectionBannerGraceSecondsForTesting = 30
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
 
             // Start stream A's own corroboration probe and hold its answer, exactly like the late-probe
@@ -6311,6 +6317,7 @@
             model.connectionBannerGraceSecondsForTesting = 30
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
 
             await model.sendKey("a")
@@ -6342,6 +6349,7 @@
             model.connectionBannerGraceSecondsForTesting = 30
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
 
             // A single, inconclusive stream loss lands at stage 1, the same evidence shape
@@ -6386,6 +6394,7 @@
             model.connectionBannerGraceSecondsForTesting = 30
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
 
             // The first stream delivered no frame through `onEvent`, so a disconnect with every candidate
@@ -6425,6 +6434,7 @@
             model.connectionBannerGraceSecondsForTesting = 30
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
 
             // The first stream delivered no frame, so a disconnect with every candidate failed jumps the
@@ -6471,6 +6481,7 @@
             model.connectionBannerGraceSecondsForTesting = 30
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
 
             // The first stream delivered no frame, so a disconnect with every candidate failed jumps the
@@ -6521,6 +6532,7 @@
             model.connectionBannerGraceSecondsForTesting = 30
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
 
             // The first stream delivers no frame, so a disconnect with every candidate failed jumps the
@@ -6577,6 +6589,7 @@
             model.connectionBannerGraceSecondsForTesting = 30
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
 
             // Same path to stage 2 as the sibling test above: a stream that delivered no frame, disconnected
@@ -6968,6 +6981,7 @@
             model.connectionBannerGraceSecondsForTesting = 30
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
 
             // The key send fails on both its immediate attempt and `performRequestUsingInputChannel`'s
@@ -7019,6 +7033,7 @@
             model.connectionBannerGraceSecondsForTesting = 30
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
 
             await model.sendKey("a")
@@ -7049,6 +7064,7 @@
             model.connectionBannerGraceSecondsForTesting = 30
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
 
             await model.sendKey("a")
@@ -7076,6 +7092,7 @@
             model.connectionBannerGraceSecondsForTesting = 30
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
 
             await model.sendKey("a")
@@ -7106,6 +7123,7 @@
             model.connectionBannerGraceSecondsForTesting = 30
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
 
             await model.sendKey("a")
@@ -7745,6 +7763,7 @@
             model.connectionBannerGraceSecondsForTesting = 30
             model.start()
             await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
 
             await model.sendKey("a")
@@ -9386,8 +9405,36 @@
         /// for the read to land first, or its reassert races the read and loses whenever the transport's
         /// actor hops are slow: that was a real one-in-a-few-runs flake, not load. Observed as the
         /// ownership flip itself, which is exactly the effect the reassert has to come after.
+        ///
+        /// The redial's stream install is waited on in the same breath, for the reason
+        /// `waitForColdOpenToSettle` below records: a subscribe the backend has recorded is not yet a
+        /// stream the model can address, and a keystroke that fails conclusively before the install is
+        /// evidence `tearDownStream(reportingLoss:)` drops on the floor.
         private func waitForRedialBootstrapToLand(_ model: TerminalViewerModel) async {
-            await waitUntil("the redial's bootstrap state read to land (ownership cleared by its ownerless snapshot)") { !model.isOwner }
+            await waitUntil("the redial's bootstrap state read to land (ownership cleared by its ownerless snapshot)") {
+                model.hasInstalledStreamForTesting && !model.isOwner
+            }
+        }
+
+        /// The cold open's counterpart to the wait above, and what makes that one name the redial's own
+        /// read rather than a first read still in flight.
+        ///
+        /// `waitForSubscribeCount(1)` returns from inside the backend's `subscribe`, which leaves two
+        /// things about the cold open unsettled, and a keystroke sent into either window fails the test on
+        /// a deadline rather than on the behavior it is about (issue #709). The stream is not installed
+        /// yet: `connect()` sets it on the far side of that same `subscribe`, and until it does,
+        /// `tearDownStream(reportingLoss:)` has no attempt to address and drops the keystroke's conclusive
+        /// stage 2 evidence without escalating. And the bootstrap `.state` read is still out: `connect()`
+        /// starts it before `subscribe` and applies the answer from a child task, an ownerless snapshot
+        /// stamped newer than `configureOwnerInteractiveForTesting`'s payload, so an answer that lands
+        /// after the grant takes the synthetic ownership straight back off and every later `sendKey`
+        /// no-ops on `isOwner`. Waiting for both puts the ownership grant last, which is where the rest of
+        /// the test needs it. `latestState` is the signal for the read because it stays nil until that
+        /// read lands.
+        private func waitForColdOpenToSettle(_ model: TerminalViewerModel) async {
+            await waitUntil("the cold open's stream to install and its bootstrap state read to land") {
+                model.hasInstalledStreamForTesting && model.latestState != nil
+            }
         }
 
         /// `waitUntil` for a condition that has to be read off an actor.
