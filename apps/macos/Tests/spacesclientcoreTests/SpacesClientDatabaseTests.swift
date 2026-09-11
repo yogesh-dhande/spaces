@@ -643,7 +643,7 @@ final class SpacesClientDatabaseTests: XCTestCase {
               last_selected_at TEXT
             );
             INSERT INTO paired_devices VALUES (
-              '\(id)', 'Studio Mac', 'macos', '\(host)', 7443, 'SHA256:abc', 'studio.local', 'yogesh', 22,
+              '\(id)', 'Studio Mac', 'macos', '\(host)', 7443, 'SHA256:abc', 'studio.local', 'tester', 22,
               '2026-06-17T00:00:00Z', '2026-06-17T00:00:00Z', '2026-06-17T00:01:00Z'
             );
             """
@@ -660,7 +660,7 @@ final class SpacesClientDatabaseTests: XCTestCase {
     private func device(id: String) -> SpacesPairedDeviceRecord {
         SpacesPairedDeviceRecord(
             id: id, name: "Studio Mac", platform: "macos", hosts: ["studio.local"], port: 7443, certificateFingerprint: "SHA256:abc",
-            sshHost: "studio.local", sshUser: "yogesh", sshPort: 22, createdAt: "2026-06-17T00:00:00Z", updatedAt: "2026-06-17T00:00:00Z",
+            sshHost: "studio.local", sshUser: "tester", sshPort: 22, createdAt: "2026-06-17T00:00:00Z", updatedAt: "2026-06-17T00:00:00Z",
             lastSelectedAt: "2026-06-17T00:01:00Z")
     }
 

@@ -32,10 +32,17 @@ final class TerminalServicePathsTests: XCTestCase {
         let launchLockPath = try TerminalServicePaths.launchLockPath()
         let databaseChangeSignalSocketPath = try TerminalServicePaths.databaseChangeSignalSocketPath()
 
-        XCTAssertTrue(socketPath.hasPrefix("/tmp/spaces-sockets-\(getuid())/service-"))
-        XCTAssertTrue(lockPath.hasPrefix("/tmp/spaces-sockets-\(getuid())/daemon-"))
+        // The socket root is the shared per-user root for a real process and this test host's own root
+        // beside it (see `SpacesSocketPaths.secureSocketRoot`), so the location claim is made through the
+        // resolved root: it is a short, flat `/tmp` directory, and each path names its file directly in it
+        // rather than nesting the profile's runtime directory.
+        let socketRoot = try SpacesSocketPaths.secureSocketRoot().path
+        XCTAssertTrue(socketRoot.hasPrefix("/tmp/spaces-"))
+        XCTAssertEqual(URL(fileURLWithPath: socketRoot).deletingLastPathComponent().path, "/tmp")
+        XCTAssertTrue(socketPath.hasPrefix("\(socketRoot)/service-"))
+        XCTAssertTrue(lockPath.hasPrefix("\(socketRoot)/daemon-"))
         XCTAssertEqual(launchLockPath, "\(socketPath).launch.lock")
-        XCTAssertTrue(databaseChangeSignalSocketPath.hasPrefix("/tmp/spaces-sockets-\(getuid())/database-change-"))
+        XCTAssertTrue(databaseChangeSignalSocketPath.hasPrefix("\(socketRoot)/database-change-"))
         XCTAssertEqual(
             lockPath, socketPath.replacingOccurrences(of: "/service-", with: "/daemon-").replacingOccurrences(of: ".sock", with: ".lock"),
             "IPC and daemon ownership must use the same runtime profile identity.")
@@ -93,16 +100,16 @@ final class TerminalServicePathsTests: XCTestCase {
             databasePath: root.appendingPathComponent("spaces.db").path,
             runtimeDirectory: root.appendingPathComponent("runtime", isDirectory: true).path)
 
-        XCTAssertEqual(paths.serviceSocketPath, serviceSocketPath(forTerminalRoot: paths.terminalRoot))
-        XCTAssertEqual(paths.serviceLockPath, instanceLockPath(forTerminalRoot: paths.terminalRoot))
-        XCTAssertEqual(paths.databaseChangeSignalSocketPath, databaseChangeSignalSocketPath(forTerminalRoot: paths.terminalRoot))
+        XCTAssertEqual(paths.serviceSocketPath, try serviceSocketPath(forTerminalRoot: paths.terminalRoot))
+        XCTAssertEqual(paths.serviceLockPath, try instanceLockPath(forTerminalRoot: paths.terminalRoot))
+        XCTAssertEqual(paths.databaseChangeSignalSocketPath, try databaseChangeSignalSocketPath(forTerminalRoot: paths.terminalRoot))
         if paths.terminalRoot.hasPrefix("/private/var/") {
             XCTAssertNotEqual(
                 paths.serviceSocketPath,
-                serviceSocketPath(forTerminalRoot: paths.terminalRoot.replacingOccurrences(of: "/private/var/", with: "/var/")))
+                try serviceSocketPath(forTerminalRoot: paths.terminalRoot.replacingOccurrences(of: "/private/var/", with: "/var/")))
             XCTAssertNotEqual(
                 paths.databaseChangeSignalSocketPath,
-                databaseChangeSignalSocketPath(forTerminalRoot: paths.terminalRoot.replacingOccurrences(of: "/private/var/", with: "/var/")))
+                try databaseChangeSignalSocketPath(forTerminalRoot: paths.terminalRoot.replacingOccurrences(of: "/private/var/", with: "/var/")))
         }
     }
 
@@ -119,22 +126,22 @@ final class TerminalServicePathsTests: XCTestCase {
             terminalRoot: try TerminalServicePaths.terminalRootDirectory().path)
     }
 
-    private func serviceSocketPath(forTerminalRoot terminalRoot: String) -> String {
+    private func serviceSocketPath(forTerminalRoot terminalRoot: String) throws -> String {
         var hash: UInt64 = 5381
         for byte in terminalRoot.utf8 { hash = ((hash << 5) &+ hash) &+ UInt64(byte) }
-        return String(format: "/tmp/spaces-sockets-\(getuid())/service-%016llx.sock", hash)
+        return try SpacesSocketPaths.secureSocketRoot().appendingPathComponent(String(format: "service-%016llx.sock", hash)).path
     }
 
-    private func databaseChangeSignalSocketPath(forTerminalRoot terminalRoot: String) -> String {
+    private func databaseChangeSignalSocketPath(forTerminalRoot terminalRoot: String) throws -> String {
         var hash: UInt64 = 5381
         for byte in terminalRoot.utf8 { hash = ((hash << 5) &+ hash) &+ UInt64(byte) }
-        return String(format: "/tmp/spaces-sockets-\(getuid())/database-change-%016llx.sock", hash)
+        return try SpacesSocketPaths.secureSocketRoot().appendingPathComponent(String(format: "database-change-%016llx.sock", hash)).path
     }
 
-    private func instanceLockPath(forTerminalRoot terminalRoot: String) -> String {
+    private func instanceLockPath(forTerminalRoot terminalRoot: String) throws -> String {
         var hash: UInt64 = 5381
         for byte in terminalRoot.utf8 { hash = ((hash << 5) &+ hash) &+ UInt64(byte) }
-        return String(format: "/tmp/spaces-sockets-\(getuid())/daemon-%016llx.lock", hash)
+        return try SpacesSocketPaths.secureSocketRoot().appendingPathComponent(String(format: "daemon-%016llx.lock", hash)).path
     }
 
     private func restoreEnvironmentValue(_ value: String?, name: String) { if let value { setenv(name, value, 1) } else { unsetenv(name) } }

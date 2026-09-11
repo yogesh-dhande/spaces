@@ -106,25 +106,29 @@
         // Paces this session's reconnects. Internal (not `private`) so behavior tests can shorten its
         // delays instead of waiting out real seconds.
         let reconnectBackoff = TerminalStateStreamReconnectBackoff()
-        private var streamClient: (any TerminalRemoteStateStreamClient)?
-        // The candidate address the installed stream connected on, mirrored here because the stream picks
-        // it internally and the protocol the model holds does not carry it. Read only by the corroboration
-        // probe, which pins its ping to this address so the answer is about the stream's own path rather
-        // than about whichever candidate a race happens to win. Nil whenever no stream is installed, and
-        // whenever the installed one is a test double with no host of its own.
-        private var streamConnectedHost: String?
-        // Bumped every time a stream client is installed. `onEvent`/`onDisconnect` callbacks carry the
-        // generation they were created under, so a superseded client's late callback (an immediate
-        // post-connect rejection, or a straggling disconnect after replacement) is ignored instead of
-        // tearing down or feeding the current stream.
+        // Every connect attempt this pane currently considers live, keyed by its generation. Membership
+        // is the identity every stream callback is gated on (`liveAttempt(forStream:)`), so retiring an
+        // attempt is what makes everything it still has in flight stale on arrival.
+        //
+        // Ordinarily this holds at most one attempt. Stage 2 ("Device unreachable") is the exception: the
+        // ladder's tick starts a fresh dial alongside a stale one instead of waiting out its dial budget,
+        // so up to `maximumConcurrentUnreachableAttempts` race at once and the first to deliver a payload
+        // wins (see `armUnreachableRedialTick` and `applyStreamEvent`).
+        private var connectAttempts: [UInt64: DeviceTerminalConnectAttempt] = [:]
+        // The attempt whose stream this model reads: the most recent one to open a client, and (once a
+        // payload has proven one of them) the winner, since the winner retires every other live attempt.
+        // Nil whenever no stream is open. The corroboration probe and the disconnect bookkeeping read the
+        // stream's address and client through it.
+        private var installedStreamAttemptGeneration: UInt64?
+        // Bumped every time a stream client is opened. `onEvent`/`onDisconnect` callbacks carry the
+        // generation they were created under, so the model can find which attempt a callback belongs to
+        // (and drop one whose attempt is gone) instead of feeding or tearing down the current stream.
         private var streamClientGeneration: UInt64 = 0
-        // The generation the client currently in `streamClient` was installed under, or nil while none is
-        // installed. Moves with `streamClient` only (see `installStreamClient`/`clearInstalledStreamClient`),
-        // which is what makes it a safe answer to "did this disconnect come from the stream we hold?" —
-        // `streamClientGeneration` alone is not, because it is bumped before a client is installed and again
-        // when one is retired, so comparing against it can reject a drop from the very client still
-        // installed and leave it there dead forever (issue #537).
-        private var installedStreamClientGeneration: UInt64?
+        // Counts every payload accepted from a live attempt's stream. Read purely as a change detector by
+        // the one failure handler that suspends (`handleStreamDisconnect`'s local-daemon credential
+        // refresh): any payload at all while it was parked means a racing attempt proved the connection
+        // up, and a handler that resumes after that must not report an outage over it.
+        private var liveStreamPayloadCount: UInt64 = 0
         // Owns the liveness recheck a stream loss starts when the cached runtime state claims the session
         // needs no stream (see `recheckLivenessAfterStreamLoss`). One task, which both asks and waits, so
         // there is a single place the question can be open and no second timer can pace it.
@@ -135,29 +139,25 @@
         private var lastSubscriptionAttemptAt: Date?
         private var refreshInFlight = false
         private var stateRefreshRetryTask: Task<Void, Never>?
-        // Owns the off-main connect for the live subscription. The pinned-TLS connect blocks on a
-        // semaphore, so it must never run on the main actor; while a connect is in flight this guards
-        // `ensureSubscriptionStarted` from starting a second one.
-        private var subscriptionConnectTask: Task<Void, Never>?
-        // Identifies one connect attempt end to end, from `ensureSubscriptionStarted()` through
-        // `establishStateStreamConnection()`'s two `openStateStream()` dials. `client.start()`'s blocking
-        // dial runs on a detached task with no structured-concurrency link to `subscriptionConnectTask`, so
-        // cancelling that task (as `retryStateStreamConnection()` does) does not stop an abandoned dial from
-        // finishing: it keeps running, and `establishStateStreamConnection()`'s `await`s around it keep
-        // resuming and executing to completion regardless. Bumped whenever a new attempt starts
-        // (`ensureSubscriptionStarted()`) or an in-flight one is retired (`retryStateStreamConnection()`),
-        // and captured by the attempt's own closures. Every state mutation the attempt's body makes after
-        // resuming from an `await` (scheduling a reconnect, clearing `subscriptionConnectTask`, moving the
-        // connection-stage tracker) is gated on this generation still matching, so a superseded attempt's
-        // belated completion is dropped instead of clobbering the replacement that took its place.
+        // Numbers each connect attempt. `client.start()`'s blocking dial runs on a detached task with no
+        // structured-concurrency link to the attempt's own task, so cancelling that task (as
+        // `retryStateStreamConnection()` does) does not stop an abandoned dial from finishing: it keeps
+        // running, and `establishStateStreamConnection()`'s `await`s around it keep resuming and executing
+        // to completion regardless. Every state mutation an attempt's body makes after resuming from an
+        // `await` is therefore gated on that attempt still being in `connectAttempts`, so a retired
+        // attempt's belated completion is dropped instead of clobbering whatever took its place.
         private var connectAttemptGeneration: UInt64 = 0
+        // The stage 2 redial cadence: one sleep on the ladder's current rung, then a fresh dial alongside
+        // whatever is still in flight, then re-armed on the next rung. Non-nil exactly while the tracker
+        // reads `.unreachable` and this pane still has listeners.
+        private var unreachableRedialTask: Task<Void, Never>?
         // Holds `scheduleReconnect`'s delayed retry so a second call while one is already pending is a
         // no-op instead of stacking a competing timer and doubling the backoff. Both
-        // `establishStateStreamConnection`'s own failure paths and the connect-completion check in
-        // `ensureSubscriptionStarted` can each decide the same failed connect owes a retry, so
+        // `establishStateStreamConnection`'s own failure paths and the completion check in
+        // `finishConnectAttempt` can each decide the same failed connect owes a retry, so
         // `scheduleReconnect` has to tolerate being called twice for one failure. Cleared when the retry
-        // fires (or the model is torn down); nothing else clears it early, so a connect that installs a
-        // client on its own simply leaves the stale retry to find `streamClient` set and no-op when it runs.
+        // fires (or the model is torn down); nothing else clears it early, so a connect that opens a
+        // stream on its own simply leaves the stale retry to find one installed and no-op when it runs.
         private var reconnectTask: Task<Void, Never>?
 
         // Emission time of the newest payload already applied. The catch-up `.state`
@@ -197,17 +197,28 @@
             return PreparedCredentials(certificateFingerprint: credentials.certificateFingerprint, authToken: credentials.authToken)
         }
 
+        /// Makes no isolation assumption: a `deinit` runs on whichever thread dropped the last reference —
+        /// a background one whenever an async caller holds the final reference to the pane that owns this
+        /// model — so it can neither assume the main actor nor skip its cleanup off it. Skipping leaves the
+        /// device's stream client connected and reading with nothing left to deliver its payloads to.
+        ///
+        /// Task cancellation and the request client's `cancel()` are thread-safe on their own (the client
+        /// is lock-guarded), so they run here. The connect attempts are main-actor objects, so they are
+        /// captured as values and torn down there.
         deinit {
-            guard Thread.isMainThread else { return }
-            MainActor.assumeIsolated {
-                streamClient?.stop()
-                stateRefreshRetryTask?.cancel()
-                subscriptionConnectTask?.cancel()
-                reconnectTask?.cancel()
-                livenessRecheckTask?.cancel()
-                graceTask?.cancel()
-                linkCorroborationProbe?.task.cancel()
-                requestClientBox.current.client.cancel()
+            stateRefreshRetryTask?.cancel()
+            reconnectTask?.cancel()
+            unreachableRedialTask?.cancel()
+            livenessRecheckTask?.cancel()
+            graceTask?.cancel()
+            linkCorroborationProbe?.task.cancel()
+            requestClientBox.current.client.cancel()
+            let attempts = Array(connectAttempts.values)
+            MainThreadDeinitCleanup.run {
+                for attempt in attempts {
+                    attempt.task?.cancel()
+                    attempt.client?.stop()
+                }
             }
         }
 
@@ -436,90 +447,162 @@
             }
         }
 
-        /// Installs `client` as the session's live subscription, recording the generation it was created
-        /// under. Every install goes through here so `installedStreamClientGeneration` can never drift from
-        /// the client it describes; `handleStreamDisconnect` decides ownership of a drop by comparing
-        /// against it.
-        private func installStreamClient(_ client: any TerminalRemoteStateStreamClient, generation: UInt64) {
-            streamClient = client
-            installedStreamClientGeneration = generation
+        /// The attempt whose stream this model currently reads, if any.
+        private var installedAttempt: DeviceTerminalConnectAttempt? { installedStreamAttemptGeneration.flatMap { connectAttempts[$0] } }
+
+        /// The live subscription client, or nil while no attempt holds one. Every "do we already have a
+        /// stream" decision reads this rather than the attempt set, which also counts an attempt that is
+        /// still dialing.
+        private var installedStreamClient: (any TerminalRemoteStateStreamClient)? { installedAttempt?.client }
+
+        /// The installed stream's own generation: the per-socket token every stream callback carries.
+        /// Deliberately not the same identity as the attempt that opened it, because one attempt can open
+        /// two streams in turn (the local-device bootstrap retries inside a single attempt), so anything
+        /// scoped to a particular socket (the corroboration probe) keys on this rather than on the attempt.
+        private var installedStreamGeneration: UInt64? { installedAttempt?.streamGeneration }
+
+        /// The candidate address the installed stream connected on. The stream picks it internally and the
+        /// protocol the model holds does not carry it, so it is recorded on the attempt when its dial
+        /// returns. Read by the corroboration probe, which pins its ping to this address so the answer is
+        /// about the stream's own path rather than about whichever candidate a race happens to win.
+        private var streamConnectedHost: String? { installedAttempt?.connectedHost }
+
+        /// The live attempt whose stream carries `generation`, or nil when no live attempt does: the one
+        /// gate every stream callback passes. Membership, not equality against a single current generation,
+        /// because stage 2 runs two attempts at once and both are current until one delivers a payload.
+        private func liveAttempt(forStream generation: UInt64) -> DeviceTerminalConnectAttempt? {
+            connectAttempts.values.first { $0.streamGeneration == generation }
         }
 
-        /// Detaches the installed subscription and returns it so the caller can stop it. The stop is the
+        /// Records `client` as `attempt`'s stream and makes that attempt the one the model reads. Every
+        /// open goes through here so an attempt's stream generation can never drift from the client it
+        /// describes; `handleStreamDisconnect` and `applyStreamEvent` decide ownership of a callback by
+        /// looking the generation back up.
+        private func installStreamClient(_ client: any TerminalRemoteStateStreamClient, generation: UInt64, on attempt: DeviceTerminalConnectAttempt)
+        {
+            attempt.client = client
+            attempt.streamGeneration = generation
+            attempt.connectedHost = nil
+            attempt.deliveredPayload = false
+            installedStreamAttemptGeneration = attempt.generation
+        }
+
+        /// Detaches `attempt`'s subscription and returns it so the caller can stop it. The stop is the
         /// caller's because its timing differs by path (before or after arming a reconnect), but the state
-        /// it leaves behind must not: nothing else clears `streamClient`.
-        @discardableResult private func clearInstalledStreamClient() -> (any TerminalRemoteStateStreamClient)? {
-            let installedClient = streamClient
-            streamClient = nil
-            installedStreamClientGeneration = nil
-            streamConnectedHost = nil
+        /// it leaves behind must not: nothing else clears an attempt's stream.
+        @discardableResult private func clearStream(of attempt: DeviceTerminalConnectAttempt) -> (any TerminalRemoteStateStreamClient)? {
+            let installedClient = attempt.client
+            attempt.client = nil
+            attempt.streamGeneration = nil
+            attempt.connectedHost = nil
+            if installedStreamAttemptGeneration == attempt.generation { installedStreamAttemptGeneration = nil }
             return installedClient
         }
 
+        /// Drops `generation` from the live set, so everything it still has in flight is stale on arrival,
+        /// and cancels its dial task. Leaves the stream alone: this is for an attempt whose stream has
+        /// already ended on its own, where there is nothing left to stop.
+        private func dropConnectAttempt(_ generation: UInt64) {
+            guard let attempt = connectAttempts.removeValue(forKey: generation) else { return }
+            attempt.task?.cancel()
+            if installedStreamAttemptGeneration == generation { installedStreamAttemptGeneration = nil }
+        }
+
+        /// Drops `generation` and stops the stream it opened. For an attempt taken out of service while its
+        /// stream may still be live: a loser of the stage 2 race, the oldest attempt when the concurrency
+        /// cap is reached, Retry's supersession, or a teardown. A pinned-TLS connection is released only by
+        /// an explicit stop, so an attempt dropped without this leaks its connection and dispatch queue for
+        /// the life of the process. Never routes through `handleStreamDisconnect`, so retiring an attempt
+        /// reports nothing and paces nothing.
+        private func retireConnectAttempt(_ generation: UInt64) {
+            let client = connectAttempts[generation]?.client
+            dropConnectAttempt(generation)
+            client?.stop()
+        }
+
         /// Called after a connect attempt's dial succeeds, to decide what becomes of the client it
-        /// produced: recorded as the live stream's connected host when it is still the one installed, or
-        /// stopped when it is not. A dial that resolves after its attempt was superseded (Retry, or a
-        /// newer attempt that already installed its own client, see `connectAttemptGeneration`) still
-        /// holds a real, connected subscription to the daemon; leaving it alone would leak that connection.
+        /// produced: recorded as its attempt's connected host when that attempt is still live, or stopped
+        /// when it is not. A dial that resolves after its attempt was retired (Retry, the stage 2
+        /// concurrency cap, or a racing attempt that already won the first-payload race) still holds a
+        /// real, connected subscription to the daemon; leaving it alone would leak that connection.
         ///
         /// Internal (not `private`) for the same reason as `handleStreamDisconnect`/`applyStreamEvent`
         /// below: the concrete stream client offers no seam to force this ordering through a real connect,
         /// so `spacesuiTests` calls it directly with a `FakeStreamClient` to prove the superseded case
         /// stops rather than installs.
         func finishSuccessfulConnect(_ client: any TerminalRemoteStateStreamClient, connectedHost: String?) {
-            if streamClient === client {
-                streamConnectedHost = connectedHost
+            if let attempt = connectAttempts.values.first(where: { $0.client === client }) {
+                attempt.connectedHost = connectedHost
             } else {
                 client.stop()
             }
         }
 
-        private func ensureSubscriptionStarted(now: Date = Date()) {
-            // Test seam: fires on every call, including one the guard below immediately turns away, so
-            // `spacesuiTests` can observe a delayed retry actually running (and being eaten by the
-            // in-flight guard) instead of guessing whether real time has passed. Nil in production.
-            ensureSubscriptionStartedInvokedForTesting?()
-            if streamClient != nil || subscriptionConnectTask != nil { return }
+        private func ensureSubscriptionStarted() {
+            let now = subscribeThrottleNow
+            // A live attempt is either dialing or holding a stream, and in both cases this pane already has
+            // recovery under way. Only the stage 2 ladder tick deliberately dials alongside one, and it
+            // bypasses this entry point (see `startConcurrentUnreachableRedial`).
+            if !connectAttempts.isEmpty { return }
             if let lastSubscriptionAttemptAt, now.timeIntervalSince(lastSubscriptionAttemptAt) < 0.5 {
                 // The throttle paces attempts; it must never be the reason a session is left with listeners
                 // and nothing arranging a stream for them. A pane whose last listener left and whose
                 // replacement registers inside this window would otherwise land exactly there — the removal
                 // cancelled the liveness recheck, and this return would drop the new listener's attempt with
                 // nothing scheduled behind it. Hand the attempt to the paced retry instead of losing it.
-                if reconnectTask == nil, livenessRecheckTask == nil { scheduleReconnect() }
+                if reconnectTask == nil, livenessRecheckTask == nil, unreachableRedialTask == nil { scheduleReconnect() }
                 return
             }
             lastSubscriptionAttemptAt = now
+            beginConnectAttempt(dialTimeoutSeconds: Self.dialTimeoutSeconds)
+        }
+
+        /// Starts one connect attempt and adds it to the live set. The only place an attempt is created:
+        /// the cold open and the stage 1 reconnect reach it through `ensureSubscriptionStarted()`'s
+        /// one-at-a-time guard, and the stage 2 ladder tick and Retry call it directly: the tick to race a
+        /// fresh dial against one already in flight, Retry to dial on the stage it was pressed in.
+        private func beginConnectAttempt(dialTimeoutSeconds: TimeInterval) {
             // Catch up unconditionally, before (and independent of) the subscribe below.
             // The daemon only streams live sessions, so an ended session's subscribe is
             // rejected — but its `.state` response still carries the final render the host
             // needs, and that response must be applied even when no live stream attaches.
             refreshState()
             connectAttemptGeneration &+= 1
-            let attemptGeneration = connectAttemptGeneration
-            subscriptionConnectTask = Task { @MainActor [weak self] in
+            let attempt = DeviceTerminalConnectAttempt(
+                generation: connectAttemptGeneration, startedAt: Date(), dialTimeoutSeconds: dialTimeoutSeconds)
+            connectAttempts[attempt.generation] = attempt
+            // The dial's own start, the anchor a measurement lane needs to tell this pane's stream dial
+            // apart from the catch-up request and the sidebar's own traffic on the same device: only this
+            // event says a stream dial is in flight, which is the state an outage measurement times from.
+            emitPerformanceEvent(
+                name: "stream_dial_begin", attributes: ["host": device.hosts.first ?? "", "generation": String(attempt.generation)])
+            let attemptGeneration = attempt.generation
+            attempt.task = Task { @MainActor [weak self] in
                 await self?.establishStateStreamConnection(generation: attemptGeneration)
-                // A superseded attempt (retired by `retryStateStreamConnection()` while its dial was still
-                // in flight) reaches here too: the detached dial task it awaited has no
-                // structured-concurrency link to this task, so cancelling `subscriptionConnectTask` above
-                // does not stop it from resuming and running this closure to completion. Dropping it here
-                // is what keeps it from clearing `subscriptionConnectTask` (which by now belongs to the
-                // attempt that superseded it) or deciding this session needs a reconnect it has no business
-                // arming.
-                guard let self, attemptGeneration == self.connectAttemptGeneration else { return }
-                self.subscriptionConnectTask = nil
-                // Establishes the invariant a connect that finishes without leaving `streamClient`
-                // installed always leaves a retry armed. `establishStateStreamConnection`'s own failure
-                // paths already call `scheduleReconnect()` before returning, so this only does new work
-                // when the connect reported success (`openStateStream` returned true) while a competing
-                // disconnect — e.g. a failed input send racing the connect (`reportFailedInputSend`) —
-                // had already cleared `streamClient` and lost its own retry to the
-                // `subscriptionConnectTask != nil` guard above, which is still armed for as long as this
-                // task is in flight. Without this, that race leaves the pane connected to nothing with no
-                // retry coming. `scheduleReconnect()` is idempotent, so the common case — a retry is
-                // already pending from one of those failure paths — is a no-op here.
-                if self.streamClient == nil { self.scheduleReconnect() }
+                self?.finishConnectAttempt(generation: attemptGeneration)
             }
+        }
+
+        /// One attempt's dial task has run to completion. A retired attempt (Retry, the stage 2 cap, or a
+        /// racing attempt that won) reaches here too: the detached dial it awaited has no
+        /// structured-concurrency link to that task, so cancelling the task does not stop it from resuming
+        /// and running to completion. The membership guard is what keeps such an attempt from deciding this
+        /// session needs a reconnect it has no business arming.
+        ///
+        /// The second half establishes the invariant that a connect finishing without leaving a stream
+        /// installed always leaves a redial armed. `establishStateStreamConnection`'s own failure paths
+        /// already schedule one before returning, so this only does new work when the connect reported
+        /// success while a competing disconnect (a failed input send racing the connect, see
+        /// `reportFailedInputSend`) had already stopped its stream and lost its own retry to the
+        /// in-flight guard, which is armed for as long as this attempt is live. Scheduling is idempotent,
+        /// so the common case (a redial is already pending from one of those failure paths) is a no-op.
+        private func finishConnectAttempt(generation: UInt64) {
+            guard let attempt = connectAttempts[generation] else { return }
+            attempt.isDialInFlight = false
+            // An attempt that ends holding no stream is over; dropping it is what frees the pane to dial
+            // again, since a live attempt is what `ensureSubscriptionStarted()` reads as recovery under way.
+            if attempt.client == nil { dropConnectAttempt(generation) }
+            if installedStreamClient == nil { scheduleReconnect() }
         }
 
         /// Establishes the live subscription stream, keeping the blocking pinned-TLS connect off the main
@@ -527,23 +610,26 @@
         /// actor froze the UI for the full connect timeout whenever the endpoint was stale or unreachable.
         /// On a retryable connect failure for the local device it re-resolves the daemon's current Device
         /// API port and retries once, so an idle-shut-down daemon that rebound an ephemeral port (or a
-        /// stale paired_devices row) is recovered rather than stranding the pane. `openStateStream` installs
-        /// and clears `streamClient` itself (see its install-before-start note), so this method only decides
-        /// whether to retry or schedule a reconnect from its boolean result.
+        /// stale paired_devices row) is recovered rather than stranding the pane. `openStateStream` opens
+        /// and clears the attempt's stream itself (see its install-before-start note), so this method only
+        /// decides whether to retry or schedule a redial from its boolean result.
         ///
-        /// `generation` is this attempt's `connectAttemptGeneration`, captured by the caller before the
-        /// first `await`. Every decision this method makes below an `await` is gated on that generation
-        /// still being current: `client.start()`'s blocking dial (inside `openStateStream`) runs on a
-        /// detached task with no structured-concurrency link to `subscriptionConnectTask`, so
-        /// `retryStateStreamConnection()` cancelling that task does not stop an abandoned dial from
-        /// resuming here. Without the gate, a stale attempt's belated failure would still reach
-        /// `scheduleReconnect(after:)` and mark the tracker unreachable over a replacement's already-healthy
-        /// stream.
+        /// `generation` names this attempt. Every decision this method makes below an `await` is gated on
+        /// that attempt still being live: `client.start()`'s blocking dial (inside `openStateStream`) runs
+        /// on a detached task with no structured-concurrency link to the attempt's own task, so retiring
+        /// the attempt (Retry, the stage 2 cap, or a racing attempt that won the first-payload race) does
+        /// not stop an abandoned dial from resuming here. Without the gate, a retired attempt's belated
+        /// failure would still reach `scheduleReconnect(after:)` and mark the tracker unreachable over a
+        /// replacement's already-healthy stream.
+        ///
+        /// The local-device bootstrap and its retry stay inside this one attempt rather than becoming a
+        /// second one: `LocalDeviceRecoveryBootstrap` is coalesced process-wide, so two concurrent stage 2
+        /// attempts share a single bootstrap, and the first dial's exhaustion evidence is still discarded
+        /// (see the note below) so a routine idle-daemon restart cannot read as stage 2.
         private func establishStateStreamConnection(generation: UInt64) async {
-            guard generation == connectAttemptGeneration else { return }
-            if streamClient != nil { return }
-            let firstAttempt = await openStateStream()
-            guard generation == connectAttemptGeneration else { return }
+            guard connectAttempts[generation] != nil else { return }
+            let firstAttempt = await openStateStream(generation: generation)
+            guard connectAttempts[generation] != nil else { return }
             if case .connected = firstAttempt { return }
             // The first connect failed. For the local device this may be a stale port or an idle-shut-down
             // daemon; ensure it is running and re-resolve its current port, then retry. The (possibly
@@ -557,15 +643,15 @@
             // escalation. For a remote device `ensureLocalDeviceReachableForRetry()` always returns false
             // immediately, so this collapses to `firstAttempt` deciding it, same as before this bootstrap.
             let localDeviceRecoverable = await ensureLocalDeviceReachableForRetry()
-            guard generation == connectAttemptGeneration else { return }
+            guard connectAttempts[generation] != nil else { return }
             guard localDeviceRecoverable else {
                 scheduleReconnect(after: firstAttempt)
                 return
             }
             await reloadCatchUpState()
-            guard generation == connectAttemptGeneration else { return }
-            let secondAttempt = await openStateStream()
-            guard generation == connectAttemptGeneration else { return }
+            guard connectAttempts[generation] != nil else { return }
+            let secondAttempt = await openStateStream(generation: generation)
+            guard connectAttempts[generation] != nil else { return }
             if case .connected = secondAttempt { return }
             // A transient subscribe failure on a live session would otherwise strand existing listeners
             // with only the one-shot catch-up and no live updates, because the render host has already
@@ -593,19 +679,20 @@
         /// task so its semaphore wait never lands on the main actor. Returns `.connected` when `start()`
         /// succeeded, `.failed` on a construction or connect/handshake failure.
         ///
-        /// The client is installed as `streamClient` before `start()` runs: `start()` returns after merely
+        /// The client is recorded on the attempt before `start()` runs: `start()` returns after merely
         /// sending the subscribe request, so a server rejection arrives as a later response line whose
-        /// `onDisconnect` can reach the main actor before this function resumes. Installing first means that
-        /// racing disconnect finds the client installed and clears it through the disconnect path (which
-        /// owns reconnect), instead of clearing nothing and letting the resumption store a dead client that
+        /// `onDisconnect` can reach the main actor before this function resumes. Recording it first means
+        /// that racing disconnect finds the stream and clears it through the disconnect path (which owns
+        /// the redial), instead of clearing nothing and letting the resumption store a dead client that
         /// would block every future reconnect. A `.connected` result therefore does not guarantee the
-        /// installed client is still current: a racing disconnect may already have cleared and rescheduled
+        /// attempt still holds this stream: a racing disconnect may already have cleared and rescheduled
         /// it, only that the disconnect path has taken over its lifecycle.
         ///
         /// Deliberately does not touch the connection-stage tracker or `reconnectBackoff` on success: those
         /// declare the connection *proven* healthy, which happens once a frame actually arrives over the
         /// new stream (`applyStreamEvent`), not merely once `start()` returns.
-        private func openStateStream() async -> StateStreamConnectResult {
+        private func openStateStream(generation attemptGeneration: UInt64) async -> StateStreamConnectResult {
+            guard let attempt = connectAttempts[attemptGeneration] else { return .failed(allCandidatesUnreachable: false) }
             let request = SpacesDeviceAPIRequest(
                 command: .subscribe(SpacesDeviceTerminalSubscriptionRequest(sessionID: sessionID, clientID: nil)),
                 authToken: requestClientBox.current.authToken, clientApp: clientApp)
@@ -621,7 +708,7 @@
                         Task { @MainActor [weak self] in self?.handleStreamDisconnect(error, generation: generation) }
                     })
             } catch { return .failed(allCandidatesUnreachable: false) }
-            installStreamClient(client, generation: generation)
+            installStreamClient(client, generation: generation, on: attempt)
             let started: Bool
             // Captured before running the override below: the override closure is free to clear
             // `stateStreamConnectOverrideForTesting` itself (some tests do, to simulate a one-shot
@@ -631,20 +718,23 @@
             if let connectOverrideForTesting = stateStreamConnectOverrideForTesting {
                 // Test seam: lets `spacesuiTests` control exactly when and how the blocking connect
                 // resolves, so it can reproduce `start()` succeeding for a client a competing disconnect
-                // already stopped without racing real network timing. See the property's doc comment.
-                started = await connectOverrideForTesting()
+                // already stopped without racing real network timing. It is handed the dial budget this
+                // attempt would have spent, which is how a test reads the budget the dial actually got.
+                // See the property's doc comment.
+                started = await connectOverrideForTesting(attempt.dialTimeoutSeconds)
             } else {
+                let dialTimeoutSeconds = attempt.dialTimeoutSeconds
                 started = await Task.detached(priority: .userInitiated) { () -> Bool in
                     do {
-                        try client.start()
+                        try client.start(timeoutSeconds: dialTimeoutSeconds)
                         return true
                     } catch { return false }
                 }.value
             }
             guard started else {
-                // Only clear the installed client if it is still this one; a racing disconnect (or a newer
-                // connect) may already have replaced it, and clearing then would drop a healthy stream.
-                if streamClient === client { clearInstalledStreamClient() }
+                // Only clear the attempt's stream if it is still this client; a racing disconnect may
+                // already have cleared it, and a stale attempt may have been retired outright.
+                if let attempt = connectAttempts[attemptGeneration], attempt.client === client { clearStream(of: attempt) }
                 client.stop()
                 // The verdict has to come from the failed dial itself, not a fresh query against the
                 // resolver: with one resolver shared per device across every pane's stream, another
@@ -709,6 +799,7 @@
         /// `.unauthorized` — every case where the daemon is reachable but the pane's pinned identity or boxed
         /// token is stale, and the token refresh above is what re-authenticates the revoked case.
         @discardableResult private func ensureLocalDeviceReachableForRetry() async -> Bool {
+            if let localDeviceRecoveryOverrideForTesting { return await localDeviceRecoveryOverrideForTesting() }
             guard device.id == SpacesPairedDeviceRecord.localDeviceID else { return false }
             let clientApp = self.clientApp
             let previousHosts = device.hosts
@@ -752,14 +843,14 @@
         /// box to the daemon's current token and the next subscribe authenticates. Every other disconnect
         /// takes the plain delayed reconnect.
         func handleStreamDisconnect(_ error: (any Error)?, generation: UInt64) {
-            // A drop is this model's to react to exactly when it came from the client the model currently
-            // holds. That is deliberately compared against the INSTALLED client's generation rather than the
-            // newest generation issued: a superseded client's late disconnect must still not tear down the
-            // client that replaced it, but a generation that moved on without replacing anything must not
-            // turn away a drop from the stream still installed either — that leaves a dead client in place,
-            // and `ensureSubscriptionStarted` reads any installed client as a live subscription, so the pane
-            // would never resubscribe and never report the outage (issue #537).
-            guard generation == installedStreamClientGeneration else { return }
+            // A drop is this model's to react to exactly when it came from a stream one of its LIVE attempts
+            // opened. Membership is the gate rather than equality against the newest generation issued: a
+            // retired attempt's late disconnect must not tear down the attempt that replaced it, a
+            // generation that moved on without replacing anything must not turn away a drop from a stream
+            // still installed (that leaves a dead client in place, and the pane would never resubscribe nor
+            // report the outage, issue #537), and in stage 2 two attempts are live at once with either one's
+            // drop being its own news.
+            guard let attempt = liveAttempt(forStream: generation) else { return }
             // Keep listeners attached through a subscribe drop: the asynchronous catch-up
             // `.state` (the final render for an ended session) must still reach them, and
             // not notifying listeners keeps the render host from re-registering and
@@ -769,8 +860,14 @@
             // Stop the dropped client before dropping the reference: its pinned-TLS connection is
             // released only by an explicit cancel, so a bare `nil` would orphan the connection and its
             // dispatch queue for the life of the process while the reconnect mints a fresh one.
-            let disconnectedClient = clearInstalledStreamClient()
+            let disconnectedClient = clearStream(of: attempt)
             disconnectedClient?.stop()
+            // An attempt whose dial task has already finished has nothing left to run, so it is dropped: a
+            // live attempt is what `ensureSubscriptionStarted()` reads as recovery under way, and one left
+            // behind holding no stream would block every future dial. One still inside its dial keeps its
+            // place until its own body finishes (`finishConnectAttempt`), since the blocking dial resumes
+            // regardless of any cancellation.
+            if !attempt.isDialInFlight { dropConnectAttempt(attempt.generation) }
             // Gate strictly on `.unauthorized` for the local device: an unauthorized subscribe rejection means
             // the daemon is reachable but the boxed token is stale, recoverable only by re-bootstrapping.
             // Ended-session rejections (session-not-running/not-available) and remote devices must never
@@ -780,9 +877,15 @@
             if let error, case SpacesDeviceAPIRequestClientError.requestRejected(_, .unauthorized) = error,
                 device.id == SpacesPairedDeviceRecord.localDeviceID
             {
+                // Revalidated across the bootstrap's suspension: in stage 2 a second dial is racing for the
+                // whole of it, and a payload landing on that dial's stream meanwhile has already cleared the
+                // outage. Reporting this loss afterwards would put the notice back up over a stream that is
+                // provably live and pace a redial against it.
+                let payloadCountAtDisconnect = liveStreamPayloadCount
                 Task { @MainActor [weak self] in
                     await self?.ensureLocalDeviceReachableForRetry()
-                    self?.scheduleReconnect()
+                    guard let self, self.liveStreamPayloadCount == payloadCountAtDisconnect else { return }
+                    self.scheduleReconnect()
                 }
                 return
             }
@@ -864,28 +967,17 @@
             // evidence than whatever downgraded reason put the tracker at stage 1 in the first place.
             guard !isStateStreamDisconnected else {
                 if connectionStageTracker.stage != .unreachable, Self.isAllCandidatesUnreachableResolverError(error) {
-                    // An automatic redial may already be in flight here: `openStateStream` installs
-                    // `streamClient` before its blocking dial resolves, so a client that dialed but has
-                    // delivered no frame yet leaves the tracker at `.reconnecting` exactly like this. Left
-                    // in place, that stale attempt (and `subscriptionConnectTask`) would make the ladder
-                    // redial armed below a no-op: it would be turned away by `ensureSubscriptionStarted()`'s
-                    // own in-flight guard (`streamClient != nil || subscriptionConnectTask != nil`) until
-                    // the stale attempt's own connect timeout or stream watchdog resolves it, minutes
-                    // later. Retiring it first with the same cleanup Retry performs is what lets the ladder
-                    // redial actually dial; the retired attempt's belated completion is dropped by the
-                    // generation gate `retireInFlightStreamAttempt()` bumps, so it cannot arm a competing
-                    // reconnect of its own.
-                    retireInFlightStreamAttempt()
-                    // Mirrors `scheduleReconnect(after:)`'s own use of this delay. The stale stage 1
-                    // timer already armed here (`reconnectTask`, paced by `reconnectBackoff`, capped
-                    // ~10s) has to be retired before rearming: `scheduleReconnect(delay:)` is a no-op
-                    // while `reconnectTask != nil`, so without cancelling it first the fresh ladder delay
-                    // computed below would just be discarded, and the redial would fire off the stale
-                    // stage 1 cadence instead of the stage 2 ladder this escalation just moved to.
-                    let redialDelaySeconds = applyStageTransition { $0.attemptEndedUnreachable() }
-                    reconnectTask?.cancel()
-                    reconnectTask = nil
-                    scheduleReconnect(delay: .seconds(redialDelaySeconds))
+                    // An automatic redial may already be in flight here: `openStateStream` opens its
+                    // client before the blocking dial resolves, so an attempt that dialed but has delivered
+                    // no frame yet leaves the tracker at `.reconnecting` exactly like this. That attempt
+                    // was started on stage 1's terms against an address every candidate has now refused, so
+                    // it is retired with the same cleanup Retry performs; its belated completion is dropped
+                    // by the membership gate, so it cannot arm a competing redial of its own.
+                    retireAllConnectAttempts()
+                    // The escalation cancels the stale stage 1 timer and hands pacing to the ladder tick,
+                    // which the redial below arms.
+                    enterUnreachableStage()
+                    scheduleReconnect()
                 }
                 return true
             }
@@ -921,12 +1013,14 @@
         /// `openStateStream`'s equivalent evidence does (see `scheduleReconnect(after:)`); the probe's
         /// failed verdict is pinned to one host and never sets it, so it keeps the ordinary stage 1 cadence.
         private func tearDownStreamAndScheduleReconnect(allCandidatesUnreachable: Bool = false) {
-            // Retire this client's generation before stopping it: `stop()` cancels the connection, whose
-            // receive loop then delivers one final disconnect callback, and that callback must not arm a
-            // second reconnect on top of the one below.
-            streamClientGeneration &+= 1
-            let deadClient = clearInstalledStreamClient()
-            deadClient?.stop()
+            // Detach the stream before stopping it: `stop()` cancels the connection, whose receive loop then
+            // delivers one final disconnect callback, and that callback must not arm a second reconnect on
+            // top of the one below. Clearing the stream is what makes it fail the membership gate.
+            if let attempt = installedAttempt {
+                let deadClient = clearStream(of: attempt)
+                deadClient?.stop()
+                if !attempt.isDialInFlight { dropConnectAttempt(attempt.generation) }
+            }
             if allCandidatesUnreachable {
                 scheduleReconnect(after: .failed(allCandidatesUnreachable: true))
             } else {
@@ -953,11 +1047,13 @@
         /// one timeout per keystroke, so without a single-flight rule a stalled daemon would be probed once
         /// per keystroke; the first probe's verdict answers for all of them.
         ///
-        /// Keyed by generation rather than by mere presence: a probe is only an answer about the stream it
-        /// was started under, and its verdict is discarded when that stream is gone. A timeout on a stream
-        /// installed after the probe went out therefore has to be corroborated on its own, so it starts a
-        /// probe of its own instead of being silently answered by one whose verdict can no longer apply.
-        /// The superseded probe is left to run itself out; nothing acts on it.
+        /// Keyed by the stream's own generation rather than by mere presence: a probe is only an answer
+        /// about the socket it was started under, and its verdict is discarded when that socket is gone. A
+        /// timeout on a stream installed after the probe went out therefore has to be corroborated on its
+        /// own, so it starts a probe of its own instead of being silently answered by one whose verdict can
+        /// no longer apply. The superseded probe is left to run itself out; nothing acts on it. The
+        /// attempt's generation is too coarse for this: the local-device bootstrap opens a second stream
+        /// inside the attempt that already opened one, and both sockets would answer to the same key.
         private var linkCorroborationProbe: (generation: UInt64, task: Task<Void, Never>)?
 
         /// Sends `.ping` to decide whether a bare input-send timeout was a saturated daemon or a dead link,
@@ -976,9 +1072,10 @@
         /// on, and a stream sitting on a path that just died would be torn down (or spared) on the strength
         /// of an answer from somewhere else entirely.
         ///
-        /// The verdict is scoped to the stream generation the probe was started under: if the stream was
-        /// replaced or torn down meanwhile, a late verdict says nothing about the stream now installed and
-        /// is dropped rather than tearing down a healthy replacement.
+        /// The verdict is scoped to the generation of the stream the probe was started under: if that
+        /// stream was replaced or torn down meanwhile, including by a replacement its own attempt opened,
+        /// a late verdict says nothing about the stream now installed and is dropped rather than tearing
+        /// down a healthy replacement.
         ///
         /// Treating a missed probe as conclusive leans on the daemon answering `.ping` off its
         /// engine-blocked queues (the terminal-control lane commands divert to; see
@@ -1000,7 +1097,7 @@
         /// indistinguishable from the false teardown this probe exists to remove, and the residual cost is
         /// a stale passive render with a bounded self-heal, not lost input or a false banner.
         private func startLinkCorroborationProbe() {
-            let generation = streamClientGeneration
+            guard let generation = installedStreamGeneration else { return }
             guard linkCorroborationProbe?.generation != generation else { return }
             let probe = linkCorroborationProbeForTesting ?? makeLinkCorroborationPingProbe()
             let pinnedHost = streamConnectedHost
@@ -1011,7 +1108,7 @@
                 // taken it while this one was out, and clearing that would let the next timeout start a
                 // duplicate probe for a generation already being corroborated.
                 if self.linkCorroborationProbe?.generation == generation { self.linkCorroborationProbe = nil }
-                guard generation == self.streamClientGeneration else { return }
+                guard generation == self.installedStreamGeneration else { return }
                 guard !Self.isAnswerFromTheDaemon(probeError) else { return }
                 self.tearDownStreamAndScheduleReconnect()
             }
@@ -1065,9 +1162,22 @@
         /// runs. Mirrors `stateStreamConnectOverrideForTesting`.
         var linkCorroborationProbeForTesting: (@MainActor (String?) async -> (any Error)?)?
 
+        /// Overrides the local-device bootstrap a failed first connect runs before retrying, so
+        /// `spacesuiTests` can drive the one production path that opens a second stream inside a single
+        /// connect attempt without a real local daemon behind it. Mirrors
+        /// `stateStreamConnectOverrideForTesting`. Nil in production, where only the local device's own
+        /// bootstrap can answer true.
+        var localDeviceRecoveryOverrideForTesting: (@MainActor () async -> Bool)?
+
         /// Awaits the in-flight corroboration probe and its verdict, so a test can observe the outcome
         /// deterministically instead of polling. A no-op when no probe is running.
         func drainPendingLinkCorroborationProbeForTesting() async { await linkCorroborationProbe?.task.value }
+
+        /// The in-flight corroboration probe's task, if any. A test captures it before a replacement
+        /// stream's probe takes the slot, so the superseded probe's verdict can be awaited to completion
+        /// rather than yielded at: a superseded probe is out of `drainPendingLinkCorroborationProbeForTesting`'s
+        /// reach. Mirrors `connectAttemptTasksForTesting`.
+        var pendingLinkCorroborationProbeTaskForTesting: Task<Void, Never>? { linkCorroborationProbe?.task }
 
         /// Whether a corroboration probe is in flight; `spacesuiTests` uses it to prove a second timeout
         /// arriving during one does not spawn a competing probe.
@@ -1123,13 +1233,27 @@
         /// to prove that the one-shot delivery `apply` performs ahead of its staleness guard is still
         /// refused for a superseded client.
         func applyStreamEvent(_ payload: GhosttyRemoteSessionStatePayload, generation: UInt64) {
-            // Compared against the INSTALLED client's generation, exactly like `handleStreamDisconnect`'s
-            // guard (see that field's doc comment): `streamClientGeneration` alone only ever increases and
-            // is never retired by a disconnect, so a frame the old client already had in flight on the
-            // main actor would still carry a generation equal to it and pass this guard after
-            // `handleStreamDisconnect` cleared `streamClient`, clearing the banner and resetting backoff
-            // for a stream that is no longer installed.
-            guard generation == installedStreamClientGeneration else { return }
+            // Gated on the payload's stream belonging to a LIVE attempt, exactly like
+            // `handleStreamDisconnect`: `streamClientGeneration` alone only ever increases and is never
+            // retired by a disconnect, so a frame the old client already had in flight on the main actor
+            // would still carry a generation equal to it and pass an equality guard after the disconnect
+            // cleared the stream, clearing the banner and resetting backoff for a stream that is gone.
+            guard let attempt = liveAttempt(forStream: generation) else { return }
+            liveStreamPayloadCount &+= 1
+            if !attempt.deliveredPayload {
+                attempt.deliveredPayload = true
+                // Measured from THIS attempt's own dial, not from whichever racing attempt started last, so
+                // a stage 2 winner reports the interval an outage measurement is actually timing.
+                emitPerformanceEvent(
+                    name: "stream_first_frame", elapsedMS: TerminalPerformance.elapsedMS(since: attempt.startedAt),
+                    attributes: ["host": attempt.connectedHost ?? "", "generation": String(generation)])
+            }
+            // The first attempt to deliver a payload is the one that actually reached the device, so it
+            // becomes this pane's stream and every other live attempt is retired here, synchronously,
+            // before the payload below reaches any listener. A loser contributes nothing after this point:
+            // its later payloads and its disconnect both fail the membership guard above on arrival.
+            installedStreamAttemptGeneration = attempt.generation
+            for losingGeneration in Array(connectAttempts.keys) where losingGeneration != attempt.generation { retireConnectAttempt(losingGeneration) }
             // A frame actually arriving over the stream is the proof the connect succeeding in
             // `openStateStream` alone is not: it is what the tracker's contract means by
             // `frameReceived()`, and what `TerminalConnectionNotice`'s banner promises the user.
@@ -1142,20 +1266,40 @@
         // these instead of racing a real connect.
         /// `connectedHost` stands in for the address the concrete client would have pinned itself to, so a
         /// test can drive the probe's host correlation without a multi-address daemon.
-        @discardableResult func installStreamClientForTesting(_ client: any TerminalRemoteStateStreamClient, connectedHost: String? = nil) -> UInt64 {
+        ///
+        /// Supersedes whatever was live by default, which is what a pane outside stage 2 does: one attempt
+        /// at a time, so a test about the model's single installed stream gets exactly that.
+        /// `racingLiveAttempts` keeps what is already live instead, which is the stage 2 race's own shape
+        /// (two attempts, each with its own stream, until one of them delivers a payload) and is the only
+        /// way a test can watch a losing stream actually being stopped.
+        @discardableResult func installStreamClientForTesting(
+            _ client: any TerminalRemoteStateStreamClient, connectedHost: String? = nil, racingLiveAttempts: Bool = false
+        ) -> UInt64 {
+            if !racingLiveAttempts { retireAllConnectAttempts() }
+            connectAttemptGeneration &+= 1
+            let attempt = DeviceTerminalConnectAttempt(
+                generation: connectAttemptGeneration, startedAt: Date(), dialTimeoutSeconds: Self.dialTimeoutSeconds)
+            // No dial ever ran for this stream, so the attempt is settled the moment it is installed: a
+            // disconnect must drop it rather than wait for a dial task that does not exist.
+            attempt.isDialInFlight = false
+            connectAttempts[attempt.generation] = attempt
             streamClientGeneration &+= 1
-            installStreamClient(client, generation: streamClientGeneration)
-            streamConnectedHost = connectedHost
+            installStreamClient(client, generation: streamClientGeneration, on: attempt)
+            attempt.connectedHost = connectedHost
             return streamClientGeneration
         }
 
-        var hasActiveStreamClientForTesting: Bool { streamClient != nil }
+        var hasActiveStreamClientForTesting: Bool { installedStreamClient != nil }
+
+        /// How many connect attempts are live right now, which is how a test reads the stage 2 race: one
+        /// dial in flight, a second started on the ladder's tick, and the cap that keeps it at two.
+        var liveConnectAttemptCountForTesting: Int { connectAttempts.count }
 
         /// Exposes the currently installed client's generation so a test that let a real connect attempt
         /// install its client (through `stateStreamConnectOverrideForTesting`, rather than
         /// `installStreamClientForTesting`) can still call `applyStreamEvent`/`handleStreamDisconnect` with
         /// the generation those calls require.
-        var installedStreamClientGenerationForTesting: UInt64? { installedStreamClientGeneration }
+        var installedStreamClientGenerationForTesting: UInt64? { installedStreamGeneration }
 
         /// Overrides the blocking pinned-TLS connect `openStateStream` normally runs in a detached task,
         /// so a test can control exactly when and how it resolves instead of racing real network timing.
@@ -1164,7 +1308,9 @@
         /// `reportFailedInputSend` has already cleared `streamClient` reproduces `start()` succeeding for
         /// a client that was concurrently stopped, deterministically. Nil in production, where the real
         /// detached connect always runs.
-        var stateStreamConnectOverrideForTesting: (@MainActor () async -> Bool)?
+        /// It receives the dial budget the real `start(timeoutSeconds:)` would have been given, so a test
+        /// can assert a stage 2 redial dials on the shorter budget while the cold open keeps the full one.
+        var stateStreamConnectOverrideForTesting: (@MainActor (TimeInterval) async -> Bool)?
 
         /// Stands in for `SpacesDeviceAPIStateStreamClient.lastDialExhaustedAllCandidates` when a failed
         /// connect came from `stateStreamConnectOverrideForTesting`: the override bypasses `start()`
@@ -1173,8 +1319,20 @@
         /// instead.
         var lastDialExhaustedAllCandidatesForTesting = false
 
-        /// See the call site in `ensureSubscriptionStarted`.
-        var ensureSubscriptionStartedInvokedForTesting: (@MainActor () -> Void)?
+        /// The clock the subscribe throttle stamps and measures its 500ms window against. Nil in
+        /// production, where every stamp and every comparison reads the real `Date()`.
+        ///
+        /// `spacesuiTests` pins it so a test about what the throttle does INSIDE its window states that
+        /// window as a fact rather than racing it: the steps between the stamping subscribe and the
+        /// subscribe under test are a real server, a real dial and a real socket teardown, and on a loaded
+        /// runner they outran 500ms and made the test assert against the un-throttled path instead
+        /// (issue #646).
+        var subscribeThrottleClockForTesting: (@MainActor () -> Date)?
+
+        /// What the subscribe throttle reads for "now": the pinned test clock when one is installed, the
+        /// real one otherwise. Every throttle stamp and comparison goes through here, so a pinned clock
+        /// governs the whole window rather than half of it.
+        private var subscribeThrottleNow: Date { subscribeThrottleClockForTesting?() ?? Date() }
 
         /// Overrides the `.state` request the liveness recheck makes, so `spacesuiTests` can hand it a
         /// chosen answer — a transport failure, a coded refusal, a running session, an exited one — and a
@@ -1196,17 +1354,62 @@
         /// Whether a delayed reconnect is currently armed and waiting to fire.
         var hasArmedReconnectForTesting: Bool { reconnectTask != nil }
 
-        /// Awaits the in-flight connect `ensureSubscriptionStarted` started, if any, so a test can observe
-        /// its outcome deterministically instead of polling.
-        func drainPendingConnectForTesting() async { await subscriptionConnectTask?.value }
+        /// The stage 1 reconnect timer's current task, if any. A test captures it before releasing the
+        /// held `reconnectWaitForTesting` and then awaits the captured handle, which proves what the retry
+        /// did instead of waiting out a real delay; mirrors `graceTaskForTesting`. Reading the live
+        /// property afterwards would not work: the retry clears it as its first act.
+        var reconnectTaskForTesting: Task<Void, Never>? { reconnectTask }
 
-        /// Awaits an armed reconnect through its (test-shortened) backoff delay and the connect it starts,
-        /// so a test can drive a real retry to completion deterministically instead of polling or sleeping
-        /// out the interval. A no-op when no reconnect is armed.
+        /// Overrides what the stage 1 reconnect timer awaits in place of `Task.sleep`, mirroring
+        /// `graceWaitForTesting` and `unreachableRedialWaitForTesting`: a test holds the armed retry and
+        /// releases it when it wants it to fire, so "the timer fired" is an act the test performs rather
+        /// than a short real delay it has to outlast. It receives the delay it stands in for. Nil in
+        /// production, where every retry is a real sleep.
+        var reconnectWaitForTesting: (@MainActor (Duration) async -> Void)?
+
+        /// Overrides what the liveness recheck's own cadence awaits between attempts in place of
+        /// `Task.sleep`, mirroring `reconnectWaitForTesting`. Holding the cadence is also what makes the
+        /// loop's state readable: the recheck asks exactly once per iteration, after fully settling the
+        /// last answer, so a test that sees a wait parked here knows nothing is in flight and can change
+        /// what the next attempt answers without racing one. Nil in production, where the cadence is the
+        /// same real `reconnectBackoff` delay the reconnect timer uses.
+        var livenessRecheckWaitForTesting: (@MainActor (Duration) async -> Void)?
+
+        /// Every live connect attempt's dial task, oldest attempt first. A test captures the task of an
+        /// attempt it is about to have retired (by Retry, by the stage 2 cap, or by a racing attempt's
+        /// first payload) so it can await that attempt running to completion after resolving its dial:
+        /// a retired attempt is out of `drainPendingConnectForTesting`'s reach, and without the handle the
+        /// only way to assert its belated completion changed nothing is to guess how many `Task.yield()`s
+        /// it takes.
+        var connectAttemptTasksForTesting: [Task<Void, Never>] { connectAttempts.keys.sorted().compactMap { connectAttempts[$0]?.task } }
+
+        /// The stage 2 cadence's current tick, non-nil exactly while a rung is being waited out. A test
+        /// captures it before releasing the held `unreachableRedialWaitForTesting`, then awaits the
+        /// captured handle, which proves the redial the rung started deterministically instead of racing a
+        /// real duration; mirrors `graceTaskForTesting`.
+        var unreachableRedialTaskForTesting: Task<Void, Never>? { unreachableRedialTask }
+
+        /// Overrides what the stage 2 redial cadence awaits in place of `Task.sleep`, mirroring
+        /// `graceWaitForTesting`: a test holds a rung open and releases it on demand, driving the ladder
+        /// deterministically instead of waiting out real seconds. It receives the rung it stands in for, so
+        /// a test can also read the ladder sequence the cadence actually spent. Nil in production, where
+        /// every rung is a real sleep.
+        var unreachableRedialWaitForTesting: (@MainActor (Duration) async -> Void)?
+
+        /// Awaits every connect attempt currently in flight, so a test can observe their outcomes
+        /// deterministically instead of polling. The tasks are captured first: a winning attempt retires the
+        /// others as it lands, and the live set is mutated by exactly that.
+        func drainPendingConnectForTesting() async {
+            for task in connectAttempts.values.compactMap(\.task) { await task.value }
+        }
+
+        /// Awaits whichever redial is armed, the stage 1 timer or the stage 2 ladder tick, through its
+        /// delay, then the attempts it started, so a test can drive a real redial to completion
+        /// deterministically instead of polling or sleeping out the interval. A no-op when none is armed.
         func drainPendingReconnectForTesting() async {
-            guard let reconnectTask else { return }
-            await reconnectTask.value
-            await subscriptionConnectTask?.value
+            if let reconnectTask { await reconnectTask.value }
+            if let unreachableRedialTask { await unreachableRedialTask.value }
+            await drainPendingConnectForTesting()
         }
 
         /// Re-subscribes after a backoff delay — only while listeners remain and the session is still
@@ -1223,16 +1426,13 @@
         /// coming unless nothing is listening for one.
         ///
         /// Idempotent while a retry is already pending (`reconnectTask != nil`): more than one caller can
-        /// decide the same failed connect owes a retry (see the connect-completion check in
-        /// `ensureSubscriptionStarted`), and a second call here must not stack a competing timer or double
-        /// the backoff on top of the one already armed.
+        /// decide the same failed connect owes a retry (see `finishConnectAttempt`), and a second call here
+        /// must not stack a competing timer or double the backoff on top of the one already armed.
         ///
-        /// `delay` overrides the ordinary `reconnectBackoff` cadence. Only `scheduleReconnect(after:)`
-        /// passes one, for the one case with harder evidence than "a connect failed": every candidate
-        /// address has now refused to dial, which is stage 2 and paces off `TerminalUnreachableBackoff`'s
-        /// own (slower) ladder instead. Every other caller (a live subscription dropping, a failed input
-        /// send, a liveness recheck failure) has no such evidence and always takes this default path.
-        private func scheduleReconnect(delay: Duration? = nil) {
+        /// This is the stage 1 cadence only. Once the tracker reads `.unreachable`, every caller here is
+        /// redirected onto the ladder tick (`armUnreachableRedialTick`), which paces stage 2's redials on
+        /// `TerminalUnreachableBackoff`'s own ladder and races them rather than waiting each one out.
+        private func scheduleReconnect() {
             // A retry is already armed, and whoever armed it already published the drop.
             guard reconnectTask == nil else { return }
             // Order matters below, and it is the opposite of the obvious one. A cached non-interactive
@@ -1254,10 +1454,23 @@
             // Nothing is being fanned out to, so nothing needs a live stream; a listener registering later
             // starts one itself through `registerListener`.
             guard !listeners.isEmpty else { return }
-            let resolvedDelay = delay ?? reconnectBackoff.nextDelay()
+            // Stage 2's redials are paced by the ladder tick, which dials on the rung whether or not an
+            // attempt is still in flight. Every caller that would arm a stage 1 timer here re-arms that
+            // cadence instead (idempotent), so a failing attempt can neither spend a rung nor start a
+            // second, competing timer underneath the one the ladder owns.
+            guard connectionStageTracker.stage != .unreachable else {
+                armUnreachableRedialTick()
+                return
+            }
+            let resolvedDelay = reconnectBackoff.nextDelay()
             lastReconnectDelayForTesting = resolvedDelay
+            let wait = reconnectWaitForTesting
             reconnectTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: resolvedDelay)
+                if let wait {
+                    await wait(resolvedDelay)
+                } else {
+                    try? await Task.sleep(for: resolvedDelay)
+                }
                 // `try?` turns the sleep's `CancellationError` into a plain return from that line, not
                 // from this task: without checking `Task.isCancelled` explicitly, a caller that cancels
                 // this task (Retry, or an escalation rearming on the stage 2 ladder) would only stop the
@@ -1266,7 +1479,7 @@
                 // arm and firing a spurious extra `ensureSubscriptionStarted()` of its own.
                 guard let self, !Task.isCancelled else { return }
                 self.reconnectTask = nil
-                guard self.streamClient == nil, !self.listeners.isEmpty else { return }
+                guard self.installedStreamClient == nil, !self.listeners.isEmpty else { return }
                 // Same rule as above: the retry does not end on the cached state's word alone.
                 guard self.currentRuntimeState?.state.isInteractive != false else {
                     self.recheckLivenessAfterStreamLoss()
@@ -1277,29 +1490,106 @@
             }
         }
 
-        /// Arms the next redial from a failed connect's own evidence: the tracker's (slower) stage 2
-        /// ladder once the attempt proves every known candidate address refused to dial, OR the tracker
-        /// is already `.unreachable` from an earlier attempt, otherwise the ordinary stage 1 backoff (see
-        /// `scheduleReconnect(delay:)`).
+        /// Arms the next redial from a failed attempt's own evidence: proving every known candidate address
+        /// refused to dial is what escalates to stage 2, where `scheduleReconnect()` then hands pacing to
+        /// the ladder tick; every other failure keeps the ordinary stage 1 backoff.
         ///
-        /// The `connectionStageTracker.stage == .unreachable` half matters because the resolver's failed
-        /// set is self-resetting (`SpacesDeviceEndpointResolver.nextStreamHost()` clears it right after a
-        /// full cycle through every candidate), so with more than one candidate host the very next
-        /// attempt after the one that reached stage 2 can fail with `allCandidatesUnreachable: false`
-        /// even though nothing has actually improved. Without this, that attempt would drop back onto
-        /// `reconnectBackoff` (capped at 10 s, and never reset by Retry) instead of continuing to pace on
-        /// the stage 2 ladder: once unreachable, every failed attempt keeps pacing on the ladder until a
-        /// frame actually arrives.
+        /// A failed attempt that carries no such evidence still stays on the ladder once the tracker
+        /// already reads `.unreachable`, and that is `scheduleReconnect()`'s own stage check rather than
+        /// something re-derived here. It matters because the resolver's failed set is self-resetting
+        /// (`SpacesDeviceEndpointResolver.nextStreamHost()` clears it right after a full cycle through
+        /// every candidate), so with more than one candidate host the very next attempt after the one that
+        /// reached stage 2 can fail with `allCandidatesUnreachable: false` even though nothing has actually
+        /// improved. Without that check it would drop back onto `reconnectBackoff` (capped at 10 s, and
+        /// never reset by Retry) instead of continuing on the ladder until a frame actually arrives.
         private func scheduleReconnect(after result: StateStreamConnectResult) {
-            let isAllCandidatesUnreachable: Bool
-            if case .failed(true) = result { isAllCandidatesUnreachable = true } else { isAllCandidatesUnreachable = false }
-            guard isAllCandidatesUnreachable || connectionStageTracker.stage == .unreachable else {
-                scheduleReconnect()
+            if case .failed(true) = result { enterUnreachableStage() }
+            scheduleReconnect()
+        }
+
+        /// Records the stage 2 evidence and hands pacing to the ladder tick. Deliberately does not advance
+        /// the ladder: while stage 2 persists several attempts can be in flight at once, so a failing
+        /// attempt is not a tick, and `armUnreachableRedialTick()` is the only thing that spends a rung.
+        ///
+        /// The stage 1 timer is cancelled here rather than left to fire: it is paced by `reconnectBackoff`,
+        /// and `scheduleReconnect()` is a no-op while one is pending, so leaving it armed would keep
+        /// the redial on the cadence this escalation just moved off.
+        private func enterUnreachableStage() {
+            applyStageTransition { $0.enterUnreachable() }
+            reconnectTask?.cancel()
+            reconnectTask = nil
+        }
+
+        /// Arms the stage 2 redial cadence on the ladder's next rung, unless it is already armed.
+        ///
+        /// Stage 2 means every candidate address has already refused a dial, so an attempt still in flight
+        /// when the rung elapses is not progress worth waiting for: it is a dial against an address that
+        /// was down when it started, and the link may well have come back since. The tick therefore starts
+        /// a fresh dial alongside it rather than superseding it, and whichever one delivers a payload first
+        /// wins (`applyStreamEvent`). Waiting out the stale attempt's own dial budget instead is what made
+        /// a pane whose device came back take a fixed ten seconds to repaint (issue #694).
+        ///
+        /// Idempotent, and the only place the ladder advances while stage 2 persists: a failing attempt
+        /// re-enters through `scheduleReconnect()` and finds the tick already armed, so it can
+        /// neither spend a rung nor push the pending redial further out.
+        private func armUnreachableRedialTick() {
+            guard connectionStageTracker.stage == .unreachable, !listeners.isEmpty else { return }
+            guard unreachableRedialTask == nil else { return }
+            let delaySeconds = applyStageTransition { $0.nextRedialDelay() }
+            let delay = Duration.seconds(delaySeconds)
+            lastReconnectDelayForTesting = delay
+            let wait = unreachableRedialWaitForTesting
+            unreachableRedialTask = Task { @MainActor [weak self] in
+                if let wait {
+                    await wait(delay)
+                } else {
+                    try? await Task.sleep(for: delay)
+                }
+                guard let self, !Task.isCancelled else { return }
+                self.unreachableRedialTask = nil
+                self.startConcurrentUnreachableRedial()
+                self.armUnreachableRedialTick()
+            }
+        }
+
+        private func cancelUnreachableRedialTick() {
+            unreachableRedialTask?.cancel()
+            unreachableRedialTask = nil
+        }
+
+        /// The ladder tick's redial: a fresh dial that leaves whatever is still in flight running, capped at
+        /// `maximumConcurrentUnreachableAttempts` live attempts. Each pinned-TLS dial pins a thread for its
+        /// whole budget, so the cap is what keeps a long outage from accumulating them; it retires the
+        /// oldest attempt, the one with the least chance left of answering.
+        private func startConcurrentUnreachableRedial() {
+            // Nothing is being fanned out to, so nothing needs a stream; a listener registering later starts
+            // one itself through `registerListener`.
+            guard !listeners.isEmpty else { return }
+            // Same rule as `scheduleReconnect()`: an ended session needs no stream, and the cached
+            // state is not this model's to rule on, so the device is asked instead of dialed.
+            guard currentRuntimeState?.state.isInteractive != false else {
+                cancelUnreachableRedialTick()
+                recheckLivenessAfterStreamLoss()
                 return
             }
-            let redialDelaySeconds = applyStageTransition { $0.attemptEndedUnreachable() }
-            scheduleReconnect(delay: .seconds(redialDelaySeconds))
+            while connectAttempts.count >= Self.maximumConcurrentUnreachableAttempts, let oldest = connectAttempts.keys.min() {
+                retireConnectAttempt(oldest)
+            }
+            beginConnectAttempt(dialTimeoutSeconds: Self.unreachableRedialDialTimeoutSeconds)
         }
+
+        /// The dial-to-subscribe budget for a pane's cold open and its stage 1 redials.
+        private static let dialTimeoutSeconds: TimeInterval = 10
+
+        /// The dial-to-subscribe budget for a stage 2 redial, shorter than the cold open's: its job is to
+        /// notice the device coming back rather than to wait out a slow link, and the ladder starts a fresh
+        /// dial on the next rung regardless, so a long budget only pins a thread on a dead path.
+        private static let unreachableRedialDialTimeoutSeconds: TimeInterval = 4
+
+        /// How many dials may be in flight at once while stage 2 races them. Two: each pinned-TLS dial pins
+        /// a thread for its whole budget, and a third rung's dial is worth more than the oldest attempt
+        /// still hanging on an address that was down when it started.
+        private static let maximumConcurrentUnreachableAttempts = 2
 
         /// Asks the device whether the session is still live, after a stream loss the cached runtime state
         /// claims needs no stream — and keeps asking until the device answers.
@@ -1329,7 +1619,11 @@
                     let result = await fetch()
                     guard !Task.isCancelled, let outcome = self?.settleLivenessRecheck(with: result) else { break }
                     guard case .retryAfter(let retryDelay) = outcome else { break }
-                    try? await Task.sleep(for: retryDelay)
+                    if let wait = self?.livenessRecheckWaitForTesting {
+                        await wait(retryDelay)
+                    } else {
+                        try? await Task.sleep(for: retryDelay)
+                    }
                     guard !Task.isCancelled else { break }
                     // Re-resolve a local daemon that may have moved before asking again. An idle-shut-down
                     // daemon comes back on a fresh ephemeral port, so every attempt made through the request
@@ -1360,7 +1654,9 @@
         /// Whether an open liveness question is still this model's to answer. An installed stream, a connect
         /// in flight, or an armed reconnect all mean recovery is owned elsewhere, and a background poll that
         /// kept raising the disconnected notice underneath a healthy stream would be worse than no poll.
-        private var wantsLivenessRecheck: Bool { !listeners.isEmpty && streamClient == nil && subscriptionConnectTask == nil && reconnectTask == nil }
+        private var wantsLivenessRecheck: Bool {
+            !listeners.isEmpty && connectAttempts.isEmpty && reconnectTask == nil && unreachableRedialTask == nil
+        }
 
         /// The recheck's own `.state` request, or nil once nothing needs the answer. Vended as a closure so
         /// the recheck loop can await the round trip without holding the model across it.
@@ -1425,15 +1721,38 @@
             let result = mutate(&connectionStageTracker)
             if connectionStageTracker.stage != before.stage || connectionStageTracker.isBannerVisible != before.isBannerVisible {
                 TerminalSessionNotification.post(.spacesTerminalStateStreamConnectionDidChange, sessionID: sessionID)
+                // Banner visibility earns an event of its own alongside the stage: the grace expiring
+                // raises the banner without moving the stage, and the interval the user actually saw the
+                // banner is what a measurement lane reads out of these events. Same attribute names and
+                // values the iOS viewer emits, so one report covers both clients.
+                emitPerformanceEvent(
+                    name: "connection_stage",
+                    attributes: [
+                        "stage": String(describing: connectionStageTracker.stage), "banner": connectionStageTracker.isBannerVisible ? "1" : "0",
+                        "device": device.id,
+                    ])
             }
             return result
+        }
+
+        /// Source label every event from a Mac paired-device pane carries, distinguishing it from the
+        /// `mac-mirror` render host in the same process and from the `ios-viewer` client.
+        private static let performanceEventSource = "mac-pane"
+
+        /// Emits one device-terminal performance event for this session, or nothing at all when no
+        /// measurement lane configured a log path. `elapsedMS` and `attributes` are autoclosures so a
+        /// disabled logger (every ordinary run) pays only the boolean check, never the formatting.
+        private func emitPerformanceEvent(name: String, elapsedMS: @autoclosure () -> Int? = nil, attributes: @autoclosure () -> [String: String]) {
+            guard SpacesDeviceTerminalPerformanceLogger.isEnabled() else { return }
+            SpacesDeviceTerminalPerformanceLogger.emit(
+                .init(sessionID: sessionID, source: Self.performanceEventSource, name: name, elapsedMS: elapsedMS(), attributes: attributes()))
         }
 
         /// Declares the stream lost: moves the tracker to stage 1 (a no-op if it is already past stage 1;
         /// see `TerminalConnectionStageTracker.streamLost()`) and arms the grace timer that raises the
         /// "Reconnecting…" banner after `TerminalConnectionNotice.bannerGraceSeconds`, so a blip that heals
         /// within the grace never paints anything. Published before the listener-empty check in
-        /// `scheduleReconnect(delay:)`, same as before this tracker existed: a live session whose stream is
+        /// `scheduleReconnect()`, same as before this tracker existed: a live session whose stream is
         /// gone is an outage the pane must be able to report whether or not a retry gets armed for it.
         private func markStreamLost() {
             let wasConnected = connectionStageTracker.stage == .connected
@@ -1452,6 +1771,7 @@
         /// banner to report.
         private func clearConnectionOutage() {
             cancelGraceTimer()
+            cancelUnreachableRedialTick()
             reconnectBackoff.reset()
             applyStageTransition { $0.frameReceived() }
         }
@@ -1487,30 +1807,18 @@
         /// before the orphaned task itself gets a chance to run.
         var graceTaskForTesting: Task<Void, Never>? { graceTask }
 
-        /// Retires any connect already in flight, and any client it already installed but that has not yet
-        /// produced a frame: an automatic reconnect timer can start one before something else needs the
-        /// slot back (Retry, or `reportFailedInputSend`'s stage 1 to stage 2 escalation), and
-        /// `ensureSubscriptionStarted()`'s in-flight guard (`streamClient != nil || subscriptionConnectTask
-        /// != nil`) would otherwise make a fresh redial a no-op until that stale attempt's own connect
-        /// timeout or stream watchdog resolves it, minutes later. This mirrors
-        /// `tearDownStreamAndScheduleReconnect`'s cleanup (retire the generation, clear and stop the
-        /// installed client) without going through it: neither caller wants this to also schedule a
-        /// reconnect of its own, since each arms one on its own terms right after.
+        /// Retires every attempt currently live, stream and dial task alike: an automatic redial can be in
+        /// flight when something else needs the pane's stream slot back (Retry, or `reportFailedInputSend`'s
+        /// stage 1 to stage 2 escalation), and a stale attempt left in place would make a fresh redial a
+        /// no-op until its own dial budget or stream watchdog resolves it, minutes later. Deliberately does
+        /// not schedule anything: each caller arms its own redial on its own terms right after.
         ///
-        /// `connectAttemptGeneration` is bumped here too, not just inside whatever fresh
-        /// `ensureSubscriptionStarted()` call follows: `client.start()`'s blocking dial has no
-        /// structured-concurrency link to `subscriptionConnectTask`, so cancelling it above does not stop
-        /// an in-flight attempt from resuming and finishing on its own later. Retiring its generation now
-        /// (independent of whether a fresh attempt actually starts afterward) is what makes that belated
-        /// completion recognizable as stale everywhere it is checked, so it cannot arm a competing
-        /// reconnect of its own.
-        private func retireInFlightStreamAttempt() {
-            subscriptionConnectTask?.cancel()
-            subscriptionConnectTask = nil
-            connectAttemptGeneration &+= 1
-            streamClientGeneration &+= 1
-            let deadClient = clearInstalledStreamClient()
-            deadClient?.stop()
+        /// Dropping an attempt from the live set, rather than relying on a cancellation the blocking dial
+        /// would actually observe (it runs on a detached task with no structured-concurrency link back to
+        /// the attempt's task, so a retired attempt keeps dialing regardless), is what makes its belated
+        /// completion recognizable as stale everywhere it is checked.
+        private func retireAllConnectAttempts() {
+            for generation in Array(connectAttempts.keys) { retireConnectAttempt(generation) }
         }
 
         /// User-initiated retry from the pane's Retry button, shown only in stage 2 ("Device unreachable").
@@ -1524,10 +1832,25 @@
             applyStageTransition { $0.retryRequested() }
             reconnectTask?.cancel()
             reconnectTask = nil
-            retireInFlightStreamAttempt()
+            // The pending tick is paced on the ladder Retry just reset, so it is cancelled rather than left
+            // to fire; the redial below re-arms it from the first rung once the reset is in effect.
+            cancelUnreachableRedialTick()
+            retireAllConnectAttempts()
             SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint).clearCachedWinner()
-            lastSubscriptionAttemptAt = nil
-            ensureSubscriptionStarted()
+            guard connectionStageTracker.stage == .unreachable else {
+                // Clearing the throttle keeps a Retry made moments after the last attempt from being
+                // swallowed by it: the user asking is reason enough to dial again.
+                lastSubscriptionAttemptAt = nil
+                ensureSubscriptionStarted()
+                return
+            }
+            // A Retry pressed while the device is unreachable is an unreachable-stage redial: it gives up
+            // on the same short budget the cadence's own redials use, and the cadence keeps running
+            // across it, so a Retry whose dial black-holes on the address that was down is raced by the
+            // next rung instead of holding the pane for its whole budget.
+            lastSubscriptionAttemptAt = subscribeThrottleNow
+            beginConnectAttempt(dialTimeoutSeconds: Self.unreachableRedialDialTimeoutSeconds)
+            armUnreachableRedialTick()
         }
 
         private func scheduleStateRefreshRetry() {

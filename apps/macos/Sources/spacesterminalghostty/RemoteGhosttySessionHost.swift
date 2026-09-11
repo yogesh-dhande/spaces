@@ -207,16 +207,29 @@
             ensureStateStreamStartedIfNeeded()
         }
 
+        /// Makes no isolation assumption: a `deinit` runs on whichever thread dropped the last reference —
+        /// a background one whenever an async caller holds the final reference to the pane that owns this
+        /// host — so it can neither assume the main actor nor skip its cleanup off it. Skipping is the
+        /// worse of the two: it leaves the device's state subscription installed and this host's callbacks
+        /// in the model's fan-out for the life of the session (issue #537).
+        ///
+        /// Task cancellation and the input queue's `cancelAll()` are thread-safe on their own (the queue is
+        /// lock-guarded), so they run here. The two stream clients are driven from the main actor
+        /// everywhere else, so they are captured as values and stopped there.
+        ///
+        /// The scroll coalescer needs nothing: this host holds its only strong reference, so it dies with
+        /// the host, and the flush task it owns holds it weakly — that task wakes to a deallocated
+        /// coalescer and returns without enqueuing anything.
         deinit {
-            guard Thread.isMainThread else { return }
-            MainActor.assumeIsolated {
+            pendingViewportSettleTask?.cancel()
+            pendingViewportResizeTask?.cancel()
+            pendingRenderUpdateResyncTask?.cancel()
+            inputQueue.cancelAll()
+            let stateStreamClient = stateStreamClient
+            let directStateStreamClient = directStateStreamClient
+            MainThreadDeinitCleanup.run {
                 stateStreamClient?.stop()
                 directStateStreamClient?.stop()
-                pendingViewportSettleTask?.cancel()
-                pendingViewportResizeTask?.cancel()
-                pendingRenderUpdateResyncTask?.cancel()
-                scrollCoalescer.cancel()
-                inputQueue.cancelAll()
             }
         }
 

@@ -1812,6 +1812,320 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                 + "shipped must not publish a second frame")
     }
 
+    /// The trailing `state_change` broadcast is decided by the screen it would carry, not by the revision
+    /// that announced it. Ghostty raises two screen revisions for one PTY chunk, so a revision whose pixels
+    /// the `output` export already shipped can still arrive here unclaimed; the frame it would publish is a
+    /// duplicate of the one subscribers hold. A change whose captured screen matches the stream's baseline
+    /// publishes nothing, and a change that moved the screen still publishes its frame.
+    func testScreenStateChangeWithUnmovedScreenPublishesNoFrame() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-unmoved-screen-state-change-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
+            workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-09-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let snapshotTextBox = MutableBox("mobile frame 0")
+        GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in Self.snapshot(text: snapshotTextBox.value) }
+        defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
+
+        let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            let remoteOwner = TerminalClient(
+                id: "remote-ipad", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
+                connectedAt: "2026-09-10T00:00:00Z")
+            try host.attach(client: remoteOwner, mode: .owner, into: nil)
+            return Box(host)
+        }
+        let host = hostBox.value
+        defer { TerminalEngineActor.runSynchronously { host.terminate() } }
+
+        let receivedPayloads = RemoteSessionStatePayloadCollector()
+        let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
+        try client.start()
+        defer { client.stop() }
+        try await waitUntil(timeout: 30) {
+            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue && $0.renderUpdate != nil }
+        }
+        receivedPayloads.removeAll()
+
+        // The revision an `output` export read mid-pair: the screen it names is already on the wire, and
+        // the picture has not moved since.
+        let unmovedRevision = UInt64.max / 2
+        try await TerminalEngineActor.run {
+            host.applySessionStateChange(.init(flags: [.screen], revision: unmovedRevision, title: nil, workingDirectory: nil))
+        }
+        // The coalesced broadcast turn clears the pending revision as it starts and runs to completion
+        // without suspending, so seeing nil from the engine actor means its decision is already made.
+        try await waitUntil(timeout: 30) { host.debugPendingScreenStateChangeBroadcastRevision == nil }
+
+        snapshotTextBox.value = "mobile frame 1"
+        let movedRevision = unmovedRevision + 1
+        try await TerminalEngineActor.run {
+            host.applySessionStateChange(.init(flags: [.screen], revision: movedRevision, title: nil, workingDirectory: nil))
+        }
+        try await waitUntil(timeout: 30) {
+            receivedPayloads.snapshot.contains {
+                $0.reason == TerminalRemoteSessionStateReason.stateChange.rawValue && $0.screenStateRevision == movedRevision
+                    && $0.renderUpdate != nil
+            }
+        }
+
+        // The stream is ordered, so a frame for the unmoved revision would have landed ahead of this one.
+        let stateChanges = receivedPayloads.snapshot.filter { $0.reason == TerminalRemoteSessionStateReason.stateChange.rawValue }
+        XCTAssertEqual(
+            stateChanges.map(\.screenStateRevision), [movedRevision],
+            "a screen state change whose screen matches what subscribers hold must publish nothing")
+    }
+
+    /// Content can move without a cell changing — repeated or blank rows scrolling past — so an identical
+    /// screen is not the same thing as a screen that did not move. Ghostty reports that movement as scroll
+    /// rects, an export drains them whether or not it ships them, and the producer holds the undelivered
+    /// ones in its carry until a frame goes out. Suppressing the frame would strand the carry, leaving a
+    /// mirror's drag-selection anchor unable to rebase, so a pending carry publishes the frame.
+    func testSuppressedScreenStateChangePublishesWhenScrollRectsAreStillCarried() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-suppressed-carry-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+            shell: "/bin/zsh", command: nil, createdAt: "2026-09-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+
+        // One 5x5 shape throughout, so scroll rects sized against it stay valid and the only thing that
+        // changes between captures is the fill letter.
+        func fiveByFive(_ letter: Character) -> GhosttyTerminalSnapshot {
+            Self.snapshot(text: Array(repeating: String(repeating: letter, count: 5), count: 5).joined(separator: "\n"))
+        }
+        let capturedSnapshotBox = MutableBox<GhosttyTerminalSnapshot?>(fiveByFive("a"))
+        let scrollRectsBox = MutableBox<[GhosttyRenderScrollRectOperation]>([])
+        GhosttyTerminalSnapshotCapture.sessionRenderStateCaptureHandlerForTesting = { _ in
+            guard let snapshot = capturedSnapshotBox.value else { return nil }
+            return GhosttyTerminalSnapshotCapture.CapturedSnapshot(snapshot: snapshot, scrollRects: scrollRectsBox.value)
+        }
+        defer { GhosttyTerminalSnapshotCapture.sessionRenderStateCaptureHandlerForTesting = nil }
+
+        let owner = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-10T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-09-10T00:00:00Z")
+
+        let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            host.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
+            return Box(host)
+        }
+        let host = hostBox.value
+        defer { TerminalEngineActor.runSynchronously { host.terminate() } }
+        try await TerminalEngineActor.run { try host.debugStartStateStreamServerForTesting() }
+        defer { TerminalEngineActor.runSynchronously { host.debugStopStateStreamServerForTesting() } }
+
+        let receivedPayloads = RemoteSessionStatePayloadCollector()
+        let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
+        try client.start()
+        defer { client.stop() }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue } }
+
+        // A broadcast, so the stream has a delta baseline naming this exact picture.
+        capturedSnapshotBox.value = fiveByFive("b")
+        try await TerminalEngineActor.run { host.applySessionStateChange(.init(flags: [.screen], revision: 2, title: nil, workingDirectory: nil)) }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.screenStateRevision == 2 && $0.renderUpdate != nil } }
+        receivedPayloads.removeAll()
+
+        // A one-shot `.state` read drains rects Ghostty had queued while the screen itself is unchanged:
+        // rows of identical content scrolled, so the grid matches the baseline cell for cell. A
+        // self-contained export never ships rects, so they land in the producer's carry.
+        let carriedRect = GhosttyRenderScrollRectOperation(rowStart: 0, rowCount: 5, columnStart: 0, columnCount: 5, deltaRows: 1, deltaColumns: 0)
+        scrollRectsBox.value = [carriedRect]
+        let oneShotPayload = try await TerminalEngineActor.run {
+            host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial.rawValue)
+        }
+        XCTAssertEqual(try XCTUnwrap(oneShotPayload?.decodedRenderUpdate).kind, .full, "a self-contained export always forces a full frame")
+
+        // Now the trailing screen-state change over that same unchanged screen. Its frame would otherwise
+        // be suppressed as a duplicate, but the carry has to reach the stream.
+        scrollRectsBox.value = []
+        try await TerminalEngineActor.run { host.applySessionStateChange(.init(flags: [.screen], revision: 3, title: nil, workingDirectory: nil)) }
+        try await waitUntil(timeout: 30) {
+            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.stateChange.rawValue && $0.renderUpdate != nil }
+        }
+        let statePayload = try XCTUnwrap(
+            receivedPayloads.snapshot.first { $0.reason == TerminalRemoteSessionStateReason.stateChange.rawValue && $0.renderUpdate != nil })
+        let update = try XCTUnwrap(statePayload.decodedRenderUpdate)
+        XCTAssertEqual(update.kind, .delta)
+        XCTAssertEqual(update.delta?.scrollRects, [carriedRect], "the frame published for the carry must carry the rects it was published for")
+        XCTAssertEqual(update.delta?.scrollRectsOverflowed, false)
+    }
+
+    /// Suppressing the duplicate frame must cost a live stream subscriber nothing. The subscriber holds the
+    /// frame the last broadcast delivered, and the stream's delta baseline names that frame by the revision
+    /// it was published under, so the next genuine delta has to cite that same revision. Advancing the
+    /// baseline to a revision nothing was ever published under would make every subscriber refuse that
+    /// delta as `base_revision_mismatch` and resync.
+    func testSuppressedScreenStateChangeKeepsStreamSubscribersOnTheDeltaChain() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-suppressed-subscriber-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+            shell: "/bin/zsh", command: nil, createdAt: "2026-09-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+
+        let capturedSnapshotBox = MutableBox<GhosttyTerminalSnapshot?>(Self.snapshot(text: "alpha"))
+        GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in capturedSnapshotBox.value }
+        defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
+
+        let owner = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-10T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-09-10T00:00:00Z")
+
+        let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            host.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
+            return Box(host)
+        }
+        let host = hostBox.value
+        defer { TerminalEngineActor.runSynchronously { host.terminate() } }
+
+        let receivedPayloads = RemoteSessionStatePayloadCollector()
+        try await TerminalEngineActor.run { try host.debugStartStateStreamServerForTesting() }
+        defer { TerminalEngineActor.runSynchronously { host.debugStopStateStreamServerForTesting() } }
+        let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
+        try client.start()
+        defer { client.stop() }
+        try await waitUntil(timeout: 30) {
+            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue && $0.renderUpdate != nil }
+        }
+        let initialPayload = try XCTUnwrap(receivedPayloads.snapshot.last { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue })
+        var subscriberBaseline = try Self.renderBaseline(from: initialPayload, baseline: nil)
+
+        // One broadcast, so the stream has a delta baseline and the subscriber holds the frame it named.
+        capturedSnapshotBox.value = Self.snapshot(text: "bravo")
+        try await TerminalEngineActor.run { host.applySessionStateChange(.init(flags: [.screen], revision: 2, title: nil, workingDirectory: nil)) }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.screenStateRevision == 2 && $0.renderUpdate != nil } }
+        let baselinePayload = try XCTUnwrap(receivedPayloads.snapshot.first { $0.screenStateRevision == 2 && $0.renderUpdate != nil })
+        subscriberBaseline = try Self.renderBaseline(from: baselinePayload, baseline: subscriberBaseline)
+        XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: subscriberBaseline.snapshot), "bravo")
+        receivedPayloads.removeAll()
+
+        // The trailing half of Ghostty's two-revision pair for the same bytes: a new screen revision over
+        // pixels the previous broadcast already shipped. The gate suppresses its frame, and the subscriber
+        // is told nothing — so it still holds exactly what the last broadcast gave it.
+        try await TerminalEngineActor.run { host.applySessionStateChange(.init(flags: [.screen], revision: 3, title: nil, workingDirectory: nil)) }
+        try await waitUntil(timeout: 30) { host.debugPendingScreenStateChangeBroadcastRevision == nil }
+        XCTAssertTrue(
+            receivedPayloads.snapshot.allSatisfy { $0.reason != TerminalRemoteSessionStateReason.stateChange.rawValue },
+            "the unchanged screen must publish no frame")
+
+        // The next genuine screen change has to reach that untouched subscriber as a delta it can apply.
+        capturedSnapshotBox.value = Self.snapshot(text: "charl")
+        try await TerminalEngineActor.run { host.applySessionStateChange(.init(flags: [.screen], revision: 4, title: nil, workingDirectory: nil)) }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.screenStateRevision == 4 && $0.renderUpdate != nil } }
+        let broadcastPayload = try XCTUnwrap(receivedPayloads.snapshot.first { $0.screenStateRevision == 4 && $0.renderUpdate != nil })
+
+        var reducer = TerminalRemoteStateReducer(renderUpdateBaseline: subscriberBaseline)
+        let reduction = reducer.reduce(incomingPayload: broadcastPayload, previousPayload: baselinePayload, requestResyncOnApplyFailure: true)
+        XCTAssertNil(reduction.dropReason, "the delta must cite the revision the subscriber's last frame was published under")
+        XCTAssertFalse(reduction.didRequestResync, "a suppressed duplicate frame must not cost a live subscriber a full resync")
+        let frame = try XCTUnwrap(reduction.frameToApply)
+        XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: frame.snapshot), "charl")
+    }
+
+    /// A one-shot `.state` read of a screen the gate just suppressed a frame for — a pane's foreground
+    /// heartbeat, a fresh subscribe — is stamped with the revision the stream already uses for that
+    /// picture, not the newer one Ghostty raised over pixels nothing published. Stamping the newer one
+    /// would leave the reader holding a revision the session's next delta does not cite, and it would
+    /// refuse that delta as `base_revision_mismatch` — a full resync, the exact cost suppressing the
+    /// duplicate frame was meant to save.
+    func testSuppressedScreenStateChangeKeepsAOneShotReaderOnTheDeltaChain() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-suppressed-revision-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+            shell: "/bin/zsh", command: nil, createdAt: "2026-09-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+
+        let capturedSnapshotBox = MutableBox<GhosttyTerminalSnapshot?>(Self.snapshot(text: "alpha"))
+        GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in capturedSnapshotBox.value }
+        defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
+
+        let owner = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-10T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-09-10T00:00:00Z")
+
+        let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            host.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
+            return Box(host)
+        }
+        let host = hostBox.value
+        defer { TerminalEngineActor.runSynchronously { host.terminate() } }
+
+        let receivedPayloads = RemoteSessionStatePayloadCollector()
+        try await TerminalEngineActor.run { try host.debugStartStateStreamServerForTesting() }
+        defer { TerminalEngineActor.runSynchronously { host.debugStopStateStreamServerForTesting() } }
+        let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
+        try client.start()
+        defer { client.stop() }
+        try await waitUntil(timeout: 30) {
+            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue && $0.renderUpdate != nil }
+        }
+        let initialPayload = try XCTUnwrap(receivedPayloads.snapshot.last { $0.reason == TerminalRemoteSessionStateReason.initial.rawValue })
+        var clientBaseline = try Self.renderBaseline(from: initialPayload, baseline: nil)
+
+        // One broadcast, so the stream has a delta baseline of its own.
+        capturedSnapshotBox.value = Self.snapshot(text: "bravo")
+        try await TerminalEngineActor.run { host.applySessionStateChange(.init(flags: [.screen], revision: 2, title: nil, workingDirectory: nil)) }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.screenStateRevision == 2 && $0.renderUpdate != nil } }
+        let baselinePayload = try XCTUnwrap(receivedPayloads.snapshot.first { $0.screenStateRevision == 2 && $0.renderUpdate != nil })
+        clientBaseline = try Self.renderBaseline(from: baselinePayload, baseline: clientBaseline)
+        XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: clientBaseline.snapshot), "bravo")
+        receivedPayloads.removeAll()
+
+        // The trailing half of Ghostty's two-revision pair for the same bytes: a new screen revision over
+        // pixels the previous broadcast already shipped. The gate suppresses its frame.
+        try await TerminalEngineActor.run { host.applySessionStateChange(.init(flags: [.screen], revision: 3, title: nil, workingDirectory: nil)) }
+        try await waitUntil(timeout: 30) { host.debugPendingScreenStateChangeBroadcastRevision == nil }
+        XCTAssertTrue(
+            receivedPayloads.snapshot.allSatisfy { $0.reason != TerminalRemoteSessionStateReason.stateChange.rawValue },
+            "the unchanged screen must publish no frame")
+
+        // A pane's own `.state` read of that unchanged screen — the self-contained read a foreground
+        // heartbeat or a fresh subscribe is answered with. It becomes the reader's baseline.
+        let oneShotPayload = try await TerminalEngineActor.run { () -> GhosttyRemoteSessionStatePayload in
+            try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial.rawValue))
+        }
+        clientBaseline = try Self.renderBaseline(from: oneShotPayload, baseline: clientBaseline)
+        XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: clientBaseline.snapshot), "bravo")
+
+        // The next genuine screen change has to reach that reader as a delta it can apply.
+        capturedSnapshotBox.value = Self.snapshot(text: "charl")
+        try await TerminalEngineActor.run { host.applySessionStateChange(.init(flags: [.screen], revision: 4, title: nil, workingDirectory: nil)) }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.screenStateRevision == 4 && $0.renderUpdate != nil } }
+        let broadcastPayload = try XCTUnwrap(receivedPayloads.snapshot.first { $0.screenStateRevision == 4 && $0.renderUpdate != nil })
+
+        var reducer = TerminalRemoteStateReducer(renderUpdateBaseline: clientBaseline)
+        let reduction = reducer.reduce(incomingPayload: broadcastPayload, previousPayload: oneShotPayload, requestResyncOnApplyFailure: true)
+        XCTAssertNil(reduction.dropReason, "the delta must cite the revision the one-shot read stamped")
+        XCTAssertFalse(reduction.didRequestResync, "a suppressed duplicate frame must not cost the reader a full resync")
+        let frame = try XCTUnwrap(reduction.frameToApply)
+        XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: frame.snapshot), "charl")
+    }
+
     func testRemoteScreenStateVisibleContentIgnoresBlankSnapshotsAndText() async {
         try await TerminalEngineActor.run {
             XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteScreenStateHasVisibleContent(snapshot: Self.snapshot(text: "   \n  "), snapshotText: nil))

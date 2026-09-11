@@ -560,7 +560,8 @@ final class TerminalSessionModelTests: XCTestCase {
 
         let paths = try TerminalSessionPaths.forSession(id: "7399141B-E18F-429C-AD87-1FA6191DC9FE")
 
-        XCTAssertTrue(paths.controlSocketPath.contains("/tmp/spaces-sockets-\(getuid())/"))
+        XCTAssertEqual(URL(fileURLWithPath: paths.controlSocketPath).deletingLastPathComponent().path, try SpacesSocketPaths.secureSocketRoot().path)
+        XCTAssertTrue(paths.controlSocketPath.hasPrefix("/tmp/spaces-"))
         XCTAssertFalse(paths.controlSocketPath.contains("/terminal/sessions/7399141B-E18F-429C-AD87-1FA6191DC9FE/"))
         XCTAssertLessThan(paths.controlSocketPath.utf8.count, 104)
     }

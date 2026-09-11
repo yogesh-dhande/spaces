@@ -748,9 +748,32 @@ public final class WorkspaceOrchestrator {
             resolvedBranch = nil
             resolvedBaseBranch = nil
         }
+        // A stored branch on a workspace whose worktree has gone detached is a claim, not a lock: git does
+        // not stop that same branch from being checked out into the worktree this create may go on to make,
+        // and refusing here would make the detached workspace's stale claim permanent — nothing else can
+        // ever release it, since discovery's own collision release only runs on a scan, and a scan
+        // importing this exact worktree is what this create call is standing in for. But this create can
+        // still fail after this point — branch-mode validation below, `makeWorkspaceDirname`, or the git
+        // worktree creation itself — and none of those failures should have already erased the claimant's
+        // branch with no replacement worktree holding it. So the release is only recorded here and applied
+        // once the new worktree actually exists, immediately before the new row is inserted, which is also
+        // exactly late enough to keep the `(project, branch)` uniqueness constraint satisfied at that insert.
+        var staleClaimToRelease: (workspaceID: String, branch: String)?
         if project.isGitRepo, let branchName = resolvedBranch {
             if let existing = try workspaceForBranch(projectID: projectID, branch: branchName) {
-                throw WorkspaceError.invalidArgument(message: "Branch '\(branchName)' is already used by workspace '\(existing.displayName)'.")
+                // A workspace's stored branch stops being real the moment its own worktree no longer
+                // represents it: listed but detached, or missing from `git worktree list` entirely while
+                // its directory remains (a corrupt administrative `gitdir` link — see
+                // `testScanReleasesCorruptGitdirWorkspacesStaleBranchClaimWhenAnotherWorktreeClaimsIt`,
+                // which the scan's own collision-release step treats the same way). Only a workspace whose
+                // worktree is listed and still actually checked out on this branch keeps the refusal; every
+                // other shape is a stale claim this create is entitled to take over.
+                let existingWorktreeActuallyHoldsBranch = try git.listWorktrees(path: project.dir)
+                    .contains { normalizePath($0.path) == normalizePath(existing.dir) && $0.branchName == branchName }
+                guard !existingWorktreeActuallyHoldsBranch else {
+                    throw WorkspaceError.invalidArgument(message: "Branch '\(branchName)' is already used by workspace '\(existing.displayName)'.")
+                }
+                staleClaimToRelease = (existing.id, branchName)
             }
             let branchExists = try branchExistsForNewWorkspace(project: project, branch: branchName, allowRemoteBranchLookup: allowRemoteBranchLookup)
             if allowExistingBranchReuse, !branchExists {
@@ -800,6 +823,12 @@ public final class WorkspaceOrchestrator {
             workspaceDir = project.dir
             workspaceDirname = nil
             workspaceBranch = nil
+        }
+        // The worktree above now exists and actually holds the branch, so the detached claimant's stale
+        // hold on it (if any) is released here — after everything that could still fail, and immediately
+        // before the insert below, so the old and new rows are never both holding the branch at once.
+        if let staleClaimToRelease {
+            try store.clearWorkspaceBranch(id: staleClaimToRelease.workspaceID, ifCurrentlyEquals: staleClaimToRelease.branch)
         }
         let workspace = WorkspaceRecord(
             id: UUID().uuidString, projectID: project.id, dir: workspaceDir, dirname: workspaceDirname, branch: workspaceBranch,
@@ -897,14 +926,98 @@ public final class WorkspaceOrchestrator {
             }
 
             let existingWorkspaces = try store.workspaces(projectID: project.id)
+
+            // A workspace's last-known branch is only a claim once a live worktree elsewhere holds that same
+            // branch, and there are two different ways a workspace can go stale like that: its worktree
+            // stays listed but goes detached (`WorktreeInfo.branchName` is nil), or git omits it from the
+            // listing entirely while its directory still exists — a corrupt administrative `gitdir` link,
+            // which keeps the workspace's row exactly like any other still-present worktree (see
+            // `testScanKeepsWorkspaceWhenCorruptGitdirOmitsPresentWorktreeFromList`), so the earlier version
+            // of this step that only looked at listed-and-detached rows left that second kind of stale claim
+            // unreleased forever. `workspaces_project_branch_unique` allows one workspace per (project,
+            // branch), so importing a second, live worktree on that branch below without releasing the stale
+            // claim first would collide, and the resulting store error would abort this whole scan —
+            // including every worktree and project still to come. This runs as its own step, ahead of both
+            // the reconcile loop (which never rewrites a detached workspace's branch) and the import loop
+            // (which would otherwise hit the collision), rather than catching the constraint violation, so
+            // the release is a deliberate ownership transfer instead of a fallback for a write failure. A
+            // live worktree elsewhere on the project always wins the branch; the other workspace goes back
+            // to having no claim on any branch, exactly like one that was detached from the moment it lost
+            // its last claimant.
+            let liveWorktreePathByBranch: [String: String] = discoverableWorktreeByPath.values.reduce(into: [:]) { result, worktree in
+                guard let branchName = worktree.branchName else { return }
+                result[branchName] = normalizePath(worktree.path)
+            }
+            // Branches whose stale-claim release lost to a busy project lock this pass. The release and the
+            // import loop below each claim the gate separately rather than sharing one lock interval across
+            // both steps — holding it that long would make this scan busy-reject a concurrent create or
+            // teardown for however long the whole scan takes, not just for the moment it actually touches
+            // the database. That means a short operation can hold the gate during the release (rejecting it
+            // as busy) and finish before the import loop gets there: the import would then acquire the gate
+            // and its `store.upsert` would collide with the still-unreleased claim on
+            // `workspaces_project_branch_unique`, a real constraint error rather than the busy sentinel, and
+            // that would abort the whole scan instead of self-healing. Recording the branch here lets the
+            // import loop skip that one worktree for this pass with the same self-heals-on-a-later-scan
+            // handling the busy path already has, instead of ever reaching the colliding write.
+            var staleBranchClaimsSkippedAsBusy: Set<String> = []
             for workspace in existingWorkspaces {
                 let normalizedWorkspacePath = normalizePath(workspace.dir)
-                if let worktree = discoverableWorktreeByPath[normalizedWorkspacePath], workspace.branch != worktree.branchName {
-                    let updatedWorkspace = WorkspaceRecord(
-                        id: workspace.id, projectID: workspace.projectID, dir: workspace.dir, dirname: workspace.dirname, branch: worktree.branchName,
-                        baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isHidden: workspace.isHidden,
-                        isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, notes: workspace.notes)
-                    try store.upsert(workspace: updatedWorkspace)
+                guard let staleBranch = workspace.branch, let liveWorktreePath = liveWorktreePathByBranch[staleBranch] else { continue }
+                // The live worktree holding this branch is this workspace's own worktree — it legitimately
+                // owns the branch it is reporting, not a stale claim to release.
+                guard normalizedWorkspacePath != liveWorktreePath else { continue }
+                // A branch-only compare-and-set, not the full-row `upsert` the rest of this function uses
+                // elsewhere: `workspace` was read at the top of this scan, and a concurrent notes, hidden,
+                // or running-state write landing on this row in between must not be clobbered by replaying
+                // that stale snapshot back over it. Run under the same project lifecycle gate the import
+                // loop below claims per worktree, so this release is serialized against the same lifecycle
+                // operations imports are.
+                do {
+                    try withProjectLifecycleLock(projectID: project.id) {
+                        try store.clearWorkspaceBranch(id: workspace.id, ifCurrentlyEquals: staleBranch)
+                    }
+                } catch {
+                    // The busy holder is typically a `createWorkspace` already releasing this exact claim
+                    // itself (see `createWorkspaceUnlocked`), or some other lifecycle operation on this
+                    // project. Either way it leaves the database consistent on its own, and the release
+                    // self-heals on a later scan if it is still owed; aborting the whole scan here would
+                    // also skip every remaining workspace and project in this pass. No trailing scan is
+                    // queued for the skip: discovery is event-driven, so the live worktree this release
+                    // would have made importable stays out of Spaces until the next `.git/worktrees`
+                    // write or daemon-startup scan, exactly the accepted edge the import loop's busy path
+                    // below carries. The overlap is the few milliseconds a project-scoped operation holds
+                    // the gate, and any worktree work on the project re-triggers the scan. Accepted.
+                    guard Self.isProjectLifecycleBusyError(error) else { throw error }
+                    staleBranchClaimsSkippedAsBusy.insert(staleBranch)
+                    continue
+                }
+            }
+
+            for workspace in existingWorkspaces {
+                let normalizedWorkspacePath = normalizePath(workspace.dir)
+                // A worktree with no branch name is detached, not branch-less: `git worktree list` omits
+                // the `branch` line entirely rather than reporting an empty one. Rewriting the record to
+                // `branch: nil` here would wipe the workspace's identity and its `displayName` fallback the
+                // moment its checkout went detached. The record instead keeps its last-known branch until
+                // the worktree lands back on one, at which point this updates it as usual.
+                if let worktree = discoverableWorktreeByPath[normalizedWorkspacePath], let branchName = worktree.branchName,
+                    workspace.branch != branchName
+                {
+                    // The branch this worktree now reports can still belong to a stale claimant whose
+                    // release lost the gate race above (`staleBranchClaimsSkippedAsBusy`): moving this
+                    // workspace onto it here would hit the real `workspaces_project_branch_unique`
+                    // constraint instead of the busy sentinel and abort the whole scan, the same way the
+                    // import loop below would. There is nothing else this branch of the reconcile writes to
+                    // separate out — it only ever touches the branch column — so the whole reconcile for
+                    // this workspace waits for a later scan, once the release it depends on has gone
+                    // through.
+                    if !staleBranchClaimsSkippedAsBusy.contains(branchName) {
+                        let updatedWorkspace = WorkspaceRecord(
+                            id: workspace.id, projectID: workspace.projectID, dir: workspace.dir, dirname: workspace.dirname, branch: branchName,
+                            baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isHidden: workspace.isHidden,
+                            isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, notes: workspace.notes)
+                        try store.upsert(workspace: updatedWorkspace)
+                    }
                 }
 
                 guard !workspace.isDefault else { continue }
@@ -934,7 +1047,18 @@ public final class WorkspaceOrchestrator {
                 let normalizedPath = normalizePath(worktree.path)
 
                 guard discoverableWorktreeByPath[normalizedPath] != nil else { continue }
-                guard let branchName = worktree.branchName else { continue }
+                // Workspace identity, branch rename, and `displayName` all assume a named branch, so a
+                // worktree on a detached HEAD is not imported. Skipping it is otherwise silent, so log it
+                // at the same debug level as the rest of this file's diagnostics.
+                guard let branchName = worktree.branchName else {
+                    logDiscoverySkip(path: normalizedPath, reason: "detached HEAD")
+                    continue
+                }
+                // The claim this branch would collide with above lost the race for the project lock and is
+                // still held, so importing here would hit the real `workspaces_project_branch_unique`
+                // constraint rather than the busy sentinel below and abort the whole scan. Skip it the same
+                // way the busy path does: the next scan gets another chance at the release.
+                guard !staleBranchClaimsSkippedAsBusy.contains(branchName) else { continue }
 
                 let imported: WorkspaceRecord?
                 do {
@@ -2183,6 +2307,11 @@ public final class WorkspaceOrchestrator {
     private func logCycleProfile(_ message: String) {
         guard debugLoggingEnabled() else { return }
         Self.writeStandardError("spaces: cycle \(message)\n")
+    }
+
+    private func logDiscoverySkip(path: String, reason: String) {
+        guard debugLoggingEnabled() else { return }
+        Self.writeStandardError("spaces: discovery skipped \(path) (\(reason))\n")
     }
 
     func logPerfMetric(_ metric: String, workspaceID: String, target: String, detail: String = "", elapsedMS: Int, success: Bool) {

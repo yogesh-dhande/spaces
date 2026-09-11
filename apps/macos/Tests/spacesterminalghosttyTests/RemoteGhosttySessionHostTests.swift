@@ -1082,7 +1082,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             openedURLs.append(url)
             return true
         }
-        let macRecordingPath = "/Users/yogesh/Desktop/Screen Recording 2026-05-07 at 10.11.01\u{202F}AM.mov"
+        let macRecordingPath = "/fixtures/recordings/Screen Recording 2026-05-07 at 10.11.01\u{202F}AM.mov"
 
         mirrorView.applyActionEvent(.openURL(kind: .unknown, value: "/tmp/screenshot.png"))
         mirrorView.applyActionEvent(.openURL(kind: .unknown, value: "file:///tmp/movie.mp4"))
@@ -3177,6 +3177,80 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("the host stops the subscription handle it drops") { subscriber.stoppedClientCount >= 1 }
         withExtendedLifetime(host) {}
     }
+
+    /// A host's last reference can be dropped by a background thread — any async caller holding the pane
+    /// controller that owns it — in which case its `deinit` runs there. Cleanup that runs only on the main
+    /// thread leaves the device's state subscription installed and this host's callbacks in the model's
+    /// fan-out for the life of the session, which is the leak `deinit` exists to prevent.
+    @MainActor func testLastReleaseOffMainStopsTheStateStreamSubscription() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let subscriber = RecordingStateStreamSubscriber()
+        let box = SessionHostBox()
+        let weakReference = WeakSessionHostReference()
+        try autoreleasepool {
+            try makeHostReadyForRelease(sessionID: "remote-release-off-main", root: root, subscriber: subscriber, into: box)
+            weakReference.host = box.host
+        }
+
+        let releaseFinished = DispatchSemaphore(value: 0)
+        let deallocatedOnReleasingThread = ReleasingThreadOutcome()
+        Thread.detachNewThread {
+            autoreleasepool { box.host = nil }
+            // Read from the releasing thread: a host that is gone by the time this line runs was
+            // deallocated by that thread's release, which is the scenario under test.
+            deallocatedOnReleasingThread.value = weakReference.host == nil
+            releaseFinished.signal()
+        }
+        waitForCondition("the releasing thread finishes") { releaseFinished.wait(timeout: .now()) == .success }
+
+        XCTAssertTrue(deallocatedOnReleasingThread.value, "the background thread did not perform the host's last release")
+        waitForCondition("the released host stops its subscription handle") { subscriber.stoppedClientCount >= 1 }
+    }
+
+    /// The control: the same host released on the main thread, where the cleanup runs inline.
+    @MainActor func testLastReleaseOnMainStopsTheStateStreamSubscription() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let subscriber = RecordingStateStreamSubscriber()
+        let box = SessionHostBox()
+        let weakReference = WeakSessionHostReference()
+        try autoreleasepool {
+            try makeHostReadyForRelease(sessionID: "remote-release-on-main", root: root, subscriber: subscriber, into: box)
+            weakReference.host = box.host
+        }
+
+        autoreleasepool { box.host = nil }
+
+        XCTAssertNil(weakReference.host, "the host was still referenced, so its deinit never ran")
+        waitForCondition("the released host stops its subscription handle") { subscriber.stoppedClientCount >= 1 }
+    }
+
+    /// Builds a host subscribed to `subscriber`'s stream into `box`, which then holds its only strong
+    /// reference: the caller alone decides which thread performs the host's last release.
+    @MainActor private func makeHostReadyForRelease(
+        sessionID: String, root: URL, subscriber: RecordingStateStreamSubscriber, into box: SessionHostBox
+    ) throws {
+        let fixture = try makeRunningSessionFixture(sessionID: sessionID, root: root)
+        let recorder = DirectTerminalServiceRecorder(payload: fixture.payload)
+        box.host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: recorder.send,
+            stateStreamSubscriber: subscriber.subscribe)
+        waitForCondition("host subscribes to the state stream") { subscriber.isSubscribed }
+        XCTAssertEqual(subscriber.stoppedClientCount, 0, "the subscription was already stopped before the host was released")
+    }
+
+    /// Carries the host across to the thread that performs its last release, and watches it without
+    /// keeping it alive. `@unchecked Sendable` because the host is `@MainActor` and not `Sendable`: each
+    /// box is written once by the test and once by the releasing thread, never concurrently.
+    private final class SessionHostBox: @unchecked Sendable { var host: RemoteGhosttySessionHost? }
+    private final class WeakSessionHostReference: @unchecked Sendable { weak var host: RemoteGhosttySessionHost? }
+    /// Carries the releasing thread's verdict back to the test.
+    private final class ReleasingThreadOutcome: @unchecked Sendable { var value = false }
 
     /// Captures the host's state-stream callbacks so a test can emit payloads the way the device state
     /// model does: off the main actor, in a known order. It also stands in for the model's listener

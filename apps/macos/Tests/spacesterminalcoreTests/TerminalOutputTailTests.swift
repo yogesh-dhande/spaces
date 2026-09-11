@@ -303,7 +303,7 @@ final class TerminalOutputTailTests: XCTestCase {
         let output =
             "\(escape)[2J\(escape)[1;1Hanalysis complete"
             + "\(escape)[4;1H❯ \(escape)[2mShow me a preview of the running app\(escape)[22m queued input"
-            + "\(escape)[6;3H\(escape)[2mautocomplete option\(escape)[22m" + "\(escape)[8;1Hyogesh@Mac demo | Fable 5 | ctx 40%"
+            + "\(escape)[6;3H\(escape)[2mautocomplete option\(escape)[22m" + "\(escape)[8;1Htester@Mac demo | Fable 5 | ctx 40%"
             + "\(escape)[4;3H\(escape)[?25h"
 
         let tailed = try renderedTail(output, columns: 80, rows: 9)
@@ -311,7 +311,7 @@ final class TerminalOutputTailTests: XCTestCase {
         XCTAssertFalse(tailed.contains("Show me a preview of the running app"), tailed)
         XCTAssertTrue(tailed.contains("queued input"), tailed)
         XCTAssertTrue(tailed.contains("autocomplete option"), tailed)
-        XCTAssertTrue(tailed.contains("yogesh@Mac demo | Fable 5 | ctx 40%"), tailed)
+        XCTAssertTrue(tailed.contains("tester@Mac demo | Fable 5 | ctx 40%"), tailed)
     }
 
     func testTailPreservesNormalUnsubmittedTextAtAndAfterCursor() throws {

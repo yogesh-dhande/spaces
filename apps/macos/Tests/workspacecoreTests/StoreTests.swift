@@ -1695,6 +1695,31 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isHidden, false)
     }
 
+    // `clearWorkspaceBranch` is the compare-and-set discovery's collision release and the create-validation
+    // path use to release a detached workspace's stale branch claim: it is read once (the branch it expects
+    // to still be there) and applied later, so it must touch only the branch column. A notes edit or a hide
+    // landing on the row in between — after that read, before the release runs — must survive untouched.
+    func testClearWorkspaceBranchDoesNotClobberFieldsChangedSinceItsRead() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir, branch: "feature")
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        // Stands in for a concurrent write landing between the release caller's read of the row and its
+        // call to `clearWorkspaceBranch`.
+        try store.updateWorkspaceNotes(id: workspace.id, notes: "in progress")
+        try store.updateWorkspaceHidden(id: workspace.id, isHidden: true)
+
+        let released = try store.clearWorkspaceBranch(id: workspace.id, ifCurrentlyEquals: "feature")
+        XCTAssertTrue(released)
+
+        let reloaded = try XCTUnwrap(store.workspace(id: workspace.id))
+        XCTAssertNil(reloaded.branch)
+        XCTAssertEqual(reloaded.notes, "in progress", "the release must not clobber a notes edit that landed after its read")
+        XCTAssertTrue(reloaded.isHidden, "the release must not clobber a hidden-state change that landed after its read")
+    }
+
     // Tests that a project's isHidden flag round-trips through updateProjectHidden in both directions, and
     // that it is independent of its workspaces' own hidden flags.
     func testUpdateProjectHiddenRoundTrips() throws {

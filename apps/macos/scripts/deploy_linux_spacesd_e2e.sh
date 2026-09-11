@@ -331,6 +331,22 @@ else
   # `zig build`. Volumes live on the Linux VM's own filesystem where POSIX locking works,
   # and they persist across runs so incremental deploys stay fast. Sources and the emitted
   # artifact still flow through the /workspace mount.
+  # Sweep the cache volumes of worktrees that no longer exist before adding this worktree's pair, so
+  # the leak self-heals for anyone who runs this lane whether or not they ever run the prune-merged
+  # cleanup workflow. It sits here, on the path that actually builds, because it is a build-cache
+  # concern and Docker is already required by the builder image resolved just above; a deploy that
+  # reuses a cached archive touches no cache volume and needs no sweep. Docker being unavailable is
+  # the helper's own no-op, so anything it does report as a failure is a real one and stops the
+  # deploy along with everything else under `set -e`.
+  "$repo_root/scripts/prune-linux-e2e-cache-volumes.sh"
+  # The worktree label is what that helper prunes by: Docker volumes are global to the daemon, so a
+  # volume stamped with the worktree it was built from can be judged by that path alone, while a
+  # hash inventory only ever describes the clone doing the pruning and would reclaim another clone's
+  # live cache. `docker volume create` on an existing volume is a no-op that returns the name, so a
+  # warm cache picks the label up on the next deploy.
+  docker volume create --label dev.usespaces.spaces.lane=linux-e2e --label dev.usespaces.spaces.worktree="$repo_root" "$zig_cache_volume" >/dev/null
+  docker volume create --label dev.usespaces.spaces.lane=linux-e2e --label dev.usespaces.spaces.worktree="$repo_root" "$swift_cache_volume" >/dev/null
+
   docker_args=(run --rm --init --platform "$docker_platform")
   if [[ "$git_common_dir" != "$repo_root/.git" ]]; then
     docker_args+=(-v "$git_common_dir:$git_common_dir")
