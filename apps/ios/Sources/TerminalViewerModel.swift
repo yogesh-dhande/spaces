@@ -328,6 +328,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// prove a teardown actually retired all of them cannot infer it from the stream cancel count alone:
     /// an attempt that never installed a handle has nothing to cancel.
     var liveConnectAttemptCountForTesting: Int { connectAttempts.count }
+    /// Whether the attempt that subscribed has finished installing its stream, which it does on the far
+    /// side of `subscribe`'s own suspension: until then this viewer has a subscription the backend has
+    /// already recorded but no stream of its own to address, and `tearDownStream(reportingLoss:)` returns
+    /// without escalating because there is no attempt to tear down. A test that types into a cold open
+    /// waits for this first, so the keystroke it sends is one the model can actually act on rather than
+    /// one that lands in that window (issue #709); see `waitForColdOpenToSettle` in
+    /// `TerminalViewerModelTests`.
+    var hasInstalledStreamForTesting: Bool { streamAttemptGeneration != nil }
     private var bufferedInputText = ""
     private var bufferedInputFlushTask: Task<Void, Never>?
     private let inputSendQueue = TerminalInputSerialQueue()
@@ -2637,6 +2645,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private func tearDownStream(reportingLoss error: Error) async {
         // Addressed at the attempt whose stream this is, not at "the model's stream": in stage 2 several
         // attempts can be live and only this one is being torn down.
+        //
+        // A conclusive input failure that lands before a cold open installs its stream has no attempt to
+        // address, so it is dropped here without escalating, and the stream's own initial-event timeout is
+        // what reports the link instead. That is accepted rather than covered: the window is the few
+        // milliseconds between `subscribe` returning and this generation being recorded, and a keystroke
+        // cannot normally be sent before the pane is attached and interactive.
         guard let generation = streamAttemptGeneration, let attempt = connectAttempts[generation] else { return }
         attempt.handle?.cancel()
         await handleDisconnect(SpacesDeviceAPIStreamDisconnect(error: error), generation: generation)
