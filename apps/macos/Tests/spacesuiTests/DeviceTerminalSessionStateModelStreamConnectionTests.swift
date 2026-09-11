@@ -1,12 +1,12 @@
 import Foundation
 import XCTest
 import spacesclientcore
-import spacesterminalcore
 
 @testable import spacesdeviceapi
 // Testable for `SpacesDeviceAPIRequestSessionClient.openedConnectionCountForTesting`, which is how the
 // corroboration-probe test proves the probe never dials through the shared session client.
 @testable import spacesdevicecore
+@testable import spacesterminalcore
 @testable import spacesui
 
 /// Guards how a device-backed session publishes the health of its state subscription.
@@ -238,6 +238,98 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertFalse(model.connectionStageTracker.isBannerVisible)
     }
 
+    /// A measurement lane times a Mac outage out of the pane's own performance log, so the banner
+    /// transitions the user sees have to reach that log with the same names and attribute values the
+    /// iOS viewer emits. The grace is driven through `GraceGate` so the banner-raising transition is
+    /// deterministic rather than racing the real one-second wait.
+    @MainActor func testStreamOutageEmitsTheBannerStageEventsAMeasurementLaneReads() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let deviceID = "remote-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID, deviceID: deviceID)
+        let gate = GraceGate()
+        model.graceWaitForTesting = { await gate.wait() }
+        let generation = model.installStreamClientForTesting(FakeStreamClient())
+
+        let events = try await capturedPerformanceEvents {
+            model.handleStreamDisconnect(nil, generation: generation)
+            let armedGraceTask = model.graceTaskForTesting
+            gate.release()
+            await armedGraceTask?.value
+        }
+
+        let stageEvents = events.filter { $0.name == "connection_stage" && $0.sessionID == sessionID }
+        XCTAssertEqual(
+            stageEvents.map { [$0.attributes["stage"], $0.attributes["banner"]] }, [["reconnecting", "0"], ["reconnecting", "1"]],
+            "the loss and the grace expiring are two separate transitions, and the banner interval is the gap between them")
+        XCTAssertEqual(Set(stageEvents.map(\.source)), ["mac-pane"])
+        XCTAssertEqual(Set(stageEvents.compactMap { $0.attributes["device"] }), [deviceID], "a report groups an outage by the device that went away")
+    }
+
+    /// `stream_first_frame` marks the moment a stream proved itself, which happens once per installed
+    /// stream: emitting it per payload would turn a connect-timing event into a per-frame one and make
+    /// every recovery interval unreadable.
+    @MainActor func testFirstAcceptedPayloadEmitsOneStreamFirstFrameEvent() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        let generation = model.installStreamClientForTesting(FakeStreamClient(), connectedHost: "10.0.0.7")
+
+        let events = try await capturedPerformanceEvents {
+            model.applyStreamEvent(runningStatePayload(sessionID: sessionID), generation: generation)
+            model.applyStreamEvent(runningStatePayload(sessionID: sessionID), generation: generation)
+        }
+
+        let firstFrameEvents = events.filter { $0.name == "stream_first_frame" && $0.sessionID == sessionID }
+        XCTAssertEqual(firstFrameEvents.count, 1, "a second payload on the same stream proves nothing new about the connection")
+        XCTAssertEqual(firstFrameEvents.first?.source, "mac-pane")
+        XCTAssertEqual(firstFrameEvents.first?.attributes["host"], "10.0.0.7")
+        XCTAssertEqual(firstFrameEvents.first?.attributes["generation"], String(generation))
+    }
+
+    /// `stream_dial_begin` is what a measurement lane reads to know a stream dial is in flight: the pane
+    /// also runs a catch-up request and shares its device with the sidebar, so proxy-level connection
+    /// counting cannot tell those apart. One event per dial, carrying that dial's own generation, is what
+    /// lets a lane pair a dial with the `stream_first_frame` that ends it.
+    @MainActor func testEveryStreamDialEmitsItsOwnDialBeginEvent() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        // Far beyond this test's own runtime: the failed dials below arm a redial, and one firing here
+        // would add dials this test did not ask for.
+        model.reconnectBackoff.retryDelay = .seconds(600)
+        model.reconnectBackoff.maxRetryDelay = .seconds(600)
+        model.reconnectBackoff.retryJitterFraction = { 0 }
+        model.stateStreamConnectOverrideForTesting = { _ in false }
+
+        let events = try await capturedPerformanceEvents {
+            model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+            await model.drainPendingConnectForTesting()
+            model.retryStateStreamConnection()
+            await model.drainPendingConnectForTesting()
+        }
+
+        let dialEvents = events.filter { $0.name == "stream_dial_begin" && $0.sessionID == sessionID }
+        XCTAssertEqual(dialEvents.count, 2, "the cold open and the Retry are two dials, and a lane times each of them separately")
+        XCTAssertEqual(Set(dialEvents.map(\.source)), ["mac-pane"])
+        XCTAssertEqual(Set(dialEvents.compactMap { $0.attributes["host"] }), ["127.0.0.1"], "the event names the device the dial is aimed at")
+        XCTAssertEqual(
+            Set(dialEvents.compactMap { $0.attributes["generation"] }).count, 2,
+            "each dial carries its own generation, so a lane can pair one with the frame that ends it")
+    }
+
+    /// A payload from a stream the model already retired is not evidence about anything, so it must
+    /// leave the log alone: counted as a first frame it would end an outage the report is still timing.
+    @MainActor func testPayloadFromARetiredStreamEmitsNoFirstFrameEvent() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        let retiredGeneration = model.installStreamClientForTesting(FakeStreamClient())
+        model.handleStreamDisconnect(nil, generation: retiredGeneration)
+
+        let events = try await capturedPerformanceEvents {
+            model.applyStreamEvent(runningStatePayload(sessionID: sessionID), generation: retiredGeneration)
+        }
+
+        XCTAssertEqual(events.filter { $0.sessionID == sessionID }, [], "a retired stream's late payload must not report a healthy connection")
+    }
+
     /// Stage 2 is entered only on hard evidence (every candidate address refused to dial), with the
     /// banner visible immediately (no grace) and the next automatic redial paced off the tracker's own
     /// (slower) ladder instead of the ordinary stage 1 backoff. Retry is the escape hatch: it redials
@@ -273,7 +365,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         // populate it.
         let resolver = SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: identity.certificateFingerprint)
         model.lastDialExhaustedAllCandidatesForTesting = resolver.noteStreamFailed(host: "127.0.0.1")
-        model.stateStreamConnectOverrideForTesting = { false }
+        model.stateStreamConnectOverrideForTesting = { _ in false }
 
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
         await model.drainPendingConnectForTesting()
@@ -332,7 +424,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         // would wrongly say "not every candidate has failed", because the walk hands the candidate back
         // out instead of continuing to skip it.
         XCTAssertEqual(resolver.nextStreamHost(), "127.0.0.1", "sanity: the reset already happened")
-        model.stateStreamConnectOverrideForTesting = { false }
+        model.stateStreamConnectOverrideForTesting = { _ in false }
 
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
         await model.drainPendingConnectForTesting()
@@ -383,7 +475,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         let resolver = SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: identity.certificateFingerprint)
         resolver.noteStreamFailed(host: "127.0.0.1")
         model.lastDialExhaustedAllCandidatesForTesting = resolver.noteStreamFailed(host: "127.0.0.2")
-        model.stateStreamConnectOverrideForTesting = { false }
+        model.stateStreamConnectOverrideForTesting = { _ in false }
 
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
         await model.drainPendingConnectForTesting()
@@ -800,7 +892,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         model.reconnectBackoff.retryJitterFraction = { 0 }
         // Only the stream connect is stubbed; the catch-up `.state` this registration fires reaches the real
         // server, so the session reads as running for the rest of the test.
-        model.stateStreamConnectOverrideForTesting = { true }
+        model.stateStreamConnectOverrideForTesting = { _ in true }
         let subscriber = model.makeHostStateStreamSubscriber()
 
         // A pane subscribes, which stamps the throttle.
@@ -1076,7 +1168,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         // Let the freshly armed retry fire and fail again with the same conclusive evidence. The next rung
         // must be the ladder's second one, proving the escalation above consumed the ladder exactly once,
         // not twice.
-        model.stateStreamConnectOverrideForTesting = { false }
+        model.stateStreamConnectOverrideForTesting = { _ in false }
         model.lastDialExhaustedAllCandidatesForTesting = true
         await model.drainPendingReconnectForTesting()
 
@@ -1127,7 +1219,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         // connect override below, because the retired attempt's client (or connect task) was still
         // occupying the in-flight guard(s) that turn a redial away.
         var connectOverrideInvoked = false
-        model.stateStreamConnectOverrideForTesting = {
+        model.stateStreamConnectOverrideForTesting = { _ in
             connectOverrideInvoked = true
             return false
         }
@@ -1244,7 +1336,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         // cleared while that connect is still in flight without racing real network timing.
         let reachedConnect = expectation(description: "the first connect reached the controlled resolution point")
         var resumeConnect: ((Bool) -> Void)?
-        model.stateStreamConnectOverrideForTesting = { [weak model] in
+        model.stateStreamConnectOverrideForTesting = { [weak model] _ in
             await withCheckedContinuation { continuation in
                 resumeConnect = { continuation.resume(returning: $0) }
                 // Only the first connect is controlled; the retry this test drives afterward must reach
@@ -1331,7 +1423,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         model.reconnectBackoff.retryDelay = .seconds(600)
         model.reconnectBackoff.maxRetryDelay = .seconds(3600)
         model.reconnectBackoff.retryJitterFraction = { 0 }
-        model.stateStreamConnectOverrideForTesting = { false }
+        model.stateStreamConnectOverrideForTesting = { _ in false }
 
         model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
         await model.drainPendingConnectForTesting()
@@ -1375,7 +1467,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         var connectCount = 0
         var resumeFirstConnect: ((Bool) -> Void)?
         let reachedFirstConnect = expectation(description: "the first connect reached the controlled resolution point")
-        model.stateStreamConnectOverrideForTesting = { [weak model] in
+        model.stateStreamConnectOverrideForTesting = { [weak model] _ in
             connectCount += 1
             guard connectCount == 1 else {
                 // Retry's own fresh attempt (and anything after it) resolves immediately, against the real
@@ -1450,7 +1542,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         var connectCount = 0
         var resumeFirstConnect: ((Bool) -> Void)?
         let reachedFirstConnect = expectation(description: "the first connect reached the controlled resolution point")
-        model.stateStreamConnectOverrideForTesting = { [weak model] in
+        model.stateStreamConnectOverrideForTesting = { [weak model] _ in
             connectCount += 1
             guard connectCount == 1 else {
                 model?.stateStreamConnectOverrideForTesting = nil
@@ -1925,6 +2017,76 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertTrue(model.hasArmedReconnectForTesting)
     }
 
+    /// The replacement can come from the very attempt that opened the stream being corroborated: the
+    /// local-device bootstrap retries the subscribe inside one attempt, so a single attempt opens two
+    /// sockets in turn. A probe is an answer about the socket it was sent on and nothing else, so the
+    /// first socket's verdict must neither tear the replacement down nor stand in for it: the replacement's
+    /// own timeout has to be corroborated on its own.
+    @MainActor func testAProbeForAFailedStreamLeavesTheReplacementItsOwnAttemptOpenedAlone() async throws {
+        let model = try makeModel(sessionID: "session-\(UUID().uuidString)")
+        model.reconnectBackoff.retryDelay = .seconds(600)
+        model.reconnectBackoff.maxRetryDelay = .seconds(3600)
+        // Stands in for the local daemon the bootstrap restarts and re-resolves, which is the only thing
+        // that makes the attempt retry its subscribe rather than end on the first failure.
+        model.localDeviceRecoveryOverrideForTesting = { true }
+        let dials = DialGate()
+        model.stateStreamConnectOverrideForTesting = { _ in await dials.dial() }
+        var probeInvocations = 0
+        var resumeProbes: [((any Error)?) -> Void] = []
+        let firstProbeStarted = expectation(description: "the first stream's probe started")
+        let secondProbeStarted = expectation(description: "the replacement stream's probe started")
+        model.linkCorroborationProbeForTesting = { _ in
+            probeInvocations += 1
+            let isFirst = probeInvocations == 1
+            return await withCheckedContinuation { (continuation: CheckedContinuation<(any Error)?, Never>) in
+                resumeProbes.append { continuation.resume(returning: $0) }
+                if isFirst { firstProbeStarted.fulfill() } else { secondProbeStarted.fulfill() }
+            }
+        }
+
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        await waitUntil("the attempt opened its first stream") { model.installedStreamClientGenerationForTesting != nil }
+        let firstStreamGeneration = model.installedStreamClientGenerationForTesting
+
+        // A keystroke times out on that first stream and its corroboration probe goes out.
+        XCTAssertFalse(model.reportFailedInputSend(SpacesDeviceAPIRequestClientError.timeout("Timed out.")))
+        await fulfillment(of: [firstProbeStarted], timeout: 5)
+
+        // The first stream's dial fails, the bootstrap answers, and the same attempt opens a second stream.
+        dials.resumeOldest(started: false)
+        // Generous, because the bootstrap re-runs the catch-up `.state` request before the retry and this
+        // fixture's device address answers nothing, so that request spends its whole budget first.
+        await waitUntil("the attempt opened a replacement stream", timeout: 30) {
+            model.installedStreamClientGenerationForTesting != nil && model.installedStreamClientGenerationForTesting != firstStreamGeneration
+        }
+        let replacementGeneration = model.installedStreamClientGenerationForTesting
+
+        XCTAssertFalse(model.reportFailedInputSend(SpacesDeviceAPIRequestClientError.timeout("Timed out again.")))
+        await fulfillment(of: [secondProbeStarted], timeout: 5)
+        XCTAssertEqual(probeInvocations, 2, "the replacement socket's timeout must be corroborated rather than answered by the first socket's probe")
+
+        // The first socket's probe reports the outage it was sent to confirm, long after that socket was
+        // replaced: it is about a stream that no longer exists.
+        resumeProbes[0](SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused"))
+        // Nothing hands back a handle for a superseded probe's remaining work, so give its resumption a few
+        // turns to run to completion before asserting nothing moved.
+        for _ in 0..<4 { await Task.yield() }
+
+        XCTAssertEqual(model.installedStreamClientGenerationForTesting, replacementGeneration, "a stale verdict must not drop the replacement stream")
+        XCTAssertFalse(model.isStateStreamDisconnected, "a stale verdict must not put the disconnected notice on a pane whose stream is fine")
+        XCTAssertFalse(model.hasArmedReconnectForTesting)
+
+        // The replacement's own probe is answered by the daemon, so the pane keeps the stream, and the
+        // attempt's dial resolves into it.
+        resumeProbes[1](nil)
+        await model.drainPendingLinkCorroborationProbeForTesting()
+        dials.resumeOldest(started: true)
+        await model.drainPendingConnectForTesting()
+
+        XCTAssertEqual(model.installedStreamClientGenerationForTesting, replacementGeneration)
+        XCTAssertFalse(model.isStateStreamDisconnected)
+    }
+
     /// The interactive control commands on the hot per-keystroke path (typed input, key, scroll, resize,
     /// clear-screen) get the shortened deadline; every other control command — session-management calls
     /// like attach/detach/heartbeat/takeover/appearance, off that path — keeps the Device API's own
@@ -2044,6 +2206,318 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertNil(model.latestRemoteStatePayload?.clipboardWrite)
     }
 
+    // MARK: Stage 2 redial cadence
+
+    /// The bug this cadence exists for (#694): a dial started while the device was down parks on a dead
+    /// address for its whole budget, and before this nothing redialed until it failed, so a pane whose
+    /// link came back waited out the stale dial. The ladder's rung must start a fresh dial alongside the
+    /// one still in flight instead.
+    @MainActor func testALadderRungElapsingDuringAnInFlightRedialStartsASecondDialAlongsideIt() async throws {
+        let model = try makeModel(sessionID: "session-\(UUID().uuidString)")
+        let dials = DialGate()
+        model.stateStreamConnectOverrideForTesting = { _ in await dials.dial() }
+        let rungs = RungGate()
+        model.unreachableRedialWaitForTesting = { await rungs.wait($0) }
+        model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+
+        XCTAssertTrue(model.reportFailedInputSend(SpacesDeviceEndpointResolverError.allCandidatesUnreachable(hosts: ["127.0.0.1"])))
+        XCTAssertEqual(model.connectionStageTracker.stage, .unreachable)
+
+        let firstTick = model.unreachableRedialTaskForTesting
+        rungs.release()
+        await firstTick?.value
+        await waitUntil("the first rung dialed") { dials.parkedDialCount == 1 }
+        XCTAssertEqual(model.liveConnectAttemptCountForTesting, 1)
+
+        // The next rung elapses while that dial is still parked on the address that was down when it
+        // started. It must dial again rather than wait the stale attempt out.
+        let secondTick = model.unreachableRedialTaskForTesting
+        rungs.release()
+        await secondTick?.value
+        await waitUntil("the second rung dialed alongside the first") { dials.parkedDialCount == 2 }
+
+        XCTAssertEqual(model.liveConnectAttemptCountForTesting, 2, "the rung must start a fresh dial alongside the one still in flight")
+        // A prefix, because arming the next rung is what records it and the tick that does so is already
+        // running by now: what this pins is the order the cadence spent them, one per tick.
+        XCTAssertEqual(
+            Array(rungs.waitedRungs.prefix(2)),
+            [.seconds(TerminalUnreachableBackoff.ladderSeconds[0]), .seconds(TerminalUnreachableBackoff.ladderSeconds[1])],
+            "each tick spends exactly one rung")
+    }
+
+    /// The race is settled by a payload, not by a dial returning: the first attempt whose stream delivers
+    /// one is the one that actually reached the device, so it becomes the pane's stream and every other
+    /// live attempt is retired then and there. A loser must contribute nothing afterwards, since its
+    /// later payloads and its disconnect would otherwise feed state into, or tear down, the stream that
+    /// just recovered the pane, and its stream must be stopped rather than left connected and forgotten.
+    @MainActor func testTheFirstPayloadWinsAndTheLosingAttemptIsStoppedAndIgnored() throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        let losingClient = FakeStreamClient()
+        let winningClient = FakeStreamClient()
+        let losingGeneration = model.installStreamClientForTesting(losingClient)
+        let winningGeneration = model.installStreamClientForTesting(winningClient, racingLiveAttempts: true)
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        XCTAssertEqual(model.liveConnectAttemptCountForTesting, 2, "sanity: two attempts are racing, as stage 2 runs them")
+
+        model.applyStreamEvent(
+            statePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.runtimeState.rawValue, emittedAt: "2026-07-24T00:00:05Z",
+                title: "winner"), generation: winningGeneration)
+
+        XCTAssertEqual(model.liveConnectAttemptCountForTesting, 1, "the first payload settles the race")
+        XCTAssertEqual(losingClient.stopCount, 1, "the loser's stream must be stopped, not left connected and forgotten")
+        XCTAssertEqual(winningClient.stopCount, 0, "the winner's stream is the pane's stream")
+        XCTAssertEqual(model.latestRemoteStatePayload?.title, "winner")
+
+        // A payload the loser already had in flight, stamped NEWER than the winner's so only the race's
+        // own verdict can be what refuses it.
+        model.applyStreamEvent(
+            statePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.runtimeState.rawValue, emittedAt: "2026-07-24T00:00:09Z",
+                title: "loser"), generation: losingGeneration)
+        XCTAssertEqual(model.latestRemoteStatePayload?.title, "winner", "a retired attempt's payload must not reach the pane's state")
+
+        model.handleStreamDisconnect(SpacesDeviceAPIRequestClientError.streamStalled, generation: losingGeneration)
+        XCTAssertFalse(model.isStateStreamDisconnected, "the loser's own stream ending says nothing about the winner's")
+        XCTAssertFalse(model.hasArmedReconnectForTesting, "a retired attempt must not pace a redial")
+        XCTAssertTrue(model.hasActiveStreamClientForTesting, "the winning stream must still be installed")
+    }
+
+    /// Each pinned-TLS dial pins a thread for its whole budget, so the race is capped: a third rung
+    /// retires the oldest attempt (the one with the least chance left of answering) rather than
+    /// accumulating dials for the length of the outage.
+    @MainActor func testTheStage2RaceIsCappedAtTwoLiveAttempts() async throws {
+        let model = try makeModel(sessionID: "session-\(UUID().uuidString)")
+        let dials = DialGate()
+        model.stateStreamConnectOverrideForTesting = { _ in await dials.dial() }
+        let rungs = RungGate()
+        model.unreachableRedialWaitForTesting = { await rungs.wait($0) }
+        model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        XCTAssertTrue(model.reportFailedInputSend(SpacesDeviceEndpointResolverError.allCandidatesUnreachable(hosts: ["127.0.0.1"])))
+
+        for expectedDialCount in 1...3 {
+            let tick = model.unreachableRedialTaskForTesting
+            rungs.release()
+            await tick?.value
+            await waitUntil("rung \(expectedDialCount) dialed") { dials.parkedDialCount == expectedDialCount }
+        }
+
+        XCTAssertEqual(model.liveConnectAttemptCountForTesting, 2, "the third rung must retire the oldest attempt rather than run three dials")
+    }
+
+    /// A pane released while two dials are racing must leave neither connection behind: a pinned-TLS
+    /// stream is released only by an explicit stop, so an attempt dropped without one keeps its
+    /// connection and its dispatch queue alive for the life of the process.
+    @MainActor func testReleasingThePaneStopsEveryRacingStream() throws {
+        let firstClient = FakeStreamClient()
+        let secondClient = FakeStreamClient()
+        var model: DeviceTerminalSessionStateModel? = try makeModel(sessionID: "session-\(UUID().uuidString)")
+        model?.installStreamClientForTesting(firstClient)
+        model?.installStreamClientForTesting(secondClient, racingLiveAttempts: true)
+        XCTAssertEqual(model?.liveConnectAttemptCountForTesting, 2)
+
+        model = nil
+
+        XCTAssertEqual(firstClient.stopCount, 1, "every racing stream must be stopped when the pane goes away")
+        XCTAssertEqual(secondClient.stopCount, 1)
+    }
+
+    /// A stage 2 redial's job is to notice the device coming back, and the ladder starts a fresh dial on
+    /// the next rung regardless, so it gives up sooner than the pane's cold open, which has no such
+    /// cadence behind it and must tolerate a slow link.
+    @MainActor func testAStage2RedialDialsOnAShorterBudgetThanTheColdOpen() async throws {
+        let model = try makeModel(sessionID: "session-\(UUID().uuidString)")
+        var dialBudgets: [TimeInterval] = []
+        model.stateStreamConnectOverrideForTesting = { budgetSeconds in
+            dialBudgets.append(budgetSeconds)
+            return false
+        }
+        model.lastDialExhaustedAllCandidatesForTesting = true
+        let rungs = RungGate()
+        model.unreachableRedialWaitForTesting = { await rungs.wait($0) }
+
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        await model.drainPendingConnectForTesting()
+
+        XCTAssertEqual(dialBudgets, [10], "the cold open keeps the full dial budget")
+        XCTAssertEqual(model.connectionStageTracker.stage, .unreachable)
+
+        let tick = model.unreachableRedialTaskForTesting
+        rungs.release()
+        await tick?.value
+        await model.drainPendingConnectForTesting()
+
+        XCTAssertEqual(dialBudgets, [10, 4], "a stage 2 redial gives up sooner than the cold open")
+    }
+
+    /// A losing attempt's dial keeps running after the race is settled (the blocking dial has no
+    /// structured-concurrency link to the task that started it) and can resolve as the strongest failure
+    /// evidence there is. It must change nothing: reaching the redial machinery from there would put the
+    /// banner back up over a stream that is provably live and pace a redial against it.
+    @MainActor func testALosingDialResolvingAfterTheWinnerLandedLeavesTheWinnerAlone() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        let dials = DialGate()
+        var returnedDialCount = 0
+        model.stateStreamConnectOverrideForTesting = { _ in
+            let started = await dials.dial()
+            returnedDialCount += 1
+            return started
+        }
+        let rungs = RungGate()
+        model.unreachableRedialWaitForTesting = { await rungs.wait($0) }
+        model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        XCTAssertTrue(model.reportFailedInputSend(SpacesDeviceEndpointResolverError.allCandidatesUnreachable(hosts: ["127.0.0.1"])))
+
+        let firstTick = model.unreachableRedialTaskForTesting
+        rungs.release()
+        await firstTick?.value
+        await waitUntil("the first rung dialed") { dials.parkedDialCount == 1 }
+        let secondTick = model.unreachableRedialTaskForTesting
+        rungs.release()
+        await secondTick?.value
+        await waitUntil("the second rung dialed") { dials.parkedDialCount == 2 }
+        guard let winningGeneration = model.installedStreamClientGenerationForTesting else {
+            return XCTFail("the newest attempt must have opened a stream before its dial resolves")
+        }
+
+        // The second attempt's stream delivers first, which retires the first attempt mid-dial.
+        model.applyStreamEvent(runningStatePayload(sessionID: sessionID), generation: winningGeneration)
+        XCTAssertEqual(model.connectionStageTracker.stage, .connected)
+        XCTAssertEqual(model.liveConnectAttemptCountForTesting, 1)
+
+        // The retired attempt's dial finally answers, with every candidate address unreachable.
+        model.lastDialExhaustedAllCandidatesForTesting = true
+        dials.resumeOldest(started: false)
+        await waitUntil("the retired attempt's dial answered") { returnedDialCount == 1 }
+        // Nothing hands back a handle for a retired attempt's remaining work, so give its resumption a few
+        // turns to run to completion before asserting nothing moved.
+        for _ in 0..<4 { await Task.yield() }
+
+        XCTAssertEqual(model.connectionStageTracker.stage, .connected, "a loser's belated failure must not tear the winner down")
+        XCTAssertFalse(model.connectionStageTracker.isBannerVisible)
+        XCTAssertTrue(model.hasActiveStreamClientForTesting)
+        XCTAssertFalse(model.hasArmedReconnectForTesting)
+        XCTAssertNil(model.unreachableRedialTaskForTesting, "the frame ended the outage, so the cadence must be cancelled")
+    }
+
+    /// The ladder paces the cadence, not the failures: a redial that fails must not spend a rung of its
+    /// own, or a device that refuses dials quickly would run the ladder out in a fraction of the time it
+    /// describes and the redials would drift off the promised interval.
+    @MainActor func testAFailingRedialSpendsNoLadderRung() async throws {
+        let model = try makeModel(sessionID: "session-\(UUID().uuidString)")
+        model.stateStreamConnectOverrideForTesting = { _ in false }
+        model.lastDialExhaustedAllCandidatesForTesting = true
+        let rungs = RungGate()
+        model.unreachableRedialWaitForTesting = { await rungs.wait($0) }
+        model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        XCTAssertTrue(model.reportFailedInputSend(SpacesDeviceEndpointResolverError.allCandidatesUnreachable(hosts: ["127.0.0.1"])))
+
+        for _ in 0..<2 {
+            let tick = model.unreachableRedialTaskForTesting
+            rungs.release()
+            await tick?.value
+            await model.drainPendingConnectForTesting()
+        }
+
+        XCTAssertEqual(
+            Array(rungs.waitedRungs.prefix(2)),
+            [.seconds(TerminalUnreachableBackoff.ladderSeconds[0]), .seconds(TerminalUnreachableBackoff.ladderSeconds[1])],
+            "the cadence spent the ladder in order, one rung per tick")
+        XCTAssertEqual(
+            model.lastReconnectDelayForTesting, .seconds(TerminalUnreachableBackoff.ladderSeconds[2]),
+            "two ticks, two rungs: the failed redials in between must not have advanced the ladder past the third rung")
+    }
+
+    /// Retry starts an attempt of its own, and that attempt can black-hole on a dead address exactly like
+    /// any automatic redial. The cadence has to keep running across it: a Retry that silenced the ladder
+    /// until its own dial gave up would hold the pane for the whole dial budget with nothing racing it,
+    /// which is the delay the concurrent cadence exists to remove.
+    @MainActor func testARetryWhoseDialHangsIsStillRacedByTheNextRung() async throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        let dials = DialGate()
+        model.stateStreamConnectOverrideForTesting = { _ in await dials.dial() }
+        let rungs = RungGate()
+        model.unreachableRedialWaitForTesting = { await rungs.wait($0) }
+        model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        XCTAssertTrue(model.reportFailedInputSend(SpacesDeviceEndpointResolverError.allCandidatesUnreachable(hosts: ["127.0.0.1"])))
+        XCTAssertEqual(model.connectionStageTracker.stage, .unreachable)
+        let cancelledTick = model.unreachableRedialTaskForTesting
+
+        model.retryStateStreamConnection()
+        await waitUntil("Retry dialed") { dials.parkedDialCount == 1 }
+        XCTAssertEqual(model.liveConnectAttemptCountForTesting, 1, "Retry's own attempt is the live one")
+        XCTAssertNotNil(model.unreachableRedialTaskForTesting, "Retry must leave the cadence armed on the ladder it just reset")
+
+        // The tick Retry cancelled is parked on the gate rather than on a real sleep, so it is released
+        // here to let it run to its cancellation check instead of leaving it suspended for the test's life.
+        rungs.release()
+        await cancelledTick?.value
+        XCTAssertEqual(dials.parkedDialCount, 1, "the cancelled tick must not dial")
+
+        let tick = model.unreachableRedialTaskForTesting
+        rungs.release()
+        await tick?.value
+        await waitUntil("the rung dialed alongside the hanging Retry") { dials.parkedDialCount == 2 }
+        XCTAssertEqual(model.liveConnectAttemptCountForTesting, 2, "the rung must race Retry's hanging dial rather than wait it out")
+
+        guard let winningGeneration = model.installedStreamClientGenerationForTesting else {
+            return XCTFail("the rung's redial must have opened a stream before its dial resolves")
+        }
+        model.applyStreamEvent(runningStatePayload(sessionID: sessionID), generation: winningGeneration)
+
+        XCTAssertEqual(model.connectionStageTracker.stage, .connected, "the first payload wins, Retry's own still-hanging dial included")
+        XCTAssertEqual(model.liveConnectAttemptCountForTesting, 1)
+        XCTAssertNil(model.unreachableRedialTaskForTesting, "the frame ended the outage, so the cadence must be cancelled")
+    }
+
+    /// A Retry pressed while the device is unreachable is an unreachable-stage redial: its job is to
+    /// notice the device coming back, and the cadence dials again regardless, so it gives up on the same
+    /// short budget every other stage 2 redial does rather than on the cold open's.
+    @MainActor func testARetryWhileUnreachableDialsOnTheStage2Budget() async throws {
+        let model = try makeModel(sessionID: "session-\(UUID().uuidString)")
+        var dialBudgets: [TimeInterval] = []
+        model.stateStreamConnectOverrideForTesting = { budgetSeconds in
+            dialBudgets.append(budgetSeconds)
+            return false
+        }
+        model.lastDialExhaustedAllCandidatesForTesting = true
+        let rungs = RungGate()
+        model.unreachableRedialWaitForTesting = { await rungs.wait($0) }
+
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        await model.drainPendingConnectForTesting()
+
+        XCTAssertEqual(dialBudgets, [10], "the cold open keeps the full dial budget")
+        XCTAssertEqual(model.connectionStageTracker.stage, .unreachable)
+
+        model.retryStateStreamConnection()
+        await model.drainPendingConnectForTesting()
+
+        XCTAssertEqual(dialBudgets, [10, 4], "Retry redials on the stage 2 budget, not the cold open's")
+        XCTAssertEqual(
+            model.lastReconnectDelayForTesting, .seconds(TerminalUnreachableBackoff.ladderSeconds[0]),
+            "Retry resets the ladder, so the cadence it leaves armed starts from the shortest rung")
+    }
+
+    /// Polls `condition` on the main actor until it holds, bounded so a model that never gets there fails
+    /// the test instead of hanging it. Used where the thing being waited for is started by a task the
+    /// model owns and hands back no handle (an attempt's dial reaching the connect seam).
+    @MainActor private func waitUntil(
+        _ description: String, timeout: TimeInterval = 5, file: StaticString = #filePath, line: UInt = #line, _ condition: @MainActor () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline, !condition() { await Task.yield() }
+        XCTAssertTrue(condition(), description, file: file, line: line)
+    }
+
     private func statePayload(sessionID: String, reason: String, emittedAt: String, title: String = "t") -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
             sessionID: sessionID, reason: reason, emittedAt: emittedAt, sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
@@ -2080,9 +2554,26 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertFalse(model.hasArmedLivenessRecheckForTesting, "the liveness recheck never settled", file: file, line: line)
     }
 
-    @MainActor private func makeModel(sessionID: String) throws -> DeviceTerminalSessionStateModel {
+    /// Runs `body` with the device-terminal performance logger pointed at a file inside this test's own
+    /// temporary profile, and returns the events it wrote. The log path is process-global, so it is
+    /// configured for exactly the duration of `body` and reset afterward; `flush()` drains the logger's
+    /// serial write queue so the file is complete before it is parsed.
+    @MainActor private func capturedPerformanceEvents(_ body: () async throws -> Void) async throws -> [SpacesDeviceTerminalPerformanceEvent] {
+        let logPath = profileRoot.appendingPathComponent("device-perf-\(UUID().uuidString).jsonl").path
+        SpacesDeviceTerminalPerformanceLogger.configureDefaultLogPath(logPath)
+        defer { SpacesDeviceTerminalPerformanceLogger.resetDefaultLogPathForTesting() }
+        try await body()
+        SpacesDeviceTerminalPerformanceLogger.flush()
+        guard let contents = try? String(contentsOfFile: logPath, encoding: .utf8) else { return [] }
+        let decoder = JSONDecoder()
+        return try contents.split(separator: "\n").map { try decoder.decode(SpacesDeviceTerminalPerformanceEvent.self, from: Data($0.utf8)) }
+    }
+
+    /// `deviceID` is a parameter so a test asserting on an emitted event's `device` attribute can name
+    /// the device it expects; every other caller takes the default fresh identity.
+    @MainActor private func makeModel(sessionID: String, deviceID: String = "remote-\(UUID().uuidString)") throws -> DeviceTerminalSessionStateModel {
         let device = SpacesPairedDeviceRecord(
-            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: 1,
+            id: deviceID, name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: 1,
             certificateFingerprint: "SHA256:" + String(repeating: "0", count: 64), createdAt: "2026-07-24T00:00:00Z",
             updatedAt: "2026-07-24T00:00:00Z", lastSelectedAt: "2026-07-24T00:00:00Z")
         return try DeviceTerminalSessionStateModel(
@@ -2189,6 +2680,58 @@ private final class GraceGate {
         isReleased = true
         continuation?.resume()
         continuation = nil
+    }
+}
+
+/// Stands in for the blocking pinned-TLS dial inside `openStateStream()` via
+/// `stateStreamConnectOverrideForTesting`, holding each dial parked until the test answers it. That is
+/// what lets a test hold a stage 2 dial on a dead address exactly as the real one would be held, and then
+/// watch the ladder's next rung dial alongside it. `@MainActor` for the same reason `GraceGate` is: every
+/// caller and every test driving it is already on the main actor.
+@MainActor
+private final class DialGate {
+    private var parked: [CheckedContinuation<Bool, Never>] = []
+
+    var parkedDialCount: Int { parked.count }
+
+    func dial() async -> Bool { await withCheckedContinuation { parked.append($0) } }
+
+    /// Answers the dial that has been parked longest, which is the older attempt's in a stage 2 race.
+    func resumeOldest(started: Bool) {
+        guard !parked.isEmpty else { return }
+        parked.removeFirst().resume(returning: started)
+    }
+}
+
+/// Stands in for `Task.sleep` inside the stage 2 redial cadence via `unreachableRedialWaitForTesting`,
+/// so a test drives the ladder rung by rung instead of waiting out real seconds, and can read back the
+/// rungs the cadence actually spent. Releasing before the cadence reaches its wait is credited, mirroring
+/// `GraceGate`'s already-released case.
+@MainActor
+private final class RungGate {
+    /// The rungs the cadence has waited on, in order.
+    private(set) var waitedRungs: [Duration] = []
+    private var creditedReleases = 0
+    /// Parked waits in the order they arrived, rather than a single slot: a cancelled tick stays parked
+    /// here until it is released (cancelling a task does not resume a continuation it is suspended on),
+    /// and a test that cancels one by pressing Retry has to be able to let it finish.
+    private var parked: [CheckedContinuation<Void, Never>] = []
+
+    func wait(_ rung: Duration) async {
+        waitedRungs.append(rung)
+        guard creditedReleases == 0 else {
+            creditedReleases -= 1
+            return
+        }
+        await withCheckedContinuation { parked.append($0) }
+    }
+
+    func release() {
+        guard !parked.isEmpty else {
+            creditedReleases += 1
+            return
+        }
+        parked.removeFirst().resume()
     }
 }
 

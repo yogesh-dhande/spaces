@@ -254,6 +254,28 @@ class ShaperTestCase(unittest.TestCase):
         finally:
             s.close()
 
+    def test_conn_open_records_the_link_state_it_was_accepted_under(self):
+        listen_port, control_port, log_path = self.start_shaper("good")
+        with socket.create_connection(("127.0.0.1", listen_port), timeout=5) as s:
+            s.sendall(b"before-outage")
+            self.assertEqual(s.recv(1024), b"before-outage")
+
+        self.assertEqual(self.send_control(control_port, "link down"), "ok down")
+        s2 = socket.create_connection(("127.0.0.1", listen_port), timeout=5)
+        try:
+            deadline = time.monotonic() + 5
+            opens = []
+            while time.monotonic() < deadline:
+                opens = [e for e in self.read_log(log_path) if e["event"] == "conn_open"]
+                if len(opens) >= 2:
+                    break
+                time.sleep(0.1)
+            self.assertEqual(
+                [e.get("link") for e in opens[:2]], ["up", "down"],
+                "a lane driving an outage reads this to tell a dial parked in the dead link from one that got through")
+        finally:
+            s2.close()
+
     def test_link_up_closes_survivors_and_allows_new_connections(self):
         listen_port, control_port, _log_path = self.start_shaper("good")
         s = socket.create_connection(("127.0.0.1", listen_port), timeout=5)
@@ -277,6 +299,36 @@ class ShaperTestCase(unittest.TestCase):
         with socket.create_connection(("127.0.0.1", listen_port), timeout=5) as s3:
             s3.sendall(b"after-recovery")
             self.assertEqual(s3.recv(1024), b"after-recovery")
+
+    def test_link_up_dead_black_holes_survivors_and_allows_new_connections(self):
+        listen_port, control_port, _log_path = self.start_shaper("good")
+        s = socket.create_connection(("127.0.0.1", listen_port), timeout=5)
+        s.sendall(b"before-outage")
+        self.assertEqual(s.recv(1024), b"before-outage")
+
+        self.assertEqual(self.send_control(control_port, "link down"), "ok down")
+
+        # Accepted while down: never connected upstream, never answered.
+        s2 = socket.create_connection(("127.0.0.1", listen_port), timeout=5)
+
+        self.assertEqual(self.send_control(control_port, "link up dead"), "ok up-dead")
+
+        # Both tainted connections stay open and silent: the client learns
+        # nothing from its socket and only recovers by dialing anew.
+        s.settimeout(2.0)
+        s.sendall(b"after-dead-recovery")
+        with self.assertRaises(socket.timeout):
+            s.recv(1024)
+        s2.settimeout(2.0)
+        s2.sendall(b"after-dead-recovery")
+        with self.assertRaises(socket.timeout):
+            s2.recv(1024)
+        s.close()
+        s2.close()
+
+        with socket.create_connection(("127.0.0.1", listen_port), timeout=5) as s3:
+            s3.sendall(b"new-connection")
+            self.assertEqual(s3.recv(1024), b"new-connection")
 
     def test_byte_log_sums_match_bytes_transferred(self):
         listen_port, _control_port, log_path = self.start_shaper("good")

@@ -9,8 +9,21 @@ daemon's certificate by fingerprint, so the proxy does not terminate or
 inspect anything, it just paces bytes.
 
 Also exposes a line-based control port so a driving test can flip the link
-down (blackhole, sockets stay open) and back up (stale connections closed)
-to exercise reconnect behavior deterministically.
+down and back up to exercise reconnect behavior deterministically. Three
+verbs, each answered with "ok <link state>":
+
+  link down      Blackhole: sockets stay open, nothing is forwarded, and a
+                 connection accepted during the outage is never dialed
+                 upstream. Every connection alive at this moment, and every
+                 one accepted while down, is tainted.
+  link up        Recovery that closes every tainted connection, so a client
+                 holding a stale socket learns immediately and redials.
+  link up dead   Recovery for new connections only: every tainted
+                 connection is left black-holed for the rest of the run,
+                 never dialed upstream and never closed by the proxy, so a
+                 client waiting on one sits out its own timeout before it
+                 redials. This is the path change (NAT rebinding, VPN or
+                 mesh route change) a client cannot detect from its socket.
 
 Python 3.9+, stdlib only.
 """
@@ -88,7 +101,15 @@ class Connection:
         # every tainted connection (both halves) rather than letting it
         # resume, so the client's stale socket fails fast the way a real
         # link recovery does instead of silently replaying stale traffic.
+        # `link up dead` leaves them open and forwarding nothing instead.
         self.tainted = False
+        # Cleared for this connection by `link down`, and never set again:
+        # a tainted connection either gets closed by `link up` or stays
+        # black-holed through `link up dead`. Pacers wait on it before every
+        # write, so forwarding stops without touching sockets, and a
+        # recovered link only carries connections opened after it.
+        self.flow_event = asyncio.Event()
+        self.flow_event.set()
         self.closed = False
         self.closed_event = asyncio.Event()
         self.bytes_up = 0
@@ -106,14 +127,9 @@ class ShaperState:
         self.rate_bytes_per_sec = profile["bandwidth_mbit"] * 1_000_000 / 8.0
         self.connections = {}
         self._next_id = 0
-        # Cleared on `link down`, set on `link up`. Pacers block on this
-        # before writing, so a down link stops all forwarding immediately
-        # without touching sockets. It is only set again after every
-        # tainted connection has already been cancelled and closed, so a
-        # pacer can never wake up and write stale data into a connection
-        # that is about to be torn down.
-        self.link_up_event = asyncio.Event()
-        self.link_up_event.set()
+        # "up", "down", or "up-dead". Only "down" stops a new connection
+        # from being dialed upstream; the two recovery states differ solely
+        # in what happens to the connections the outage tainted.
         self.link_state = "up"
         self.pending_up = 0
         self.pending_down = 0
@@ -151,7 +167,7 @@ async def pacer_loop(state, queue, writer, conn, direction):
             await asyncio.sleep(release_time - now)
         bucket = conn.up_bucket if direction == "up" else conn.down_bucket
         await bucket.take(len(data))
-        await state.link_up_event.wait()
+        await conn.flow_event.wait()
         try:
             writer.write(data)
             await writer.drain()
@@ -212,7 +228,10 @@ async def close_connection(state, conn):
 async def handle_connection(state, client_reader, client_writer):
     conn = Connection(state.next_id(), client_writer)
     state.connections[conn.id] = conn
-    log_event(state.log_file, "conn_open", conn=conn.id)
+    # The link state the accept happened under: a driving test that timed an outage from the client's
+    # own events still needs the proxy to confirm the dial it is about actually landed in the dead
+    # link, and only this record can say that.
+    log_event(state.log_file, "conn_open", conn=conn.id, link=state.link_state)
 
     if state.link_state == "down":
         # Accepted but deliberately never connected upstream and never
@@ -248,9 +267,9 @@ async def handle_connection(state, client_reader, client_writer):
 
 
 async def do_link_down(state):
-    state.link_up_event.clear()
     for conn in state.connections.values():
         conn.tainted = True
+        conn.flow_event.clear()
     state.link_state = "down"
     log_event(state.log_file, "link", state="down")
 
@@ -260,8 +279,20 @@ async def do_link_up(state):
     for conn in tainted:
         await close_connection(state, conn)
     state.link_state = "up"
-    state.link_up_event.set()
     log_event(state.log_file, "link", state="up")
+
+
+async def do_link_up_dead(state):
+    """Recovery that leaves the outage's connections dead rather than closed.
+
+    The tainted connections keep their sockets and forward nothing for the
+    rest of the run: their pacers stay parked on a flow event that is never
+    set again, and one accepted during the outage is still waiting to be
+    dialed upstream. The proxy closes them only at shutdown. A client
+    parked on one of them recovers by dialing anew, on its own timeout.
+    """
+    state.link_state = "up-dead"
+    log_event(state.log_file, "link", state="up-dead")
 
 
 async def handle_control(state, reader, writer):
@@ -275,6 +306,8 @@ async def handle_control(state, reader, writer):
                 await do_link_down(state)
             elif command == "link up":
                 await do_link_up(state)
+            elif command == "link up dead":
+                await do_link_up_dead(state)
             elif command == "status":
                 pass
             else:

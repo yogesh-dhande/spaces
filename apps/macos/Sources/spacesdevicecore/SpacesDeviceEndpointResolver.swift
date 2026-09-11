@@ -225,7 +225,7 @@ public final class SpacesDeviceEndpointResolver: @unchecked Sendable {
     /// successive attempts instead of resolving within a single one, unlike the racing command-channel
     /// connect's `SpacesDeviceEndpointResolverError.allCandidatesUnreachable`. It is the specific fact
     /// that escalates a stream outage from "still retrying" to "unreachable"
-    /// (`TerminalConnectionStageTracker.attemptEndedUnreachable()`); a device with untried candidates
+    /// (`TerminalConnectionStageTracker.enterUnreachable()`); a device with untried candidates
     /// left, or with only one candidate that has not yet failed, reads `false`.
     ///
     /// The caller must use this return value rather than querying the resolver again afterward: with one
