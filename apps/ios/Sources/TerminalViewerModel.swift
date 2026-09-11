@@ -324,6 +324,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// actually armed with (e.g. distinguishing the stage 2 ladder's first rung from its second) without
     /// a seam that lets it drive the delay itself.
     private(set) var lastScheduledReconnectDelayForTesting: Duration?
+    /// How many schedules `lastScheduledReconnectDelayForTesting` has recorded. The open's own connect is
+    /// armed through the same scheduler at no delay, so a delay read after `start()` can be that zero
+    /// rather than the redial a test means to measure: counting the schedules is what lets the test wait
+    /// for its own one instead of for a value that is already there.
+    private(set) var scheduledReconnectCountForTesting = 0
     /// How many connect attempts are live right now. Stage 2 races several at once, so a test that has to
     /// prove a teardown actually retired all of them cannot infer it from the stream cancel count alone:
     /// an attempt that never installed a handle has nothing to cancel.
@@ -2687,6 +2692,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard !isStopping else { return }
         guard !isEndedState else { return }
         lastScheduledReconnectDelayForTesting = delay
+        scheduledReconnectCountForTesting += 1
         cancelAllConnectAttempts()
         beginConnectAttempt(after: delay)
     }

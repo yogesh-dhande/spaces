@@ -2532,8 +2532,11 @@
 
             // The stream dies with the open's takeover still sending, so the attachment it wins is one no
             // snapshot ever confirmed.
+            // The open armed its own connect through the same scheduler, at no delay, so the delay below is
+            // read only once a further schedule has landed: the redial this disconnect arms.
+            let schedulesBeforeRedial = model.scheduledReconnectCountForTesting
             await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
-            await waitUntil("the dropped stream to arm its redial") { model.lastScheduledReconnectDelayForTesting != nil }
+            await waitUntil("the dropped stream to arm its redial") { model.scheduledReconnectCountForTesting > schedulesBeforeRedial }
             // Held until that redial has begun, which is the window this finding is about: its connect
             // decides what to do with the unconfirmed attachment while the takeover is still in flight.
             let redialDelay = model.lastScheduledReconnectDelayForTesting ?? .seconds(1)
@@ -3252,12 +3255,15 @@
             // The first `.state` read of the run is the one the acknowledgement above owes its name to.
             ownership.failNextStateRead()
             model.start()
+            // The open arms its own connect through the same scheduler, at no delay, so a delay is already
+            // recorded here: the redial this test measures is the schedule that follows this one.
+            let schedulesBeforeRedial = model.scheduledReconnectCountForTesting
 
             await waitUntil("the open's attach to be acknowledged without a name") { ownership.attachCount() == 1 }
-            await waitUntil("the failed read to arm the redial") { model.lastScheduledReconnectDelayForTesting != nil }
-            if let redialDelay = model.lastScheduledReconnectDelayForTesting {
-                XCTAssertGreaterThan(redialDelay, .zero, "the retry must be paced by the reconnect backoff")
-            }
+            await waitUntil("the failed read to arm the redial") { model.scheduledReconnectCountForTesting > schedulesBeforeRedial }
+            let redialDelay = model.lastScheduledReconnectDelayForTesting
+            XCTAssertNotNil(redialDelay, "a failed naming read must arm the redial rather than abandon the attach")
+            if let redialDelay { XCTAssertGreaterThan(redialDelay, .zero, "the retry must be paced by the reconnect backoff") }
             let didSubscribe = await backend.waitForSubscribeCount(1)
             XCTAssertTrue(didSubscribe, "the redial must open the subscription the failed attach never reached")
             await waitUntil("the redial to attach again") { ownership.attachCount() == 2 }
