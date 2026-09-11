@@ -397,9 +397,10 @@ public final class SpacesClientDatabase {
     // MARK: - Terminal owner client ids
 
     /// Records the `TerminalClient` id this device used to attach to a terminal session as OWNER, so a
-    /// relaunch of this Mac reuses the same id and the daemon's still-live `localWindow` owner
-    /// attachment matches — letting the pane silently reclaim ownership instead of attaching as a
-    /// viewer. Keyed by (device id, session id); session ids are globally unique.
+    /// relaunch of this Mac reuses the same id and, while the daemon's owner attachment for it is still
+    /// live (lease unexpired, row not cleared by a daemon start/handoff in between), it matches —
+    /// letting the pane silently reclaim ownership instead of attaching as a viewer. Keyed by (device
+    /// id, session id); session ids are globally unique.
     public func setTerminalOwnerClientID(deviceID: String, sessionID: String, clientID: String) throws {
         try execute(
             sql: """
@@ -456,17 +457,15 @@ public final class SpacesClientDatabase {
 
     public func codePaneWorkspaceState(deviceID: String, workspaceID: String) throws -> String? {
         try queryRow(
-            sql: "SELECT state_json FROM code_pane_workspace_states WHERE device_id = ? AND workspace_id = ?",
-            bindings: [deviceID, workspaceID])?.first
+            sql: "SELECT state_json FROM code_pane_workspace_states WHERE device_id = ? AND workspace_id = ?", bindings: [deviceID, workspaceID])?
+            .first
     }
 
     /// All workspace ids carrying Editor state on this client for a device. Callers compare this
     /// against an authoritative overview to remove records for a workspace deleted while the app
     /// was not running.
     public func codePaneWorkspaceIDs(deviceID: String) throws -> [String] {
-        try queryRows(
-            sql: "SELECT workspace_id FROM code_pane_workspace_states WHERE device_id = ?", bindings: [deviceID]
-        ).compactMap(\.first)
+        try queryRows(sql: "SELECT workspace_id FROM code_pane_workspace_states WHERE device_id = ?", bindings: [deviceID]).compactMap(\.first)
     }
 
     /// Removes the whole Editor state document when its workspace is deleted. Save and Discard
@@ -823,10 +822,10 @@ public final class SpacesClientDatabase {
         """
 
     // Terminal owner client ids are client/device-local: the `TerminalClient` id this Mac last used
-    // to attach to a session as OWNER. Reusing it across app relaunches lets the pane reclaim the
-    // daemon's orphaned, never-expiring `localWindow` owner attachment silently (see
-    // `setTerminalOwnerClientID`). The stored UUID exists only on this Mac, so it can only ever match
-    // THIS device's own prior attachment.
+    // to attach to a session as OWNER. Reusing it across app relaunches lets the pane reclaim a still-
+    // live owner attachment silently (see `setTerminalOwnerClientID`) as long as its lease has not
+    // lapsed and no daemon start/handoff cleared it in between. The stored UUID exists only on this
+    // Mac, so it can only ever match THIS device's own prior attachment.
     private static let terminalOwnerClientIDsSchemaSQL = """
             CREATE TABLE IF NOT EXISTS terminal_owner_client_ids (
               device_id TEXT NOT NULL,
@@ -923,9 +922,9 @@ public final class SpacesClientDatabase {
                     ALTER TABLE paired_devices_v3 RENAME TO paired_devices;
                     """)
         },
-        SpacesClientMigrationStep(
-            fromVersion: 3, toVersion: 4, description: "Add client-local Editor workspace recovery state"
-        ) { db in try executeClientBatch(database: db, sql: codePaneWorkspaceStateSchemaSQL) },
+        SpacesClientMigrationStep(fromVersion: 3, toVersion: 4, description: "Add client-local Editor workspace recovery state") { db in
+            try executeClientBatch(database: db, sql: codePaneWorkspaceStateSchemaSQL)
+        },
     ]
 
     private static func timestamp() -> String { timestampFormatter.string(from: Date()) }

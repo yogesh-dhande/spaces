@@ -675,7 +675,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
 
             let localOwner = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-02T00:00:00Z")
+                id: "local-window", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-02T00:00:00Z")
             try host.startIfNeeded()
 
             try host.attach(client: localOwner, mode: .owner, into: nil)
@@ -715,7 +715,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             let remoteOwner = TerminalClient(
-                id: "remote-ipad", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
+                id: "remote-ipad", kind: .remote, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
                 connectedAt: "2026-06-02T00:00:00Z")
             try host.attach(client: remoteOwner, mode: .owner, into: nil)
             return Box(host)
@@ -788,8 +788,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
 
         let remoteOwner = TerminalClient(
-            id: "remote-ipad", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
-            connectedAt: "2026-06-04T00:00:00Z")
+            id: "remote-ipad", kind: .remote, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"), connectedAt: "2026-06-04T00:00:00Z"
+        )
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-06-04T00:00:00Z")
 
@@ -867,7 +867,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
 
         let owner = TerminalClient(
-            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:00Z")
+            id: "local-window", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-08-09T00:00:00Z")
 
@@ -984,7 +984,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         defer { GhosttyTerminalSnapshotCapture.sessionRenderStateCaptureHandlerForTesting = nil }
 
         let owner = TerminalClient(
-            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-17T00:00:00Z")
+            id: "local-window", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-17T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-08-17T00:00:00Z")
 
@@ -1069,7 +1069,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
 
         let owner = TerminalClient(
-            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:00Z")
+            id: "local-window", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-08-09T00:00:00Z")
 
@@ -1182,7 +1182,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         // `resize` only exports screen state for a local-window or remote-viewer owner.
         let owner = TerminalClient(
-            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:00Z")
+            id: "local-window", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-08-09T00:00:00Z")
 
@@ -1271,7 +1271,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         // `resize` only exports screen state for a local-window or remote-viewer owner.
         let owner = TerminalClient(
-            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:00Z")
+            id: "local-window", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-08-09T00:00:00Z")
 
@@ -1331,7 +1331,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let owner = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-03T00:00:00Z")
+                id: "local-window", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-03T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-06-03T00:00:00Z")
 
@@ -1379,7 +1379,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             let owner = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-03T00:00:00Z")
+                id: "local-window", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-03T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-06-03T00:00:00Z")
 
@@ -1413,7 +1413,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             let owner = TerminalClient(
-                id: "remote-ipad", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
+                id: "remote-ipad", kind: .remote, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
                 connectedAt: "2026-09-09T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-09-09T00:00:00Z")
@@ -1457,7 +1457,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             let owner = TerminalClient(
-                id: "remote-ipad", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
+                id: "remote-ipad", kind: .remote, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
                 connectedAt: "2026-09-09T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-09-09T00:00:00Z")
@@ -1532,8 +1532,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
 
         let owner = TerminalClient(
-            id: "remote-ipad", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
-            connectedAt: "2026-09-09T00:00:00Z")
+            id: "remote-ipad", kind: .remote, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"), connectedAt: "2026-09-09T00:00:00Z"
+        )
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-09-09T00:00:00Z")
 
@@ -1603,7 +1603,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             let owner = TerminalClient(
-                id: "remote-owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-03T00:00:00Z")
+                id: "remote-owner", kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-03T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-06-03T00:00:00Z")
 
@@ -1636,7 +1636,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let owner = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-03T00:00:00Z")
+                id: "local-window", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-03T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-06-03T00:00:00Z")
 
@@ -1687,7 +1687,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                     command: "sleep 0.2; i=1; while [ $i -le 40 ]; do printf \"line$i\\n\"; i=$((i+1)); done; sleep 120",
                     createdAt: "2026-09-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
             let remoteOwner = TerminalClient(
-                id: "remote-ipad", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
+                id: "remote-ipad", kind: .remote, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
                 connectedAt: "2026-09-09T00:00:00Z")
             try host.attach(client: remoteOwner, mode: .owner, into: nil)
             try host.startIfNeeded()
@@ -1719,8 +1719,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             host.core.handleControlRequest(
                 TerminalControlRequest(
                     command: .scroll(
-                        TerminalControlScrollPayload(
-                            clientID: nil, ownerEpoch: nil, scrollHorizontal: 0, scrollVertical: -3, scrollMods: 0))))
+                        TerminalControlScrollPayload(clientID: nil, ownerEpoch: nil, scrollHorizontal: 0, scrollVertical: -3, scrollMods: 0))))
         }
         XCTAssertTrue(boundaryResponse.ok, boundaryResponse.message)
         XCTAssertEqual(boundaryResponse.message, "Already at scroll boundary.")
@@ -1729,23 +1728,19 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             host.core.handleControlRequest(
                 TerminalControlRequest(
                     command: .scroll(
-                        TerminalControlScrollPayload(
-                            clientID: nil, ownerEpoch: nil, scrollHorizontal: 0, scrollVertical: 3, scrollMods: 0))))
+                        TerminalControlScrollPayload(clientID: nil, ownerEpoch: nil, scrollHorizontal: 0, scrollVertical: 3, scrollMods: 0))))
         }
         XCTAssertTrue(movedResponse.ok, movedResponse.message)
         XCTAssertEqual(movedResponse.message, "Scrolled terminal.")
 
-        try await waitUntil(timeout: 30) {
-            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.scroll.rawValue }
-        }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.scroll.rawValue } }
         let scrollPayloads = receivedPayloads.snapshot.filter { $0.reason == TerminalRemoteSessionStateReason.scroll.rawValue }
         XCTAssertEqual(scrollPayloads.count, 1, "the boundary scroll must publish nothing")
         let scrollUpdate = try XCTUnwrap(scrollPayloads[0].decodedRenderUpdate)
         XCTAssertEqual(scrollUpdate.kind, .delta)
         XCTAssertNil(scrollUpdate.fallbackReason)
         XCTAssertLessThan(
-            scrollUpdate.changedCellCount, columns * rows / 2,
-            "a viewport scroll ships the rows ghostty moved as scroll rects, not the whole grid")
+            scrollUpdate.changedCellCount, columns * rows / 2, "a viewport scroll ships the rows ghostty moved as scroll rects, not the whole grid")
     }
 
     /// A keystroke echo costs one screen frame, not two. The `output` broadcast exports the frame Ghostty
@@ -1767,11 +1762,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let readyMarker = "echo frame ready"
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "single-screen-frame-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "echo",
-            workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh",
-            command: "stty -echo; printf '\(readyMarker)\\n'; cat", createdAt: "2026-09-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "stty -echo; printf '\(readyMarker)\\n'; cat",
+            createdAt: "2026-09-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let owner = TerminalClient(
-            id: "remote-ipad", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
-            connectedAt: "2026-09-09T00:00:00Z")
+            id: "remote-ipad", kind: .remote, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"), connectedAt: "2026-09-09T00:00:00Z"
+        )
 
         let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
@@ -1849,7 +1844,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
 
             let localOwner = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-19T00:00:00Z")
+                id: "local-window", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-19T00:00:00Z")
             try host.startIfNeeded()
             try host.attach(client: localOwner, mode: .owner, into: nil)
 
@@ -2183,7 +2178,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                 workspaceID: "workspace-1", kind: .shell)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: .init(rootDirectory: root.path))
             let ownerClient = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-23T00:00:00Z")
+                id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-05-23T00:00:00Z")
             var sessionCaptureCount = 0
             GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in
                 sessionCaptureCount += 1
@@ -2215,9 +2210,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             var surfaceRefreshCount = 0
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths) { surfaceRefreshCount += 1 }
             let localOwner = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-23T00:00:00Z")
+                id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-05-23T00:00:00Z")
             let remoteOwner = TerminalClient(
-                id: "remote-ipad", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-23T00:00:01Z")
+                id: "remote-ipad", kind: .remote, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-23T00:00:01Z")
             var sessionCaptureCount = 0
             GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in
                 sessionCaptureCount += 1
@@ -2252,9 +2247,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-05-24T00:00:00Z",
             workspaceID: "workspace-1", kind: .shell)
         let localOwner = TerminalClient(
-            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-24T00:00:00Z")
+            id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-05-24T00:00:00Z")
         let remoteOwner = TerminalClient(
-            id: "remote-ipad", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-24T00:00:01Z")
+            id: "remote-ipad", kind: .remote, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-24T00:00:01Z")
         let sessionCaptureCountBox = MutableBox(0)
         GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in
             sessionCaptureCountBox.value += 1
@@ -2331,7 +2326,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             let localOwner = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-28T00:00:00Z")
+                id: "local-window", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-28T00:00:00Z")
             try host.attach(client: localOwner, mode: .owner, into: nil)
             return Box(host)
         }
@@ -2387,7 +2382,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             let localOwner = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-28T00:00:00Z")
+                id: "local-window", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-28T00:00:00Z")
             try host.attach(client: localOwner, mode: .owner, into: nil)
             return Box(host)
         }
@@ -2457,7 +2452,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             let localOwner = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-28T00:00:00Z")
+                id: "local-window", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-28T00:00:00Z")
             try host.attach(client: localOwner, mode: .owner, into: nil)
             return Box(host)
         }
@@ -2517,7 +2512,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-06-04T00:00:00Z", workspaceID: "workspace-1",
             kind: .shell)
         let localOwner = TerminalClient(
-            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-04T00:00:00Z")
+            id: "local-window", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-04T00:00:00Z")
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
@@ -2747,7 +2742,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             process.waitUntilExit()
 
             let client = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-10T00:00:01Z")
+                id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-05-10T00:00:01Z")
             try TerminalSessionPersistence.upsertClient(client, paths: paths)
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: client, mode: .owner, paths: paths, attachedAt: "2026-05-10T00:00:01Z")
@@ -2926,8 +2921,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
-            let owner = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-06-04T00:00:00Z")
+            let owner = TerminalClient(id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-06-04T00:00:00Z")
             try host.attach(client: owner, mode: .owner, into: nil)
             return Box(host)
         }
@@ -2999,7 +2993,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "local-owner-render-update-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "local-render",
             workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "stty -echo; printf '\(readyMarker)\\n'; cat",
             createdAt: "2026-06-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
-        let owner = TerminalClient(id: "local-owner", kind: .localWindow, identity: .init(label: "Mac"), connectedAt: "2026-06-09T00:00:00Z")
+        let owner = TerminalClient(id: "local-owner", kind: .local, identity: .init(label: "Mac"), connectedAt: "2026-06-09T00:00:00Z")
 
         let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
@@ -3219,7 +3213,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // Attaching with a dark appearance must re-theme the live session even though the client only
         // conveys light/dark; colors reach the surface on the io thread, so pump ticks while polling.
         let client = TerminalClient(
-            id: "remote-owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
+            id: "remote-owner", kind: .remote, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
             connectedAt: "2026-07-07T00:00:00Z")
         let response = TerminalEngineActor.runSynchronously {
             host.core.handleControlRequest(
@@ -3317,7 +3311,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         // A remote owner: `resize` only exports screen state for a local-window or remote-viewer owner.
         let ownerClient = TerminalClient(
-            id: "remote-owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
+            id: "remote-owner", kind: .remote, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
             connectedAt: "2026-08-09T00:00:00Z")
         let attachResponse = TerminalEngineActor.runSynchronously {
             host.core.handleControlRequest(
@@ -3762,7 +3756,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             let ownerClient = TerminalClient(
-                id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-21T00:00:00Z")
+                id: "owner-client", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-05-21T00:00:00Z")
             try host.attach(client: ownerClient, mode: .owner, into: nil)
             return Box(host)
         }
@@ -3986,7 +3980,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-6", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh",
             createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let client = TerminalClient(
-            id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
+            id: "remote-client", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
         let attachmentNotifications = expectation(description: "attachment notifications")
         attachmentNotifications.expectedFulfillmentCount = 2
         let observer = NotificationCenter.default.addObserver(forName: .spacesTerminalAttachmentStateDidChange, object: nil, queue: .main) {
@@ -4030,9 +4024,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let localClient = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+                id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
             let remoteClient = TerminalClient(
-                id: "remote-ipad", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
+                id: "remote-ipad", kind: .remote, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
 
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: localClient, mode: .owner, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
@@ -4068,7 +4062,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let owner = TerminalClient(
-                id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-31T00:00:00Z")
+                id: "remote-owner", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-31T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-31T00:00:00Z")
 
@@ -4095,7 +4089,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             defer { host.terminate() }
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let owner = TerminalClient(
-                id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-06-15T00:00:00Z")
+                id: "remote-owner", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-06-15T00:00:00Z")
             XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .viewer)).ok)
             XCTAssertTrue(host.handleControlRequest(.init(command: "takeover", clientID: owner.id)).ok)
 
@@ -4122,7 +4116,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             defer { host.terminate() }
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let owner = TerminalClient(
-                id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-07-16T00:00:00Z")
+                id: "remote-owner", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-07-16T00:00:00Z")
             XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .viewer)).ok)
             XCTAssertTrue(host.handleControlRequest(.init(command: "takeover", clientID: owner.id)).ok)
 
@@ -4153,7 +4147,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             defer { host.terminate() }
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let owner = TerminalClient(
-                id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-07-26T00:00:00Z")
+                id: "remote-owner", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-07-26T00:00:00Z")
             XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .viewer)).ok)
             XCTAssertTrue(host.handleControlRequest(.init(command: "takeover", clientID: owner.id)).ok)
 
@@ -4189,7 +4183,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "stty -echo; printf '\(readyMarker)\\n'; cat",
             createdAt: "2026-06-03T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let owner = TerminalClient(
-            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-06-03T00:00:00Z")
+            id: "remote-owner", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-06-03T00:00:00Z")
 
         let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
@@ -4235,9 +4229,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let previousOwner = TerminalClient(
-                id: "iphone-owner", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-31T00:00:00Z")
+                id: "iphone-owner", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-31T00:00:00Z")
             let nextOwner = TerminalClient(
-                id: "ipad-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-31T00:00:01Z")
+                id: "ipad-owner", kind: .remote, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-31T00:00:01Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: previousOwner, mode: .owner, paths: paths, attachedAt: "2026-05-31T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
@@ -4268,7 +4262,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             host.core.debugSetLastKnownSurfaceSize(columns: 80, rows: 24)
             let owner = TerminalClient(
-                id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-31T00:00:00Z")
+                id: "remote-owner", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-31T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-31T00:00:00Z")
 
@@ -4303,8 +4297,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             host.core.debugSetLastKnownSurfaceSize(columns: 80, rows: 24)
-            let owner = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-07-29T00:00:00Z")
+            let owner = TerminalClient(id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-07-29T00:00:00Z")
 
             XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .owner)).ok)
             XCTAssertTrue(host.handleControlRequest(.init(command: "resize", clientID: owner.id, columns: 80, rows: 24, resizeSerial: 5)).ok)
@@ -4331,7 +4324,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let staleTimestampedClient = TerminalClient(
-                id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2000-01-01T00:00:00Z")
+                id: "remote-client", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2000-01-01T00:00:00Z")
 
             let attachResponse = host.handleControlRequest(.init(command: "attach", client: staleTimestampedClient, attachmentMode: .viewer))
             XCTAssertEqual(attachResponse, TerminalControlResponse(ok: true, message: "Attached viewer client."))
@@ -4360,10 +4353,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let refreshedClient = TerminalClient(
-                id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
+                id: "remote-client", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
             let staleClient = TerminalClient(
-                id: "stale-remote-client", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"),
-                connectedAt: "2026-05-17T00:00:00Z")
+                id: "stale-remote-client", kind: .remote, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: "session-heartbeat", client: refreshedClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
@@ -4392,7 +4384,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-7", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh",
             createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let client = TerminalClient(
-            id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
+            id: "remote-client", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
         let attachmentNotifications = expectation(description: "attachment expiry notification")
         let observer = NotificationCenter.default.addObserver(forName: .spacesTerminalAttachmentStateDidChange, object: nil, queue: .main) {
             notification in
@@ -4430,16 +4422,19 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let localClient = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+                id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
             let remoteClient = TerminalClient(
-                id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z"
-            )
+                id: "stale-remote-owner", kind: .remote, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: localClient, mode: .owner, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: remoteClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
             try TerminalSessionPersistence.transferOwnership(
                 sessionID: launchConfiguration.sessionID, newOwnerClientID: remoteClient.id, paths: paths, transferredAt: "2026-05-17T00:00:01Z")
+
+            // The local window is lease-governed like any other client now, so its pane keeps
+            // heartbeating to stay live while the remote owner above goes stale.
+            try TerminalSessionPersistence.touchClient(id: localClient.id, paths: paths, touchedAt: "2026-05-17T00:01:00Z")
 
             let expiredAt = ISO8601DateFormatter().date(from: "2026-05-17T00:01:05Z")!
             XCTAssertEqual(host.expireStaleRemoteClientsIfNeeded(now: expiredAt), [remoteClient.id])
@@ -4449,6 +4444,72 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             XCTAssertEqual(activeAttachments.first(where: { $0.mode == .owner })?.clientID, localClient.id)
             XCTAssertFalse(activeAttachments.contains { $0.clientID == remoteClient.id })
 
+        }
+    }
+
+    /// The regression this closes: a `.local` owner (a Mac's own window onto its own daemon) is now
+    /// judged by its lease exactly like a `.remote` one, so once it stops heartbeating (its app died
+    /// without detaching) it loses ownership within the expiry window, and a still-live client attached
+    /// to the same session is promoted to owner automatically and can actually type — not merely gain the
+    /// in-memory owner attribute while its sends stay rejected. Two `.local` clients set up the scenario
+    /// (e.g. a relaunched window replacing a killed one) so the daemon's existing auto-transfer-to-local
+    /// logic (`activeLocalWindowClientID`) completes the reclaim with no manual takeover needed — the
+    /// same self-heal path that already covered a stale REMOTE owner handing back to a local window,
+    /// extended to a stale LOCAL owner now that `.local` carries no exemption. Before this fix `.local`
+    /// was excluded from `staleRemoteClients`'s SQL outright, so `expireStaleRemoteClientsIfNeeded` would
+    /// never even consider `staleLocalOwner` a candidate: this test's first assertion would see an empty
+    /// `expired` array, ownership would never move, and the waiting client's send would fail with
+    /// `.ownershipRejected` forever.
+    func testExpiringStaleLocalOwnerLetsAnotherAttachedClientTakeOverAndType() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-local-owner-expiry", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+                shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            let staleLocalOwner = TerminalClient(
+                id: "dead-local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+            let waitingLocalClient = TerminalClient(
+                id: "relaunched-local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+            try TerminalSessionPersistence.attachClient(
+                sessionID: launchConfiguration.sessionID, client: staleLocalOwner, mode: .owner, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+            try TerminalSessionPersistence.attachClient(
+                sessionID: launchConfiguration.sessionID, client: waitingLocalClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+
+            // Both attached at 00:00:00, so both leases start there. The waiting client then heartbeats at
+            // 00:01:00 the way an open pane does; the dead one never heartbeats again. That single
+            // difference is the whole scenario: asked about 00:01:05, the owner is 65s past its last proof
+            // of life (beyond the 60s `remoteClientLeaseInterval`) while the waiting client is 5s past its
+            // own. Without this touch both leases would sit at 00:00:00 and both clients would be stale,
+            // which is what the assertions below would then be measuring instead of the intended contrast.
+            try TerminalSessionPersistence.touchClient(id: waitingLocalClient.id, paths: paths, touchedAt: "2026-05-17T00:01:00Z")
+            let expiredAt = ISO8601DateFormatter().date(from: "2026-05-17T00:01:05Z")!
+            XCTAssertEqual(
+                host.expireStaleRemoteClientsIfNeeded(now: expiredAt), [staleLocalOwner.id],
+                "a local owner that stopped heartbeating must be judged exactly like a remote one")
+            host.debugDrainPersistenceQueue()
+
+            let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
+            XCTAssertEqual(
+                activeAttachments.first(where: { $0.mode == .owner })?.clientID, waitingLocalClient.id,
+                "the still-live client must be promoted to owner automatically once the stale owner expires")
+            XCTAssertFalse(activeAttachments.contains { $0.clientID == staleLocalOwner.id })
+
+            // Prove the new owner can actually type, and the expired owner genuinely cannot — not just
+            // that the attachment row moved.
+            let promotedSend = host.handleControlRequest(
+                .init(command: "send", text: "echo taken-over\n", clientID: waitingLocalClient.id, ownerEpoch: nil))
+            let staleSend = host.handleControlRequest(
+                .init(command: "send", text: "echo still-here\n", clientID: staleLocalOwner.id, ownerEpoch: nil))
+            XCTAssertTrue(promotedSend.ok, "the promoted client must be able to send input as the new owner")
+            XCTAssertFalse(staleSend.ok, "the expired local owner must no longer be able to send input")
+            XCTAssertEqual(staleSend.errorCode, .ownershipRejected)
         }
     }
 
@@ -4466,7 +4527,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let remoteClient = TerminalClient(
-                id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
+                id: "remote-client", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
 
             XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: remoteClient, attachmentMode: .viewer)).ok)
             host.debugDrainPersistenceQueue()
@@ -4478,9 +4539,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             // heartbeat map, so it isolates that one signal.
             try TerminalSessionPersistence.touchClient(id: remoteClient.id, paths: paths, touchedAt: "2000-01-01T00:00:00Z")
 
-            // Fix 1: `controlResponseForAttachRequest` records the attach in `latestRemoteClientHeartbeat`, the
-            // same map a lease touch does, so the sweep below honors it as fresh liveness evidence despite the
-            // stale-looking committed row above.
+            // The attach refreshed this client's lease in the in-memory snapshot (and recorded it in
+            // `latestRemoteClientHeartbeat`, the same map a lease touch feeds), so the sweep below judges it
+            // live from memory and never expires it off the stale-looking committed row above.
             let expiredClientIDs = host.expireStaleRemoteClientsIfNeeded(now: Date())
             XCTAssertTrue(
                 expiredClientIDs.isEmpty,
@@ -4506,13 +4567,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
 
             let staleRemoteOwner = TerminalClient(
-                id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z"
-            )
+                id: "stale-remote-owner", kind: .remote, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
             let localClient = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+                id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
             let takingOverClient = TerminalClient(
-                id: "taking-over-viewer", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
-                connectedAt: "2026-05-17T00:00:00Z")
+                id: "taking-over-viewer", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
 
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: staleRemoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
@@ -4525,6 +4584,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             // `touchClient` writes straight to the committed row without going through the host, so this is
             // what makes `staleRemoteOwner` look stale to the sweep later, independent of everything else below.
             try TerminalSessionPersistence.touchClient(id: staleRemoteOwner.id, paths: paths, touchedAt: "2000-01-01T00:00:00Z")
+
+            // The local window is lease-governed like any other client now, so its pane keeps heartbeating
+            // (against real wall-clock time here, since the expiry check below uses `Date()`) to stay live
+            // while only `staleRemoteOwner` goes stale.
+            try TerminalSessionPersistence.touchClient(id: localClient.id, paths: paths, touchedAt: TerminalSessionTimestamp.string(from: Date()))
 
             // Park the persistence queue before the takeover, so the takeover's durable transfer write is
             // enqueued but held rather than committed. This is the genuine lag: the host's in-memory authority
@@ -4582,8 +4646,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             defer { host.terminate() }
 
-            let owner = TerminalClient(
-                id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+            let owner = TerminalClient(id: "owner-client", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
             try host.attach(client: owner, mode: .owner, into: nil)
             host.debugDrainPersistenceQueue()
             XCTAssertEqual(host.activeOwnerClientID(), owner.id)
@@ -4675,7 +4738,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         // Attach with a very old lease so the committed DB row is stale at real-now.
         let staleClient = TerminalClient(
-            id: "remote-heartbeat", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2000-01-01T00:00:00Z")
+            id: "remote-heartbeat", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2000-01-01T00:00:00Z")
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: staleClient, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
@@ -4712,9 +4775,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-b1-dedup", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
             command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let localClient = TerminalClient(
-            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2000-01-01T00:00:00Z")
+            id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2000-01-01T00:00:00Z")
         let remoteClient = TerminalClient(
-            id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z")
+            id: "stale-remote-owner", kind: .remote, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z")
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: localClient, mode: .owner, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
@@ -4722,6 +4785,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: launchConfiguration.sessionID, client: remoteClient, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
         try TerminalSessionPersistence.transferOwnership(
             sessionID: launchConfiguration.sessionID, newOwnerClientID: remoteClient.id, paths: paths, transferredAt: "2000-01-01T00:00:01Z")
+        // The local window is lease-governed like any other client now, so its pane heartbeats at real-now
+        // to stay live while the remote owner's 2000-era lease goes stale.
+        try TerminalSessionPersistence.touchClient(id: localClient.id, paths: paths, touchedAt: TerminalSessionTimestamp.string(from: Date()))
 
         let lockHolder = CompetingWriteLockHolder(databasePath: try SpacesProfile.current().databasePath)
         lockHolder.startHolding(maxHoldSeconds: 10)
@@ -4746,7 +4812,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     /// Regression for the fast-path gate at the top of `expireStaleRemoteClientsIfNeeded`: once a tick decides
     /// to expire a client, `markClientsExpiredInCache` optimistically detaches it in the in-memory attachment
     /// cache immediately, before the durable detach (parked here on the persistence queue) commits. A second
-    /// tick that runs in that window sees `hasLeaseGovernedAttachedClient() == false` — the cache already shows
+    /// tick that runs in that window sees `hasLapsedLeaseGovernedAttachedClient(now:) == false` — the cache already shows
     /// nothing left to expire — so a gate that only checks that predicate takes the fast path and clears
     /// `expiredRemoteClientIDs`. That erases the pending marker `isClientDurablyDisconnected` relies on to
     /// veto a rescuing heartbeat, so a heartbeat arriving after the wipe is rejected as durably-disconnected
@@ -4766,8 +4832,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             // A stale (2000-era lease) remote viewer so the first tick decides to expire it.
             let staleClient = TerminalClient(
-                id: "remote-second-tick", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
-                connectedAt: "2000-01-01T00:00:00Z")
+                id: "remote-second-tick", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2000-01-01T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: staleClient, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
 
@@ -4808,9 +4873,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-promoted-coherence", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
             command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let localClient = TerminalClient(
-            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2000-01-01T00:00:00Z")
+            id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2000-01-01T00:00:00Z")
         let remoteClient = TerminalClient(
-            id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z")
+            id: "stale-remote-owner", kind: .remote, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z")
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: localClient, mode: .owner, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
@@ -4819,6 +4884,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // Remote becomes the owner (local demoted to viewer); its 2000-era lease makes it a stale owner at real-now.
         try TerminalSessionPersistence.transferOwnership(
             sessionID: launchConfiguration.sessionID, newOwnerClientID: remoteClient.id, paths: paths, transferredAt: "2000-01-01T00:00:01Z")
+        // The local window is lease-governed like any other client now, so its pane heartbeats at real-now
+        // to stay live while the remote owner's 2000-era lease goes stale.
+        try TerminalSessionPersistence.touchClient(id: localClient.id, paths: paths, touchedAt: TerminalSessionTimestamp.string(from: Date()))
 
         let lockHolder = CompetingWriteLockHolder(databasePath: try SpacesProfile.current().databasePath)
         lockHolder.startHolding(maxHoldSeconds: 10)
@@ -4867,8 +4935,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         // A stale (2000-era lease) remote viewer so the committed DB row is a stale-expiry candidate at real-now.
         let staleClient = TerminalClient(
-            id: "remote-heartbeat-veto", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
-            connectedAt: "2000-01-01T00:00:00Z")
+            id: "remote-heartbeat-veto", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2000-01-01T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: staleClient, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
 
@@ -4930,13 +4997,12 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let localClient = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2000-01-01T00:00:00Z")
+                id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2000-01-01T00:00:00Z")
             let staleRemoteOwner = TerminalClient(
-                id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z"
-            )
+                id: "stale-remote-owner", kind: .remote, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z")
             // B attaches with a fresh lease so it is never itself a stale-expiry candidate.
             let takeoverClient = TerminalClient(
-                id: "takeover-remote", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
+                id: "takeover-remote", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"),
                 connectedAt: TerminalSessionTimestamp.string(from: Date()))
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: localClient, mode: .owner, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
@@ -4948,6 +5014,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             // The stale remote becomes the owner (2000-era lease makes it stale at real-now).
             try TerminalSessionPersistence.transferOwnership(
                 sessionID: launchConfiguration.sessionID, newOwnerClientID: staleRemoteOwner.id, paths: paths, transferredAt: "2000-01-01T00:00:01Z")
+            // The local window is lease-governed like any other client now, so its pane heartbeats at real-now
+            // to stay live while only the stale remote owner goes stale.
+            try TerminalSessionPersistence.touchClient(id: localClient.id, paths: paths, touchedAt: TerminalSessionTimestamp.string(from: Date()))
 
             // Park the persistence queue so the tick's atomic expiry is enqueued but cannot commit yet.
             let gate = host.debugHoldPersistenceQueue()
@@ -4994,23 +5063,23 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let localOwner = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
-            let remoteViewer = TerminalClient(
-                id: "remote-iphone", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
+                id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+            let remoteClient = TerminalClient(
+                id: "remote-iphone", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"),
                 connectedAt: TerminalSessionTimestamp.string(from: Date()))
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: localOwner, mode: .owner, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
-                sessionID: launchConfiguration.sessionID, client: remoteViewer, mode: .viewer, paths: paths,
+                sessionID: launchConfiguration.sessionID, client: remoteClient, mode: .viewer, paths: paths,
                 attachedAt: TerminalSessionTimestamp.string(from: Date()))
 
             let gate = host.debugHoldPersistenceQueue()
-            let takeover = host.handleControlRequest(.init(command: "takeover", clientID: remoteViewer.id))
+            let takeover = host.handleControlRequest(.init(command: "takeover", clientID: remoteClient.id))
             XCTAssertTrue(takeover.ok, "the takeover is decided in memory and must be accepted while its mirror is parked")
 
             let payload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.attachmentState.rawValue))
             let broadcastOwner = payload.attachmentSnapshot?.attachments.first { $0.detachedAt == nil && $0.mode == .owner }
-            XCTAssertEqual(broadcastOwner?.clientID, remoteViewer.id, "the broadcast must advertise the new owner immediately after the takeover")
+            XCTAssertEqual(broadcastOwner?.clientID, remoteClient.id, "the broadcast must advertise the new owner immediately after the takeover")
             XCTAssertEqual(
                 try TerminalSessionPersistence.activeAttachments(paths: paths).first(where: { $0.mode == .owner })?.clientID, localOwner.id,
                 "the durable mirror is still parked, proving the broadcast read memory rather than the database")
@@ -5018,7 +5087,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             gate.signal()
             host.debugDrainPersistenceQueue()
             XCTAssertEqual(
-                try TerminalSessionPersistence.activeAttachments(paths: paths).first(where: { $0.mode == .owner })?.clientID, remoteViewer.id,
+                try TerminalSessionPersistence.activeAttachments(paths: paths).first(where: { $0.mode == .owner })?.clientID, remoteClient.id,
                 "the mirror converges on the new owner once the queue drains")
         }
     }
@@ -5043,8 +5112,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
 
             let owner = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"),
-                connectedAt: TerminalSessionTimestamp.string(from: Date()))
+                id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: TerminalSessionTimestamp.string(from: Date()))
 
             let gate = host.debugHoldPersistenceQueue()
             let attach = host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .owner))
@@ -5079,7 +5147,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
 
             let remoteOwner = TerminalClient(
-                id: "remote-iphone", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
+                id: "remote-iphone", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"),
                 connectedAt: TerminalSessionTimestamp.string(from: Date()))
             let attach = host.handleControlRequest(.init(command: "attach", client: remoteOwner, attachmentMode: .owner))
             XCTAssertTrue(attach.ok, "the remote client's attach must be accepted")
@@ -5133,8 +5201,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
 
             let owner = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"),
-                connectedAt: TerminalSessionTimestamp.string(from: Date()))
+                id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: TerminalSessionTimestamp.string(from: Date()))
             let attach = host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .owner))
             XCTAssertTrue(attach.ok, "the owner attach must be accepted")
             host.debugDrainPersistenceQueue()
@@ -5182,8 +5249,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             @TerminalEngineActor func catalogSnapshot() -> TerminalSessionAttachmentSnapshot? { host.inMemoryCatalogEntry()?.attachmentSnapshot }
 
             let first = TerminalClient(
-                id: "window-a", kind: .localWindow, identity: .init(label: "Spaces window A"),
-                connectedAt: TerminalSessionTimestamp.string(from: Date()))
+                id: "window-a", kind: .local, identity: .init(label: "Spaces window A"), connectedAt: TerminalSessionTimestamp.string(from: Date()))
             XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: first, attachmentMode: .owner)).ok)
             host.debugDrainPersistenceQueue()
             XCTAssertEqual(exportedSnapshot()?.attachments.map { $0.clientID }, ["window-a"])
@@ -5191,8 +5257,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             XCTAssertEqual(catalogSnapshot()?.attachments.map { $0.clientID }, ["window-a"])
 
             let second = TerminalClient(
-                id: "window-b", kind: .localWindow, identity: .init(label: "Spaces window B"),
-                connectedAt: TerminalSessionTimestamp.string(from: Date()))
+                id: "window-b", kind: .local, identity: .init(label: "Spaces window B"), connectedAt: TerminalSessionTimestamp.string(from: Date()))
             XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: second, attachmentMode: .owner)).ok)
             host.debugDrainPersistenceQueue()
             let afterHandover = try XCTUnwrap(exportedSnapshot())
@@ -5277,16 +5342,18 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let localClient = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2000-01-01T00:00:00Z")
+                id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2000-01-01T00:00:00Z")
             let staleRemoteOwner = TerminalClient(
-                id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z"
-            )
+                id: "stale-remote-owner", kind: .remote, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: localClient, mode: .owner, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: staleRemoteOwner, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
             try TerminalSessionPersistence.transferOwnership(
                 sessionID: launchConfiguration.sessionID, newOwnerClientID: staleRemoteOwner.id, paths: paths, transferredAt: "2000-01-01T00:00:01Z")
+            // The local window is lease-governed like any other client now, so its pane heartbeats at real-now
+            // to stay live while only the stale remote owner goes stale.
+            try TerminalSessionPersistence.touchClient(id: localClient.id, paths: paths, touchedAt: TerminalSessionTimestamp.string(from: Date()))
 
             // Park the queue so the tick's atomic expiry (transfer target = the local window A) is enqueued but
             // cannot commit yet.
@@ -5466,7 +5533,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let client = TerminalClient(
-            id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
+            id: "remote-client", kind: .remote, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: client, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
 
@@ -5521,10 +5588,12 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-b2-detach-reconciles", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
             shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
-        let client = TerminalClient(
-            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+        let client = TerminalClient(id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: client, mode: .owner, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+        // The local window is lease-governed like any other client now, so its pane heartbeats at real-now
+        // to stay live for `hasLiveAttachments`'s check below (which defaults to real `Date()`).
+        try TerminalSessionPersistence.touchClient(id: client.id, paths: paths, touchedAt: TerminalSessionTimestamp.string(from: Date()))
 
         let databasePath = try SpacesProfile.current().databasePath
         let box = TerminalEngineActor.runSynchronously { () -> Box<GhosttyEmbeddedSessionHost> in
@@ -5739,15 +5808,18 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let localClient = TerminalClient(
-            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+            id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
         let remoteClient = TerminalClient(
-            id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
+            id: "stale-remote-owner", kind: .remote, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: localClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: remoteClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
         try TerminalSessionPersistence.transferOwnership(
             sessionID: launchConfiguration.sessionID, newOwnerClientID: remoteClient.id, paths: paths, transferredAt: "2026-05-17T00:00:01Z")
+        // The local window is lease-governed like any other client now, so its pane keeps heartbeating to
+        // stay live while the remote owner above goes stale.
+        try TerminalSessionPersistence.touchClient(id: localClient.id, paths: paths, touchedAt: "2026-05-17T00:01:00Z")
 
         let expiredAt = ISO8601DateFormatter().date(from: "2026-05-17T00:01:05Z")!
         let box = TerminalEngineActor.runSynchronously { () -> Box<GhosttyEmbeddedSessionHost> in
@@ -5810,12 +5882,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let localClient = TerminalClient(
-            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+            id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
         let ownerClient = TerminalClient(
-            id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
+            id: "stale-remote-owner", kind: .remote, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
         let viewerClient = TerminalClient(
-            id: "stale-remote-viewer", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
-            connectedAt: "2026-05-17T00:00:00Z")
+            id: "stale-remote-viewer", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: localClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
@@ -5876,9 +5947,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let localViewer = TerminalClient(
-            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2000-01-01T00:00:00Z")
+            id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2000-01-01T00:00:00Z")
         let remoteOwner = TerminalClient(
-            id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z")
+            id: "stale-remote-owner", kind: .remote, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z")
         // Local window is a viewer; the remote attaches then takes ownership with a stale (2000-era) lease.
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: localViewer, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")

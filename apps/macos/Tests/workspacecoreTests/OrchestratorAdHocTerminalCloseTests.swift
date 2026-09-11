@@ -43,8 +43,7 @@ extension OrchestratorTests {
                     return BuiltInTerminalForegroundReading(process: nil, shellHasChildProcesses: shellHasChildProcesses)
                 }
                 return foreground.map { BuiltInTerminalForegroundReading(process: $0, shellHasChildProcesses: shellHasChildProcesses) }
-            }, builtInTerminalLiveOwnerAttachmentProber: builtInTerminalLiveOwnerAttachmentProber,
-            daemonHandoffInProgress: daemonHandoffInProgress)
+            }, builtInTerminalLiveOwnerAttachmentProber: builtInTerminalLiveOwnerAttachmentProber, daemonHandoffInProgress: daemonHandoffInProgress)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -70,12 +69,16 @@ extension OrchestratorTests {
         TerminalForegroundProcessSnapshot(pid: 123, executablePath: "/bin/zsh", argv: ["/bin/zsh"])
     }
 
+    /// Attaches an owner whose lease is fresh as of the call: the attach stamps the client's lease from
+    /// `connectedAt`, and every kind is lease-governed, so an owner attached with an unparseable or old
+    /// timestamp would read as already expired and the close decision would not be about ownership at all.
     private func attachOwnerClient(sessionID: String, clientID: String) throws {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        let now = ISO8601DateFormatter().string(from: Date())
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID,
-            client: TerminalClient(id: clientID, kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "now"),
-            mode: .owner, paths: paths, attachedAt: "now")
+            client: TerminalClient(id: clientID, kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: now),
+            mode: .owner, paths: paths, attachedAt: now)
     }
 
     func testConditionalCloseStopsUnattachedBareShellSession() throws {

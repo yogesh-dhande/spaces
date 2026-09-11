@@ -489,7 +489,7 @@ class StreamReader:
 def terminal_client(client_id: str, label: str) -> dict:
     return {
         "id": client_id,
-        "kind": "remoteViewer",
+        "kind": "remote",
         "identity": {"label": label, "deviceName": label, "networkAddress": "127.0.0.1"},
         "connectedAt": iso_now(),
         "disconnectedAt": None,

@@ -94,7 +94,7 @@ final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
     }
 
     private static let ownerClient = TerminalClient(
-        id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-07-21T00:00:00Z")
+        id: "owner-client", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-07-21T00:00:00Z")
 
     /// Opens this process's read and write database lanes (and applies the profile's migrations) before a
     /// test contends the write lock. A daemon has both lanes open long before any session is created, so
@@ -253,8 +253,7 @@ final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
             try core.startIfNeeded()
             // Attach a local-window owner so owner-gated sends are accepted and their lease touch fires the
             // durable write path this regression guards.
-            let owner = TerminalClient(
-                id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-07-21T00:00:00Z")
+            let owner = TerminalClient(id: "owner-client", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-07-21T00:00:00Z")
             try core.attachClient(owner, mode: .owner)
             return CoreBox(core: core, paths: paths, root: root)
         }
@@ -339,8 +338,7 @@ final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
                 workspaceID: "workspace-1", kind: .shell)
             let core = GhosttyEmbeddedSessionCore(launchConfiguration: launch, paths: paths)
             try core.startIfNeeded()
-            let owner = TerminalClient(
-                id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-07-21T00:00:00Z")
+            let owner = TerminalClient(id: "owner-client", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-07-21T00:00:00Z")
             try core.attachClient(owner, mode: .owner)
             return CoreBox(core: core, paths: paths, root: root)
         }

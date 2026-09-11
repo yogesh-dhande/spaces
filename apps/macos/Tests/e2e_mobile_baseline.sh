@@ -930,7 +930,7 @@ ensure_mac_app_for_owned_session() {
 }
 
 # The cold-open-owned scenario's precondition: opens the just-started session in a native Mac
-# window before the UI test runs, so the iPhone's cold open lands on a session a localWindow owner
+# window before the UI test runs, so the iPhone's cold open lands on a session a local owner
 # already holds (GitHub issue #672's common case) rather than the ownerless session every other
 # cold-open scenario measures.
 open_owned_session() {

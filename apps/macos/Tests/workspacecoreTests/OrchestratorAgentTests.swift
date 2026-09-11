@@ -164,7 +164,7 @@ extension OrchestratorTests {
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: 4321,
                     state: .running, updatedAt: timestamp), paths: paths)
             let ownerClient = TerminalClient(
-                id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+                id: "owner-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
                 connectedAt: timestamp)
             try TerminalSessionPersistence.attachClient(sessionID: sessionID, client: ownerClient, mode: .owner, paths: paths, attachedAt: timestamp)
             try TerminalSessionPersistence.detachClient(id: ownerClient.id, paths: paths, detachedAt: timestamp)

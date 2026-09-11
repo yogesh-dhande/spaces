@@ -67,9 +67,8 @@
 
         private func makeConfiguration(sessionID: String, command: String?) -> TerminalSessionLaunchConfiguration {
             TerminalSessionLaunchConfiguration(
-                sessionID: sessionID, backend: .ghosttyEmbedded, title: "selection",
-                workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: command, createdAt: "2026-08-17T00:00:00Z",
-                workspaceID: "workspace-selection", kind: .shell)
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "selection", workingDirectory: FileManager.default.temporaryDirectory.path,
+                shell: "/bin/sh", command: command, createdAt: "2026-08-17T00:00:00Z", workspaceID: "workspace-selection", kind: .shell)
         }
 
         /// Nonisolated poller so its `Task.sleep` suspensions don't hold the engine's queue while the
@@ -97,8 +96,7 @@
         /// local/remote owner, matching `GhosttyLinuxHeadlessSessionResizeTests.attachRemoteOwner`.
         @TerminalEngineActor private static func attachRemoteOwner(to core: GhosttyEmbeddedSessionCore, id: String) {
             let client = TerminalClient(
-                id: id, kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
-                connectedAt: "2026-08-17T00:00:00Z")
+                id: id, kind: .remote, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-08-17T00:00:00Z")
             let response = core.handleControlRequest(TerminalControlRequest(command: "attach", client: client, attachmentMode: .owner))
             #expect(response.ok, "attaching a remote owner must succeed: \(response.message)")
         }
@@ -119,8 +117,8 @@
         ) -> TerminalControlResponse {
             core.handleControlRequest(
                 TerminalControlRequest(
-                    command: "setSelection", clientID: "viewer-without-ownership", selectionStartColumn: startColumn,
-                    selectionStartRow: startRow, selectionEndColumn: endColumn, selectionEndRow: endRow, selectionRectangle: rectangle))
+                    command: "setSelection", clientID: "viewer-without-ownership", selectionStartColumn: startColumn, selectionStartRow: startRow,
+                    selectionEndColumn: endColumn, selectionEndRow: endRow, selectionRectangle: rectangle))
         }
 
         @TerminalEngineActor private static func clearSelection(_ core: GhosttyEmbeddedSessionCore) -> TerminalControlResponse {
@@ -175,8 +173,8 @@
             #expect(readResponse.ok)
             #expect(readResponse.selectionText == "hello")
             #expect(
-                TerminalEngineActor.runSynchronously { Self.renderedSnapshot(of: core)?.selection } != nil,
-                "reading selection text must not clear it")
+                TerminalEngineActor.runSynchronously { Self.renderedSnapshot(of: core)?.selection } != nil, "reading selection text must not clear it"
+            )
 
             let clearResponse = TerminalEngineActor.runSynchronously { Self.clearSelection(core) }
             #expect(clearResponse.ok, "clearSelection must succeed: \(clearResponse.message)")

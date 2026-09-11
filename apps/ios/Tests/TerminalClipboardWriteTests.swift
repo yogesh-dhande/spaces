@@ -55,8 +55,7 @@
         /// emitted before a state refresh overtook it.
         private func staleSnapshotClipboardPayload(targetClientID: String, text: String) -> GhosttyRemoteSessionStatePayload {
             let otherClient = TerminalClient(
-                id: "another-device", kind: .remoteViewer, identity: TerminalClientIdentity(label: "Another device"),
-                connectedAt: "2026-07-28T00:00:00Z")
+                id: "another-device", kind: .remote, identity: TerminalClientIdentity(label: "Another device"), connectedAt: "2026-07-28T00:00:00Z")
             return GhosttyRemoteSessionStatePayload(
                 sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue, emittedAt: "2026-07-28T00:00:02Z",
                 sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil,

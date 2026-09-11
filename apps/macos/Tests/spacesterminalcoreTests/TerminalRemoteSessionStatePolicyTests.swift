@@ -45,65 +45,56 @@ final class TerminalRemoteSessionStatePolicyTests: XCTestCase {
     func testScreenStatePolicyMatchesOwnerBootstrapModel() {
         XCTAssertFalse(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.initial.rawValue))
         XCTAssertTrue(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.initial.rawValue, ownerKind: .localWindow))
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.initial.rawValue, ownerKind: .local))
+        XCTAssertTrue(
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.initial.rawValue, ownerKind: .remote))
         XCTAssertTrue(
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.initial.rawValue, ownerKind: .remoteViewer))
+                reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, ownerKind: .local))
         XCTAssertTrue(
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, ownerKind: .localWindow))
+                reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, ownerKind: .remote))
+        XCTAssertFalse(
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.input.rawValue, ownerKind: .remote))
+        XCTAssertFalse(
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.input.rawValue, ownerKind: .local))
         XCTAssertTrue(
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, ownerKind: .remoteViewer))
+                reason: TerminalRemoteSessionStateReason.inputOutput.rawValue, ownerKind: .local))
         XCTAssertFalse(
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.input.rawValue, ownerKind: .remoteViewer))
-        XCTAssertFalse(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.input.rawValue, ownerKind: .localWindow))
+                reason: TerminalRemoteSessionStateReason.inputOutput.rawValue, ownerKind: .remote))
+        XCTAssertTrue(
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.output.rawValue, ownerKind: .local))
+        XCTAssertTrue(
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.output.rawValue, ownerKind: .remote))
         XCTAssertTrue(
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.inputOutput.rawValue, ownerKind: .localWindow))
-        XCTAssertFalse(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.inputOutput.rawValue, ownerKind: .remoteViewer))
+                reason: TerminalRemoteSessionStateReason.stateChange.rawValue, ownerKind: .local))
         XCTAssertTrue(
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.output.rawValue, ownerKind: .localWindow))
+                reason: TerminalRemoteSessionStateReason.stateChange.rawValue, ownerKind: .remote))
         XCTAssertTrue(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.output.rawValue, ownerKind: .remoteViewer))
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.resize.rawValue, ownerKind: .remote))
         XCTAssertTrue(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.stateChange.rawValue, ownerKind: .localWindow))
-        XCTAssertTrue(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.stateChange.rawValue, ownerKind: .remoteViewer))
-        XCTAssertTrue(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.resize.rawValue, ownerKind: .remoteViewer))
-        XCTAssertTrue(
-            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.resize.rawValue, ownerKind: .localWindow))
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.resize.rawValue, ownerKind: .local))
         XCTAssertTrue(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.clearScreen.rawValue))
         XCTAssertFalse(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.runtimeState.rawValue))
         // A clipboard write rides its own broadcast after the output turn that already carried the
         // frame; re-exporting one here would put a second frame on the delta chain for nothing.
         XCTAssertFalse(
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue, ownerKind: .localWindow))
+                reason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue, ownerKind: .local))
         XCTAssertFalse(
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
-                reason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue, ownerKind: .remoteViewer))
-        XCTAssertFalse(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: "unknown", ownerKind: .localWindow))
+                reason: TerminalRemoteSessionStateReason.clipboardWrite.rawValue, ownerKind: .remote))
+        XCTAssertFalse(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: "unknown", ownerKind: .local))
     }
 
     func testActiveOwnerHelpersUseLiveOwnerAttachment() {
-        let owner = TerminalClient(
-            id: "owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-15T00:00:00Z")
+        let owner = TerminalClient(id: "owner", kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-15T00:00:00Z")
         let localViewer = TerminalClient(
-            id: "viewer", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-15T00:00:01Z")
+            id: "viewer", kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-15T00:00:01Z")
         let snapshot = TerminalSessionAttachmentSnapshot(
             clients: [localViewer, owner],
             attachments: [
@@ -115,12 +106,12 @@ final class TerminalRemoteSessionStatePolicyTests: XCTestCase {
 
         XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: snapshot), owner.id)
         XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClient(in: snapshot), owner)
-        XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClientKind(in: snapshot), .remoteViewer)
+        XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClientKind(in: snapshot), .remote)
     }
 
     func testActiveOwnerHelpersMatchMacOwnerAttachmentSemantics() {
         let owner = TerminalClient(
-            id: "owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-15T00:00:00Z",
+            id: "owner", kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-15T00:00:00Z",
             disconnectedAt: "2026-06-15T00:00:03Z")
         let snapshot = TerminalSessionAttachmentSnapshot(
             clients: [owner],
@@ -129,7 +120,7 @@ final class TerminalRemoteSessionStatePolicyTests: XCTestCase {
 
         XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: snapshot), owner.id)
         XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClient(in: snapshot), owner)
-        XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClientKind(in: snapshot), .remoteViewer)
+        XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClientKind(in: snapshot), .remote)
     }
 
     func testOwnerBootstrapRequiresSnapshot() throws {

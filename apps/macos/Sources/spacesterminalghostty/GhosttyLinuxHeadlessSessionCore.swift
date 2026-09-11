@@ -1431,7 +1431,7 @@
         }
 
         private func markLocalOwnerCommandInputOutputResyncPending() {
-            guard activeOwnerClient()?.kind == .localWindow else { return }
+            guard activeOwnerClient()?.kind == .local else { return }
             localOwnerCommandInputOutputResyncPending = true
         }
 

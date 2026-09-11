@@ -527,7 +527,7 @@ extension OrchestratorTests {
             try TerminalSessionPersistence.attachClient(
                 sessionID: sessionID,
                 client: TerminalClient(
-                    id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+                    id: "owner-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
                     connectedAt: "now"), mode: .owner, paths: paths, attachedAt: "now")
 
             _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
@@ -570,7 +570,7 @@ extension OrchestratorTests {
             try TerminalSessionPersistence.attachClient(
                 sessionID: sessionID,
                 client: TerminalClient(
-                    id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", hostName: "phone", deviceName: "Remote Client"),
+                    id: "remote-client", kind: .remote, identity: .init(label: "iPhone", hostName: "phone", deviceName: "Remote Client"),
                     connectedAt: "2000-01-01T00:00:00Z"), mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
 
             _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
@@ -612,7 +612,7 @@ extension OrchestratorTests {
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
                     state: .running, updatedAt: timestamp), paths: paths)
             let ownerClient = TerminalClient(
-                id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+                id: "owner-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
                 connectedAt: timestamp)
             try TerminalSessionPersistence.attachClient(sessionID: sessionID, client: ownerClient, mode: .owner, paths: paths, attachedAt: timestamp)
             try TerminalSessionPersistence.detachClient(id: ownerClient.id, paths: paths, detachedAt: timestamp)
@@ -643,8 +643,8 @@ extension OrchestratorTests {
 
         let sessionID = "spaces-ad-hoc-session-live-in-memory-attach"
         let window = WindowRecord(
-            id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-            targetURL: nil, terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now")
+            id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+            terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now")
         try store.upsert(window: window)
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
@@ -656,8 +656,8 @@ extension OrchestratorTests {
             let createdAt = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-120))
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 .init(
-                    sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil,
-                    createdAt: createdAt, workspaceID: workspace.id, kind: .shell), paths: paths)
+                    sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil, createdAt: createdAt,
+                    workspaceID: workspace.id, kind: .shell), paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 .init(
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
@@ -687,8 +687,8 @@ extension OrchestratorTests {
 
         let sessionID = "spaces-ad-hoc-session-no-live-attach"
         let window = WindowRecord(
-            id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-            targetURL: nil, terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now")
+            id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+            terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now")
         try store.upsert(window: window)
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
@@ -698,8 +698,8 @@ extension OrchestratorTests {
             let createdAt = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-120))
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 .init(
-                    sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil,
-                    createdAt: createdAt, workspaceID: workspace.id, kind: .shell), paths: paths)
+                    sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil, createdAt: createdAt,
+                    workspaceID: workspace.id, kind: .shell), paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 .init(
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,

@@ -202,7 +202,7 @@
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: 123,
                     state: .running, updatedAt: "2026-07-02T00:00:01Z"), paths: paths)
             let terminalClient = TerminalClient(
-                id: clientID, kind: .remoteViewer, identity: TerminalClientIdentity(label: "Remote Mac"), connectedAt: "2026-07-02T00:00:01Z",
+                id: clientID, kind: .remote, identity: TerminalClientIdentity(label: "Remote Mac"), connectedAt: "2026-07-02T00:00:01Z",
                 leaseRefreshedAt: "2026-07-02T00:00:01Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: sessionID, client: terminalClient, mode: .owner, paths: paths, attachedAt: "2026-07-02T00:00:01Z")

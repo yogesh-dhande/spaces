@@ -284,7 +284,7 @@ final class GhosttyEmbeddedSessionIdleCostTests: XCTestCase {
             for _ in 0..<5 { XCTAssertEqual(host.expireStaleRemoteClientsIfNeeded(now: idleNow), []) }
 
             let viewer = TerminalClient(
-                id: "late-viewer", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
+                id: "late-viewer", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"),
                 connectedAt: TerminalSessionTimestamp.string(from: idleNow))
             XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: viewer, attachmentMode: .viewer)).ok)
             host.debugDrainPersistenceQueue()
@@ -296,9 +296,10 @@ final class GhosttyEmbeddedSessionIdleCostTests: XCTestCase {
         }
     }
 
-    /// A local window client never expires however long the sweep runs: its liveness is not the lease's to
-    /// decide, and the window it belongs to is what keeps the session open.
-    func testSweepNeverExpiresAnAttachedLocalWindow() async throws {
+    /// A local pane is lease-governed like every other client: its kind exempts it from nothing, and only
+    /// its lease keeps it attached (`GhosttyEmbeddedSessionHostTests` covers the local owner that stops
+    /// heartbeating and is expired). Inside that lease, repeated sweeps leave it alone however many run.
+    func testSweepLeavesALocalPaneAloneWhileItsLeaseIsFresh() async throws {
         try useIsolatedSpacesProfile()
         let root = try Self.makeSessionRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -309,13 +310,14 @@ final class GhosttyEmbeddedSessionIdleCostTests: XCTestCase {
         try await TerminalEngineActor.run {
             let host = try Self.makeSteadySession(launchConfiguration, paths: paths)
             let window = TerminalClient(
-                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"),
-                connectedAt: TerminalSessionTimestamp.string(from: Date()))
+                id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: TerminalSessionTimestamp.string(from: Date()))
             XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: window, attachmentMode: .owner)).ok)
             host.debugDrainPersistenceQueue()
 
-            let farFuture = Date().addingTimeInterval(TerminalSessionPersistence.remoteClientLeaseInterval * 100)
-            for _ in 0..<5 { XCTAssertEqual(host.expireStaleRemoteClientsIfNeeded(now: farFuture), []) }
+            // Judged near the end of the lease the attach refreshed, the widest gap a pane that heartbeats
+            // every 20s into a 60s lease ever leaves.
+            let lateInLease = Date().addingTimeInterval(TerminalSessionPersistence.remoteClientLeaseInterval - 5)
+            for _ in 0..<5 { XCTAssertEqual(host.expireStaleRemoteClientsIfNeeded(now: lateInLease), []) }
 
             host.debugDrainPersistenceQueue()
             XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).map(\.clientID), [window.id])

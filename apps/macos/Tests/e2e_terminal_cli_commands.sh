@@ -158,7 +158,7 @@ request = {
     "command": "attach",
     "client": {
         "id": client_id,
-        "kind": "remoteViewer",
+        "kind": "remote",
         "identity": {
             "label": "CLI E2E Viewer",
             "deviceName": "CLI E2E Viewer",

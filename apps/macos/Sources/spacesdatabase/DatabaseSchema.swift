@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 19
+    public static let currentVersion = 20
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -628,6 +628,48 @@ public enum DatabaseSchema {
                       sent_at TEXT,
                       FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
                     );
+                    """)
+        },
+        // `TerminalClientKind`'s raw values changed from `localWindow`/`remoteViewer` to `local`/`remote`.
+        // The wire protocol version bump governs what two live processes negotiate on connect; it does
+        // not reach a raw string already in a profile database, so an existing `terminal_clients` row or
+        // a `terminal_remote_session_states.payload_json` naming a client would fail to decode after the
+        // rename, losing an ended session's replayable final state. Both stored forms are rewritten in
+        // place rather than aliased in the decoder. The payload is written by a plain `JSONEncoder()`
+        // (compact, unspaced), so the literal `"kind":"localWindow"` is the exact stored form; a quote
+        // inside a JSON string value is backslash-escaped, so the substring can only be the key itself.
+        // `CREATE TABLE IF NOT EXISTS` is the file's usual parity for tables every route already has.
+        DatabaseMigrationStep(fromVersion: 19, toVersion: 20, description: "Rename terminal client kinds to local/remote", requiresBackup: true) {
+            handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS terminal_clients (
+                      root_directory TEXT NOT NULL,
+                      session_id TEXT NOT NULL,
+                      client_id TEXT NOT NULL,
+                      kind TEXT NOT NULL,
+                      identity_label TEXT NOT NULL,
+                      identity_host_name TEXT,
+                      identity_device_name TEXT,
+                      identity_network_address TEXT,
+                      connected_at TEXT NOT NULL,
+                      lease_refreshed_at TEXT NOT NULL,
+                      disconnected_at TEXT,
+                      PRIMARY KEY (root_directory, client_id)
+                    );
+                    UPDATE terminal_clients SET kind = 'local' WHERE kind = 'localWindow';
+                    UPDATE terminal_clients SET kind = 'remote' WHERE kind = 'remoteViewer';
+
+                    CREATE TABLE IF NOT EXISTS terminal_remote_session_states (
+                      session_id TEXT PRIMARY KEY,
+                      root_directory TEXT NOT NULL UNIQUE,
+                      payload_json TEXT NOT NULL,
+                      has_final_render INTEGER NOT NULL DEFAULT 0
+                    );
+                    UPDATE terminal_remote_session_states
+                    SET payload_json = REPLACE(REPLACE(payload_json, '"kind":"localWindow"', '"kind":"local"'), '"kind":"remoteViewer"', '"kind":"remote"')
+                    WHERE payload_json LIKE '%"kind":"localWindow"%' OR payload_json LIKE '%"kind":"remoteViewer"%';
                     """)
         },
     ]

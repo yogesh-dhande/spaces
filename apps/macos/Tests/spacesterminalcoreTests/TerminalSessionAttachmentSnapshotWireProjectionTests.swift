@@ -7,7 +7,7 @@ import Testing
 @Suite struct TerminalSessionAttachmentSnapshotWireProjectionTests {
     private let sessionID = "SESSION"
 
-    private func client(_ id: String, kind: TerminalClientKind = .remoteViewer, disconnectedAt: String? = nil, leaseRefreshedAt: String? = nil)
+    private func client(_ id: String, kind: TerminalClientKind = .remote, disconnectedAt: String? = nil, leaseRefreshedAt: String? = nil)
         -> TerminalClient
     {
         TerminalClient(
@@ -23,7 +23,7 @@ import Testing
 
     @Test func dropsDetachedAttachmentsAndTheClientsOnlyTheyReferenced() {
         let snapshot = TerminalSessionAttachmentSnapshot(
-            clients: [client("owner", kind: .localWindow), client("gone-phone", disconnectedAt: "2026-08-22T10:05:00Z")],
+            clients: [client("owner", kind: .local), client("gone-phone", disconnectedAt: "2026-08-22T10:05:00Z")],
             attachments: [
                 attachment("owner", mode: .owner), attachment("gone-phone", detachedAt: "2026-08-22T10:05:00Z"),
                 attachment("owner", mode: .viewer, detachedAt: "2026-08-22T09:00:00Z"),
@@ -53,7 +53,7 @@ import Testing
         let expired = GhosttyRemoteSessionStateTimestamp.string(from: now.addingTimeInterval(-600))
         let snapshot = TerminalSessionAttachmentSnapshot(
             clients: [
-                client("owner", kind: .localWindow), client("fresh-viewer", leaseRefreshedAt: fresh),
+                client("owner", kind: .local, leaseRefreshedAt: fresh), client("fresh-viewer", leaseRefreshedAt: fresh),
                 client("expired-viewer", leaseRefreshedAt: expired), client("detached-viewer", leaseRefreshedAt: fresh),
             ],
             attachments: [
@@ -70,7 +70,7 @@ import Testing
 
     @Test func preservesTheActiveOwnerAndItsClient() {
         let snapshot = TerminalSessionAttachmentSnapshot(
-            clients: [client("owner", kind: .localWindow), client("old-owner", disconnectedAt: "2026-08-22T09:30:00Z")],
+            clients: [client("owner", kind: .local), client("old-owner", disconnectedAt: "2026-08-22T09:30:00Z")],
             attachments: [attachment("old-owner", mode: .owner, detachedAt: "2026-08-22T09:30:00Z"), attachment("owner", mode: .owner)])
 
         let projected = snapshot.liveWireProjection()
@@ -81,7 +81,7 @@ import Testing
 
     @Test func isIdempotent() {
         let snapshot = TerminalSessionAttachmentSnapshot(
-            clients: [client("owner", kind: .localWindow), client("gone", disconnectedAt: "2026-08-22T10:05:00Z")],
+            clients: [client("owner", kind: .local), client("gone", disconnectedAt: "2026-08-22T10:05:00Z")],
             attachments: [attachment("owner", mode: .owner), attachment("gone", detachedAt: "2026-08-22T10:05:00Z")])
 
         #expect(snapshot.liveWireProjection() == snapshot.liveWireProjection().liveWireProjection())

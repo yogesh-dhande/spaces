@@ -1176,7 +1176,7 @@
                     return SpacesDeviceAPIResponse(ok: true, message: "ok")
                 }
                 let client = TerminalClient(
-                    id: clientID, kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:25:30Z")
+                    id: clientID, kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:25:30Z")
                 let attachment = TerminalAttachment(
                     sessionID: "terminal-session", clientID: clientID, mode: .owner, attachedAt: "2026-06-04T14:25:30Z")
                 let snapshot = TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment])
@@ -1289,7 +1289,7 @@
         func testForegroundResumePreemptsAnotherActiveOwnerOnce() async throws {
             let recorder = DeviceAPIRequestRecorder()
             let macClient = TerminalClient(
-                id: "mac-owner", kind: .localWindow, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:25:00Z")
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:25:00Z")
             let macOwner = TerminalAttachment(sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:25:00Z")
             let macOwnedState = Self.runningTerminalState(
                 attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwner]),
@@ -1497,7 +1497,7 @@
             XCTAssertEqual(payload.action, .attach)
             XCTAssertEqual(payload.sessionID, "terminal-session")
             XCTAssertEqual(payload.attachmentMode, .viewer)
-            XCTAssertEqual(payload.client?.kind, .remoteViewer)
+            XCTAssertEqual(payload.client?.kind, .remote)
         }
 
         func testStartingSessionAttachSendsResolvedAppearance() async throws {
@@ -2891,7 +2891,7 @@
             // the stream has carried the viewer past it: an older owner epoch, so the reducer refuses all
             // of it — screen, attachment snapshot and metadata alike.
             let previousOwner = TerminalClient(
-                id: "mac-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces"), connectedAt: "2026-06-04T14:23:30Z")
+                id: "mac-window", kind: .local, identity: TerminalClientIdentity(label: "Spaces"), connectedAt: "2026-06-04T14:23:30Z")
             let preHandoffSnapshot = TerminalSessionAttachmentSnapshot(
                 clients: [previousOwner],
                 attachments: [
@@ -3108,7 +3108,7 @@
             defer { model.stop() }
 
             let displacedOwner = TerminalClient(
-                id: "displaced-owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:23:29Z")
+                id: "displaced-owner", kind: .remote, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:23:29Z")
             let displacedAttachment = TerminalAttachment(
                 sessionID: "terminal-session", clientID: displacedOwner.id, mode: .owner, attachedAt: "2026-06-04T14:23:29Z")
             await model.applyLatestState(
@@ -4942,6 +4942,539 @@
             XCTAssertEqual(model.connectionStage, .reconnecting)
         }
 
+        /// A daemon restart wipes every `terminal_clients`/`terminal_attachments` row, so a client that
+        /// held an attachment before a reconnect and whose bootstrap snapshot no longer names it must
+        /// re-attach on its own. Without this, the stream keeps delivering frames (the pane looks alive)
+        /// while every input the client sends is rejected, because the daemon holds no attachment for it
+        /// at all. Mirrors the Mac pane's `refreshNow` (`TerminalSessionPaneViewController.swift`,
+        /// `attachmentModeToRequest`), which re-attaches under the identical condition.
+        ///
+        /// Backgrounded throughout (`prepareForBackgrounding()`, never resumed): a running session this
+        /// client does not own also arms the pre-existing, unrelated "claim an ownerless session"
+        /// automatic takeover (`attemptAutomaticTakeoverIfNeeded`, gated on `isSceneActive`) on every
+        /// applied state, including a plain viewer's very first bootstrap. Backgrounding is this suite's
+        /// established way of holding that mechanism off (see `testInitiallyInactiveViewerWaitsForActivationBeforeAutomaticTakeover`),
+        /// which is what isolates the reattach behavior this test actually protects.
+        func testAViewerWhoseAttachmentVanishedAcrossAReconnectAttachesAgain() async throws {
+            let backend = RestartedDaemonBackend(attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.connectionBannerGraceSecondsForTesting = 30
+            model.prepareForBackgrounding()
+
+            let client = model.remoteClientForTesting
+            let viewerAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:23:30Z")
+            await backend.setAttachmentSnapshot(TerminalSessionAttachmentSnapshot(clients: [client], attachments: [viewerAttachment]))
+
+            model.start()
+            _ = await backend.waitForSubscribeCount(1)
+            _ = await backend.waitForAttachCount(1)
+            await waitUntil("the bootstrap attachment to land") {
+                model.attachmentSnapshot.attachments.contains { $0.clientID == client.id && $0.detachedAt == nil }
+            }
+
+            // The daemon restarts: its next answer names nobody attached at all.
+            await backend.setAttachmentSnapshot(TerminalSessionAttachmentSnapshot())
+            await backend.reportDisconnect(POSIXError(.ECONNRESET))
+
+            let resubscribed = await backend.waitForSubscribeCount(2, timeout: .seconds(5))
+            XCTAssertTrue(resubscribed, "a reset stream must reconnect")
+            let reattached = await backend.waitForAttachCount(2, timeout: .seconds(5))
+            XCTAssertTrue(reattached, "the reconnect's empty bootstrap snapshot must trigger a reattach")
+
+            let takeoverCount = await backend.currentTakeoverCount()
+            XCTAssertEqual(takeoverCount, 0, "a former viewer reattaching must not take over")
+            let mode = await backend.lastAttachedMode()
+            XCTAssertEqual(mode, .viewer, "the reattach must stay a viewer attach, matching what this client was before the restart")
+        }
+
+        /// The sibling of the reattach case above: a reconnect whose bootstrap snapshot still names this
+        /// client (a network blip, the daemon's rows intact) must send nothing. This client could be the
+        /// session's owner, and the only mode `attachViewerForCurrentLifecycle` sends is `.viewer`, so a
+        /// blind reattach here would demote an owner for no reason.
+        ///
+        /// Backgrounded throughout for the same reason as the reattach test above: it keeps the
+        /// pre-existing "claim an ownerless session" automatic takeover from firing on this viewer's own
+        /// bootstrap, isolating the "does not attach again" behavior this test actually protects.
+        func testAReconnectWhoseBootstrapStillNamesThisClientDoesNotAttachAgain() async throws {
+            let backend = RestartedDaemonBackend(attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.connectionBannerGraceSecondsForTesting = 30
+            model.prepareForBackgrounding()
+
+            let client = model.remoteClientForTesting
+            let viewerAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:23:30Z")
+            await backend.setAttachmentSnapshot(TerminalSessionAttachmentSnapshot(clients: [client], attachments: [viewerAttachment]))
+
+            model.start()
+            _ = await backend.waitForSubscribeCount(1)
+            _ = await backend.waitForAttachCount(1)
+            await waitUntil("the bootstrap attachment to land") {
+                model.attachmentSnapshot.attachments.contains { $0.clientID == client.id && $0.detachedAt == nil }
+            }
+
+            // The daemon's rows survive this disconnect: the next bootstrap still names this client.
+            await backend.reportDisconnect(POSIXError(.ECONNRESET))
+            let resubscribed = await backend.waitForSubscribeCount(2, timeout: .seconds(5))
+            XCTAssertTrue(resubscribed, "a reset stream must reconnect")
+            let secondStateRead = await backend.waitForStateReadCount(2, timeout: .seconds(5))
+            XCTAssertTrue(secondStateRead, "the reconnect's bootstrap read must land")
+
+            // Nothing distinguishes "will never attach again" from "hasn't attached again yet" here, so
+            // give the model a beat past the bootstrap landing before asserting the negative.
+            try? await Task.sleep(for: .milliseconds(300))
+
+            let attachCount = await backend.currentAttachCount()
+            XCTAssertEqual(attachCount, 1, "a reconnect whose snapshot still names this client must not attach again")
+            let takeoverCount = await backend.currentTakeoverCount()
+            XCTAssertEqual(takeoverCount, 0)
+        }
+
+        /// A former owner whose attachment vanished across a reconnect hands itself back its one
+        /// automatic takeover, so it reclaims the session it owned instead of leaving it ownerless until
+        /// some other client happens to take over. The Mac pane does the equivalent by re-attaching
+        /// directly as owner; this client re-attaches as viewer first (`attachViewerForCurrentLifecycle`
+        /// has no owner mode) and then takes over.
+        ///
+        /// The scene stays active (unlike the two tests above): this is the one case where the automatic
+        /// takeover actually must fire, since `attemptAutomaticTakeoverIfNeeded` requires `isSceneActive`.
+        /// That leaves the pre-existing "claim an ownerless session" mechanism free to also fire on this
+        /// same reconnect's bootstrap, racing the production reattach this test protects — `attachIndex <
+        /// takeoverIndex` holds regardless of how that race resolves only because `RestartedDaemonBackend`
+        /// rejects a takeover from a client it has no attachment for: the accepted takeover can only be
+        /// the one this client's own reattach made legitimate.
+        ///
+        /// Ownership is seeded with `configureOwnerInteractiveForTesting`, not a pre-set
+        /// `RestartedDaemonBackend` snapshot alone: `connect()`'s own `shouldAttachBeforeSubscribing`
+        /// sends a blind `.viewer` attach ahead of the very first bootstrap whenever `hasAttachedToSession`
+        /// is still false, which — now that this backend's `.attach` registers whatever mode it is sent —
+        /// would demote a merely-seeded owner before the bootstrap ever confirms it. Seeding through
+        /// `configureOwnerInteractiveForTesting` sets `hasAttachedToSession` (and `isOwner`) the same way
+        /// a real prior attach would have, so that blind pre-attach never fires, exactly as it would not
+        /// for a genuine already-attached owner reconnecting.
+        func testAFormerOwnerReclaimsTheSessionAfterItsAttachmentVanished() async throws {
+            let backend = RestartedDaemonBackend(attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.connectionBannerGraceSecondsForTesting = 30
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+
+            let client = model.remoteClientForTesting
+            let ownerAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: client.id, mode: .owner, attachedAt: "2026-06-04T14:23:30Z")
+            await backend.setAttachmentSnapshot(TerminalSessionAttachmentSnapshot(clients: [client], attachments: [ownerAttachment]))
+
+            model.start()
+            _ = await backend.waitForSubscribeCount(1)
+            await waitUntil("the bootstrap owner snapshot to apply", timeout: .seconds(5)) { model.isOwner }
+
+            let takeoverCountBeforeRestart = await backend.currentTakeoverCount()
+            XCTAssertEqual(takeoverCountBeforeRestart, 0, "confirming ownership from the bootstrap must not itself take over")
+            let attachCountBeforeRestart = await backend.currentAttachCount()
+            XCTAssertEqual(attachCountBeforeRestart, 0, "an already-attached owner's first connect must send no attach at all")
+
+            // The daemon restarts: its next answer names nobody attached at all.
+            await backend.setAttachmentSnapshot(TerminalSessionAttachmentSnapshot())
+            await backend.reportDisconnect(POSIXError(.ECONNRESET))
+
+            let resubscribed = await backend.waitForSubscribeCount(2, timeout: .seconds(5))
+            XCTAssertTrue(resubscribed, "a reset stream must reconnect")
+            let reattached = await backend.waitForAttachCount(1, timeout: .seconds(5))
+            XCTAssertTrue(reattached, "the former owner must reattach once its attachment is gone")
+            let tookOver = await backend.waitForTakeoverCount(1, timeout: .seconds(5))
+            XCTAssertTrue(tookOver, "the former owner must reclaim the session with its one automatic takeover")
+
+            let finalAttachCount = await backend.currentAttachCount()
+            XCTAssertEqual(finalAttachCount, 1, "exactly one reattach, sent only after the restart wiped this client's attachment")
+            let finalTakeoverCount = await backend.currentTakeoverCount()
+            XCTAssertEqual(finalTakeoverCount, 1)
+            let order = await backend.requestOrderSnapshot()
+            let attachIndex = order.lastIndex(of: "attach")
+            let takeoverIndex = order.lastIndex(of: "takeover")
+            XCTAssertNotNil(attachIndex)
+            XCTAssertNotNil(takeoverIndex)
+            if let attachIndex, let takeoverIndex {
+                XCTAssertLessThan(attachIndex, takeoverIndex, "the reattach must be sent before the takeover it hands back")
+            }
+        }
+
+        /// Sibling of the reclaim test above, for the other half of the product contract (docs/spec.md
+        /// line 313): a former owner reclaims only a session the bootstrap snapshot still shows as
+        /// ownerless. When another pane (the Mac, here) took the session over while this client was
+        /// disconnected, the returning owner comes back a mere viewer of that owner, exactly like a
+        /// former viewer, and the ordinary Take Over affordance (`showsTakeOverAction`) is how the user
+        /// gets it back from there — `attemptAutomaticTakeoverIfNeeded` itself carries no such guard, so
+        /// this is what stops a returning owner from displacing a newer, legitimate one.
+        ///
+        /// The pre-existing "claim an ownerless session" mechanism can still fire its own takeover
+        /// attempt on this same reconnect's bootstrap, ahead of the reattach (`start()` resets
+        /// `hasAttemptedAutomaticTakeover`, and this client reads as not-owner the moment the bootstrap
+        /// applies the Mac's snapshot, before this client has re-attached at all) — `RestartedDaemonBackend`
+        /// rejects it, since this client is not yet attached, so it costs nothing beyond a
+        /// `"takeover-rejected"` entry ahead of the reattach. The assertions below are scoped to what
+        /// happened after the reattach, which is the only span the production gate under test controls.
+        func testAFormerOwnerStaysAViewerWhenAnotherClientOwnsTheSessionAfterRestart() async throws {
+            let backend = RestartedDaemonBackend(attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.connectionBannerGraceSecondsForTesting = 30
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+
+            let client = model.remoteClientForTesting
+            let ownerAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: client.id, mode: .owner, attachedAt: "2026-06-04T14:23:30Z")
+            await backend.setAttachmentSnapshot(TerminalSessionAttachmentSnapshot(clients: [client], attachments: [ownerAttachment]))
+
+            model.start()
+            _ = await backend.waitForSubscribeCount(1)
+            await waitUntil("the bootstrap owner snapshot to apply", timeout: .seconds(5)) { model.isOwner }
+
+            // The daemon restarts, and by the time this client reconnects another pane already took the
+            // session over: the next bootstrap names a different client as owner, this client absent.
+            let macClient = TerminalClient(
+                id: "mac-pane", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:26:00Z")
+            let macOwnerAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:26:00Z")
+            await backend.setAttachmentSnapshot(TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwnerAttachment]))
+            await backend.reportDisconnect(POSIXError(.ECONNRESET))
+
+            let resubscribed = await backend.waitForSubscribeCount(2, timeout: .seconds(5))
+            XCTAssertTrue(resubscribed, "a reset stream must reconnect")
+            let reattached = await backend.waitForAttachCount(1, timeout: .seconds(5))
+            XCTAssertTrue(reattached, "the former owner must still reattach as a viewer once its attachment is gone")
+
+            // Nothing distinguishes "will never take over" from "hasn't taken over yet" here, so give the
+            // model a beat past the reattach before asserting the negative.
+            try? await Task.sleep(for: .milliseconds(300))
+
+            let takeoverCountAfterRestart = await backend.currentTakeoverCount()
+            XCTAssertEqual(takeoverCountAfterRestart, 0, "a former owner must not displace a newer, legitimate owner")
+            let order = await backend.requestOrderSnapshot()
+            guard let attachIndex = order.lastIndex(of: "attach") else {
+                XCTFail("expected the reattach to have been recorded")
+                return
+            }
+            let afterReattach = order[(attachIndex + 1)...]
+            XCTAssertFalse(afterReattach.contains("takeover"), "no takeover must follow the reattach")
+            XCTAssertFalse(afterReattach.contains("takeover-rejected"), "no takeover attempt at all must follow the reattach")
+
+            XCTAssertFalse(model.isOwner, "a former owner must not read as owner when another client owns the session")
+            XCTAssertTrue(model.showsTakeOverAction, "the locked state's Take Over affordance must be available")
+        }
+
+        /// A reattach that itself fails (a transient error on the attach request, not a real absence of
+        /// the session) is handled exactly like a failed pre-subscribe attach: it throws out of `connect`
+        /// into the outer `catch`, which retires the attempt (cancelling its stream) and lets
+        /// `handleConnectError` schedule a redial, whose own pre-subscribe attach
+        /// (`shouldAttachBeforeSubscribing`) is the retry. Nothing in this test reports a second
+        /// disconnect; the redial is `connect`'s own doing, not something driven from outside it.
+        ///
+        /// Backgrounded throughout, for the same reason as the plain reattach test above: this is a
+        /// viewer's recovery, not an owner's, so the pre-existing "claim an ownerless session" automatic
+        /// takeover has no part to play here and is kept off entirely.
+        func testAViewerWhoseReattachFailedRedialsAndAttachesBeforeSubscribing() async throws {
+            let backend = RestartedDaemonBackend(attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.connectionBannerGraceSecondsForTesting = 30
+            model.prepareForBackgrounding()
+
+            let client = model.remoteClientForTesting
+            let viewerAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:23:30Z")
+            await backend.setAttachmentSnapshot(TerminalSessionAttachmentSnapshot(clients: [client], attachments: [viewerAttachment]))
+
+            model.start()
+            _ = await backend.waitForSubscribeCount(1)
+            _ = await backend.waitForAttachCount(1)
+            await waitUntil("the bootstrap attachment to land") {
+                model.attachmentSnapshot.attachments.contains { $0.clientID == client.id && $0.detachedAt == nil }
+            }
+
+            // The daemon restarts: its next answer names nobody attached at all, and the reattach this
+            // reconnect sends is made to fail once, the way a transient error on that one request would.
+            await backend.setAttachmentSnapshot(TerminalSessionAttachmentSnapshot())
+            await backend.setFailNextAttach()
+            await backend.reportDisconnect(POSIXError(.ECONNRESET))
+
+            let resubscribed = await backend.waitForSubscribeCount(2, timeout: .seconds(5))
+            XCTAssertTrue(resubscribed, "a reset stream must reconnect even though the reattach it triggers will fail")
+            let failedReattach = await backend.waitForAttachCount(2, timeout: .seconds(5))
+            XCTAssertTrue(failedReattach, "the reconnect's empty bootstrap snapshot must still trigger a reattach attempt")
+
+            let snapshotAfterFailure = await backend.currentAttachmentSnapshot()
+            XCTAssertFalse(
+                snapshotAfterFailure.attachments.contains { $0.clientID == client.id && $0.detachedAt == nil },
+                "a failed attach must not register the client, the same as a real daemon that rejected it")
+
+            // No second disconnect is reported here: the failed reattach throws into `connect`'s own
+            // outer `catch`, which retires this attempt and schedules a redial through
+            // `handleConnectError` on its own, without anything external driving it. Reaching a third
+            // subscribe with nothing but that scheduled redial to cause it is what proves the redial
+            // happened; the fixed one-second cadence for a non-transient daemon refusal, plus the 5 s
+            // budget below, leaves ample room for it to land.
+            let resubscribedAgain = await backend.waitForSubscribeCount(3, timeout: .seconds(5))
+            XCTAssertTrue(resubscribedAgain, "the failed reattach must schedule its own redial, opening a third stream")
+            let reattachedAgain = await backend.waitForAttachCount(3, timeout: .seconds(5))
+            XCTAssertTrue(reattachedAgain, "the redial must attach again, recovering from the earlier failure")
+
+            // This third attach must be the redial's pre-subscribe path (`shouldAttachBeforeSubscribing`),
+            // not the reattach block the second connect already failed out of: it must be recorded before
+            // the third subscribe, not after it.
+            let order = await backend.requestOrderSnapshot()
+            let thirdAttachIndex = order.lastIndex(of: "attach")
+            let thirdSubscribeIndex = order.lastIndex(of: "subscribe")
+            XCTAssertNotNil(thirdAttachIndex)
+            XCTAssertNotNil(thirdSubscribeIndex)
+            if let thirdAttachIndex, let thirdSubscribeIndex {
+                XCTAssertLessThan(
+                    thirdAttachIndex, thirdSubscribeIndex,
+                    "the recovering attach must be sent before its reconnect subscribes, proving it took the pre-subscribe path")
+            }
+
+            let finalSnapshot = await backend.currentAttachmentSnapshot()
+            XCTAssertTrue(
+                finalSnapshot.attachments.contains { $0.clientID == client.id && $0.detachedAt == nil },
+                "the recovering attach must register the client")
+            let takeoverCount = await backend.currentTakeoverCount()
+            XCTAssertEqual(takeoverCount, 0, "a former viewer recovering this way must not take over")
+            let mode = await backend.lastAttachedMode()
+            XCTAssertEqual(mode, .viewer, "the recovering attach must stay a viewer attach")
+        }
+
+        /// The P1 this exercises: `connect()`'s bootstrap read is only one of the two sources a
+        /// reconnect's armed reattach check can settle from. When the bootstrap read answers nothing (a
+        /// request failure, or its own fixed timeout) before the subscription's stream has delivered
+        /// anything, deciding the check right there and then would skip it forever: `hasAttachedToSession`
+        /// is still whatever it was before this connect (`true`, since this client held an attachment
+        /// going into it), so a decision made at that moment reads as "still attached" and reattaches
+        /// nothing. The stream's own payload, arriving after, is what finally sets `hasAttachedToSession`
+        /// false and must still be able to trigger the reattach then, which is exactly what
+        /// `applyReducedState`'s consume site (armed by `connect()`, not fixed to its bootstrap call)
+        /// covers: whichever source produces the first snapshot naming this client gone is the one that
+        /// settles the check.
+        ///
+        /// Backgrounded throughout, for the same reason as the plain reattach test above: this is a
+        /// viewer's recovery, not an owner's, so the pre-existing "claim an ownerless session" automatic
+        /// takeover has no part to play here and is kept off entirely.
+        func testAViewerReattachesFromTheStreamPayloadWhenTheBootstrapReadIsUnavailable() async throws {
+            let backend = RestartedDaemonBackend(attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.connectionBannerGraceSecondsForTesting = 30
+            model.prepareForBackgrounding()
+
+            let client = model.remoteClientForTesting
+            let viewerAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:23:30Z")
+            await backend.setAttachmentSnapshot(TerminalSessionAttachmentSnapshot(clients: [client], attachments: [viewerAttachment]))
+
+            model.start()
+            _ = await backend.waitForSubscribeCount(1)
+            _ = await backend.waitForAttachCount(1)
+            await waitUntil("the bootstrap attachment to land") {
+                model.attachmentSnapshot.attachments.contains { $0.clientID == client.id && $0.detachedAt == nil }
+            }
+
+            // The daemon restarts: its next answer would name nobody attached at all, except this
+            // reconnect's bootstrap read is made to fail outright, so it never gets to answer anything.
+            await backend.setAttachmentSnapshot(TerminalSessionAttachmentSnapshot())
+            await backend.setFailNextStateRead()
+            await backend.reportDisconnect(POSIXError(.ECONNRESET))
+
+            let resubscribed = await backend.waitForSubscribeCount(2, timeout: .seconds(5))
+            XCTAssertTrue(resubscribed, "a reset stream must reconnect even though its bootstrap read will fail")
+            let bootstrapFailed = await backend.waitForStateReadCount(2, timeout: .seconds(5))
+            XCTAssertTrue(bootstrapFailed, "the reconnect's own bootstrap read must have been attempted (and failed) by now")
+
+            // The bootstrap read is done and answered nothing; nothing has reattached from it, since
+            // `hasAttachedToSession` reads exactly what it did before this connect until some snapshot
+            // says otherwise.
+            let attachCountAfterFailedBootstrap = await backend.currentAttachCount()
+            XCTAssertEqual(attachCountAfterFailedBootstrap, 1, "a failed bootstrap read alone must not have triggered anything yet")
+
+            // The subscription's own stream now delivers the empty-snapshot payload the bootstrap read
+            // never got to answer with — the reconnect's other, equally authoritative source for the same
+            // fact.
+            let emptySnapshotFrame = TerminalViewerModelTests.runningTerminalState(
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:24:00Z")
+            await backend.fireFrame(emptySnapshotFrame)
+
+            let reattached = await backend.waitForAttachCount(2, timeout: .seconds(5))
+            XCTAssertTrue(reattached, "the stream's own payload must trigger the reattach the failed bootstrap read could not")
+
+            let order = await backend.requestOrderSnapshot()
+            XCTAssertEqual(order.filter { $0 == "attach" }.count, 2, "exactly the first connect's attach and this recovering one")
+            let finalSnapshot = await backend.currentAttachmentSnapshot()
+            XCTAssertTrue(
+                finalSnapshot.attachments.contains { $0.clientID == client.id && $0.detachedAt == nil },
+                "the recovering attach must register the client")
+            let takeoverCount = await backend.currentTakeoverCount()
+            XCTAssertEqual(takeoverCount, 0, "a former viewer recovering this way must not take over")
+            let mode = await backend.lastAttachedMode()
+            XCTAssertEqual(mode, .viewer, "the recovering attach must stay a viewer attach")
+        }
+
+        /// codex P1 (round 6): `lifecycle` and `clientID` alone do not tell a reconnect's own settling
+        /// snapshot apart from a snapshot the connection it replaces submitted just before disconnecting
+        /// -- a reconnect keeps both unchanged from the connection it replaces, so a stale submission that
+        /// still names this client attached can pass `isCurrentStateRefresh` and clear the check without
+        /// ever reattaching, if its reduction happens to land after `connect()` has already armed the
+        /// check. `TerminalReattachCheckAfterReconnect.submissionBoundary` is what tells them apart: only
+        /// a snapshot *submitted* after the boundary was produced by this reconnect.
+        ///
+        /// Reproducing the "after" half deterministically (not racing a sleep) needs two pieces:
+        ///   - The stale payload's own *submission* is what must predate the boundary, and that part is
+        ///     free: `submitLatestState` bumps `submittedStateCount` synchronously on the call that makes
+        ///     it, so submitting before `reportDisconnect` below guarantees the boundary `connect()` reads
+        ///     off it afterwards already covers it.
+        ///   - Its *application* has to land after the boundary was read, which is not free: reduction
+        ///     runs off the main actor, and a single payload reduces fast enough to almost always finish
+        ///     well inside the ~150ms silent-redial delay, landing before the check even exists. A large,
+        ///     ordinary burst of `paddingCount` unrelated payloads submitted immediately ahead of the
+        ///     stale one exploits the pipeline's own strict FIFO reduction (`TerminalRemoteStateReductionPipeline`'s
+        ///     single consumer loop) to push its reduction out past that delay: the stale payload cannot
+        ///     even begin reducing until every padding payload ahead of it already has, which reliably
+        ///     outlasts the redial on any machine this suite runs on. This can only make the test
+        ///     conservative, never flaky: if the burst ever fails to outlast the delay, the stale payload
+        ///     resolves before the check exists, both fixed and unfixed code behave identically (a
+        ///     no-op), and the assertions below still pass because the real settling snapshot fired
+        ///     afterwards settles the check on its own -- the test would just fail to have exercised the
+        ///     bug that round, never fail on correct code. Each padding frame carries its own, strictly
+        ///     increasing revision (a repeated one would have the reducer judge every frame after the
+        ///     first no newer than what it already retained, dropping it and arming an unrelated
+        ///     render-update resync fetch that races this test's own single-shot bootstrap-read failure
+        ///     below for which `.state` call actually fails), and `renderUpdateResyncIntervalForTesting`
+        ///     is pinned far out of reach so the burst's own duration cannot arm that resync on a timer
+        ///     either.
+        ///
+        /// The bootstrap read is made to fail (as in the stream-payload test above), so the *only* two
+        /// candidates left to settle the check are the stale payload and this test's own later `fireFrame`
+        /// -- isolating whether the boundary, not `lifecycle`/`clientID` alone, is what keeps the former
+        /// from being mistaken for the latter. Awaiting a sentinel payload submitted after the stale one
+        /// (`applyLatestState`) is what proves the stale payload has actually finished applying, by the
+        /// same strict-ordering guarantee `testAnAwaitedApplyLandsAfterEverythingSubmittedBeforeIt`
+        /// documents, before this test moves on to fire the real settling snapshot.
+        func testAStalePayloadFromTheConnectionAReconnectReplacesDoesNotConsumeItsReattachCheck() async throws {
+            let backend = RestartedDaemonBackend(attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.connectionBannerGraceSecondsForTesting = 30
+            // The padding burst below takes well over the default 1-second trailing render-update-resync
+            // interval to drain, which would otherwise arm an unrelated out-of-band `.state` refresh
+            // (`reason: "render_update_resync"`) that races this test's own single-shot `setFailNextStateRead`
+            // for which `.state` call actually fails -- letting a resync consume it instead of the
+            // reconnect's own bootstrap read, and leaving that bootstrap read to succeed and settle the
+            // check on its own before this test's checkpoint. Pinning the interval far out of reach removes
+            // that confound: the only `.state` call in play is the reconnect's own bootstrap read.
+            model.renderUpdateResyncIntervalForTesting = 1_000_000
+            model.prepareForBackgrounding()
+
+            let client = model.remoteClientForTesting
+            let viewerAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:23:30Z")
+            await backend.setAttachmentSnapshot(TerminalSessionAttachmentSnapshot(clients: [client], attachments: [viewerAttachment]))
+
+            model.start()
+            _ = await backend.waitForSubscribeCount(1)
+            _ = await backend.waitForAttachCount(1)
+            await waitUntil("the bootstrap attachment to land") {
+                model.attachmentSnapshot.attachments.contains { $0.clientID == client.id && $0.detachedAt == nil }
+            }
+
+            // The connection about to be replaced submits one more payload that still names this client
+            // attached -- exactly what a real stream frame racing its own disconnect looks like -- behind
+            // a large burst of unrelated padding that exists only to keep the reduce queue busy past the
+            // reconnect's arm (see the doc comment above). Both go out before `reportDisconnect`, so both
+            // predate whatever boundary the reconnect arms with.
+            // Each padding frame carries its own, strictly increasing revision: a repeated revision would
+            // have the reducer judge every frame after the first no newer than what it already retained,
+            // dropping it and requesting a render-update resync (`shouldUseFrame`) -- an unrelated
+            // out-of-band `.state` fetch this test does not want competing with its own bootstrap-read
+            // failure injection below.
+            let paddingCount = 3_000
+            let paddingFrames = try (0..<paddingCount).map { index in
+                try TerminalViewerModelTests.framedState(
+                    text: String(repeating: "x", count: 2_000), sessionRevision: UInt64(index + 1), ownerEpoch: 1, emittedAt: "2026-06-04T14:23:31Z")
+            }
+            for paddingFrame in paddingFrames { model.submitLatestState(paddingFrame, isOutOfBand: false) }
+            let staleStillAttachedPayload = TerminalViewerModelTests.runningTerminalState(
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [viewerAttachment]),
+                emittedAt: "2026-06-04T14:23:32Z")
+            model.submitLatestState(staleStillAttachedPayload, isOutOfBand: false)
+
+            // The daemon restarts: its next answer would name nobody attached at all, except this
+            // reconnect's bootstrap read is made to fail outright (as in the stream-payload test above),
+            // so the stale payload above and this test's own later `fireFrame` are the only two snapshots
+            // left that could possibly settle the check.
+            await backend.setAttachmentSnapshot(TerminalSessionAttachmentSnapshot())
+            await backend.setFailNextStateRead()
+            await backend.reportDisconnect(POSIXError(.ECONNRESET))
+
+            // Both of these can only be true once `connect()` has already run past its arm, which is the
+            // very first thing it does: confirms the boundary the reconnect armed with already covers the
+            // padding burst and the stale payload above.
+            let resubscribed = await backend.waitForSubscribeCount(2, timeout: .seconds(30))
+            XCTAssertTrue(resubscribed, "a reset stream must reconnect even though its bootstrap read will fail")
+            let bootstrapFailed = await backend.waitForStateReadCount(2, timeout: .seconds(30))
+            XCTAssertTrue(bootstrapFailed, "the reconnect's own bootstrap read must have been attempted (and failed) by now")
+
+            // Drains the burst and the stale payload behind it: this resolves only once both have been
+            // fully accounted for, by the same strict-ordering guarantee
+            // `testAnAwaitedApplyLandsAfterEverythingSubmittedBeforeIt` documents.
+            await model.applyLatestState(Self.outputState(title: "sentinel", emittedAt: "2026-06-04T14:23:33Z"), isOutOfBand: false)
+
+            // Nothing has reattached: the fixed code must have left the stale payload's attempt to settle
+            // the check unconsumed rather than clearing it, since a submission at or below the boundary
+            // never triggers the block that starts a reattach.
+            let attachCountAfterStalePayload = await backend.currentAttachCount()
+            XCTAssertEqual(
+                attachCountAfterStalePayload, 1,
+                "a stale payload from the connection this reconnect replaced must not have triggered anything, correct or otherwise")
+
+            // The subscription's own stream now delivers the empty-snapshot payload the bootstrap read
+            // never got to answer with -- the reconnect's genuine settling snapshot, submitted (and so
+            // indexed) after the boundary.
+            let emptySnapshotFrame = TerminalViewerModelTests.runningTerminalState(
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:24:00Z")
+            await backend.fireFrame(emptySnapshotFrame)
+
+            let reattached = await backend.waitForAttachCount(2, timeout: .seconds(10))
+            XCTAssertTrue(
+                reattached,
+                "the check must still be armed for the reconnect's own settling snapshot: a stale payload the connection being replaced "
+                    + "submitted before disconnecting must not have consumed it")
+
+            let takeoverCount = await backend.currentTakeoverCount()
+            XCTAssertEqual(takeoverCount, 0, "a former viewer recovering this way must not take over")
+            let mode = await backend.lastAttachedMode()
+            XCTAssertEqual(mode, .viewer, "the recovering attach must stay a viewer attach")
+        }
+
         /// K2 regression: a keystroke queued behind a conclusively failing send must not go out once a
         /// new stream is up. Mirrors Mac's `RemoteGhosttySessionHost.reportInputFailure`, which calls
         /// `inputQueue.cancelAll()` exactly when `reportFailedInputSend` returns `true` (a teardown), so
@@ -5026,6 +5559,210 @@
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
+
+            func close() async {}
+        }
+
+        /// Reproduces a daemon that wipes its `terminal_clients`/`terminal_attachments` tables on every
+        /// start: `.state` reads answer with whatever attachment snapshot the test currently holds
+        /// (settable mid-run via `setAttachmentSnapshot`, so a test can simulate the daemon losing this
+        /// client's row between two reads).
+        ///
+        /// `.attach` registers the requesting client into `attachmentSnapshot` (mirroring what a real
+        /// attach does to the daemon's row) and `.takeover` requires the requesting client to currently
+        /// hold a live attachment there, rejecting (`ok: false`) a takeover from a client the snapshot
+        /// does not name — exactly what a real daemon can do, since a restart's wipe leaves it with no
+        /// record of a client that has not yet re-attached. This is not incidental realism: the
+        /// pre-existing "claim an ownerless running session" automatic takeover
+        /// (`TerminalViewerModel.attemptAutomaticTakeoverIfNeeded`) fires on every applied state,
+        /// including the reconnect's own bootstrap, and would otherwise race the reattach this backend is
+        /// built to exercise — modeling the daemon's real gate is what makes the accepted takeover
+        /// provably wait on the reattach that makes it legitimate, rather than depending on which of two
+        /// in-memory async calls happens to reach the mock first.
+        ///
+        /// Requests are counted by kind and recorded in the order they were processed (this actor
+        /// serializes them), so a test can check ordering (a reattach must precede the takeover it hands
+        /// back) as well as totals. `takeoverCount`/`waitForTakeoverCount` count only *accepted*
+        /// takeovers: a takeover a real daemon would reject changes nothing a test needs to see.
+        private actor RestartedDaemonBackend: SpacesDeviceAPIBackend {
+            private var attachmentSnapshot: TerminalSessionAttachmentSnapshot
+            private var subscribeCount = 0
+            private var onDisconnect: (@MainActor (SpacesDeviceAPIStreamDisconnect) -> Void)?
+            /// Every stream this backend has opened, in subscribe order, so `fireFrame` can deliver a
+            /// payload through the most recent one's `onEvent`, exactly as a real stream frame would.
+            private var openedStreamEventHandlers: [@MainActor (GhosttyRemoteSessionStatePayload) -> Void] = []
+            private var stateReadCount = 0
+            private var attachCount = 0
+            private var takeoverCount = 0
+            private var lastAttachedModeValue: TerminalAttachmentMode?
+            private var requestOrder: [String] = []
+            private var sequence = 0
+            /// One-shot switch: when set, the next `.attach` is answered `ok: false` and, unlike a
+            /// succeeding attach, does not register the requesting client into `attachmentSnapshot` (a
+            /// real daemon that failed the attach wrote no row for it either). Clears itself the moment it
+            /// is consumed, so only that one attach fails.
+            private var failNextAttach = false
+            /// One-shot switch: when set, the next `.state` read throws instead of answering, the way a
+            /// request failure looks from `connect()`'s bootstrap read. `ETIMEDOUT` is transient
+            /// (`TerminalViewerModel.isTransientReconnectError`), so `readStateForConnectBootstrap`
+            /// (`ignoreTransientTimeout: true`) settles it as "answered nothing" with no error banner,
+            /// exactly like the read's own fixed timeout expiring for real — reproducing that outcome
+            /// without a test actually waiting one out.
+            private var failNextStateRead = false
+
+            init(attachmentSnapshot: TerminalSessionAttachmentSnapshot) { self.attachmentSnapshot = attachmentSnapshot }
+
+            nonisolated func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { RestartedDaemonRequestTransport(backend: self) }
+
+            nonisolated func openSessionStream(
+                request: SpacesDeviceAPIRequest, initialEventTimeout: Duration,
+                onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
+            ) async throws -> SpacesDeviceAPIStreamHandle {
+                await recordSubscribe(onEvent: onEvent, onDisconnect: onDisconnect)
+                return SpacesDeviceAPIStreamHandle {}
+            }
+
+            private func recordSubscribe(
+                onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
+            ) {
+                subscribeCount += 1
+                requestOrder.append("subscribe")
+                openedStreamEventHandlers.append(onEvent)
+                self.onDisconnect = onDisconnect
+            }
+
+            func setAttachmentSnapshot(_ snapshot: TerminalSessionAttachmentSnapshot) { attachmentSnapshot = snapshot }
+
+            func setFailNextAttach(_ value: Bool = true) { failNextAttach = value }
+            func setFailNextStateRead(_ value: Bool = true) { failNextStateRead = value }
+
+            func reportDisconnect(_ error: any Error) async {
+                let handler = onDisconnect
+                await MainActor.run { handler?(SpacesDeviceAPIStreamDisconnect(error: error)) }
+            }
+
+            /// Delivers `payload` on the most recently opened stream's `onEvent`, exactly as a real stream
+            /// frame would: the other, equally authoritative source `applyReducedState` can settle a
+            /// reconnect's armed reattach check from, alongside the bootstrap read.
+            func fireFrame(_ payload: GhosttyRemoteSessionStatePayload) async {
+                guard let handler = openedStreamEventHandlers.last else { return }
+                await MainActor.run { handler(payload) }
+            }
+
+            func send(_ request: SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse {
+                sequence += 1
+                switch request.command {
+                case .state:
+                    stateReadCount += 1
+                    if failNextStateRead {
+                        failNextStateRead = false
+                        throw POSIXError(.ETIMEDOUT)
+                    }
+                    return TerminalViewerModelTests.terminalStateResponse(
+                        TerminalViewerModelTests.runningTerminalState(attachmentSnapshot: attachmentSnapshot, emittedAt: Self.emittedAt(sequence)))
+                case .terminalControl(let payload) where payload.action == .attach:
+                    attachCount += 1
+                    lastAttachedModeValue = payload.attachmentMode
+                    requestOrder.append("attach")
+                    if failNextAttach {
+                        failNextAttach = false
+                        return SpacesDeviceAPIResponse(ok: false, message: "RestartedDaemonBackend: attach failed")
+                    }
+                    // Registers the attaching client into the live snapshot, the way a real attach
+                    // registers a row with the daemon: this is what a later takeover checks.
+                    if let attachingClient = payload.client {
+                        let attachment = TerminalAttachment(
+                            sessionID: "terminal-session", clientID: attachingClient.id, mode: payload.attachmentMode ?? .viewer,
+                            attachedAt: Self.emittedAt(sequence))
+                        var clients = attachmentSnapshot.clients.filter { $0.id != attachingClient.id }
+                        clients.append(attachingClient)
+                        var attachments = attachmentSnapshot.attachments.filter { $0.clientID != attachingClient.id }
+                        attachments.append(attachment)
+                        attachmentSnapshot = TerminalSessionAttachmentSnapshot(clients: clients, attachments: attachments)
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case .terminalControl(let payload) where payload.action == .takeover:
+                    // A real daemon has no row for a client that has never attached (or whose row a
+                    // restart wiped), so it cannot promote one to owner. Rejecting here is what makes the
+                    // pre-existing "claim an ownerless running session" automatic takeover harmless when
+                    // it races ahead of a reattach still in flight, instead of letting it reach ownership
+                    // through a client this backend has no record of.
+                    guard let requestingClientID = payload.clientID,
+                        attachmentSnapshot.attachments.contains(where: { $0.clientID == requestingClientID && $0.detachedAt == nil }),
+                        let owningClient = attachmentSnapshot.clients.first(where: { $0.id == requestingClientID })
+                    else {
+                        requestOrder.append("takeover-rejected")
+                        return SpacesDeviceAPIResponse(ok: false, message: "RestartedDaemonBackend: client not attached")
+                    }
+                    takeoverCount += 1
+                    requestOrder.append("takeover")
+                    let ownerAttachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: owningClient.id, mode: .owner, attachedAt: Self.emittedAt(sequence))
+                    let ownerSnapshot = TerminalSessionAttachmentSnapshot(clients: [owningClient], attachments: [ownerAttachment])
+                    attachmentSnapshot = ownerSnapshot
+                    return TerminalViewerModelTests.terminalStateResponse(
+                        TerminalViewerModelTests.runningTerminalState(attachmentSnapshot: ownerSnapshot, emittedAt: Self.emittedAt(sequence)))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+
+            @discardableResult func waitForSubscribeCount(_ count: Int, timeout: Duration = .seconds(5)) async -> Bool {
+                let deadline = ContinuousClock().now + timeout
+                while ContinuousClock().now < deadline {
+                    if subscribeCount >= count { return true }
+                    try? await Task.sleep(for: .milliseconds(5))
+                }
+                return subscribeCount >= count
+            }
+
+            @discardableResult func waitForAttachCount(_ count: Int, timeout: Duration = .seconds(5)) async -> Bool {
+                let deadline = ContinuousClock().now + timeout
+                while ContinuousClock().now < deadline {
+                    if attachCount >= count { return true }
+                    try? await Task.sleep(for: .milliseconds(5))
+                }
+                return attachCount >= count
+            }
+
+            @discardableResult func waitForTakeoverCount(_ count: Int, timeout: Duration = .seconds(5)) async -> Bool {
+                let deadline = ContinuousClock().now + timeout
+                while ContinuousClock().now < deadline {
+                    if takeoverCount >= count { return true }
+                    try? await Task.sleep(for: .milliseconds(5))
+                }
+                return takeoverCount >= count
+            }
+
+            @discardableResult func waitForStateReadCount(_ count: Int, timeout: Duration = .seconds(5)) async -> Bool {
+                let deadline = ContinuousClock().now + timeout
+                while ContinuousClock().now < deadline {
+                    if stateReadCount >= count { return true }
+                    try? await Task.sleep(for: .milliseconds(5))
+                }
+                return stateReadCount >= count
+            }
+
+            func currentAttachCount() -> Int { attachCount }
+            func currentTakeoverCount() -> Int { takeoverCount }
+            func lastAttachedMode() -> TerminalAttachmentMode? { lastAttachedModeValue }
+            func requestOrderSnapshot() -> [String] { requestOrder }
+            func currentAttachmentSnapshot() -> TerminalSessionAttachmentSnapshot { attachmentSnapshot }
+
+            /// A strictly increasing timestamp per answered request, so the reducer (which orders
+            /// out-of-band payloads by `emittedAt`) never refuses one of this backend's own state reads
+            /// or takeover acknowledgments as stale against a previous one.
+            private nonisolated static func emittedAt(_ sequence: Int) -> String {
+                let base = ISO8601DateFormatter().date(from: "2026-06-04T14:23:30Z")!
+                return ISO8601DateFormatter().string(from: base.addingTimeInterval(Double(sequence)))
+            }
+        }
+
+        private struct RestartedDaemonRequestTransport: SpacesDeviceAPIRequestTransport {
+            let backend: RestartedDaemonBackend
+
+            func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse { try await backend.send(request) }
 
             func close() async {}
         }
@@ -5691,7 +6428,7 @@
         /// does.
         private nonisolated static func ownedState(clientID: String, emittedAt: String) -> GhosttyRemoteSessionStatePayload {
             let owner = TerminalClient(
-                id: clientID, kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:23:30Z")
+                id: clientID, kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:23:30Z")
             let attachment = TerminalAttachment(sessionID: "terminal-session", clientID: clientID, mode: .owner, attachedAt: "2026-06-04T14:23:30Z")
             return GhosttyRemoteSessionStatePayload(
                 sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, emittedAt: emittedAt,

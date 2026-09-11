@@ -166,7 +166,7 @@
 
         @TerminalEngineActor private static func attachOwner(_ core: GhosttyEmbeddedSessionCore, clientID: String) {
             let client = TerminalClient(
-                id: clientID, kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-07-28T00:00:01Z")
+                id: clientID, kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-07-28T00:00:01Z")
             let response = core.handleControlRequest(TerminalControlRequest(command: "attach", client: client, attachmentMode: .owner))
             #expect(response.ok, "attaching the clipboard owner must succeed: \(response.message)")
         }

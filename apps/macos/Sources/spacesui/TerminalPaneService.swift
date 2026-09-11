@@ -24,9 +24,7 @@ import workspacecore
 @MainActor final class TerminalPaneService {
     unowned let host: AppKitController
 
-    init(host: AppKitController) {
-        self.host = host
-    }
+    init(host: AppKitController) { self.host = host }
 
     /// A one-shot, thread-safe box a background thread's `performBuiltInTerminalSessionWorkOnMainThread`
     /// call sets once the main-actor work it dispatched finishes, so the calling thread's semaphore wait
@@ -223,11 +221,30 @@ import workspacecore
                 guard let self else { return [String]() }
                 return self.applyRemoteAgentSignals(events)
             }
-            let remoteClientStore = RemoteTerminalWindowClientStore()
+            // This pane's client kind is pure locality: `.local` when this session's daemon is the local
+            // device's own, `.remote` when the pane reaches a different paired device's daemon. Both kinds
+            // are judged live by the same lease (`TerminalClientKind`), so this only decides the local-echo
+            // optimization in `TerminalRemoteSessionStatePolicy.shouldIncludeScreenState` and the heartbeat
+            // wiring below.
+            let clientKind = Self.clientKind(forDeviceID: resolvedDeviceID)
+            let remoteClientStore = RemoteTerminalWindowClientStore(heartbeatAction: { clientID in
+                // Sent through the raw request sender, not `sendDeviceTerminalControl`: that wrapper turns
+                // every `ok: false` answer into a thrown error and drops the daemon's error code, which is
+                // exactly what the stop rule reads. A transport failure says nothing about the attachment
+                // (the daemon may be restarting), so the heartbeat keeps going; only the daemon's own answer
+                // that this client or its session is gone stops it.
+                let request = TerminalServiceRequest(
+                    command: .control(
+                        .init(
+                            sessionID: sessionID,
+                            controlRequest: TerminalControlRequest(command: .heartbeat(TerminalControlClientPayload(clientID: clientID))))))
+                guard let response = try? requestSender(request) else { return true }
+                return Self.heartbeatShouldContinue(after: response)
+            })
             // Reuse the owner client id this device stored on its last successful owner attach/takeover
             // for this session so a relaunch of this Mac (e.g. after an app upgrade) presents the same id
-            // and silently reclaims the still-running session's orphaned `localWindow` owner attachment.
-            // Keyed by the local device id; a stale mapping is inert since it matches no current owner.
+            // and, while the daemon's owner attachment for it is still live, silently reclaims it. Keyed
+            // by the local device id; a stale mapping is inert since it matches no current owner.
             let ownerClientIDStore = ClientTerminalOwnerClientIDStore()
             let reusableOwnerClientID = try? ownerClientIDStore.clientID(sessionID: sessionID)
             // Resolved once here (this runs on the main actor); the attach closure is @Sendable and may
@@ -317,7 +334,7 @@ import workspacecore
             let linkOpenBox = TerminalLinkOpenHandlerBox()
             let pane = TerminalSessionPaneViewController(
                 sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: .owner, performInitialRefresh: false,
-                reusableOwnerClientID: reusableOwnerClientID, sendInputAction: sendInputAction, sendKeyAction: sendKeyAction,
+                reusableOwnerClientID: reusableOwnerClientID, clientKind: clientKind, sendInputAction: sendInputAction, sendKeyAction: sendKeyAction,
                 pasteImageAction: pasteImageAction, takeoverAction: takeoverAction, attachClientAction: attachClientAction,
                 detachClientAction: detachClientAction,
                 onCloseClientDetached: { [weak host] ownedOrEnded in
@@ -341,7 +358,7 @@ import workspacecore
                         inputFailureHandler: { [weak stateModel] error in await stateModel?.reportFailedInputSend(error) ?? false })
                 })
             let linkOpenCoordinator = TerminalLinkOpenCoordinator(
-                sessionID: sessionID, deviceID: resolvedDeviceID, isLocalDevice: resolvedDeviceID == SpacesPairedDeviceRecord.localDeviceID,
+                sessionID: sessionID, deviceID: resolvedDeviceID, isLocalDevice: clientKind == .local,
                 workingDirectoryProvider: { [weak stateModel] in
                     let payload = stateModel?.latestRemoteStatePayload
                     return Self.terminalLinkWorkingDirectory(
@@ -365,14 +382,69 @@ import workspacecore
         }
     }
 
-    private final class RemoteTerminalWindowClientStore: @unchecked Sendable {
+    /// Tracks this pane's currently-attached client id and, while attached, keeps its lease fresh with a
+    /// periodic heartbeat. Every client kind now depends on its lease (`TerminalClientKind`), including a
+    /// `.local` pane onto this Mac's own daemon, so a pane that sits attached but idle — no input, no
+    /// resize, nothing that would otherwise touch the lease — needs its own keep-alive or the stale-client
+    /// sweep silently reaps it, demoting it to viewer with no visible error (the exact failure class this
+    /// heartbeat exists to close).
+    ///
+    /// Stop rule: `heartbeatAction` answers whether the daemon still holds this client (true keeps the
+    /// heartbeat going). When a session ends while its pane stays open showing the final render, the
+    /// daemon drops every attachment for it, so a heartbeat for that pane's client is rejected forever;
+    /// without a stop rule the timer would keep firing a doomed request every interval for as long as the
+    /// pane exists. A false answer cancels the timer but keeps the stored client id, so a later attach
+    /// (which always calls `set(_:)`) re-arms it.
+    ///
+    /// Generation guard: a heartbeat can still be in flight when the pane re-attaches (attach calls
+    /// `set(_:)`) and be answered false only after that happens, and cancelling on that stale answer
+    /// would strand the fresh attachment with no keep-alive until its lease expires. `generation` is
+    /// bumped on every `set(_:)`; each tick reads it before sending and cancels only if it is unchanged
+    /// after the answer. A tick that raced a re-attach simply carries on, and the next tick's heartbeat
+    /// is answered ok by the daemon that now holds the fresh attachment.
+    final class RemoteTerminalWindowClientStore: @unchecked Sendable {
+        /// Heartbeat period, matching the interval `SpacesDeviceAPIServer` already uses for its own
+        /// cross-machine relay heartbeats (the Linux-subscription and general terminal-stream relays,
+        /// both 20s against the same `TerminalSessionPersistence.remoteClientLeaseInterval` 60s expiry):
+        /// a single missed tick still leaves 40s of margin, comfortably past ordinary scheduling jitter.
+        /// Every pane now depends on its lease the same way those cross-machine clients always did, so a
+        /// Mac pane's own keep-alive uses the same cadence rather than inventing a second constant.
+        ///
+        /// This timer runs in the GUI process, which macOS App Nap can throttle while the app is fully
+        /// occluded or backgrounded, unlike the daemon-hosted relay timers this cadence is borrowed from.
+        /// A nap that delayed two consecutive ticks (40s) would reap a live-but-idle pane, demoting it to
+        /// viewer with no visible error. A timer flag alone cannot prevent that: `.strict` only removes
+        /// the source's leeway, and a napped process is not scheduled at all. So while the timer is armed
+        /// the store holds a `ProcessInfo` background activity (see `armHeartbeatTimerIfNeeded`), which
+        /// is the mechanism macOS provides for exactly this, work that has to keep running while the app
+        /// is not in front. One small control request every 20s, and the activity that keeps it on
+        /// schedule, cost nothing measurable, whereas widening `remoteClientLeaseInterval` would let every
+        /// genuinely dead client's ghost attachment linger longer for everyone.
+        private static let heartbeatInterval: TimeInterval = 20
+
         private let lock = NSLock()
         private var clientID: String?
+        private var heartbeatTimer: DispatchSourceTimer?
+        /// Held for exactly as long as `heartbeatTimer` is armed; see `heartbeatInterval`'s doc comment.
+        private var heartbeatActivity: NSObjectProtocol?
+        /// Bumped on every `set(_:)`; see the generation guard above.
+        private var generation = 0
+        private let heartbeatAction: @Sendable (String) -> Bool
+        private let heartbeatInterval: TimeInterval
+
+        init(
+            heartbeatAction: @escaping @Sendable (String) -> Bool, heartbeatInterval: TimeInterval = RemoteTerminalWindowClientStore.heartbeatInterval
+        ) {
+            self.heartbeatAction = heartbeatAction
+            self.heartbeatInterval = heartbeatInterval
+        }
 
         func set(_ clientID: String?) {
             lock.lock()
             self.clientID = clientID
+            generation += 1
             lock.unlock()
+            if clientID != nil { armHeartbeatTimerIfNeeded() } else { cancelHeartbeatTimer() }
         }
 
         func current() -> String? {
@@ -380,6 +452,48 @@ import workspacecore
             defer { lock.unlock() }
             return clientID
         }
+
+        private func armHeartbeatTimerIfNeeded() {
+            lock.lock()
+            defer { lock.unlock() }
+            guard heartbeatTimer == nil else { return }
+            heartbeatActivity = ProcessInfo.processInfo.beginActivity(options: .background, reason: "Terminal pane lease heartbeat")
+            let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+            timer.schedule(deadline: .now() + heartbeatInterval, repeating: heartbeatInterval)
+            timer.setEventHandler { [weak self] in
+                guard let self else { return }
+                self.lock.lock()
+                let clientID = self.clientID
+                let generationBeforeSend = self.generation
+                self.lock.unlock()
+                guard let clientID else { return }
+                guard !self.heartbeatAction(clientID) else { return }
+                self.lock.lock()
+                defer { self.lock.unlock() }
+                guard self.generation == generationBeforeSend else { return }
+                self.stopHeartbeatTimerLocked()
+            }
+            timer.resume()
+            heartbeatTimer = timer
+        }
+
+        private func cancelHeartbeatTimer() {
+            lock.lock()
+            defer { lock.unlock() }
+            stopHeartbeatTimerLocked()
+        }
+
+        /// Caller holds `lock`. Ends the background activity with the timer it kept on schedule.
+        private func stopHeartbeatTimerLocked() {
+            heartbeatTimer?.cancel()
+            heartbeatTimer = nil
+            if let heartbeatActivity {
+                ProcessInfo.processInfo.endActivity(heartbeatActivity)
+                self.heartbeatActivity = nil
+            }
+        }
+
+        deinit { stopHeartbeatTimerLocked() }
     }
 
     /// Per-session, thread-safe appearance state shared between a live pane's attach closure (which
@@ -519,6 +633,17 @@ import workspacecore
     /// is best-effort: the control already succeeded, and a stale-by-emission payload
     /// is dropped by the model, so a failed refresh falls back to the subscription
     /// instead of failing the completed control.
+    /// Whether a pane's keep-alive heartbeat should keep running after the daemon answered it. Only the
+    /// daemon's own verdict that the client is no longer attached (`notFound`) or that its session is
+    /// over (`sessionNotRunning`) stops it; any other refusal, and every success, keeps it going. The
+    /// session core reports its code on the nested control response and the daemon's request router
+    /// reports its own (a core that no longer exists) on the outer response, so both are read.
+    nonisolated static func heartbeatShouldContinue(after response: TerminalServiceResponse) -> Bool {
+        guard !response.ok else { return true }
+        let code = response.controlResponse?.errorCode ?? response.errorCode
+        return code != .notFound && code != .sessionNotRunning
+    }
+
     nonisolated static func sendDeviceTerminalControl(
         sessionID: String, request: TerminalControlRequest, requestSender: RemoteGhosttyTerminalServiceRequestSender,
         refreshStateAfterControl: Bool = false, applyState: @Sendable (GhosttyRemoteSessionStatePayload) -> Void
@@ -695,6 +820,14 @@ import workspacecore
     /// "focus, don't open" line is directly testable.
     nonisolated static func canOpenOrFocusTerminalPane(hasExistingPane: Bool, deviceAcceptsDaemonActions: Bool) -> Bool {
         hasExistingPane || deviceAcceptsDaemonActions
+    }
+
+    /// A pane's `TerminalClientKind` is pure locality: `.local` when the session's daemon is this
+    /// device's own, `.remote` for every other paired device. Extracted as a pure function so the
+    /// decision is directly testable without building a full pane; `makeTerminalPaneContent` is the one
+    /// production caller, passing the device id it already resolved for the pane's request.
+    nonisolated static func clientKind(forDeviceID deviceID: String) -> TerminalClientKind {
+        deviceID == SpacesPairedDeviceRecord.localDeviceID ? .local : .remote
     }
 
     /// Whether a fresh code pane may be created for a device. Unlike

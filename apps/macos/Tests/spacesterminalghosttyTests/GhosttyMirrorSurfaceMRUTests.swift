@@ -476,7 +476,7 @@ import spacesterminalcore
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
 
-        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:00Z")
+        let client = TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:00Z")
         let renderUpdate = try GhosttyRenderUpdateBinaryCodec.encode(
             .full(GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: Self.snapshot(text: "alpha"))))
         let recorder = ControlRequestRecorder { columns, rows in

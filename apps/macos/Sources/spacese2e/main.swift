@@ -1447,7 +1447,7 @@ private struct DemoRecorder {
 
     private var recorderClient: TerminalClient {
         TerminalClient(
-            id: recorderClientID, kind: .remoteViewer,
+            id: recorderClientID, kind: .remote,
             identity: TerminalClientIdentity(label: "Spaces Demo Recorder", deviceName: "Spaces Demo Recorder", networkAddress: host),
             connectedAt: nowISO8601())
     }

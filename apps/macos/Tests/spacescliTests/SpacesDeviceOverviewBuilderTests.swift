@@ -86,7 +86,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             id: "workspace-1", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false, isRunning: true,
             lastLaunchedAt: nil)
         let localClient = TerminalClient(
-            id: "owner-1", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces"), connectedAt: "2026-05-18T08:00:00Z")
+            id: "owner-1", kind: .local, identity: TerminalClientIdentity(label: "Spaces"), connectedAt: "2026-05-18T08:00:00Z")
         let ownerAttachment = TerminalAttachment(
             id: "attachment-1", sessionID: "session-1", clientID: localClient.id, mode: .owner, attachedAt: "2026-05-18T08:00:00Z")
         let matchedSession = makeSessionCatalogEntry(

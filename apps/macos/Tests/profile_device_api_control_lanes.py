@@ -112,7 +112,7 @@ def control(action: str, session_id: str, client_id: str = TYPING_CLIENT_ID, **e
 
 def owner_attach(session_id: str, client_id: str, columns: int, rows: int) -> dict:
     return control("attach", session_id, client_id,
-                   client={"id": client_id, "kind": "localWindow",
+                   client={"id": client_id, "kind": "local",
                            "identity": {"label": "Control Lane Bench", "hostName": "localhost",
                                         "deviceName": "Mac", "networkAddress": "127.0.0.1"},
                            "connectedAt": "2026-08-24T00:00:00Z", "disconnectedAt": None},

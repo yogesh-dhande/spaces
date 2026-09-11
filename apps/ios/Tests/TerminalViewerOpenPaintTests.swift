@@ -123,7 +123,7 @@
             let model = makeModel()
             defer { model.stop() }
             let otherOwner = TerminalClient(
-                id: "mac-owner", kind: .localWindow, identity: TerminalClientIdentity(label: "mac"), connectedAt: "2026-06-04T14:23:31Z")
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "mac"), connectedAt: "2026-06-04T14:23:31Z")
 
             // First lifecycle: this viewer never takes ownership, but `latestState` still gets a frame at
             // grid G (40x30) — attachment_state is a barrier, so it applies even while the open hold is on.
@@ -174,7 +174,7 @@
             let model = makeModel()
             defer { model.stop() }
             let otherOwner = TerminalClient(
-                id: "mac-owner", kind: .localWindow, identity: TerminalClientIdentity(label: "mac"), connectedAt: "2026-06-04T14:23:31Z")
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "mac"), connectedAt: "2026-06-04T14:23:31Z")
 
             // First lifecycle: this viewer never takes ownership, but `latestState` still gets a frame at
             // grid G (40x30) — attachment_state is a barrier, so it applies even while the open hold is on.
@@ -570,7 +570,7 @@
             defer { model.stop() }
             let client = model.remoteClientForTesting
             let mac = TerminalClient(
-                id: "mac-owner", kind: .localWindow, identity: TerminalClientIdentity(label: "mac"), connectedAt: "2026-06-04T14:23:29Z")
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "mac"), connectedAt: "2026-06-04T14:23:29Z")
             await backend.configure(
                 metadata: Self.otherOwnerState(emittedAt: "2026-06-04T14:23:30Z", state: .running, owner: mac, ownerEpoch: 1), initialFrames: [],
                 // The resize is accepted with no frame behind it, which is what leaves the open hold armed
@@ -832,7 +832,7 @@
             emittedAt: String, state: TerminalSessionState, owner: TerminalClient? = nil, ownerEpoch: UInt64? = nil
         ) -> GhosttyRemoteSessionStatePayload {
             let ownerClient =
-                owner ?? TerminalClient(id: "mac-owner", kind: .localWindow, identity: TerminalClientIdentity(label: "mac"), connectedAt: emittedAt)
+                owner ?? TerminalClient(id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "mac"), connectedAt: emittedAt)
             return GhosttyRemoteSessionStatePayload(
                 sessionID: sessionID, reason: TerminalRemoteSessionStateReason.attachmentState.rawValue, emittedAt: emittedAt,
                 sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,

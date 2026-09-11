@@ -155,6 +155,19 @@ import workspacecore
         #expect(TerminalPaneService.canCreateCodePane(deviceAcceptsDaemonActions: true))
     }
 
+    /// `TerminalClientKind` is purely locality (see `TerminalClient.swift`), decided once at pane
+    /// construction from which device's daemon actually hosts the session — never from how the pane
+    /// happened to be opened. A pane onto this Mac's own daemon must record `.local`; a pane onto any
+    /// other paired device's daemon, including another Mac, must record `.remote`, since that client is
+    /// reaching the session over a network hop and the daemon's owner-echo optimization
+    /// (`TerminalRemoteSessionStatePolicy.shouldIncludeScreenState`'s `.inputOutput` case) must not treat
+    /// it as if it were rendering the PTY output locally.
+    @Test func terminalPaneClientKindIsLocalOnlyForTheLocalDeviceItself() {
+        #expect(TerminalPaneService.clientKind(forDeviceID: SpacesPairedDeviceRecord.localDeviceID) == .local)
+        #expect(TerminalPaneService.clientKind(forDeviceID: "paired-mac-mini") == .remote)
+        #expect(TerminalPaneService.clientKind(forDeviceID: "paired-iphone") == .remote)
+    }
+
     @Test func actionsRefusedByAnOutageNameTheDeviceInsteadOfClaimingSpacesIsLoading() {
         // The refusal a user reads has to match what they can see: the device's rows are on screen, so
         // "Spaces has not finished loading" would be plainly wrong. It names the device and says offline,
@@ -180,20 +193,18 @@ import workspacecore
 
         // Activating the same row again collapses it, so the pair button reads as a toggle.
         #expect(
-            DevicePairingController.expansion(
-                after: .pairing(deviceID: "mac-1"), activating: .pairing(deviceID: "mac-1"), currentPanelIsLive: true) == nil)
+            DevicePairingController.expansion(after: .pairing(deviceID: "mac-1"), activating: .pairing(deviceID: "mac-1"), currentPanelIsLive: true)
+                == nil)
 
         // A row whose code expired (or whose open returned nothing) is expanded with nothing on screen, so
         // the same click asks for a fresh code instead of closing an invisible panel.
         #expect(
-            DevicePairingController.expansion(
-                after: .pairing(deviceID: "mac-1"), activating: .pairing(deviceID: "mac-1"), currentPanelIsLive: false)
+            DevicePairingController.expansion(after: .pairing(deviceID: "mac-1"), activating: .pairing(deviceID: "mac-1"), currentPanelIsLive: false)
                 == .pairing(deviceID: "mac-1"))
 
         // Pairing another device moves the panel to that row rather than opening a second one.
         #expect(
-            DevicePairingController.expansion(
-                after: .pairing(deviceID: "mac-1"), activating: .pairing(deviceID: "linux-2"), currentPanelIsLive: true)
+            DevicePairingController.expansion(after: .pairing(deviceID: "mac-1"), activating: .pairing(deviceID: "linux-2"), currentPanelIsLive: true)
                 == .pairing(deviceID: "linux-2"))
 
         // The add-remote-device form shares the single slot: opening it closes an open pairing panel, and
@@ -631,9 +642,8 @@ import workspacecore
         }
 
         let dismissedRow = try #require(
-            CommandPaletteController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts, dismissedAttentionItemIDs: [exitAlertID]).first {
-                $0.source == .workspaceTarget && $0.kind == .process
-            })
+            CommandPaletteController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts, dismissedAttentionItemIDs: [exitAlertID])
+                .first { $0.source == .workspaceTarget && $0.kind == .process })
         guard case .idle = dismissedRow.status else {
             Issue.record("expected an acknowledged exit to read as idle")
             return
@@ -850,7 +860,8 @@ import workspacecore
         // A running-process attention item maps to the same openTerminal target the numbered path produces,
         // falling back to the row's title/dir when the session is not yet in the catalog.
         #expect(
-            WindowFocusController.windowFocusResolution(for: .workspaceProcess(workspaceID: "workspace-1", processID: "running-web"), overview: overview)
+            WindowFocusController.windowFocusResolution(
+                for: .workspaceProcess(workspaceID: "workspace-1", processID: "running-web"), overview: overview)
                 == .openTerminal(
                     AppKitController.DeviceTerminalOpenRequest(
                         workspaceID: "workspace-1", sessionID: "session-web", title: "web", workingDirectory: "/device/project-feature",
@@ -899,7 +910,8 @@ import workspacecore
             ],
             workspacesByProject: [
                 sharedProjectID: [
-                    WorkspaceSummary(id: "ws-a", branch: "feature-a", dir: "/a/shared/feature-a", isRunning: true, isDefault: false, deviceID: "device-a")
+                    WorkspaceSummary(
+                        id: "ws-a", branch: "feature-a", dir: "/a/shared/feature-a", isRunning: true, isDefault: false, deviceID: "device-a")
                 ]
             ], workspaceRuntimeStatusByID: [:])
         let deviceB = AppKitController.DeviceSection(
@@ -911,7 +923,8 @@ import workspacecore
             ],
             workspacesByProject: [
                 sharedProjectID: [
-                    WorkspaceSummary(id: "ws-b", branch: "feature-b", dir: "/b/shared/feature-b", isRunning: true, isDefault: false, deviceID: "device-b")
+                    WorkspaceSummary(
+                        id: "ws-b", branch: "feature-b", dir: "/b/shared/feature-b", isRunning: true, isDefault: false, deviceID: "device-b")
                 ]
             ], workspaceRuntimeStatusByID: [:])
 
@@ -940,8 +953,7 @@ import workspacecore
                 ProjectSummary(
                     id: sharedProjectID, name: "Shared", dir: "/a/shared", isGitRepo: true, defaultBranch: "main", isHidden: false,
                     deviceID: "device-a")
-            ],
-            workspacesByProject: [:], workspaceRuntimeStatusByID: [:])
+            ], workspacesByProject: [:], workspaceRuntimeStatusByID: [:])
         let deviceB = AppKitController.DeviceSection(
             deviceID: "device-b", deviceName: "Device B", isLocal: false, loadState: .loaded, device: nil,
             projects: [
@@ -951,7 +963,8 @@ import workspacecore
             ],
             workspacesByProject: [
                 sharedProjectID: [
-                    WorkspaceSummary(id: "ws-b", branch: "feature-b", dir: "/b/shared/feature-b", isRunning: true, isDefault: false, deviceID: "device-b")
+                    WorkspaceSummary(
+                        id: "ws-b", branch: "feature-b", dir: "/b/shared/feature-b", isRunning: true, isDefault: false, deviceID: "device-b")
                 ]
             ], workspaceRuntimeStatusByID: [:])
 
@@ -1617,8 +1630,9 @@ import workspacecore
             resolveOverview: { context in
                 recorder.record(Thread.isMainThread)
                 return SpacesDeviceOverviewResolution(
-                    overview: SpacesDeviceOverview(device: context.device, overview: SpacesDeviceOverviewPayload(workspaces: [], sessions: [summary])),
-                    daemonStatus: nil, compatibility: nil)
+                    overview: SpacesDeviceOverview(
+                        device: context.device, overview: SpacesDeviceOverviewPayload(workspaces: [], sessions: [summary])), daemonStatus: nil,
+                    compatibility: nil)
             })
 
         #expect(match == AppKitController.TerminalSessionSummaryMatch(device: device, summary: summary))
@@ -1638,8 +1652,7 @@ import workspacecore
             sessionID: "session-1",
             request: TerminalControlRequest(
                 command: "attach",
-                client: TerminalClient(
-                    id: "mac-window", kind: .localWindow, identity: .init(label: "mac-window"), connectedAt: "2026-06-22T12:00:00Z"),
+                client: TerminalClient(id: "mac-window", kind: .local, identity: .init(label: "mac-window"), connectedAt: "2026-06-22T12:00:00Z"),
                 attachmentMode: .owner), requestSender: recorder.send, refreshStateAfterControl: true, applyState: { applied.store($0) })
 
         #expect(response.ok)
@@ -1660,8 +1673,7 @@ import workspacecore
             sessionID: "session-1",
             request: TerminalControlRequest(
                 command: "attach",
-                client: TerminalClient(
-                    id: "mac-window", kind: .localWindow, identity: .init(label: "mac-window"), connectedAt: "2026-06-22T12:00:00Z"),
+                client: TerminalClient(id: "mac-window", kind: .local, identity: .init(label: "mac-window"), connectedAt: "2026-06-22T12:00:00Z"),
                 attachmentMode: .owner), requestSender: recorder.send, refreshStateAfterControl: true, applyState: { applied.store($0) })
 
         #expect(response.ok)
@@ -1692,7 +1704,7 @@ import workspacecore
     }
 
     private func attachmentSnapshot(ownerID: String) -> TerminalSessionAttachmentSnapshot {
-        let client = TerminalClient(id: ownerID, kind: .localWindow, identity: .init(label: ownerID), connectedAt: "2026-06-22T12:00:00Z")
+        let client = TerminalClient(id: ownerID, kind: .local, identity: .init(label: ownerID), connectedAt: "2026-06-22T12:00:00Z")
         return TerminalSessionAttachmentSnapshot(
             clients: [client],
             attachments: [TerminalAttachment(sessionID: "session-1", clientID: ownerID, mode: .owner, attachedAt: "2026-06-22T12:00:00Z")])

@@ -207,14 +207,13 @@ public struct TerminalSessionAttachmentSnapshot: Codable, Sendable, Equatable {
         self.attachments = attachments
     }
 
-    /// Attachments backed by a still-present client. An attachment counts as live only
-    /// when it is not detached, its client is not disconnected, and — for the kinds whose
-    /// liveness the lease decides (`TerminalClientKind.livenessDependsOnLease`, i.e. those
-    /// that can vanish without sending a detach) — its lease was refreshed within
-    /// `remoteClientLeaseInterval`. A local window client is always live while attached, and
-    /// its lease is never even read. This is the single source of truth for liveness; the
-    /// persistence query and any off-device consumer both judge attachments through this rule,
-    /// so an expired remote viewer is never mistaken for a live attachment.
+    /// Attachments backed by a still-present client. An attachment counts as live only when it is not
+    /// detached, its client is not disconnected, and its lease was refreshed within
+    /// `remoteClientLeaseInterval`. Every kind is judged the same way — a `local` client is a separate
+    /// process reaching the daemon over a unix socket exactly as a `remote` client reaches it over the
+    /// network, so neither can be trusted to still be there without proving it. This is the single
+    /// source of truth for liveness; the persistence query and any off-device consumer both judge
+    /// attachments through this rule, so an expired client's attachment is never mistaken for a live one.
     public func liveAttachments(now: Date = Date(), remoteClientLeaseInterval: TimeInterval = TerminalSessionPersistence.remoteClientLeaseInterval)
         -> [TerminalAttachment]
     {
@@ -222,7 +221,6 @@ public struct TerminalSessionAttachmentSnapshot: Codable, Sendable, Equatable {
         let clientsByID = Dictionary(clients.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return attachments.filter { attachment in
             guard attachment.detachedAt == nil, let client = clientsByID[attachment.clientID], client.disconnectedAt == nil else { return false }
-            guard client.kind.livenessDependsOnLease else { return true }
             guard let lastSeenAt = TerminalSessionPersistence.parseISO8601(client.leaseRefreshedAt ?? ""), lastSeenAt >= cutoff else { return false }
             return true
         }
@@ -434,6 +432,24 @@ public enum TerminalSessionPersistence {
                         attachment.detachedAt ?? "",
                     ])
             }
+        }
+    }
+
+    /// Deletes every `terminal_clients` and `terminal_attachments` row in the profile database, across
+    /// every session. Called once at daemon start — which a handoff resume is the first step of — because
+    /// no client transport (a control-socket connection, a subscription stream) survives this process
+    /// replacing itself, whether that is an ordinary restart or an in-place `execv` handoff. A row that
+    /// outlives the process is therefore never evidence of a real attached client; wiping both tables
+    /// before any session core exists to read them makes a ghost owner attachment (a client that vanished
+    /// without detaching, permanently holding a session's ownership) structurally impossible rather than
+    /// relying on lease expiry to catch it eventually. Every real client re-attaches on its own once it
+    /// notices the disconnect — the same reconnect path an ordinary daemon restart already exercises —
+    /// so this touches no `terminal_sessions` row and none of the PTY state a handoff exists to carry
+    /// forward.
+    public static func clearAllClientsAndAttachments(databasePath: String? = nil) throws {
+        try withProfileDatabaseTransaction(at: databasePath) { database in
+            try database.execute(sql: "DELETE FROM terminal_attachments")
+            try database.execute(sql: "DELETE FROM terminal_clients")
         }
     }
 
@@ -817,13 +833,10 @@ public enum TerminalSessionPersistence {
         remoteClientLeaseInterval: TimeInterval = TerminalSessionPersistence.remoteClientLeaseInterval
     ) throws -> [StaleRemoteClient] {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        // Kinds whose liveness the lease does not decide are excluded outright rather than compared against
-        // the cutoff — their rows carry no meaningful lease. Derived from `livenessDependsOnLease` so this
-        // filter and `liveAttachments` cannot disagree about which kinds the lease governs.
-        let leaseExemptKinds = TerminalClientKind.allCases.filter { !$0.livenessDependsOnLease }.map(\.rawValue)
-        let leaseExemptPlaceholders = Array(repeating: "?", count: leaseExemptKinds.count).joined(separator: ", ")
         // The lane returns the raw candidate rows only; the cutoff comparison against `now` is CPU work
-        // that does not touch the connection, so it happens after the lane releases.
+        // that does not touch the connection, so it happens after the lane releases. No kind is excluded
+        // here: every attached client's lease governs its own expiry (see `liveAttachments`), so a
+        // `local` client that stops heartbeating is exactly as stale as a `remote` one that does.
         let rows = try withProfileDatabase { database in
             try database.queryRows(
                 sql: """
@@ -833,9 +846,8 @@ public enum TerminalSessionPersistence {
                     WHERE c.root_directory = ?
                       AND a.detached_at IS NULL
                       AND c.disconnected_at IS NULL
-                      AND c.kind NOT IN (\(leaseExemptPlaceholders))
                     ORDER BY c.client_id
-                    """, bindings: [root] + leaseExemptKinds)
+                    """, bindings: [root])
         }
         let cutoff = now.addingTimeInterval(-remoteClientLeaseInterval)
         return rows.compactMap { row in

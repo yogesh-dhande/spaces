@@ -545,7 +545,7 @@ client_app = {
 desktop_owner_client_id = str(uuid.uuid4()).upper()
 desktop_owner = {
     "id": desktop_owner_client_id,
-    "kind": "localWindow",
+    "kind": "local",
     "identity": {
         "label": "Spaces window",
         "hostName": "localhost",
@@ -584,7 +584,7 @@ assert desktop_attach["ok"], desktop_attach
 mobile_client_id = str(uuid.uuid4()).upper()
 mobile_client = {
     "id": mobile_client_id,
-    "kind": "remoteViewer",
+    "kind": "remote",
     "identity": {
         "label": "iPad Pro Simulator",
         "deviceName": "iPad Pro Simulator",

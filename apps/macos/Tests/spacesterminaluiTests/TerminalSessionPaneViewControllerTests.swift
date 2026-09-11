@@ -113,6 +113,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
     }
 
     @MainActor private final class FakeGhosttySessionHost: TerminalGhosttySessionHosting {
+        var connectionStageTracker = TerminalConnectionStageTracker()
         var hasSurface = true
         var snapshotValue: GhosttyTerminalSnapshot?
         var snapshotTextValue: String?
@@ -353,6 +354,25 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             }
         }
         return try XCTUnwrap(bitmap.representation(using: type, properties: [:]))
+    }
+
+    private func srgbComponents(_ cgColor: CGColor) throws -> (r: CGFloat, g: CGFloat, b: CGFloat, a: CGFloat) {
+        let resolved = try XCTUnwrap(NSColor(cgColor: cgColor)?.usingColorSpace(.sRGB))
+        return (resolved.redComponent, resolved.greenComponent, resolved.blueComponent, resolved.alphaComponent)
+    }
+
+    private func colorsApproximatelyMatch(_ lhs: CGColor, _ rhs: CGColor, tolerance: CGFloat = 0.01) -> Bool {
+        guard let a = try? srgbComponents(lhs), let b = try? srgbComponents(rhs) else { return false }
+        return abs(a.r - b.r) < tolerance && abs(a.g - b.g) < tolerance && abs(a.b - b.b) < tolerance && abs(a.a - b.a) < tolerance
+    }
+
+    private func assertColorsMatch(_ lhs: CGColor, _ rhs: CGColor, file: StaticString = #filePath, line: UInt = #line) throws {
+        let a = try srgbComponents(lhs)
+        let b = try srgbComponents(rhs)
+        XCTAssertEqual(a.r, b.r, accuracy: 0.01, file: file, line: line)
+        XCTAssertEqual(a.g, b.g, accuracy: 0.01, file: file, line: line)
+        XCTAssertEqual(a.b, b.b, accuracy: 0.01, file: file, line: line)
+        XCTAssertEqual(a.a, b.a, accuracy: 0.01, file: file, line: line)
     }
 
     @MainActor private func makeGhosttyController(
@@ -766,7 +786,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         // Another client takes ownership before that attach is sent; the refresh that sees it replaces
         // the pane's intent with a viewer attach.
         let remoteOwner = TerminalClient(
-            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            id: "remote-owner", kind: .remote, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
             connectedAt: "2026-05-20T00:00:02Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:02Z")
@@ -988,9 +1008,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 7, childPID: 8, state: .running, updatedAt: "2026-08-01T00:00:01Z",
                 title: "shell", workingDirectory: "/tmp", columns: 80, rows: 24),
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(
-                clients: [
-                    TerminalClient(id: ownerClientID, kind: .localWindow, identity: TerminalClientIdentity(label: "owner"), connectedAt: "now")
-                ], attachments: [TerminalAttachment(sessionID: sessionID, clientID: ownerClientID, mode: .owner, attachedAt: "now")]))
+                clients: [TerminalClient(id: ownerClientID, kind: .local, identity: TerminalClientIdentity(label: "owner"), connectedAt: "now")],
+                attachments: [TerminalAttachment(sessionID: sessionID, clientID: ownerClientID, mode: .owner, attachedAt: "now")]))
     }
 
     /// A session-terminating close is the daemon already stopping the session, so it must not fire the
@@ -1125,7 +1144,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 return host
             })
         let owner = TerminalClient(
-            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-06-06T00:00:00Z")
+            id: controller.clientID, kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-06-06T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-06-06T00:00:00Z")
 
@@ -1155,11 +1174,13 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             attachClientAction: persistenceBackedAttachAction(paths), detachClientAction: persistenceBackedDetachAction(paths))
 
         XCTAssertEqual(controller.displayTitle, "session title")
-        XCTAssertFalse(controller.debugShowsTerminalSurface)
-        XCTAssertTrue(controller.debugShowsTextRenderer)
-        XCTAssertEqual(normalizedRenderedOutput(controller.debugRenderedOutput), "")
+        // An interactive session this pane owns resolves to `.ghosttyOwner` whether or not a frame has
+        // landed yet (see `resolveVisibleRenderer`'s doc comment) — the output-log text view is never the
+        // fallback for a missing first frame, so nothing here can leak the on-disk output log.
+        XCTAssertTrue(controller.debugShowsTerminalSurface)
+        XCTAssertFalse(controller.debugShowsTextRenderer)
         XCTAssertFalse(controller.debugRenderedOutput.contains("echo hello"))
-        XCTAssertEqual(controller.debugRendererSummary, "Renderer: preparing owner surface")
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: ghostty-mirror")
     }
 
     @MainActor func testGhosttyOwnerDoesNotRenderSnapshotTextWhenSurfaceIsUnavailable() throws {
@@ -1182,10 +1203,13 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         host.snapshotTextValue = "owner snapshot"
         let controller = makeGhosttyController(sessionID: "session-render-state-text", paths: paths, host: host)
 
-        XCTAssertFalse(controller.debugShowsTerminalSurface)
-        XCTAssertTrue(controller.debugShowsTextRenderer)
-        XCTAssertEqual(normalizedRenderedOutput(controller.debugRenderedOutput), "")
-        XCTAssertEqual(controller.debugRendererSummary, "Renderer: preparing owner surface")
+        // An interactive session this pane owns resolves to `.ghosttyOwner` even with no surface yet
+        // (see `resolveVisibleRenderer`'s doc comment), so the ended-session snapshot-text fallback never
+        // applies while the session is still running.
+        XCTAssertTrue(controller.debugShowsTerminalSurface)
+        XCTAssertFalse(controller.debugShowsTextRenderer)
+        XCTAssertFalse(controller.debugRenderedOutput.contains("owner snapshot"))
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: ghostty-mirror")
     }
 
     @MainActor func testControllerUpgradesFromFallbackBackendOnceGhosttyMetadataAppears() throws {
@@ -1207,7 +1231,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 sessionID: "session-upgrade", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running,
                 updatedAt: "2026-05-10T00:00:01Z"), paths: paths)
         let owner = TerminalClient(
-            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: controller.clientID, kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-10T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: "session-upgrade", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-10T00:00:00Z")
@@ -1262,10 +1286,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 sessionID: "session-3", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
             paths: paths)
         let owner = TerminalClient(
-            id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Yogesh Mac"),
+            id: "owner-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Yogesh Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
         let viewer = TerminalClient(
-            id: "viewer-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            id: "viewer-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
         try TerminalSessionPersistence.upsertClient(owner, paths: paths)
         try TerminalSessionPersistence.upsertClient(viewer, paths: paths)
@@ -1282,12 +1306,110 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertFalse(controller.debugShowsTerminalSurface)
         XCTAssertFalse(controller.debugShowsInlineControls)
         XCTAssertTrue(controller.debugShowsTakeoverButton)
-        // The simplified viewer shell shows only a centered status message plus the
-        // Take Over button; the detail header and output body are hidden.
+        // The State-B scrim overlays a centered icon/title/message/button on top of the pane body: the
+        // plain-text output view on the terminal background, dimmed underneath. The session's live
+        // output is not mirrored here (only the owning client sees it), and the detail header stays
+        // permanently hidden for every pane (unrelated to ownership).
         XCTAssertTrue(controller.debugShowsTakeoverMessage)
-        XCTAssertTrue(controller.debugTakeoverMessage.contains("Current owner"))
-        XCTAssertFalse(controller.debugShowsTextRenderer)
+        XCTAssertEqual(controller.debugTakeoverTitle, "Owned by Yogesh Mac")
+        XCTAssertEqual(controller.debugTakeoverMessage, "Take over to view and type here.")
+        XCTAssertTrue(controller.debugShowsTextRenderer)
         XCTAssertFalse(controller.debugShowsHeader)
+    }
+
+    /// After the owner detaches or its lease expires, a viewer pane's session has no owner at all. The
+    /// overlay says exactly that rather than claiming some other device owns it, and Take Over is still
+    /// the way this pane becomes the owner.
+    @MainActor func testViewerPaneOfAnOwnerlessSessionSaysNoDeviceOwnsIt() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-ownerless", backend: .ghosttyEmbedded, title: "frontend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-ownerless", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+        let viewer = TerminalClient(
+            id: "viewer-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            connectedAt: "2026-05-09T00:00:00Z")
+        try TerminalSessionPersistence.upsertClient(viewer, paths: paths)
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-ownerless", client: viewer, mode: .viewer, paths: paths, attachedAt: "2026-05-09T00:00:01Z")
+
+        let controller = TerminalSessionPaneViewController(
+            sessionID: "session-ownerless", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
+            preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in })
+
+        XCTAssertFalse(controller.debugShowsTerminalSurface)
+        XCTAssertTrue(controller.debugShowsTakeoverButton)
+        XCTAssertTrue(controller.debugShowsTakeoverMessage)
+        XCTAssertEqual(controller.debugTakeoverTitle, "No device owns this terminal")
+        XCTAssertEqual(controller.debugTakeoverMessage, "Take over to view and type here.")
+    }
+
+    /// `TakeoverScrimView` resolves the theme background under the view's own effective appearance
+    /// (`ThemeColorAppKit.activeTheme` returns a dynamic `NSColor`, but a `CALayer` only stores a
+    /// resolved `CGColor`), so an aqua/dark-aqua switch while the State-B overlay is showing must
+    /// repaint the scrim to the matching theme tint instead of leaving it frozen at whatever appearance
+    /// was active when the layer was first created.
+    @MainActor func testTakeoverScrimFollowsTheEffectiveAppearance() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-scrim", backend: .ghosttyEmbedded, title: "frontend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-scrim", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+        let owner = TerminalClient(
+            id: "owner-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Yogesh Mac"),
+            connectedAt: "2026-05-09T00:00:00Z")
+        let viewer = TerminalClient(
+            id: "viewer-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            connectedAt: "2026-05-09T00:00:00Z")
+        try TerminalSessionPersistence.upsertClient(owner, paths: paths)
+        try TerminalSessionPersistence.upsertClient(viewer, paths: paths)
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-scrim", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-scrim", client: viewer, mode: .viewer, paths: paths, attachedAt: "2026-05-09T00:00:01Z")
+
+        let controller = TerminalSessionPaneViewController(
+            sessionID: "session-scrim", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
+            preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in })
+        let window = makeHostWindow(for: controller)
+        XCTAssertTrue(controller.debugShowsTakeoverScrim)
+
+        let expectedLight = NSColor(themeColor: ActiveTheme.descriptor.light.background).withAlphaComponent(0.72).cgColor
+        let expectedDark = NSColor(themeColor: ActiveTheme.descriptor.dark.background).withAlphaComponent(0.72).cgColor
+
+        // Assigning `.appearance` drives `viewDidChangeEffectiveAppearance` through the hosted view tree
+        // once the window lays out and draws, the same path a live light/dark switch takes.
+        controller.view.appearance = NSAppearance(named: .aqua)
+        window.layoutIfNeeded()
+        controller.view.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        let lightColor = controller.debugTakeoverScrimColor
+        try assertColorsMatch(XCTUnwrap(lightColor), expectedLight)
+
+        controller.view.appearance = NSAppearance(named: .darkAqua)
+        window.layoutIfNeeded()
+        controller.view.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        let darkColor = controller.debugTakeoverScrimColor
+        try assertColorsMatch(XCTUnwrap(darkColor), expectedDark)
+
+        XCTAssertFalse(colorsApproximatelyMatch(try XCTUnwrap(lightColor), try XCTUnwrap(darkColor)))
     }
 
     @MainActor func testGhosttyViewerShowsTakeoverStatusWhenNotOwner() throws {
@@ -1306,10 +1428,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 updatedAt: "2026-05-15T00:00:01Z"), paths: paths)
         try "tail-only-content\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
         let owner = TerminalClient(
-            id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: "owner-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-15T00:00:00Z")
         let viewer = TerminalClient(
-            id: "viewer-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            id: "viewer-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
             connectedAt: "2026-05-15T00:00:01Z")
         try TerminalSessionPersistence.upsertClient(owner, paths: paths)
         try TerminalSessionPersistence.upsertClient(viewer, paths: paths)
@@ -1323,10 +1445,11 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             detachClientAction: { _ in })
 
         XCTAssertFalse(controller.debugShowsTerminalSurface)
-        XCTAssertFalse(controller.debugShowsTextRenderer)
+        // The scrim overlays the pre-existing text-renderer body rather than hiding it.
+        XCTAssertTrue(controller.debugShowsTextRenderer)
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
-        XCTAssertTrue(controller.debugRenderedOutput.contains("Live terminal rendering is limited to the active owner."))
-        XCTAssertTrue(controller.debugRenderedOutput.contains("Current owner: Owner Mac"))
+        XCTAssertEqual(controller.debugTakeoverTitle, "Owned by Owner Mac")
+        XCTAssertEqual(controller.debugTakeoverMessage, "Take over to view and type here.")
     }
 
     @MainActor func testGhosttyViewerDoesNotMountLiveTerminalSurfaceWhenNotOwner() throws {
@@ -1345,10 +1468,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 updatedAt: "2026-05-19T00:00:01Z"), paths: paths)
 
         let owner = TerminalClient(
-            id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: "owner-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-19T00:00:00Z")
         let viewer = TerminalClient(
-            id: "viewer-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            id: "viewer-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
             connectedAt: "2026-05-19T00:00:01Z")
         try TerminalSessionPersistence.upsertClient(owner, paths: paths)
         try TerminalSessionPersistence.upsertClient(viewer, paths: paths)
@@ -1366,9 +1489,71 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         controller.showEmbedded(focus: true)
 
         XCTAssertFalse(controller.debugShowsTerminalSurface)
-        XCTAssertFalse(controller.debugShowsTextRenderer)
+        // The scrim overlays the pre-existing text-renderer body rather than hiding it.
+        XCTAssertTrue(controller.debugShowsTextRenderer)
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
-        XCTAssertTrue(controller.debugRenderedOutput.contains("Current owner: Owner Mac"))
+        XCTAssertEqual(controller.debugTakeoverTitle, "Owned by Owner Mac")
+        XCTAssertEqual(controller.debugTakeoverMessage, "Take over to view and type here.")
+    }
+
+    /// A keystroke into a pane attached as viewer while another client owns the session must do
+    /// nothing at all: no send to the daemon, no banner, no input-status message, no queued send for
+    /// later. `handleKeyEvent` guards on `preferredAttachmentMode == .owner` before it does anything
+    /// else, so a viewer pane's keystroke returns `false` immediately and never reaches the render host
+    /// or any other side-effecting path — this pins that contract so a future refactor of the guard
+    /// order cannot quietly reintroduce feedback for a non-owner keystroke.
+    @MainActor func testGhosttyViewerKeystrokeProducesNoSendAndNoFeedback() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-viewer-keystroke", backend: .ghosttyEmbedded, title: "viewer", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-09-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-viewer-keystroke", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-09-10T00:00:01Z"), paths: paths)
+
+        let owner = TerminalClient(
+            id: "owner-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-09-10T00:00:00Z")
+        let viewer = TerminalClient(
+            id: "viewer-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            connectedAt: "2026-09-10T00:00:01Z")
+        try TerminalSessionPersistence.upsertClient(owner, paths: paths)
+        try TerminalSessionPersistence.upsertClient(viewer, paths: paths)
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-viewer-keystroke", client: owner, mode: .owner, paths: paths, attachedAt: "2026-09-10T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-viewer-keystroke", client: viewer, mode: .viewer, paths: paths, attachedAt: "2026-09-10T00:00:01Z")
+
+        let host = FakeGhosttySessionHost()
+        host.hasSurface = false
+        let controller = makeGhosttyController(
+            sessionID: "session-viewer-keystroke", paths: paths, preferredAttachmentMode: .viewer, host: host, attachClientAction: { _, _ in },
+            detachClientAction: { _ in })
+        controller.showEmbedded(focus: true)
+
+        // Sanity: this is the "another client owns it" read-only state, not a blank owner pane.
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
+        XCTAssertEqual(controller.debugTakeoverTitle, "Owned by Owner Mac")
+        XCTAssertFalse(controller.debugBannerVisible)
+        let inputStatusBefore = controller.debugInputStatus
+
+        let event = try keyEvent(keyCode: kVK_ANSI_A, characters: "a", modifiers: [])
+        XCTAssertFalse(controller.handleKeyEvent(event))
+
+        XCTAssertEqual(host.handleKeyEventCallCount, 0, "a non-owner keystroke must never reach the render host")
+        XCTAssertTrue(host.recordedBindingActions.isEmpty)
+        // Nothing about the takeover status or banner changes: no "not the owner" message, no beep
+        // substitute, nothing that would tell the user their keystroke was noticed at all.
+        XCTAssertEqual(controller.debugTakeoverTitle, "Owned by Owner Mac")
+        XCTAssertEqual(controller.debugTakeoverMessage, "Take over to view and type here.")
+        XCTAssertFalse(controller.debugBannerVisible)
+        XCTAssertEqual(controller.debugInputStatus, inputStatusBefore)
     }
 
     @MainActor func testGhosttyViewerShowsTakeoverStatusUntilOwnershipChanges() throws {
@@ -1386,10 +1571,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 sessionID: "session-viewer-loading", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
                 updatedAt: "2026-05-15T00:00:01Z"), paths: paths)
         let owner = TerminalClient(
-            id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: "owner-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-15T00:00:00Z")
         let viewer = TerminalClient(
-            id: "viewer-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            id: "viewer-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
             connectedAt: "2026-05-15T00:00:01Z")
         try TerminalSessionPersistence.upsertClient(owner, paths: paths)
         try TerminalSessionPersistence.upsertClient(viewer, paths: paths)
@@ -1403,9 +1588,11 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             detachClientAction: { _ in })
 
         XCTAssertFalse(controller.debugShowsTerminalSurface)
-        XCTAssertFalse(controller.debugShowsTextRenderer)
+        // The scrim overlays the pre-existing text-renderer body rather than hiding it.
+        XCTAssertTrue(controller.debugShowsTextRenderer)
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
-        XCTAssertTrue(controller.debugRenderedOutput.contains("Current owner: Owner Mac"))
+        XCTAssertEqual(controller.debugTakeoverTitle, "Owned by Owner Mac")
+        XCTAssertEqual(controller.debugTakeoverMessage, "Take over to view and type here.")
     }
 
     @MainActor func testOwnerSeekingCustomAttachRegistersViewerWhenAnotherClientOwnsSession() async throws {
@@ -1424,7 +1611,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 updatedAt: "2026-05-20T00:00:01Z"), paths: paths)
 
         let remoteOwner = TerminalClient(
-            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            id: "remote-owner", kind: .remote, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
             connectedAt: "2026-05-20T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: "session-owner-seeking-custom", client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
@@ -1468,7 +1655,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             paths: paths)
 
         let remoteOwner = TerminalClient(
-            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            id: "remote-owner", kind: .remote, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
             connectedAt: "2026-05-20T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
@@ -1557,9 +1744,9 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
     }
 
     /// Relaunch reclaim: a pane built with the owner client id this device stored on its prior launch
-    /// matches the daemon's orphaned, never-expiring `localWindow` owner attachment left behind by the
-    /// killed instance. `currentOwnerClient?.id == client.id` so the pane silently adopts that owner
-    /// attachment — no daemon re-attach, no viewer/takeover UI.
+    /// matches the daemon's orphaned owner attachment left behind by the killed instance, as long as its
+    /// lease has not yet lapsed. `currentOwnerClient?.id == client.id` so the pane silently adopts that
+    /// owner attachment — no daemon re-attach, no viewer/takeover UI.
     @MainActor func testReusedOwnerClientIDReclaimsOrphanedOwnerAttachmentSilently() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1578,7 +1765,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         // The dead instance's owner attachment: a local window client that still owns the session.
         let reusedClientID = "reused-local-owner"
         let orphanedOwner = TerminalClient(
-            id: reusedClientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Studio Mac"),
+            id: reusedClientID, kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Studio Mac"),
             connectedAt: "2026-05-20T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: orphanedOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
@@ -1627,7 +1814,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             paths: paths)
 
         let foreignOwner = TerminalClient(
-            id: "other-device-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            id: "other-device-owner", kind: .remote, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
             connectedAt: "2026-05-20T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: foreignOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
@@ -1673,7 +1860,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             paths: paths)
 
         let remoteOwner = TerminalClient(
-            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            id: "remote-owner", kind: .remote, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
             connectedAt: "2026-05-20T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
@@ -1731,7 +1918,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             paths: paths)
 
         let remoteOwner = TerminalClient(
-            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            id: "remote-owner", kind: .remote, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
             connectedAt: "2026-05-20T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
@@ -1758,7 +1945,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == controller.clientID }?.mode, .owner)
 
         let mirroredViewer = TerminalClient(
-            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-20T00:00:03Z")
+            id: controller.clientID, kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-05-20T00:00:03Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: mirroredViewer, mode: .viewer, paths: paths, attachedAt: "2026-05-20T00:00:03Z")
 
@@ -1809,7 +1996,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(capture.attachedModes, [.owner])
 
         let remoteOwner = TerminalClient(
-            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", hostName: "iphone", deviceName: "iPhone"),
+            id: "remote-owner", kind: .remote, identity: .init(label: "iPhone", hostName: "iphone", deviceName: "iPhone"),
             connectedAt: "2026-05-20T00:00:02Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: remoteOwner, mode: .viewer, paths: paths, attachedAt: "2026-05-20T00:00:02Z")
@@ -1845,7 +2032,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 updatedAt: "2026-05-20T00:00:01Z"), paths: paths)
 
         let remoteOwner = TerminalClient(
-            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            id: "remote-owner", kind: .remote, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
             connectedAt: "2026-05-20T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: "session-owner-seeking", client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
@@ -1867,7 +2054,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.attachmentMode, .viewer)
         XCTAssertFalse(controller.debugShowsTerminalSurface)
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
-        XCTAssertTrue(controller.debugRenderedOutput.contains("Current owner: iPad Pro 13-inch (M5)"))
+        XCTAssertEqual(controller.debugTakeoverTitle, "Owned by iPad Pro 13-inch (M5)")
+        XCTAssertEqual(controller.debugTakeoverMessage, "Take over to view and type here.")
         XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == controller.clientID }?.mode, .viewer)
 
         controller.requestOwnershipIfNeeded()
@@ -1906,8 +2094,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
 
         let sessionID = "session-orphaned-owner"
         let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: sessionID, backend: .ghosttyEmbedded, title: "orphaned", workingDirectory: "/tmp/orphaned", shell: "/bin/zsh",
-            command: nil, createdAt: "2026-08-30T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            sessionID: sessionID, backend: .ghosttyEmbedded, title: "orphaned", workingDirectory: "/tmp/orphaned", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-08-30T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let runtimeState = TerminalSessionRuntimeState(
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 7, childPID: 8, state: .running, updatedAt: "2026-08-30T00:00:01Z",
             title: "orphaned", workingDirectory: "/tmp/orphaned", columns: 80, rows: 24)
@@ -1953,7 +2141,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             paths: paths)
 
         let remoteOwner = TerminalClient(
-            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            id: "remote-owner", kind: .remote, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
             connectedAt: "2026-05-20T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
@@ -2008,7 +2196,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             paths: paths)
 
         let remoteOwner = TerminalClient(
-            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            id: "remote-owner", kind: .remote, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
             connectedAt: "2026-05-20T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
@@ -2109,7 +2297,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             paths: paths)
 
         let remoteOwner = TerminalClient(
-            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            id: "remote-owner", kind: .remote, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
             connectedAt: "2026-05-20T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
@@ -2146,6 +2334,74 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
     }
 
+    /// Clicking Take Over puts the pane into the same waiting presentation an owner-preferred open uses
+    /// while its request is outstanding: the overlay (scrim, "Owned by …", the button) gives way to the
+    /// plain "Waiting for terminal ownership…" line, since this pane is the one trying to become owner.
+    @MainActor func testClickingTakeOverShowsTheWaitingLineInsteadOfTheOverlayUntilTheDaemonAnswers() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-takeover-waiting"
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "takeover-waiting", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
+            paths: paths)
+        let remoteOwner = TerminalClient(
+            id: "remote-owner", kind: .remote, identity: .init(label: "iPhone", hostName: "iphone", deviceName: "iPhone 17 Pro"),
+            connectedAt: "2026-05-20T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
+
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.hasSurface = false
+        let attempts = TakeoverAttemptRecorder()
+        let releaseAttempt = DispatchSemaphore(value: 0)
+        defer { releaseAttempt.signal() }
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, preferredAttachmentMode: .viewer, host: fakeHost,
+            takeoverAction: { clientID in
+                _ = attempts.record(clientID: clientID)
+                _ = releaseAttempt.wait(timeout: .now() + 10)
+                try TerminalSessionPersistence.transferOwnership(
+                    sessionID: sessionID, newOwnerClientID: clientID, paths: paths, transferredAt: "2026-05-20T00:00:02Z")
+                return TerminalControlResponse(ok: true, message: "Took over ownership.")
+            }, detachClientAction: { _ in })
+        controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
+        controller.debugForceRefresh()
+        XCTAssertTrue(controller.debugShowsTakeoverScrim)
+        XCTAssertEqual(controller.debugTakeoverTitle, "Owned by iPhone 17 Pro")
+
+        controller.takeOverOwnership()
+        let entryDeadline = Date().addingTimeInterval(5)
+        while attempts.count == 0 && Date() < entryDeadline { try? await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(attempts.count, 1)
+        XCTAssertTrue(controller.debugTakeoverPending)
+
+        controller.debugForceRefresh()
+        XCTAssertFalse(controller.debugShowsTakeoverScrim)
+        XCTAssertFalse(controller.debugShowsTakeoverMessage)
+        XCTAssertTrue(controller.debugRenderedOutput.contains("Waiting for terminal ownership"))
+
+        fakeHost.hasSurface = true
+        fakeHost.snapshotValue = ghosttySnapshot(text: "owned")
+        fakeHost.snapshotTextValue = "owned"
+        releaseAttempt.signal()
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            controller.debugForceRefresh()
+            if controller.attachmentMode == .owner && !controller.debugTakeoverPending { break }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertEqual(controller.attachmentMode, .owner)
+        XCTAssertFalse(controller.debugShowsTakeoverScrim)
+    }
+
     @MainActor func testTakeoverRetrySupersedesStalePendingAttempt() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -2162,7 +2418,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             paths: paths)
 
         let remoteOwner = TerminalClient(
-            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", hostName: "iphone", deviceName: "iPhone 17 Pro"),
+            id: "remote-owner", kind: .remote, identity: .init(label: "iPhone", hostName: "iphone", deviceName: "iPhone 17 Pro"),
             connectedAt: "2026-05-20T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
@@ -2245,7 +2501,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         let controller = makeGhosttyController(sessionID: "session-owner-to-viewer", paths: paths, host: fakeHost)
 
         let currentOwner = TerminalClient(
-            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: controller.clientID, kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-19T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: "session-owner-to-viewer", client: currentOwner, mode: .owner, paths: paths, attachedAt: "2026-05-19T00:00:00Z")
@@ -2253,7 +2509,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         controller.showEmbedded(focus: true)
         let initialAttachCount = fakeHost.attachCount
 
-        let otherClient = TerminalClient(id: "other-owner", kind: .remoteViewer, identity: .init(label: "iPad"), connectedAt: "2026-05-19T00:00:02Z")
+        let otherClient = TerminalClient(id: "other-owner", kind: .remote, identity: .init(label: "iPad"), connectedAt: "2026-05-19T00:00:02Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: "session-owner-to-viewer", client: otherClient, mode: .viewer, paths: paths, attachedAt: "2026-05-19T00:00:02Z")
         try TerminalSessionPersistence.transferOwnership(
@@ -2265,9 +2521,12 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(fakeHost.attachCount, initialAttachCount)
         XCTAssertTrue(fakeHost.didReleaseSurface)
         XCTAssertFalse(controller.debugShowsTerminalSurface)
-        XCTAssertFalse(controller.debugShowsTextRenderer)
+        // The scrim overlays the pre-existing text-renderer body rather than hiding it (the released
+        // ghostty surface leaves this pane showing its output-view fallback underneath).
+        XCTAssertTrue(controller.debugShowsTextRenderer)
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
-        XCTAssertTrue(controller.debugRenderedOutput.contains("Current owner: iPad"))
+        XCTAssertEqual(controller.debugTakeoverTitle, "Owned by iPad")
+        XCTAssertEqual(controller.debugTakeoverMessage, "Take over to view and type here.")
     }
 
     @MainActor func testGhosttyViewerShowsFinalRenderAfterSessionExit() throws {
@@ -2286,10 +2545,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 updatedAt: "2026-05-15T00:00:01Z"), paths: paths)
         try "output log tail should not render\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
         let owner = TerminalClient(
-            id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: "owner-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-15T00:00:00Z")
         let viewer = TerminalClient(
-            id: "viewer-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            id: "viewer-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
             connectedAt: "2026-05-15T00:00:01Z")
         try TerminalSessionPersistence.upsertClient(owner, paths: paths)
         try TerminalSessionPersistence.upsertClient(viewer, paths: paths)
@@ -2409,10 +2668,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 sessionID: "session-viewer-exited", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .exited,
                 updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
         let owner = TerminalClient(
-            id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: "owner-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
         let viewer = TerminalClient(
-            id: "viewer-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            id: "viewer-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
             connectedAt: "2026-05-09T00:00:01Z")
         try TerminalSessionPersistence.upsertClient(owner, paths: paths)
         try TerminalSessionPersistence.upsertClient(viewer, paths: paths)
@@ -3047,7 +3306,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             .init(
                 sessionID: "session-viewer-disabled", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
                 updatedAt: "2026-05-09T00:00:01Z"), paths: viewerPaths)
-        let owner = TerminalClient(id: "owner-client", kind: .localWindow, identity: .init(label: "Owner"), connectedAt: "2026-05-09T00:00:00Z")
+        let owner = TerminalClient(id: "owner-client", kind: .local, identity: .init(label: "Owner"), connectedAt: "2026-05-09T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: "session-viewer-disabled", client: owner, mode: .owner, paths: viewerPaths, attachedAt: "2026-05-09T00:00:00Z")
         let viewerHost = FakeGhosttySessionHost()
@@ -3234,10 +3493,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             detachClientAction: { _ in })
 
         let owner = TerminalClient(
-            id: ownerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: ownerController.clientID, kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
         let viewer = TerminalClient(
-            id: viewerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            id: viewerController.clientID, kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
             connectedAt: "2026-05-09T00:00:01Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: "session-focus-title-refresh", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
@@ -3321,7 +3580,15 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertGreaterThan(controller.debugGhosttySurfaceRefreshRequestCount, initialRefreshCount)
     }
 
-    @MainActor func testGhosttyOwnerStatusShellDisablesPasteUntilRendererIsReady() throws {
+    /// An owner pane whose renderer host has not attached yet (no live frame) is exactly State A from
+    /// the pane-blank-after-handoff redesign: it is still the owner and still accepts input normally
+    /// (`resolveVisibleRenderer` resolves it straight to `.ghosttyOwner`, never the takeover screen), so
+    /// a paste attempt here is not blocked with a "take over ownership" message — it just fails silently
+    /// (a beep, no status text) because there is no real renderer host in this unit-test environment to
+    /// carry it. This test predates that redesign and used to assert the opposite (paste disabled, an
+    /// ownership-nagging status message) back when an owner-with-no-surface pane was misclassified as
+    /// the same "another client owns this" screen a genuine viewer sees.
+    @MainActor func testGhosttyOwnerPaneAllowsPasteAttemptEvenBeforeRendererIsReady() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -3343,12 +3610,13 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         pasteboard.clearContents()
         pasteboard.setString("paste-from-test", forType: .string)
 
+        XCTAssertEqual(controller.visibleRenderer, .ghosttyOwner)
         controller.paste(nil)
 
         XCTAssertEqual(controller.debugInputFieldValue, "")
-        XCTAssertEqual(controller.debugInputStatus, "Take over ownership before sending terminal input.")
+        XCTAssertEqual(controller.debugInputStatus, "")
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.copy(_:)))))
-        XCTAssertFalse(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.paste(_:)))))
+        XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.paste(_:)))))
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
     }
 
@@ -3497,8 +3765,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             sessionID: "session-idempotent-close", paths: .init(rootDirectory: root.path),
             stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
             attachClientAction: { client, _ in capture.attachedClientID = client.id },
-            detachClientAction: { clientID in capture.detachedClientID = clientID },
-            onWindowClose: { _, _, _ in closeCallCount += 1 })
+            detachClientAction: { clientID in capture.detachedClientID = clientID }, onWindowClose: { _, _, _ in closeCallCount += 1 })
 
         controller.showEmbedded(focus: false)
         await controller.debugAwaitPendingClientControl()
@@ -3578,10 +3845,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             detachClientAction: { _ in })
 
         let owner = TerminalClient(
-            id: ownerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: ownerController.clientID, kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
         let viewer = TerminalClient(
-            id: viewerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            id: viewerController.clientID, kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
             connectedAt: "2026-05-09T00:00:01Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: "session-6", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
@@ -3656,10 +3923,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         await viewerController.debugAwaitPendingClientControl()
 
         let owner = TerminalClient(
-            id: ownerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: ownerController.clientID, kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
         let viewer = TerminalClient(
-            id: viewerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            id: viewerController.clientID, kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
             connectedAt: "2026-05-09T00:00:01Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: "session-notify", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
@@ -3710,7 +3977,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         fakeHost.effectiveWorkingDirectory = initialWorkingDirectory.path
         let controller = makeGhosttyController(sessionID: "session-metadata", paths: paths, host: fakeHost)
         let owner = TerminalClient(
-            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: controller.clientID, kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: "session-metadata", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
@@ -3748,7 +4015,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             sessionID: "session-runtime", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
             attachClientAction: persistenceBackedAttachAction(paths), detachClientAction: persistenceBackedDetachAction(paths))
         let owner = TerminalClient(
-            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: controller.clientID, kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: "session-runtime", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
@@ -3794,7 +4061,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         fakeHost.effectiveWorkingDirectory = "/tmp/work"
         let controller = makeGhosttyController(sessionID: sessionID, paths: paths, host: fakeHost)
         let owner = TerminalClient(
-            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: controller.clientID, kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
@@ -3846,7 +4113,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
 
         let controller = makeGhosttyController(sessionID: sessionID, paths: paths)
         let owner = TerminalClient(
-            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: controller.clientID, kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
@@ -3887,11 +4154,13 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertTrue(controller.debugState.contains("child: 33"))
     }
 
-    /// A pane preparing its owner surface is waiting for a first frame. That frame arrives under a
-    /// screen-content reason — the catch-up `.state` response a live session stamps `state_change` —
-    /// and only a refresh re-resolves the renderer onto the mirror, so the pane must not skip it or
-    /// it sits on the preparing UI with the frame painted into a hidden view.
-    @MainActor func testPreparingOwnerPanePresentsMirrorWhenFirstFrameArrivesUnderStateChange() throws {
+    /// An interactive session this pane owns resolves to `.ghosttyOwner` immediately, whether or not the
+    /// mirror already has a renderable surface (see `resolveVisibleRenderer`'s doc comment) — there is no
+    /// separate "preparing" screen for it to sit on first. A first frame arriving later (under a
+    /// screen-content reason, e.g. the catch-up `.state` response a live session stamps `state_change`)
+    /// must therefore find the terminal surface already showing, not need a renderer transition to
+    /// become visible.
+    @MainActor func testOwnerPaneShowsMirrorImmediatelyAndKeepsItWhenFirstFrameArrives() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -3910,15 +4179,16 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         host.hasSurface = false
         let controller = makeGhosttyController(sessionID: sessionID, paths: paths, host: host)
         let owner = TerminalClient(
-            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: controller.clientID, kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
         controller.debugForceRefresh()
-        XCTAssertEqual(controller.visibleRenderer, .ghosttyTakeoverStatus)
-        XCTAssertFalse(controller.debugShowsTerminalSurface)
+        XCTAssertEqual(controller.visibleRenderer, .ghosttyOwner)
+        XCTAssertTrue(controller.debugShowsTerminalSurface)
 
-        // The mirror applied the catch-up frame, so the host now has a renderable surface.
+        // The mirror applies the catch-up frame; the renderer was already `.ghosttyOwner`, so nothing
+        // about which screen is showing changes.
         host.hasSurface = true
         host.snapshotValue = ghosttySnapshot()
         postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.stateChange.rawValue, sessionID: sessionID)
@@ -3982,7 +4252,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
             paths: paths)
         let owner = TerminalClient(
-            id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: "owner-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
         try TerminalSessionPersistence.upsertClient(owner, paths: paths)
         try TerminalSessionPersistence.attachClient(
@@ -4006,10 +4276,11 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(refreshCount, 1)
     }
 
-    /// The one screen-content change a pane on the takeover screen can present is its surface
-    /// becoming renderable, which promotes it to the live mirror. It refreshes once on that flip and
-    /// then goes quiet again behind the live-mirror guard, however many payloads follow.
-    @MainActor func testTakeoverStatusPaneRefreshesOnceWhenSurfaceBecomesRenderable() throws {
+    /// The one screen-content change an owner pane with no renderable surface yet can present is the
+    /// surface becoming renderable, which nothing else about `.ghosttyOwner` changes for. It refreshes
+    /// once on that flip and then goes quiet again behind the live-mirror guard, however many payloads
+    /// follow.
+    @MainActor func testOwnerPaneWithNoSurfaceRefreshesOnceWhenSurfaceBecomesRenderable() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -4028,12 +4299,12 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         host.hasSurface = false
         let controller = makeGhosttyController(sessionID: sessionID, paths: paths, host: host)
         let owner = TerminalClient(
-            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: controller.clientID, kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
         controller.debugForceRefresh()
-        XCTAssertEqual(controller.visibleRenderer, .ghosttyTakeoverStatus)
+        XCTAssertEqual(controller.visibleRenderer, .ghosttyOwner)
 
         var refreshCount = 0
         controller.onDisplayTitleChanged = { _, _ in refreshCount += 1 }
@@ -4052,8 +4323,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
     /// The surface availability a skip is measured against is recorded by every refresh, so it
     /// follows the pane through ownership changes instead of describing a renderer the pane left.
     /// A pane demoted from the live mirror goes quiet on the takeover screen, and when it wins
-    /// ownership back its first frame still promotes it — which it would not if the availability it
-    /// compares against were the one it recorded while it held the mirror.
+    /// ownership back it resolves straight to `.ghosttyOwner` again (see `resolveVisibleRenderer`) —
+    /// its first frame arriving afterward still triggers exactly one refresh, which it would not if
+    /// the availability the skip check compares against were the one recorded while it held the
+    /// mirror before demotion.
     @MainActor func testDemotedPaneGoesQuietThenPresentsMirrorAgainWhenOwnershipReturns() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -4073,7 +4346,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         host.snapshotValue = ghosttySnapshot()
         let controller = makeGhosttyController(sessionID: sessionID, paths: paths, host: host)
         let owner = TerminalClient(
-            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: controller.clientID, kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
@@ -4081,7 +4354,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.visibleRenderer, .ghosttyOwner)
 
         // Another client takes the session over. Demotion releases the pane's renderer surface.
-        let otherClient = TerminalClient(id: "other-owner", kind: .remoteViewer, identity: .init(label: "iPad"), connectedAt: "2026-05-09T00:00:02Z")
+        let otherClient = TerminalClient(id: "other-owner", kind: .remote, identity: .init(label: "iPad"), connectedAt: "2026-05-09T00:00:02Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: otherClient, mode: .viewer, paths: paths, attachedAt: "2026-05-09T00:00:02Z")
         try TerminalSessionPersistence.transferOwnership(
@@ -4095,11 +4368,12 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         for reason in Self.screenContentStateReasons { postStateStreamNotifications(reason: reason, sessionID: sessionID) }
         XCTAssertEqual(refreshCount, 0)
 
-        // Ownership comes back and the mirror repaints its first frame.
+        // Ownership comes back; the pane resolves straight to `.ghosttyOwner` even before its first
+        // frame repaints (see `resolveVisibleRenderer`).
         try TerminalSessionPersistence.transferOwnership(
             sessionID: sessionID, newOwnerClientID: controller.clientID, paths: paths, transferredAt: "2026-05-09T00:00:04Z")
         controller.debugForceRefresh()
-        XCTAssertEqual(controller.visibleRenderer, .ghosttyTakeoverStatus)
+        XCTAssertEqual(controller.visibleRenderer, .ghosttyOwner)
 
         refreshCount = 0
         host.hasSurface = true
@@ -4126,10 +4400,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try "one\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
 
         let owner = TerminalClient(
-            id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: "owner-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
         let viewer = TerminalClient(
-            id: "viewer-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            id: "viewer-client", kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
             connectedAt: "2026-05-09T00:00:01Z")
         try TerminalSessionPersistence.upsertClient(owner, paths: paths)
         try TerminalSessionPersistence.upsertClient(viewer, paths: paths)
@@ -4145,13 +4419,67 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         controller.debugForceRefresh()
         let initialRenderedOutput = controller.debugRenderedOutput
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
-        XCTAssertTrue(initialRenderedOutput.contains("Current owner: Owner Mac"))
+        XCTAssertEqual(controller.debugTakeoverTitle, "Owned by Owner Mac")
+        XCTAssertEqual(controller.debugTakeoverMessage, "Take over to view and type here.")
 
         try "one\ntwo\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
         controller.debugSimulateOutputDidChange()
         try await Task.sleep(for: .milliseconds(50))
 
         XCTAssertEqual(controller.debugRenderedOutput, initialRenderedOutput)
+    }
+
+    /// Regression coverage for the State-B scrim showing stale body text underneath it. A pane that
+    /// requested ownership shows a plain "Waiting for terminal ownership…" line in the body while that
+    /// request is outstanding (`isWaitingForRequestedOwnership`, overlay hidden). If the pane stops
+    /// waiting without ever becoming owner, `refreshNow`'s `.ghosttyTakeoverStatus` case must clear that
+    /// line before showing the overlay, since there is no live content to leave visible underneath (see
+    /// `takeoverScrimView`'s doc comment): otherwise the scrim would dim leftover text from a moment
+    /// that no longer applies.
+    @MainActor func testGhosttyTakeoverStatusClearsStaleWaitingBodyTextOnceNoLongerWaitingForOwnership() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-clears-stale-waiting", backend: .ghosttyEmbedded, title: "owner-seeking", workingDirectory: "/tmp/work",
+                shell: "/bin/zsh", command: "cat", createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-clears-stale-waiting", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-20T00:00:01Z"), paths: paths)
+        let remoteOwner = TerminalClient(
+            id: "remote-owner", kind: .remote, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro"),
+            connectedAt: "2026-05-20T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-clears-stale-waiting", client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
+
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.hasSurface = false
+        // `attachClientAction` never persists an attachment, so nothing here ever makes this pane the
+        // confirmed owner; only its own optimistic attach bookkeeping changes across refreshes.
+        let controller = makeGhosttyController(
+            sessionID: "session-clears-stale-waiting", paths: paths, host: fakeHost, attachClientAction: { _, _ in }, detachClientAction: { _ in })
+
+        // Construction's own initial refresh (`performInitialRefresh`) is the one refresh where this
+        // client has not yet requested any attach: it is mid-request for its own ownership, so the
+        // overlay is hidden and the body carries the plain waiting line instead (see
+        // `isWaitingForRequestedOwnership`'s doc comment). That same refresh optimistically records a
+        // viewer attach for this client (nothing else can attach it as owner while `remoteOwner` holds
+        // the session), which is what ends the wait on the very next refresh.
+        XCTAssertFalse(controller.debugShowsTakeoverScrim)
+        XCTAssertTrue(controller.debugRenderedOutput.contains("Waiting for terminal ownership"))
+
+        // The optimistic viewer attach from the refresh above now reads as "this client was attached",
+        // so this refresh gives up seeking ownership (see the `wasObservedAsAttachedOwner` demotion in
+        // `refreshNow`) without this pane ever having become owner. The overlay now shows, and the
+        // stale waiting line must not still be sitting underneath it.
+        controller.debugForceRefresh()
+
+        XCTAssertTrue(controller.debugShowsTakeoverScrim)
+        XCTAssertEqual(controller.debugRenderedOutput, "")
     }
 
     @MainActor func testGhosttyOwnerClearsStaleNotRunningErrorOnceRuntimeRecovers() throws {
@@ -4171,7 +4499,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
 
         let controller = makeGhosttyController(sessionID: "session-runtime-recover", paths: paths)
         let owner = TerminalClient(
-            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            id: controller.clientID, kind: .local, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: "session-runtime-recover", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
@@ -4268,8 +4596,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             paths: paths)
         let host = FakeGhosttySessionHost()
         host.snapshotValue = ghosttySnapshot(text: "final output")
-        let controller = makeGhosttyController(
-            sessionID: sessionID, paths: paths, host: host, connectionStageTracker: connectionStageTracker)
+        let controller = makeGhosttyController(sessionID: sessionID, paths: paths, host: host, connectionStageTracker: connectionStageTracker)
         controller.showEmbedded(focus: true)
         return controller
     }
@@ -4433,8 +4760,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         _ = controller.handleKeyEvent(try keyEvent(keyCode: kVK_ANSI_A, characters: "a", modifiers: []))
 
         XCTAssertEqual(
-            controller.debugInputStatus, "",
-            "a keystroke during the grace must not raise the disconnected notice on a banner the user cannot see")
+            controller.debugInputStatus, "", "a keystroke during the grace must not raise the disconnected notice on a banner the user cannot see")
         XCTAssertFalse(controller.debugShowsInputStatus)
     }
 
@@ -4471,8 +4797,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
 
         XCTAssertTrue(controller.debugBannerVisible)
         XCTAssertTrue(
-            controller.banner.debugClickOnLabelPassesThrough,
-            "a banner with nothing to click must not swallow clicks meant for the terminal")
+            controller.banner.debugClickOnLabelPassesThrough, "a banner with nothing to click must not swallow clicks meant for the terminal")
     }
 
     /// Stage 2 is the one connection banner with a control (Retry), and even then only the button
@@ -4491,9 +4816,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
 
         XCTAssertTrue(controller.debugBannerVisible)
         XCTAssertTrue(controller.banner.debugClickOnActionReachesButton, "the Retry button needs to take its own click")
-        XCTAssertTrue(
-            controller.banner.debugClickOnLabelPassesThrough,
-            "the label beside Retry must not swallow clicks meant for the terminal")
+        XCTAssertTrue(controller.banner.debugClickOnLabelPassesThrough, "the label beside Retry must not swallow clicks meant for the terminal")
     }
 
     /// Stage 2 (every candidate address failed to dial) is the one case with something for the user to
@@ -4537,7 +4860,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugInputStatus, TerminalConnectionNotice.unreachableText)
     }
 
-        /// The reason left on the input status row is retired when the link returns. The row is what the
+    /// The reason left on the input status row is retired when the link returns. The row is what the
     /// debug dump reports the pane's input state from, so a stale "connection lost" there describes a
     /// pane that is working again.
     @MainActor func testDisconnectedInputStatusIsRetiredWhenTheLinkReturns() throws {
@@ -4610,12 +4933,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: nil, connectionStage: .connected, isBannerVisible: true))
         // The banner stays down until the tracker says to show it, even mid-outage (the grace window).
         XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: .running, connectionStage: .reconnecting, isBannerVisible: false))
-        XCTAssertEqual(
-            TerminalPaneBannerNotice.resolve(runtimeState: .running, connectionStage: .reconnecting, isBannerVisible: true), .disconnected)
+        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .running, connectionStage: .reconnecting, isBannerVisible: true), .disconnected)
         // An unreachable device is exactly the case where the session's state is unknown.
         XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: nil, connectionStage: .reconnecting, isBannerVisible: true), .disconnected)
-        XCTAssertEqual(
-            TerminalPaneBannerNotice.resolve(runtimeState: .running, connectionStage: .unreachable, isBannerVisible: true), .unreachable)
+        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .running, connectionStage: .unreachable, isBannerVisible: true), .unreachable)
         // A stopped session wins: the process is gone whatever the link is doing.
         XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .exited, connectionStage: .unreachable, isBannerVisible: true), .sessionEnded)
         XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .failed, connectionStage: .unreachable, isBannerVisible: true), .sessionFailed)
@@ -4676,6 +4997,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
     /// (`activeGhosttySessionHost`/`clientGhosttySessionHost`) is released on the main thread on its
     /// own merit, independent of whatever the view hierarchy happens to retain.
     @MainActor private final class DeinitTrackingGhosttySessionHost: TerminalGhosttySessionHosting {
+        var connectionStageTracker = TerminalConnectionStageTracker()
         var activeOwnerClientIDValue: String?
         private let recorder: HostDeinitThreadRecorder
         init(recorder: HostDeinitThreadRecorder) { self.recorder = recorder }
@@ -4737,7 +5059,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         let controller = makeGhosttyController(
             sessionID: sessionID, paths: paths, preferredAttachmentMode: .owner, performInitialRefresh: false, sessionHostProvider: { _, _ in host })
         let owner = TerminalClient(
-            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-07-23T00:00:00Z")
+            id: controller.clientID, kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-07-23T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-07-23T00:00:00Z")
         controller.debugForceRefresh()
