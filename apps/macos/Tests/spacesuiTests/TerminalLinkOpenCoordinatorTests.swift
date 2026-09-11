@@ -43,19 +43,38 @@ import spacesterminalui
         }
         var opens: [Open] = []
 
+        /// Emits once per recorded open, so a test that has to wait for an open awaits the open
+        /// itself instead of polling `opens` against a wall clock. Swift Testing runs every suite in
+        /// this target concurrently in one process: a stall anywhere in that process spends a poll's
+        /// budget while the code under test is simply not being scheduled, which reads as a failure
+        /// even though nothing under test misbehaved.
+        let opened: AsyncStream<Void>
+        private let openedContinuation: AsyncStream<Void>.Continuation
+
+        init() {
+            let (stream, continuation) = AsyncStream<Void>.makeStream()
+            opened = stream
+            openedContinuation = continuation
+        }
+
+        private func record(_ open: Open) {
+            opens.append(open)
+            openedContinuation.yield()
+        }
+
         func makeRegistry() -> TerminalArtifactHandlerRegistry {
             let categories: [TerminalArtifactCategory] = [.image, .video, .pdf, .markdown, .text, .html, .webURL]
             var handlers: [TerminalArtifactCategory: TerminalArtifactHandlerRegistry.Handler] = [:]
             for category in categories {
                 handlers[category] = { [weak self] url in
-                    self?.opens.append(Open(category: category, url: url))
+                    self?.record(Open(category: category, url: url))
                     return true
                 }
             }
             return TerminalArtifactHandlerRegistry(
                 handlers: handlers,
                 defaultOpenHandler: { [weak self] url in
-                    self?.opens.append(Open(category: nil, url: url))
+                    self?.record(Open(category: nil, url: url))
                     return true
                 })
         }
@@ -67,13 +86,25 @@ import spacesterminalui
         private var throwingLinks: Set<String> = []
         private var chunkByLinkID: [String: TerminalServiceTerminalLinkChunk] = [:]
         private var gatesByLinkID: [String: [DispatchSemaphore]] = [:]
+        private var gateEntryByLinkID: [String: AsyncStream<Void>.Continuation] = [:]
         private var resolveCounts = 0
         private var chunkCounts: [String: Int] = [:]
 
         func setResolve(_ response: TerminalServiceResponse, forLink link: String) { lock.withLock { resolveByLink[link] = response } }
         func setResolveThrows(forLink link: String) { lock.withLock { _ = throwingLinks.insert(link) } }
         func setChunk(_ chunk: TerminalServiceTerminalLinkChunk, forLinkID linkID: String) { lock.withLock { chunkByLinkID[linkID] = chunk } }
-        func setChunkGate(_ gate: DispatchSemaphore, forLinkID linkID: String) { lock.withLock { gatesByLinkID[linkID] = [gate] } }
+        /// Holds the next chunk read for `linkID` open until `gate` is signalled, and returns a stream
+        /// that emits once that read has entered the hold. A waiting test consumes the stream rather
+        /// than polling `chunkCount` against a wall clock, for the reason spelled out on
+        /// `OpenRecorder.opened`.
+        func setChunkGate(_ gate: DispatchSemaphore, forLinkID linkID: String) -> AsyncStream<Void> {
+            let (entered, continuation) = AsyncStream<Void>.makeStream()
+            lock.withLock {
+                gatesByLinkID[linkID] = [gate]
+                gateEntryByLinkID[linkID] = continuation
+            }
+            return entered
+        }
         func chunkCount(forLinkID linkID: String) -> Int { lock.withLock { chunkCounts[linkID] ?? 0 } }
         func resetChunkCount(forLinkID linkID: String) { lock.withLock { chunkCounts[linkID] = 0 } }
 
@@ -89,14 +120,25 @@ import spacesterminalui
                 return lock.withLock { resolveByLink[link] } ?? TerminalServiceResponse(ok: false, message: "no resolve scripted for \(link)")
             case .readTerminalLinkChunk(let payload):
                 let linkID = payload.terminalLinkID ?? ""
-                let gate: DispatchSemaphore? = lock.withLock {
+                let hold: (gate: DispatchSemaphore, entered: AsyncStream<Void>.Continuation?)? = lock.withLock {
                     chunkCounts[linkID, default: 0] += 1
                     guard var gates = gatesByLinkID[linkID], !gates.isEmpty else { return nil }
                     let gate = gates.removeFirst()
                     gatesByLinkID[linkID] = gates
-                    return gate
+                    return (gate, gateEntryByLinkID.removeValue(forKey: linkID))
                 }
-                gate?.wait()
+                if let hold {
+                    // Announce the hold before entering it, so a waiting test hears about the
+                    // outstanding read from the read itself.
+                    hold.entered?.yield()
+                    hold.entered?.finish()
+                    // Blocking is only safe because the coordinator runs every transport call on a
+                    // dedicated thread of its own, so this parks that thread and nothing else. A gate
+                    // that parked a Swift cooperative-pool thread would take a slot out of a pool
+                    // that is one thread per core with no reserve, and the fetch task that has to
+                    // reach this very read could then never be scheduled at all.
+                    hold.gate.wait()
+                }
                 guard let chunk = lock.withLock({ chunkByLinkID[linkID] }) else {
                     return TerminalServiceResponse(ok: false, message: "no chunk scripted for \(linkID)")
                 }
@@ -128,18 +170,32 @@ import spacesterminalui
             artifactKind: artifactKind, byteCount: byteCount, externalURL: externalURL)
     }
 
-    private func waitUntil(
-        timeout: Duration = .seconds(30), sourceLocation: SourceLocation = #_sourceLocation, _ predicate: @MainActor () -> Bool
+    /// Awaits one event from `events`, bounded so a coordinator that never produces it fails by name
+    /// instead of hanging. An unbounded `next()` would suspend forever, leave the gate below closed,
+    /// and let CI kill the whole process at its silence watchdog with no failed condition to read.
+    ///
+    /// The bound sits far above any plausible scheduling stall rather than near one. Swift Testing
+    /// runs every suite in this target concurrently in one process, and a stall there (a captive main
+    /// actor, a blocked stdout write) has already cost this suite more than half a minute of wall
+    /// clock while the code under test was simply not being scheduled. The bound is here to turn a
+    /// hang into a diagnosable failure, not to police how quickly the event arrives.
+    private func awaitEvent(
+        _ events: AsyncStream<Void>, _ description: String, timeout: Duration = .seconds(120), sourceLocation: SourceLocation = #_sourceLocation
     ) async {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
-        while !predicate(), clock.now < deadline {
-            await Task.yield()
-            try? await Task.sleep(for: .milliseconds(5))
+        let arrived = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                var iterator = events.makeAsyncIterator()
+                return await iterator.next() != nil
+            }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
         }
-        // Record the timeout at the wait itself: falling through silently lets downstream
-        // assertions fail in cascades that obscure which wait actually missed.
-        if !predicate() { Issue.record("waitUntil timed out after \(timeout)", sourceLocation: sourceLocation) }
+        if !arrived { Issue.record("timed out after \(timeout) waiting for \(description)", sourceLocation: sourceLocation) }
     }
 
     // MARK: - Synchronous routes
@@ -365,16 +421,20 @@ import spacesterminalui
             TerminalServiceTerminalLinkChunk(
                 linkID: linkID, offset: 0, byteCount: payload.count, isFinal: true, base64Data: payload.base64EncodedString()), forLinkID: linkID)
         let gate = DispatchSemaphore(value: 0)
-        sender.setChunkGate(gate, forLinkID: linkID)
+        // The release below is on the straight-line path, so this only covers an exit that skips it
+        // (a throwing assertion added between the wait and the release): the parked transport thread
+        // must never outlive the test.
+        defer { gate.signal() }
+        let gatedRead = sender.setChunkGate(gate, forLinkID: linkID)
         let coordinator = makeCoordinator(
             isLocalDevice: false, sender: sender, banner: banner, recorder: recorder, sessionID: sessionID, deviceID: deviceID)
 
         coordinator.openLink("data.txt")
-        // `chunkCount` is driven by a real `DispatchSemaphore` block inside a detached task, not by
-        // the coordinator's own task graph, so there is nothing here for `drainActiveWorkForTesting`
-        // to await yet: this is a genuinely event-external wait for proof the first fetch has
-        // entered (and is stalled inside) its chunk read.
-        await waitUntil { sender.chunkCount(forLinkID: linkID) == 1 }
+        // The gated read announces itself as it enters the hold. There is nothing for
+        // `drainActiveWorkForTesting` to await here (the first fetch is meant to still be inside
+        // that read), so this awaits the read's own signal for proof the fetch got there.
+        await awaitEvent(gatedRead, "the first fetch to enter its gated chunk read")
+        #expect(sender.chunkCount(forLinkID: linkID) == 1)
 
         // The duplicate click cancels the first fetch (bumping `generation` and calling
         // `Task.cancel()`) and starts a second for the same link; the second's chunk read finds the
@@ -383,9 +443,10 @@ import spacesterminalui
         // its cache write — has been observed: the late finisher this test targets must finish
         // *after* the current fetch populated the cache, or a stale completion that clobbered the
         // cache before checking its generation would be silently repaired by the second's write.
-        // (An ordering poll, not a drain: draining here would also await the parked first fetch.)
+        // (An ordering wait, not a drain: draining here would also await the parked first fetch.)
         coordinator.openLink("data.txt")
-        await waitUntil { recorder.opens.count == 1 }
+        await awaitEvent(recorder.opened, "the replacement fetch to open its artifact")
+        #expect(recorder.opens.count == 1)
 
         // Only now let the cancelled first fetch finish, and drain it to completion so the
         // assertions are exact: its late finish must not have removed the cache or opened anything.
@@ -409,6 +470,10 @@ import spacesterminalui
         let firstPayload = Data("FIRST".utf8)
         let firstLinkID = "first-\(UUID().uuidString)"
         let gate = DispatchSemaphore(value: 0)
+        // The release below is on the straight-line path, so this only covers an exit that skips it
+        // (a throwing assertion added between the wait and the release): the parked transport thread
+        // must never outlive the test.
+        defer { gate.signal() }
         sender.setResolve(
             TerminalServiceResponse(
                 ok: true, message: "",
@@ -420,7 +485,7 @@ import spacesterminalui
                 linkID: firstLinkID, offset: 0, byteCount: firstPayload.count, isFinal: true, base64Data: firstPayload.base64EncodedString()),
             forLinkID: firstLinkID)
         // The first fetch blocks inside its chunk read until the test releases the gate.
-        sender.setChunkGate(gate, forLinkID: firstLinkID)
+        let gatedRead = sender.setChunkGate(gate, forLinkID: firstLinkID)
 
         let secondPayload = Data("SECOND".utf8)
         let secondLinkID = "second-\(UUID().uuidString)"
@@ -439,20 +504,22 @@ import spacesterminalui
             isLocalDevice: false, sender: sender, banner: banner, recorder: recorder, sessionID: sessionID, deviceID: deviceID)
 
         coordinator.openLink("first.txt")
-        // Wait until the first fetch has entered its (blocked) chunk read. Genuinely event-external
-        // (a real `DispatchSemaphore` block inside a detached task, not the coordinator's own task
-        // graph), so this stays a poll rather than a drain.
-        await waitUntil { sender.chunkCount(forLinkID: firstLinkID) >= 1 }
+        // Wait until the first fetch has entered its (blocked) chunk read. The read announces itself
+        // on the way in, so this awaits that signal rather than draining: the fetch is deliberately
+        // left outstanding.
+        await awaitEvent(gatedRead, "the first fetch to enter its gated chunk read")
+        #expect(sender.chunkCount(forLinkID: firstLinkID) >= 1)
 
         // The second click cancels the first (bumping `generation` before this call returns) and
         // starts its own fetch. The first's gate stays closed until the second's open has been
         // observed, which is what proves supersession is non-blocking: the replacement fetch
         // completes while the superseded sender is still stuck in its chunk read, so an
-        // implementation that serialized the new fetch behind the old I/O would fail this wait
-        // loudly instead of being rescued by the release below. (An ordering poll, not a drain:
+        // implementation that serialized the new fetch behind the old I/O would never reach this
+        // open instead of being rescued by the release below. (An ordering wait, not a drain:
         // draining here would also await the parked first fetch.)
         coordinator.openLink("second.txt")
-        await waitUntil { recorder.opens.count == 1 }
+        await awaitEvent(recorder.opened, "the replacement fetch to open its artifact")
+        #expect(recorder.opens.count == 1)
 
         // Only now release the superseded fetch and drain it to completion, so the assertions are
         // exact: the cancelled fetch must have discarded its result without opening anything.
