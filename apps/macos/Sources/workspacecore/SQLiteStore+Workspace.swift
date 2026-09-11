@@ -108,6 +108,24 @@ extension SQLiteStore {
         try execute(sql: "UPDATE workspaces SET branch = ? WHERE id = ?", bindings: [branch ?? "", id])
     }
 
+    /// Clears `branch` to nil, but only if the row still holds `expectedBranch` — a single-column
+    /// compare-and-set, not a read-modify-write of the full record. Releasing a detached workspace's
+    /// stale branch claim (discovery's collision step, and the create-validation path that lets a live
+    /// worktree take over a branch a detached workspace is still claiming) reads the row once and applies
+    /// the release later; a full-row `upsert` in between would silently overwrite whatever else changed on
+    /// that row in the meantime — notes, hidden state, running state — none of which the release has any
+    /// business touching. Returns whether the clear applied, so a caller that raced a concurrent write to
+    /// the branch column (another release, or the branch actually changing) can tell it lost the race
+    /// rather than assume its intent happened.
+    @discardableResult
+    public func clearWorkspaceBranch(id: String, ifCurrentlyEquals expectedBranch: String) throws -> Bool {
+        try withImmediateTransaction {
+            try execute(sql: "UPDATE workspaces SET branch = '' WHERE id = ? AND branch = ?", bindings: [id, expectedBranch])
+            guard let row = try queryRow(sql: "SELECT changes()"), let changed = Int(row.first ?? "") else { return false }
+            return changed > 0
+        }
+    }
+
     public func updateWorkspaceDirname(id: String, dirname: String?) throws {
         try execute(sql: "UPDATE workspaces SET dirname = ? WHERE id = ?", bindings: [dirname ?? "", id])
     }

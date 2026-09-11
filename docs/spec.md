@@ -322,10 +322,11 @@ Review comments can be sent only to a non-exited coding agent that still belongs
 - Workspace settings used for launch must remain editable after creation.
 
 ### Discovery
-- Spaces should periodically discover valid git worktrees for registered projects.
+- Spaces should periodically discover valid git worktrees for registered projects. A valid worktree is one on a named branch; a worktree on a detached HEAD is not imported as a new workspace.
 - Newly discovered worktrees should become workspaces automatically.
 - A non-default workspace whose worktree is gone is removed automatically, the same way the Delete action removes one; there is nothing left to run it in. A workspace checkout directory that remains on disk keeps its existing record when Git omits it from the worktree listing, since the listing alone is not proof that the user's checkout is gone.
 - Discovery imports valid worktrees reported by Git. Deleting a workspace removes its worktree with its record, which is what keeps it from coming back; a valid worktree left at that path — one the delete could not remove, or one made there afterwards — is live work and is imported as a new workspace. Hiding is how an existing worktree is kept out of view: a hidden workspace keeps its record, so discovery leaves it alone rather than re-importing it.
+- An existing workspace whose worktree goes detached keeps its record and its last-known branch name until another worktree of the same project actually holds that branch; discovery never removes the record. When the worktree returns to a branch, discovery updates the branch to match. When another worktree claims the last-known branch first, that worktree owns the branch and the detached workspace's stored branch is cleared instead.
 
 ## Launch and Runtime Behavior
 - Launch starts the workspace's configured processes and captures the resulting windows. It starts no coding agents: an agent exists only when an agent command runs in a terminal.
