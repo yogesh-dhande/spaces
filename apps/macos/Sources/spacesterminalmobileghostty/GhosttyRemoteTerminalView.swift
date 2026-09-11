@@ -327,7 +327,10 @@ import Foundation
         private var didScrollDuringCurrentPan = false
         private var scrollInteractionDepth = 0
         private var deferredViewportSizeReport = false
-        private var momentumDisplayLink: CADisplayLink?
+        /// `nonisolated(unsafe)` so `deinit` can read the link it has to invalidate: a `deinit` is
+        /// nonisolated and cannot touch a non-`Sendable` isolated property. It has exclusive access to
+        /// `self` by then, and every other access to the link stays on the main actor.
+        private nonisolated(unsafe) var momentumDisplayLink: CADisplayLink?
         private var momentumVelocity = CGPoint.zero
         private var lastMomentumTimestamp: CFTimeInterval = 0
         private var lastScrollPointerPosition: TerminalScrollPointerPosition?
@@ -463,10 +466,22 @@ import Foundation
 
         @available(*, unavailable) required init?(coder: NSCoder) { nil }
 
-        // The shared mirror needs nothing here: leaving the window and SwiftUI's dismantle both run
-        // `prepareForDismantle()`, and a holder that somehow deallocates without releasing is parked
-        // by the next view's acquisition, which never touches the deallocated one.
-        deinit { MainActor.assumeIsolated { momentumDisplayLink?.invalidate() } }
+        /// The shared mirror needs nothing here: leaving the window and SwiftUI's dismantle both run
+        /// `prepareForDismantle()`, and a holder that somehow deallocates without releasing is parked
+        /// by the next view's acquisition, which never touches the deallocated one.
+        ///
+        /// Makes no isolation assumption: a `deinit` runs on whichever thread dropped the last reference, so
+        /// `MainActor.assumeIsolated` here would trap the process on a background one. UIKit happens to
+        /// defer a `UIView`'s deallocation to the main thread even when the final release lands off it, but
+        /// nothing below leans on that.
+        ///
+        /// A live momentum link retains this view (it is the link's target) and so keeps it out of `deinit`
+        /// entirely, which is why the link is normally already nil here; the invalidate stays for the case
+        /// where it is not, and goes to the main thread because CoreAnimation teardown belongs there.
+        deinit {
+            guard let momentumDisplayLink else { return }
+            MainThreadDeinitCleanup.run { momentumDisplayLink.invalidate() }
+        }
 
         public override func didMoveToWindow() {
             super.didMoveToWindow()
