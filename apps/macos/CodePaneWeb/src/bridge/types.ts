@@ -218,6 +218,11 @@ export interface WorkspaceRefListResult {
 
 export interface DiffSignatureEvent {
   scopeSignature: string;
+  /** Present only when the daemon's file watcher for this workspace failed to start (or stopped
+   *  running), the exact OS error text. While set, this signature stops recomputing on git-state
+   *  changes; the pane shows a persistent notice (`liveRefreshNotice.ts`) with a Retry action that
+   *  sends `retryLiveRefresh`, which makes the daemon retry the watcher. */
+  liveRefreshError?: string;
 }
 
 export type DiffSignatureListener = (event: DiffSignatureEvent) => void;
@@ -286,6 +291,11 @@ export type FileSignatureListener = (event: FileSignatureEvent) => void;
  *  contract as the ordinary pull path. */
 export interface FileListSignatureEvent {
   fileListSignature: string;
+  /** Same meaning as `DiffSignatureEvent.liveRefreshError`: the daemon's watcher for this workspace
+   *  failed, so this listing stops recomputing on membership changes until a `retryLiveRefresh`
+   *  call retries it. Both streams share one watcher, so a set value here is the same string as the
+   *  diff stream's. */
+  liveRefreshError?: string;
 }
 
 export type FileListSignatureListener = (event: FileListSignatureEvent) => void;
@@ -449,6 +459,14 @@ export interface SpacesBridge {
    * pane that never opens Files or quick-open never pays for background listing polls.
    */
   subscribeFileListSignature(listener: FileListSignatureListener): Unsubscribe;
+
+  /**
+   * Asks the host to recover a workspace's failed file watcher: the host stops and reopens both
+   * signature streams, and the daemon re-attempts the watcher. Resolves with no payload once the
+   * host has reopened both streams; the streams' own next push frames report whether the watcher
+   * actually recovered (`liveRefreshError` cleared or still present).
+   */
+  retryLiveRefresh(): Promise<void>;
   /** Atomically persists the current workspace-local recovery document. The page owns snapshot
    * construction so navigation, comment text, and either editing surface cannot race into
    * separate host writes. */

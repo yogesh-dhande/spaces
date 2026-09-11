@@ -399,6 +399,10 @@ export const FIXTURE_AGENTS: CodePaneAgentSummary[] = [
   { id: "agent-2", label: "codex · fix-flaky-test", sessionId: "session-2" },
 ];
 
+/** The daemon's OS error text for a failed file watcher, verbatim through to the live-refresh
+ *  notice's label. Backs `MockSpacesBridge.simulateLiveRefreshError` (dev-only harness control). */
+export const FIXTURE_LIVE_REFRESH_ERROR = "fsevents: too many open files";
+
 export const FIXTURE_INIT_PAYLOAD: CodePaneInitPayload = {
   workspaceId: "fixture-workspace",
   workspaceName: "spaces-demo",

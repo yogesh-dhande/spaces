@@ -1291,7 +1291,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     var workspaceDiffManifestSessionCreationCount: Int { workspaceDiffTransfers.manifestCreationCount }
     var workspaceDiffPatchTransferActiveCount: Int { workspaceDiffTransfers.activePatchCount }
     var workspaceDiffPatchTransferCreationCount: Int { workspaceDiffTransfers.patchCreationCount }
-    /// Producer + 2s poll timer per subscribed (workspace, ref) scope for `subscribeWorkspaceDiffSignature`,
+    /// Event-gated producer per subscribed (workspace, ref) scope for `subscribeWorkspaceDiffSignature`,
     /// keyed by `WorkspaceDiffScope`. Entries are `queue`-confined: created on a scope's first subscriber
     /// and removed when its last relay closes (see
     /// `addWorkspaceDiffSignatureSubscriber`/`removeWorkspaceDiffSignatureSubscriber`).
@@ -1301,10 +1301,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// and removed when its last relay closes (see
     /// `addWorkspaceFileSignatureSubscriber`/`removeWorkspaceFileSignatureSubscriber`).
     private var workspaceFileSignatureSubscriptions: [WorkspaceFileScope: WorkspaceFileSignatureSubscription] = [:]
-    /// Producer + 2s poll timer per subscribed workspace for `subscribeWorkspaceFileListSignature`,
+    /// Event-gated producer per subscribed workspace for `subscribeWorkspaceFileListSignature`,
     /// keyed by workspace id. Entries are `queue`-confined: created on a workspace's first subscriber
     /// and removed when its last relay closes.
     private var workspaceFileListSignatureSubscriptions: [String: WorkspaceFileListSignatureSubscription] = [:]
+    /// One `WorkspaceWatch` per workspace id, shared by that workspace's diff-signature and
+    /// file-list-signature subscriptions (see `acquireWorkspaceWatch`). An entry is created on a
+    /// workspace's first-ever subscriber and then kept for the daemon's life: it is never removed on a
+    /// last unsubscribe, only left idle (see `acquireWorkspaceWatch`'s doc comment for why removal is not
+    /// safe). `queue`-confined like the subscription dictionaries above, but one-directional: entries are
+    /// only ever added here, never taken away.
+    private var workspaceWatches: [String: WorkspaceWatch] = [:]
     /// Workspaces whose teardown is running or queued on `workspaceTeardownQueue`, reported on every
     /// overview as `workspaceIDsWithTeardownInFlight`. Guarded by its own lock rather than a queue: it is
     /// written from the teardown queue and read from whichever queue is building an overview, and both
@@ -1749,7 +1756,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// additionally tracks that ref's merge-base with `HEAD`; `lastCommit == true` is the committed-only
     /// scope, whose signature depends only on `HEAD` itself (see
     /// `SpacesDeviceWorkspaceDiffEngine.scopeSignature`). Three subscriptions to the same workspace but
-    /// different scopes get independent producers, poll timers, and socket paths, so an uncommitted, a
+    /// different scopes get independent producers and socket paths, so an uncommitted, a
     /// base-branch-review, and a last-commit pane on the same workspace never share a signature or a
     /// socket.
     struct WorkspaceDiffScope: Hashable, Sendable {
@@ -2046,15 +2053,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             try? FileManager.default.removeItem(at: outputURL.deletingLastPathComponent())
         }
     }
-    /// Pure decision for whether the diff-signature poll timer's `tick`th invocation (1-indexed, one per
+    /// Pure decision for whether the per-file signature poll timer's `tick`th invocation (1-indexed, one per
     /// 2s fire) should broadcast a frame: whenever the computed signature changed, or unconditionally every
     /// 10th tick (~20s) as a keepalive. The keepalive is disconnect detection, not a convenience: the Linux
     /// relay loop (`relayLinuxSubscription`) blocks on a plain `read()` of this scope's producer socket, and
     /// a TLS client disconnecting does not wake that read — only a subsequent write failing does. Forcing a
     /// frame at least every ~20s guarantees `writeTLSResponse` runs often enough to notice a dead peer and
     /// unwind the loop, which is what actually releases the subscriber slot, poll timer, and relay thread
-    /// (see `WorkspaceDiffSignatureSubscription`). Extracted as a free function, free of that class's
-    /// mutable state, so the cadence is testable without a TLS harness.
+    /// (see `WorkspaceFileSignatureSubscription`, the one producer still on a poll timer; the diff and
+    /// file-list producers get the same ~20s liveness guarantee from a real keepalive timer instead, since
+    /// they no longer poll on a fixed tick). Extracted as a free function, free of that class's mutable
+    /// state, so the cadence is testable without a TLS harness.
     static func workspaceDiffSignatureKeepaliveShouldBroadcast(tick: Int, changed: Bool) -> Bool { changed || tick % 10 == 0 }
 
     /// Pure decision for whether a terminal `subscribe` relay owes its client a keepalive: true once
@@ -2092,188 +2101,363 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// alive through provider failures instead of silently freezing the producer.
     static let workspaceFileListSignatureUnavailableSentinel = "unavailable"
 
-    /// Producer + 2s poll timer for one (workspace, ref) scope's `subscribeWorkspaceDiffSignature` stream.
-    /// The producer (a reused `DeviceOverviewStreamServer`) and the poll timer both run on `streamQueue`,
-    /// never on the shared serial state `queue`, so a slow `git status` during polling can never stall
-    /// request dispatch. `streamQueue` is a dedicated serial queue created per scope (see
-    /// `addWorkspaceDiffSignatureSubscriber`), never shared across scopes: a wedged repository's git calls
-    /// (bounded by the 30s per-command timeout, not instant) degrade only that scope's own poll/keepalive/
-    /// socket-accept cadence, never another subscribed scope's — mirroring the per-workspace git queue
-    /// (`workspaceGitQueue`) used for `workspaceFileRead`/`Write`/`Diff` requests. `subscriberCount` is the
-    /// one exception: it is read/written only from
-    /// `addWorkspaceDiffSignatureSubscriber`/`removeWorkspaceDiffSignatureSubscriber`, both confined to
-    /// `queue`.
+    /// How long `WorkspaceDiffSignatureSubscription`/`WorkspaceFileListSignatureSubscription` wait after a
+    /// provider failure (a git timeout or spawn failure, not a workspace deletion) before retrying on their
+    /// own, with no file-system event required. Both subscriptions are event-gated with no ordinary poll
+    /// timer, so without this a failure would sit behind the unavailable sentinel until the next real
+    /// touched-repository event, with the 20s keepalive only re-broadcasting that same stale sentinel.
+    static let unavailableRetryIntervalSeconds: TimeInterval = 5
+
+    /// Producer for one (workspace, ref) scope's `subscribeWorkspaceDiffSignature` stream. Recomputes are
+    /// event-gated: this subscription registers with the workspace's shared `WorkspaceWatch` (see
+    /// `acquireWorkspaceWatch`) and recomputes only when a debounced firing hands it a touched-repository
+    /// set, instead of polling git on a timer. The producer (a reused `DeviceOverviewStreamServer`), the
+    /// keepalive timer, and every recompute all run on `streamQueue`, never on the shared serial state
+    /// `queue`, so a slow `git status` can never stall request dispatch. `streamQueue` is a dedicated
+    /// serial queue created per scope (see `addWorkspaceDiffSignatureSubscriber`), never shared across
+    /// scopes: a wedged repository's git calls (bounded by the 30s per-command timeout, not instant)
+    /// degrade only that scope's own recompute, keepalive, and socket-accept cadence, never another
+    /// subscribed scope's, mirroring the per-workspace git queue (`workspaceGitQueue`) used for
+    /// `workspaceFileRead`/`Write`/`Diff` requests. `subscriberCount` is the one exception: it is
+    /// read/written only from `addWorkspaceDiffSignatureSubscriber`/`removeWorkspaceDiffSignatureSubscriber`,
+    /// both confined to `queue`.
     ///
-    /// Signature polling, not filesystem watching: `FileSystemWatcher`'s inotify backend is non-recursive,
-    /// so a recursive worktree watch on Linux would mean enumerating every directory within a real
-    /// watch-descriptor budget. A subscription-gated 2s poll is one code path on both platforms, computes
-    /// nothing while no pane is subscribed, and needs no directory enumeration.
+    /// The keepalive timer (20s) does no git work: it simply re-broadcasts whatever the last computed
+    /// signature was, so a Linux relay blocked on a plain socket `read()` still gets a write often enough
+    /// to notice a dead peer, exactly as the old 2s poll timer's every-10th-tick keepalive did (see
+    /// `workspaceDiffSignatureKeepaliveShouldBroadcast`'s doc comment, still used unchanged by the
+    /// per-file signature stream below, which stays on its own poll timer). A real timer at the actual
+    /// desired cadence needs no derived tick counting, so this producer does not call that function.
     ///
-    /// `signatureProvider` returning nil (the subscribed workspace was deleted) never stops this producer:
-    /// the timer handler substitutes `workspaceDiffSignatureUnavailableSentinel` and runs the same
-    /// cadence/broadcast logic against it, so the transition into unavailability still broadcasts once and
-    /// the keepalive still fires every ~20s afterward, exactly as if the workspace still existed and its
-    /// signature had simply changed. `lineProvider` reads that same already-substituted value back out of
-    /// `latestSignatureBox` rather than substituting independently (see that box's doc comment); the one
-    /// exception is the connect-before-first-tick frame, which has no tick's value to read yet and computes
-    /// its own substitution fresh.
+    /// `signatureProvider` returning nil (the subscribed workspace was deleted) substitutes
+    /// `workspaceDiffSignatureUnavailableSentinel`, broadcast exactly once on the transition into
+    /// unavailability like any other signature change; the keepalive timer then keeps re-sending that
+    /// sentinel every 20s with no further recompute.
+    ///
+    /// Watcher failure: if the workspace's `WorkspaceWatch` cannot start (or a retried start still fails),
+    /// this subscription still computes its one initial signature (so the first load works), records the
+    /// error text in `liveRefreshError`, and never recomputes again on its own, since a failed watch never
+    /// fires a touched-repository event. Every frame this subscription sends until it is torn down and
+    /// re-created (a fresh subscribe, which retries the watch) carries that same error text.
     final class WorkspaceDiffSignatureSubscription: @unchecked Sendable {
-        /// Shares one poll tick's computed signature between the timer handler (which computes and records
-        /// it) and `lineProvider` (which builds the broadcast frame from it), so a broadcast for a tick
-        /// never carries a signature more recently recomputed against a filesystem that moved between the
-        /// two — the compared value and the broadcast value are the exact same read. A plain class rather
-        /// than a tuple/closure-captured var so `lineProvider` (owned by `server`, in turn owned by `self`)
-        /// can hold a reference to it directly instead of through `self`: capturing `self` here would create
-        /// `self` → `server` → `lineProvider` → `self`, a retain cycle this box exists to avoid.
+        /// Shares the latest computed signature and live-refresh error between the recompute paths (which
+        /// compute and record them) and `lineProvider` (which builds the broadcast frame from them). A
+        /// plain class rather than closure-captured vars so `lineProvider` (owned by `server`, in turn
+        /// owned by `self`) can hold a reference to it directly instead of through `self`: capturing `self`
+        /// here would create `self` -> `server` -> `lineProvider` -> `self`, a retain cycle this box exists
+        /// to avoid.
         ///
-        /// Confined to `streamQueue`: the timer handler's write, `lineProvider`'s broadcast-time read, and
-        /// `lineProvider`'s connect-time read all run there (see the type doc above), so a plain var needs
-        /// no lock.
-        private final class LatestSignatureBox: @unchecked Sendable { var signature: String? }
+        /// Confined to `streamQueue`: the install step, every touched-event recompute, and the keepalive
+        /// timer's read all run there, so a plain var needs no lock.
+        private final class LatestSignatureBox: @unchecked Sendable {
+            var signature: String?
+            var liveRefreshError: String?
+        }
 
         let socketPath: String
         let server: DeviceOverviewStreamServer
-        private let pollTimer: DispatchSourceTimer
+        private let scope: WorkspaceDiffScope
+        private let watch: WorkspaceWatch
+        private let streamQueue: DispatchQueue
+        private let signatureProvider: @Sendable (WorkspaceDiffScope, RepositoryTouchedSet, RepositoryContributionCache) -> String?
+        private let contributionCache = RepositoryContributionCache()
+        private let keepaliveTimer: DispatchSourceTimer
         private let latestSignatureBox = LatestSignatureBox()
-        /// Last signature broadcast by the poll timer. Compared only from the timer's own handler (always
-        /// on `streamQueue`), so it needs no lock. Starts nil, so the first tick after a scope's producer
-        /// starts always "changes" and broadcasts once even if nothing moved; a harmless redundant
-        /// broadcast the client resolves by re-pulling the same diff.
+        /// See `scheduleOrCancelUnavailableRetry`'s doc comment. An init parameter (production default
+        /// `SpacesDeviceAPIServer.unavailableRetryIntervalSeconds`) rather than a hardcoded constant so a
+        /// test can shrink it, the same way `WorkspaceWatch`'s `debounceInterval`/`debounceCeiling` are
+        /// parameterized for tests without changing production behavior.
+        private let unavailableRetryInterval: TimeInterval
+        /// Confined to `streamQueue`, same as `watchToken`. Non-nil exactly while a provider failure is
+        /// awaiting its one-shot retry; cancelled and cleared the moment a recompute succeeds or this
+        /// subscription is torn down.
+        private var unavailableRetryWorkItem: DispatchWorkItem?
+        /// Last signature actually broadcast. Compared only on `streamQueue`, so it needs no lock. Starts
+        /// nil, so the install step's own initial compute always "changes" and broadcasts once.
         private var lastBroadcastSignature: String?
-        /// Ticks since this producer started, incremented on every poll timer fire regardless of whether it
-        /// broadcasts; feeds `workspaceDiffSignatureKeepaliveShouldBroadcast`. Read/written only from the
-        /// timer's own handler.
-        private var tick = 0
+        private var lastBroadcastLiveRefreshError: String?
+        /// Set once the install step (dispatched from `start()`) registers with `watch`; used by `stop()`
+        /// to unsubscribe. Nil only in the brief window between `start()` returning and that dispatched
+        /// step running.
+        private var watchToken: UUID?
         /// `queue`-confined; see the type doc above.
         var subscriberCount = 0
 
         init(
-            scope: WorkspaceDiffScope, socketPath: String, streamQueue: DispatchQueue,
-            signatureProvider: @escaping @Sendable (WorkspaceDiffScope) -> String?
+            scope: WorkspaceDiffScope, socketPath: String, streamQueue: DispatchQueue, watch: WorkspaceWatch,
+            signatureProvider: @escaping @Sendable (WorkspaceDiffScope, RepositoryTouchedSet, RepositoryContributionCache) -> String?,
+            unavailableRetryInterval: TimeInterval = SpacesDeviceAPIServer.unavailableRetryIntervalSeconds
         ) {
             self.socketPath = socketPath
+            self.scope = scope
+            self.watch = watch
+            self.streamQueue = streamQueue
+            self.signatureProvider = signatureProvider
+            self.unavailableRetryInterval = unavailableRetryInterval
             let latestSignatureBox = latestSignatureBox
             server = DeviceOverviewStreamServer(
                 socketPath: socketPath, queue: streamQueue,
                 lineProvider: {
-                    // Ordinarily just reads the value the timer handler already computed and recorded this
-                    // tick (never recomputes independently — see `LatestSignatureBox`'s doc comment). The one
-                    // exception is a client connecting before the first tick fires (+2s after start): the box
-                    // is still nil then, so this computes fresh for that one initial frame only, and does NOT
-                    // write the result into the box or `lastBroadcastSignature` — the first tick's own
-                    // nil-compare still broadcasts a corrective frame regardless, which is the existing
-                    // intended behavior `lastBroadcastSignature`'s doc comment describes.
-                    let signature =
-                        latestSignatureBox.signature ?? signatureProvider(scope) ?? SpacesDeviceAPIServer.workspaceDiffSignatureUnavailableSentinel
+                    let signature = latestSignatureBox.signature ?? SpacesDeviceAPIServer.workspaceDiffSignatureUnavailableSentinel
                     return try? SpacesDeviceWorkspaceDiffSignatureStreamCodec.encodeLine(
                         SpacesDeviceWorkspaceDiffSignatureFrame(
-                            workspaceID: scope.workspaceID, refName: scope.refName, lastCommit: scope.lastCommit, scopeSignature: signature))
+                            workspaceID: scope.workspaceID, refName: scope.refName, lastCommit: scope.lastCommit, scopeSignature: signature,
+                            liveRefreshError: latestSignatureBox.liveRefreshError))
                 })
             let timer = DispatchSource.makeTimerSource(queue: streamQueue)
-            timer.schedule(deadline: .now() + .seconds(2), repeating: .seconds(2))
-            pollTimer = timer
-            timer.setEventHandler { [weak self] in
-                guard let self else { return }
-                self.tick += 1
-                // Substitute the sentinel rather than returning early on a nil provider result: a permanent
-                // provider failure (workspace deleted) must still participate in the keepalive cadence below,
-                // or a blocked Linux relay's dead TLS peer is never surfaced. See the sentinel's doc comment.
-                let signature = signatureProvider(scope) ?? SpacesDeviceAPIServer.workspaceDiffSignatureUnavailableSentinel
-                // Recorded before the broadcast decision below, and unconditionally on every tick (not only
-                // on a broadcasting one), so a client connecting between ticks always reads the most recent
-                // computation instead of a stale one — see `LatestSignatureBox`'s doc comment for why this
-                // is a plain, unrouted-through-`self` reference rather than reaching through `self.server`.
-                latestSignatureBox.signature = signature
-                let changed = signature != self.lastBroadcastSignature
-                guard SpacesDeviceAPIServer.workspaceDiffSignatureKeepaliveShouldBroadcast(tick: self.tick, changed: changed) else { return }
-                self.lastBroadcastSignature = signature
-                self.server.broadcast()
-            }
+            timer.schedule(deadline: .now() + .seconds(20), repeating: .seconds(20))
+            keepaliveTimer = timer
+            timer.setEventHandler { [weak self] in self?.server.broadcast() }
         }
 
         func start() throws {
             do { try server.start() } catch {
-                // A dispatch source must never be released while suspended (`pollTimer` is created
-                // suspended above and only resumed on success) — releasing one traps in libdispatch. Arm
+                // A dispatch source must never be released while suspended (`keepaliveTimer` is created
+                // suspended above and only resumed on success) -- releasing one traps in libdispatch. Arm
                 // then immediately cancel it so this subscription can be discarded safely after an ordinary
                 // setup error (e.g. the socket path could not be unlinked/bound).
-                pollTimer.resume()
-                pollTimer.cancel()
+                keepaliveTimer.resume()
+                keepaliveTimer.cancel()
                 throw error
             }
-            pollTimer.resume()
+            keepaliveTimer.resume()
+            // Registering with `watch` runs its install (repository-map discovery, ignore-set reads, and
+            // the underlying `FileSystemWatcher`'s own setup) synchronously on `watch`'s own queue; hopping
+            // to `streamQueue` first keeps that work off the server's shared `queue`, which is what calls
+            // `start()` from `addWorkspaceDiffSignatureSubscriber`.
+            streamQueue.async { [weak self] in self?.installWatchAndComputeInitialSignature() }
+        }
+
+        private func installWatchAndComputeInitialSignature() {
+            subscribeToWatch()
+            recomputeAndMaybeBroadcast(touched: .recomputeAll)
+        }
+
+        /// Subscribes (or, from `retryWatch()`, re-subscribes) to `watch`, storing the new token and the
+        /// install's start error. Must run on `streamQueue`. `guard let self` rather than `self?.` inside
+        /// the nested block: the Linux toolchain rejects a Sendable closure that reads the outer weak
+        /// `self` var (a captured var in concurrent code).
+        private func subscribeToWatch() {
+            let (token, startError) = watch.subscribe { [weak self] touched in
+                guard let self else { return }
+                self.streamQueue.async { self.handleTouched(touched) }
+            }
+            watchToken = token
+            latestSignatureBox.liveRefreshError = startError
+        }
+
+        /// Re-attempts the watch install for an existing subscription that a joining subscriber just found
+        /// unhealthy. Bumping `subscriberCount` alone (the ordinary join path in
+        /// `addWorkspaceDiffSignatureSubscriber`) never retries anything: `WorkspaceWatch.subscribe`, the
+        /// call that actually re-attempts a failed install, only runs when a NEW subscription object is
+        /// constructed, which happens only for the first subscriber to a scope. Unsubscribes the current
+        /// token, re-subscribes with the same handler (retrying the install exactly as a fresh subscription
+        /// would), and recomputes so the joining client's connect-time frame, and every attached client's
+        /// next frame, reflects the outcome. A healthy subscription is left alone (the check runs on
+        /// `streamQueue`, where `latestSignatureBox` is confined, rather than being read synchronously from
+        /// the server's shared `queue`, which would stall that queue behind an in-flight recompute).
+        func retryWatch() {
+            streamQueue.async { [weak self] in
+                guard let self, self.latestSignatureBox.liveRefreshError != nil else { return }
+                // Subscribe the new handler BEFORE unsubscribing the old token, not after: with only one
+                // subscriber attached, unsubscribing first would drop `WorkspaceWatch`'s own subscriber
+                // count to zero, running its full zero-subscriber teardown (stopping the watcher and
+                // discarding `repositories`/`ignoreSets`/`classifiedDirectories`) only to immediately
+                // reinstall everything from scratch on the very next line. `subscribe` already reinstalls
+                // whenever `lastStartErrorText != nil` regardless of the count, so subscribing first gets
+                // the same retried install without paying for a full teardown-then-rebuild cycle in
+                // between; this ordering changes only when the old token is dropped, not whether the retry
+                // itself happens.
+                let previousToken = self.watchToken
+                self.subscribeToWatch()
+                if let previousToken { self.watch.unsubscribe(previousToken) }
+                self.recomputeAndMaybeBroadcast(touched: .recomputeAll)
+            }
+        }
+
+        private func handleTouched(_ touched: WorkspaceWatch.Touched) {
+            // Re-read the watch's current health on every firing, not just at install: a later failure
+            // (e.g. a Linux `addPaths` call hitting the inotify watch limit) must still reach the next
+            // frame, and a later recovery must clear a stale error back to nil.
+            latestSignatureBox.liveRefreshError = watch.currentStartError()
+            recomputeAndMaybeBroadcast(touched: RepositoryTouchedSet(all: touched.all, directories: touched.directories))
+        }
+
+        private func recomputeAndMaybeBroadcast(touched: RepositoryTouchedSet) {
+            let result = signatureProvider(scope, touched, contributionCache)
+            latestSignatureBox.signature = result ?? SpacesDeviceAPIServer.workspaceDiffSignatureUnavailableSentinel
+            broadcastIfChanged()
+            scheduleOrCancelUnavailableRetry(succeeded: result != nil)
+        }
+
+        /// This subscription has no ordinary poll timer: every recompute is gated on a `WorkspaceWatch`
+        /// firing. A nil `signatureProvider` result (a git timeout or spawn failure, not a workspace
+        /// deletion, which the caller refuses before ever subscribing) would otherwise sit cached behind the
+        /// unavailable sentinel until the next real file-system event, with the 20s keepalive only
+        /// re-broadcasting that same stale sentinel forever. This one-shot timer is the exception path for a
+        /// FAILING PROVIDER, not a recurring poll: armed only after a failed recompute, re-armed on every
+        /// following failure, and cancelled the moment a recompute succeeds or the subscription tears down
+        /// (see `stop()`), so a healthy subscription never runs it at all.
+        private func scheduleOrCancelUnavailableRetry(succeeded: Bool) {
+            unavailableRetryWorkItem?.cancel()
+            unavailableRetryWorkItem = nil
+            guard !succeeded else { return }
+            let workItem = DispatchWorkItem { [weak self] in self?.recomputeAndMaybeBroadcast(touched: .recomputeAll) }
+            unavailableRetryWorkItem = workItem
+            streamQueue.asyncAfter(deadline: .now() + unavailableRetryInterval, execute: workItem)
+        }
+
+        /// Broadcasts when the (signature, liveRefreshError) pair moved since the last broadcast, not the
+        /// signature alone: a watch retry that succeeds without the signature changing must still reach
+        /// every attached client so the page can clear its notice.
+        private func broadcastIfChanged() {
+            let signature = latestSignatureBox.signature
+            let liveRefreshError = latestSignatureBox.liveRefreshError
+            guard signature != lastBroadcastSignature || liveRefreshError != lastBroadcastLiveRefreshError else { return }
+            lastBroadcastSignature = signature
+            lastBroadcastLiveRefreshError = liveRefreshError
+            server.broadcast()
         }
 
         func stop() {
-            pollTimer.cancel()
+            keepaliveTimer.cancel()
             server.stop()
+            // Deferred to `streamQueue`, strong `self` capture (not weak): `installWatchAndComputeInitialSignature`
+            // may still be enqueued ahead of this block (it is dispatched from `start()` onto the same
+            // serial queue), so reading `watchToken` here rather than synchronously in `stop()` avoids a
+            // cross-queue race with that install step setting it; the strong capture guarantees this
+            // cleanup still runs (and the watch subscription is not leaked) even once every other strong
+            // reference to this subscription is gone. The pending unavailable-retry work item, if any, is
+            // cancelled here too, on the same queue it was scheduled from, so a retry never fires (and never
+            // calls `signatureProvider`) after teardown.
+            streamQueue.async {
+                self.unavailableRetryWorkItem?.cancel()
+                self.unavailableRetryWorkItem = nil
+                if let watchToken = self.watchToken { self.watch.unsubscribe(watchToken) }
+            }
         }
     }
 
-    /// Registers one subscriber for `scope`'s diff-signature stream, creating its producer + 2s poll timer
-    /// on the first subscriber and returning its socket path either way. Must run on `queue`.
+    /// Returns the `WorkspaceWatch` shared by every diff-signature and file-list-signature subscription for
+    /// `workspaceID`, creating it on first use and reusing the same instance for every subscription after
+    /// that, for the rest of the daemon's life: this map only ever grows, one entry per workspace that has
+    /// EVER had a subscriber, never shrinking again once created.
+    ///
+    /// An earlier version removed an entry once its watch's subscriber count reached zero, releasing the
+    /// idle watch for the (small) memory an idle `WorkspaceWatch` holds. That removal could not be made
+    /// safe: it has to run on TWO different queues to be correct (this server's `queue`, where the map
+    /// lives, and `WorkspaceWatch`'s own internal queue, where its subscriber count is the only accurate
+    /// source of "should this entry still exist"), and every attempt to bridge that gap left a window where
+    /// the release, already past its zero-subscriber check, races a brand-new subscription's `subscribe()`
+    /// landing on the watch's queue: the release wins, removes the (now no-longer-idle) map entry, and a
+    /// THIRD subscription then finds nothing there and installs a second, fully redundant watch alongside
+    /// the one the second subscription is still actively using. A reservation state closes one instance of
+    /// that race but not the next: the release can equally land between this function returning a
+    /// zero-subscriber watch and the new subscription's own `subscribe()` call, which runs later, on ITS
+    /// caller's queue, not this one.
+    ///
+    /// Keeping the entry forever sidesteps the whole class of race by removing the need for cross-queue
+    /// coordination at all: `subscribe()` already reinstalls whenever `watcher == nil` (the exact state an
+    /// idle, zero-subscriber watch is left in by `unsubscribe`'s own teardown, see its doc comment), so an
+    /// idle entry costs one serial `DispatchQueue` and a handful of now-empty collections until the next
+    /// stream for that workspace subscribes, and the entry count is bounded by the number of distinct
+    /// workspaces ever opened in this daemon's lifetime, not by how many streams have come and gone. Must
+    /// run on `queue`.
+    private func acquireWorkspaceWatch(workspaceID: String, workspaceDir: String) -> WorkspaceWatch {
+        if let existing = workspaceWatches[workspaceID] { return existing }
+        let watch = WorkspaceWatch(workspaceRoot: workspaceDir, gitClient: workspaceGitClient)
+        workspaceWatches[workspaceID] = watch
+        return watch
+    }
+
+    /// Registers one subscriber for `scope`'s diff-signature stream, creating its producer on the first
+    /// subscriber and returning its socket path either way. Must run on `queue`.
     private func addWorkspaceDiffSignatureSubscriber(scope: WorkspaceDiffScope) throws -> String {
         if let existing = workspaceDiffSignatureSubscriptions[scope] {
             existing.subscriberCount += 1
+            // Bumping `subscriberCount` alone is not a retry: `WorkspaceWatch.subscribe` (the call that
+            // re-attempts a failed install) runs only when a NEW subscription object is constructed, which
+            // happens only for the first subscriber to a scope. The Mac host's Retry action stops the old
+            // stream and opens a new one back to back, so whether this join lands before or after the old
+            // stream's disconnect has already torn this subscription down to zero (which WOULD retry, via
+            // a fresh subscription on the next call) is a race this method does not control. Retrying
+            // explicitly whenever the existing subscription's last frame carried a live-refresh error
+            // covers the case where that teardown has not landed yet.
+            existing.retryWatch()
             return existing.socketPath
         }
         let socketPath = try TerminalServicePaths.workspaceDiffSignatureSocketPath(
             workspaceID: scope.workspaceID, refName: scope.refName, lastCommit: scope.lastCommit)
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        guard let workspace = try store.workspace(id: scope.workspaceID) else {
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(scope.workspaceID)' was not found."])
+        }
         // Dedicated per-scope queue, never shared with any other scope's subscription: a wedged repository's
-        // git calls (now up to 30s, per the git-command timeout) must degrade only this scope's poll,
+        // git calls (up to 30s, per the git-command timeout) must degrade only this scope's recompute,
         // keepalive, and producer-socket accept, never another scope's. See the type doc on
         // `WorkspaceDiffSignatureSubscription`.
         let streamQueue = DispatchQueue(
             label: "spaces.workspace-diff-signature.\(scope.workspaceID).\(scope.lastCommit ? "last-commit" : (scope.refName ?? "uncommitted"))")
+        let watch = acquireWorkspaceWatch(workspaceID: scope.workspaceID, workspaceDir: workspace.dir)
         let subscription = WorkspaceDiffSignatureSubscription(
-            scope: scope, socketPath: socketPath, streamQueue: streamQueue,
-            signatureProvider: { [weak self] scope in try? self?.computeWorkspaceDiffScopeSignature(scope: scope) })
+            scope: scope, socketPath: socketPath, streamQueue: streamQueue, watch: watch,
+            signatureProvider: { [weak self] scope, touched, cache in
+                try? self?.computeWorkspaceDiffScopeSignature(scope: scope, touched: touched, contributionCache: cache)
+            })
+        // A failed `start()` here leaves `watch` in the map exactly as an idle, ordinary
+        // zero-subscriber watch would: no cleanup call, since none is needed (see `acquireWorkspaceWatch`'s
+        // doc comment).
         try subscription.start()
         subscription.subscriberCount = 1
         workspaceDiffSignatureSubscriptions[scope] = subscription
         return socketPath
     }
 
-    /// Releases one subscriber for `scope`, tearing its producer + poll timer down once the count reaches
-    /// zero. There is no explicit unsubscribe command by design; a relay's connection closing is the only
-    /// unsubscribe. Must run on `queue`.
+    /// Releases one subscriber for `scope`, tearing its producer down once the count reaches zero. There is
+    /// no explicit unsubscribe command by design; a relay's connection closing is the only unsubscribe.
+    /// Must run on `queue`.
     private func removeWorkspaceDiffSignatureSubscriber(scope: WorkspaceDiffScope) {
         guard let subscription = workspaceDiffSignatureSubscriptions[scope] else { return }
         subscription.subscriberCount -= 1
         guard subscription.subscriberCount <= 0 else { return }
         subscription.stop()
         workspaceDiffSignatureSubscriptions.removeValue(forKey: scope)
+        // `workspaceWatches[scope.workspaceID]` is left in place: see `acquireWorkspaceWatch`'s doc
+        // comment for why this map only ever grows.
     }
 
     /// Resolves `scope`'s workspace to its checkout directory and computes its `scopeSignature`
     /// (`SpacesDeviceWorkspaceDiffEngine.scopeSignature`), folding in `scope.refName`'s merge-base when
-    /// present. Used both by `handleWorkspaceDiffManifestRequest` and by the diff-signature poll timer's
-    /// `signatureProvider`, which calls this on that scope's own dedicated `streamQueue` (see
-    /// `addWorkspaceDiffSignatureSubscriber`) — a queue with no `RequestContext` of its own — so this opens
-    /// its own `SQLiteStore` rather than sharing one, per the confinement rule: a store belongs to the queue
-    /// that opened it.
-    private func computeWorkspaceDiffScopeSignature(scope: WorkspaceDiffScope) throws -> String {
+    /// present. Used by the diff-signature subscription's event-gated recompute, which calls this on that
+    /// scope's own dedicated `streamQueue` (see `addWorkspaceDiffSignatureSubscriber`), a queue with no
+    /// `RequestContext` of its own, so this opens its own `SQLiteStore` rather than sharing one, per the
+    /// confinement rule: a store belongs to the queue that opened it.
+    private func computeWorkspaceDiffScopeSignature(
+        scope: WorkspaceDiffScope, touched: RepositoryTouchedSet, contributionCache: RepositoryContributionCache
+    ) throws -> String {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         guard let workspace = try store.workspace(id: scope.workspaceID) else {
             throw NSError(
                 domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(scope.workspaceID)' was not found."])
         }
         return try SpacesDeviceWorkspaceDiffEngine.scopeSignature(
-            workspaceDir: workspace.dir, refName: scope.refName, lastCommit: scope.lastCommit, gitClient: workspaceGitClient)
+            workspaceDir: workspace.dir, refName: scope.refName, lastCommit: scope.lastCommit, gitClient: workspaceGitClient,
+            contributionCache: contributionCache, touched: touched)
     }
 
     /// Refuses `scope` before either subscribe transport (macOS `NWConnection` relay, Linux TLS relay)
     /// registers a diff-signature subscription for it, when its workspace directory is not a git
     /// repository. Without this, subscribing against a non-git workspace would sit in
-    /// `WorkspaceDiffSignatureSubscription`'s poll loop silently producing nothing (`signatureProvider`
+    /// `WorkspaceDiffSignatureSubscription` silently producing nothing (`signatureProvider`
     /// swallows its own errors via `try?`), leaving the client to read "unavailable" with no renderable
     /// reason instead of the same typed refusal `handleWorkspaceDiffManifestRequest` gives for the same case. Opens
     /// its own `SQLiteStore`, matching `computeWorkspaceDiffScopeSignature`'s confinement rule, since callers
     /// run on `queue` before any per-scope `streamQueue` (and thus any `RequestContext`) exists yet.
     ///
-    /// This runs synchronously on `queue` — the server's single serial state queue, shared by pings and
-    /// every other client's requests — rather than hopping to the per-workspace git queue the way
-    /// `handleWorkspaceDiffManifestRequest` and the diff-signature poll loop do for their own git work. That is a
+    /// This runs synchronously on `queue`, the server's single serial state queue, shared by pings and
+    /// every other client's requests, rather than hopping to the per-workspace git queue the way
+    /// `handleWorkspaceDiffManifestRequest` and the diff-signature recompute do for their own git work. That is a
     /// deliberate, bounded exception: `isRepo`'s `rev-parse --is-inside-work-tree` probe runs on
     /// `metadataCommandTimeout` (2s), and if that expires against a stalled workspace filesystem,
     /// `runGitAndCapture` still bounds its post-timeout pipe drain to `drainGrace` (2s) rather than blocking
@@ -2356,10 +2540,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     static let workspaceFileSignatureOversizedSentinel = "oversized"
 
     /// Producer + 2s poll timer for one (workspace, path) scope's `subscribeWorkspaceFileSignature` stream.
-    /// Mirrors `WorkspaceDiffSignatureSubscription`'s architecture (producer + poll timer on a dedicated
-    /// `streamQueue`, connect-time frame from the latest computed value, keepalive cadence via
-    /// `workspaceDiffSignatureKeepaliveShouldBroadcast`, reused unchanged — see that function's doc comment)
-    /// with one deliberate divergence: a provider FAILURE here (the file is unreadable or unresolvable — see
+    /// Deliberately NOT event-gated like the diff and file-list producers above: this subscription hashes
+    /// one already-open file directly, with no git spawn, so it carries none of the idle git cost the event
+    /// gating exists to remove, and a plain 2s poll stays simpler than wiring it into a `WorkspaceWatch`.
+    /// Mirrors `WorkspaceDiffSignatureSubscription`'s pre-event-gating architecture (producer + poll timer
+    /// on a dedicated `streamQueue`, connect-time frame from the latest computed value, keepalive cadence
+    /// via `workspaceDiffSignatureKeepaliveShouldBroadcast`, reused unchanged, see that function's doc
+    /// comment) with one deliberate divergence: a provider FAILURE here (the file is unreadable or unresolvable, see
     /// `computeWorkspaceFileScopeSignature`'s `nil` returns) SKIPS the tick's broadcast/`lastBroadcastValue`
     /// update entirely, rather than substituting a sentinel the way diff's `workspaceDiffSignatureUnavailableSentinel`
     /// does: failure has no meaningful wire value to report, so inventing one would be arbitrary. An
@@ -2557,123 +2744,233 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    /// Producer + 2s poll timer for one workspace's `subscribeWorkspaceFileListSignature` stream.
-    /// The wire frame remains the exact `workspaceFileList` signature, which is the value a successful
-    /// pull acknowledges. Polls use a cheaper membership detector and refresh that cached exact value only
-    /// when the detector moves; otherwise a keepalive simply repeats the cache without listing the tree.
+    /// Event-gated producer for one workspace's `subscribeWorkspaceFileListSignature` stream. Recomputes
+    /// happen only when the workspace's shared `WorkspaceWatch` hands this subscription a touched-repository
+    /// set, instead of on a poll timer. The wire frame remains the exact `workspaceFileList` signature,
+    /// which is the value a successful pull acknowledges; a touched-set recompute first checks the cheaper
+    /// membership detector and refreshes the cached exact value only when the detector moves. A keepalive
+    /// timer (20s, no git work) simply repeats the cached signature, mirroring
+    /// `WorkspaceDiffSignatureSubscription`'s keepalive.
     final class WorkspaceFileListSignatureSubscription: @unchecked Sendable {
         private final class LatestSignatureBox: @unchecked Sendable {
             var signature: String?
             var detectorToken: String?
-            var lastBroadcastSignature: String?
+            var liveRefreshError: String?
         }
 
         let socketPath: String
         let server: DeviceOverviewStreamServer
-        private let pollTimer: DispatchSourceTimer
+        private let workspaceID: String
+        private let watch: WorkspaceWatch
+        private let streamQueue: DispatchQueue
+        private let signatureProvider: @Sendable (String) -> String?
+        private let detectorProvider: @Sendable (String, RepositoryTouchedSet, SpacesDeviceWorkspaceFileListEngine.MembershipCaches) -> String?
+        private let membershipCaches = SpacesDeviceWorkspaceFileListEngine.MembershipCaches()
+        private let keepaliveTimer: DispatchSourceTimer
         private let latestSignatureBox = LatestSignatureBox()
-        private var tick = 0
+        /// See `scheduleOrCancelUnavailableRetry`'s doc comment. An init parameter (production default
+        /// `SpacesDeviceAPIServer.unavailableRetryIntervalSeconds`) rather than a hardcoded constant, the
+        /// same way `WorkspaceWatch`'s `debounceInterval`/`debounceCeiling` are parameterized for tests.
+        private let unavailableRetryInterval: TimeInterval
+        /// Confined to `streamQueue`, same as `watchToken`. Non-nil exactly while a provider failure is
+        /// awaiting its one-shot retry; cancelled and cleared the moment a recompute succeeds or this
+        /// subscription is torn down.
+        private var unavailableRetryWorkItem: DispatchWorkItem?
+        private var lastBroadcastSignature: String?
+        private var lastBroadcastLiveRefreshError: String?
+        private var watchToken: UUID?
         var subscriberCount = 0
 
         init(
-            workspaceID: String, socketPath: String, streamQueue: DispatchQueue, signatureProvider: @escaping @Sendable (String) -> String?,
-            detectorProvider: @escaping @Sendable (String) -> String?
+            workspaceID: String, socketPath: String, streamQueue: DispatchQueue, watch: WorkspaceWatch,
+            signatureProvider: @escaping @Sendable (String) -> String?,
+            detectorProvider: @escaping @Sendable (String, RepositoryTouchedSet, SpacesDeviceWorkspaceFileListEngine.MembershipCaches) -> String?,
+            unavailableRetryInterval: TimeInterval = SpacesDeviceAPIServer.unavailableRetryIntervalSeconds
         ) {
             self.socketPath = socketPath
+            self.workspaceID = workspaceID
+            self.watch = watch
+            self.streamQueue = streamQueue
+            self.signatureProvider = signatureProvider
+            self.detectorProvider = detectorProvider
+            self.unavailableRetryInterval = unavailableRetryInterval
             let latestSignatureBox = latestSignatureBox
-            let initialize: @Sendable () -> String = {
-                if let signature = latestSignatureBox.signature { return signature }
-                // Establish the detector baseline before taking the exact listing. The filesystem can
-                // change between these two calls (an agent can create/remove a file in that window). If
-                // the exact listing ran first, the detector could observe the post-change state and make
-                // that stale listing look current forever. A detector-first baseline may cause one extra
-                // exact refresh when the change lands during the listing, but it cannot suppress it.
-                let detectorToken = detectorProvider(workspaceID)
-                let exactSignature = signatureProvider(workspaceID)
-                let signature = exactSignature ?? SpacesDeviceAPIServer.workspaceFileListSignatureUnavailableSentinel
-                latestSignatureBox.signature = signature
-                // A failed exact listing has no trustworthy detector baseline: retaining one would
-                // let identical later detector ticks keep the unavailable sentinel cached forever.
-                latestSignatureBox.detectorToken = exactSignature == nil ? nil : detectorToken
-                // This is the connection's initial frame. Recording it as sent means the first poll does
-                // not re-announce the same exact signature and make an already-current client re-pull.
-                latestSignatureBox.lastBroadcastSignature = signature
-                return signature
-            }
             server = DeviceOverviewStreamServer(
                 socketPath: socketPath, queue: streamQueue,
                 lineProvider: {
-                    let signature = initialize()
-                    // A timer may have initialized the cache before the first client connected. In
-                    // that case this connect-time frame is the first actual broadcast, so acknowledge
-                    // it as sent; otherwise the next timer would immediately re-announce the same
-                    // signature solely because there was no relay at the earlier tick.
-                    if latestSignatureBox.lastBroadcastSignature == nil { latestSignatureBox.lastBroadcastSignature = signature }
+                    let signature = latestSignatureBox.signature ?? SpacesDeviceAPIServer.workspaceFileListSignatureUnavailableSentinel
                     return try? SpacesDeviceWorkspaceFileListSignatureStreamCodec.encodeLine(
-                        SpacesDeviceWorkspaceFileListSignatureFrame(workspaceID: workspaceID, fileListSignature: signature))
+                        SpacesDeviceWorkspaceFileListSignatureFrame(
+                            workspaceID: workspaceID, fileListSignature: signature, liveRefreshError: latestSignatureBox.liveRefreshError))
                 })
             let timer = DispatchSource.makeTimerSource(queue: streamQueue)
-            timer.schedule(deadline: .now() + .seconds(2), repeating: .seconds(2))
-            pollTimer = timer
-            timer.setEventHandler { [weak self] in
-                guard let self else { return }
-                self.tick += 1
-                if latestSignatureBox.signature == nil {
-                    // A timer can fire before any relay connects. It must establish the same cache as the
-                    // connect path, but has not sent a frame yet, so leave `lastBroadcastSignature` nil.
-                    // Keep initialization's detector-first ordering so a change during the exact listing
-                    // cannot be hidden by a detector baseline captured afterward.
-                    let detectorToken = detectorProvider(workspaceID)
-                    let exactSignature = signatureProvider(workspaceID)
-                    latestSignatureBox.signature = exactSignature ?? SpacesDeviceAPIServer.workspaceFileListSignatureUnavailableSentinel
-                    latestSignatureBox.detectorToken = exactSignature == nil ? nil : detectorToken
-                } else {
-                    let detectorToken = detectorProvider(workspaceID)
-                    if latestSignatureBox.detectorToken == nil || detectorToken != latestSignatureBox.detectorToken {
-                        let exactSignature = signatureProvider(workspaceID)
-                        latestSignatureBox.signature = exactSignature ?? SpacesDeviceAPIServer.workspaceFileListSignatureUnavailableSentinel
-                        // Same invariant as the connect path: retry a failed exact pull on the
-                        // following detector tick even if membership itself stayed unchanged.
-                        latestSignatureBox.detectorToken = exactSignature == nil ? nil : detectorToken
-                    }
-                }
-                let signature = latestSignatureBox.signature ?? SpacesDeviceAPIServer.workspaceFileListSignatureUnavailableSentinel
-                let changed = signature != latestSignatureBox.lastBroadcastSignature
-                guard SpacesDeviceAPIServer.workspaceDiffSignatureKeepaliveShouldBroadcast(tick: self.tick, changed: changed) else { return }
-                latestSignatureBox.lastBroadcastSignature = signature
-                self.server.broadcast()
-            }
+            timer.schedule(deadline: .now() + .seconds(20), repeating: .seconds(20))
+            keepaliveTimer = timer
+            timer.setEventHandler { [weak self] in self?.server.broadcast() }
         }
 
         func start() throws {
             do { try server.start() } catch {
-                pollTimer.resume()
-                pollTimer.cancel()
+                keepaliveTimer.resume()
+                keepaliveTimer.cancel()
                 throw error
             }
-            pollTimer.resume()
+            keepaliveTimer.resume()
+            streamQueue.async { [weak self] in self?.installWatchAndComputeInitialSignature() }
+        }
+
+        private func installWatchAndComputeInitialSignature() {
+            subscribeToWatch()
+            recomputeAndMaybeBroadcast(touched: .recomputeAll)
+        }
+
+        /// Subscribes (or, from `retryWatch()`, re-subscribes) to `watch`, storing the new token and the
+        /// install's start error. Must run on `streamQueue`. `guard let self` rather than `self?.` inside
+        /// the nested block: the Linux toolchain rejects a Sendable closure that reads the outer weak
+        /// `self` var (a captured var in concurrent code).
+        private func subscribeToWatch() {
+            let (token, startError) = watch.subscribe { [weak self] touched in
+                guard let self else { return }
+                self.streamQueue.async { self.handleTouched(touched) }
+            }
+            watchToken = token
+            latestSignatureBox.liveRefreshError = startError
+        }
+
+        /// Re-attempts the watch install for an existing subscription that a joining subscriber just found
+        /// unhealthy. Bumping `subscriberCount` alone (the ordinary join path in
+        /// `addWorkspaceFileListSignatureSubscriber`) never retries anything: `WorkspaceWatch.subscribe`,
+        /// the call that actually re-attempts a failed install, only runs when a NEW subscription object is
+        /// constructed, which happens only for the first subscriber to a scope. Unsubscribes the current
+        /// token, re-subscribes with the same handler (retrying the install exactly as a fresh subscription
+        /// would), and recomputes so the joining client's connect-time frame, and every attached client's
+        /// next frame, reflects the outcome. A healthy subscription is left alone (the check runs on
+        /// `streamQueue`, where `latestSignatureBox` is confined, rather than being read synchronously from
+        /// the server's shared `queue`, which would stall that queue behind an in-flight recompute).
+        func retryWatch() {
+            streamQueue.async { [weak self] in
+                guard let self, self.latestSignatureBox.liveRefreshError != nil else { return }
+                // Subscribe the new handler BEFORE unsubscribing the old token, not after: with only one
+                // subscriber attached, unsubscribing first would drop `WorkspaceWatch`'s own subscriber
+                // count to zero, running its full zero-subscriber teardown (stopping the watcher and
+                // discarding `repositories`/`ignoreSets`/`classifiedDirectories`) only to immediately
+                // reinstall everything from scratch on the very next line. `subscribe` already reinstalls
+                // whenever `lastStartErrorText != nil` regardless of the count, so subscribing first gets
+                // the same retried install without paying for a full teardown-then-rebuild cycle in
+                // between; this ordering changes only when the old token is dropped, not whether the retry
+                // itself happens.
+                let previousToken = self.watchToken
+                self.subscribeToWatch()
+                if let previousToken { self.watch.unsubscribe(previousToken) }
+                self.recomputeAndMaybeBroadcast(touched: .recomputeAll)
+            }
+        }
+
+        private func handleTouched(_ touched: WorkspaceWatch.Touched) {
+            // Re-read the watch's current health on every firing, not just at install: a later failure
+            // (e.g. a Linux `addPaths` call hitting the inotify watch limit) must still reach the next
+            // frame, and a later recovery must clear a stale error back to nil.
+            latestSignatureBox.liveRefreshError = watch.currentStartError()
+            recomputeAndMaybeBroadcast(touched: RepositoryTouchedSet(all: touched.all, directories: touched.directories))
+        }
+
+        /// Checks the cheap membership detector first; only when it moved (or the cache has never
+        /// succeeded) does this take the exact listing that actually forms the wire signature. A failed
+        /// exact listing clears the cached detector token so the next touched event retries it, matching
+        /// the retry-on-failure invariant the original poll design already established.
+        private func recomputeAndMaybeBroadcast(touched: RepositoryTouchedSet) {
+            let detectorToken = detectorProvider(workspaceID, touched, membershipCaches)
+            if latestSignatureBox.signature != nil, let cachedToken = latestSignatureBox.detectorToken, cachedToken == detectorToken {
+                // Membership did not move, so the exact listing is skipped; the error state may still
+                // have moved (a watch retry), which is what `broadcastIfChanged` reports on its own. Only
+                // reachable after a previous success: a failed exact listing clears `detectorToken` to nil
+                // below, forcing the exact-listing branch on every following recompute until it succeeds
+                // again, so there is nothing here for `scheduleOrCancelUnavailableRetry` to act on.
+                broadcastIfChanged()
+                return
+            }
+            let exactSignature = signatureProvider(workspaceID)
+            let signature = exactSignature ?? SpacesDeviceAPIServer.workspaceFileListSignatureUnavailableSentinel
+            latestSignatureBox.signature = signature
+            latestSignatureBox.detectorToken = exactSignature == nil ? nil : detectorToken
+            broadcastIfChanged()
+            scheduleOrCancelUnavailableRetry(succeeded: exactSignature != nil)
+        }
+
+        /// Same rationale as `WorkspaceDiffSignatureSubscription.scheduleOrCancelUnavailableRetry`: this
+        /// subscription has no ordinary poll timer either, so a failed exact listing needs its own one-shot
+        /// timer to heal without waiting on a file-system event. Armed only after a failure, re-armed on
+        /// every following failure, and cancelled the moment a recompute succeeds or the subscription tears
+        /// down (see `stop()`).
+        private func scheduleOrCancelUnavailableRetry(succeeded: Bool) {
+            unavailableRetryWorkItem?.cancel()
+            unavailableRetryWorkItem = nil
+            guard !succeeded else { return }
+            let workItem = DispatchWorkItem { [weak self] in self?.recomputeAndMaybeBroadcast(touched: .recomputeAll) }
+            unavailableRetryWorkItem = workItem
+            streamQueue.asyncAfter(deadline: .now() + unavailableRetryInterval, execute: workItem)
+        }
+
+        /// Same (signature, liveRefreshError) broadcast key as the diff-signature subscription's helper.
+        private func broadcastIfChanged() {
+            let signature = latestSignatureBox.signature
+            let liveRefreshError = latestSignatureBox.liveRefreshError
+            guard signature != lastBroadcastSignature || liveRefreshError != lastBroadcastLiveRefreshError else { return }
+            lastBroadcastSignature = signature
+            lastBroadcastLiveRefreshError = liveRefreshError
+            server.broadcast()
         }
 
         func stop() {
-            pollTimer.cancel()
+            keepaliveTimer.cancel()
             server.stop()
+            // Deferred to `streamQueue`, strong `self` capture (not weak): `installWatchAndComputeInitialSignature`
+            // may still be enqueued ahead of this block (it is dispatched from `start()` onto the same
+            // serial queue), so reading `watchToken` here rather than synchronously in `stop()` avoids a
+            // cross-queue race with that install step setting it; the strong capture guarantees this
+            // cleanup still runs (and the watch subscription is not leaked) even once every other strong
+            // reference to this subscription is gone. The pending unavailable-retry work item, if any, is
+            // cancelled here too, on the same queue it was scheduled from, so a retry never fires (and never
+            // calls `signatureProvider`) after teardown.
+            streamQueue.async {
+                self.unavailableRetryWorkItem?.cancel()
+                self.unavailableRetryWorkItem = nil
+                if let watchToken = self.watchToken { self.watch.unsubscribe(watchToken) }
+            }
         }
     }
 
     private func addWorkspaceFileListSignatureSubscriber(workspaceID: String) throws -> String {
         if let existing = workspaceFileListSignatureSubscriptions[workspaceID] {
             existing.subscriberCount += 1
+            // Bumping `subscriberCount` alone is not a retry: `WorkspaceWatch.subscribe` (the call that
+            // re-attempts a failed install) runs only when a NEW subscription object is constructed, which
+            // happens only for the first subscriber to a scope. The Mac host's Retry action stops the old
+            // stream and opens a new one back to back, so whether this join lands before or after the old
+            // stream's disconnect has already torn this subscription down to zero (which WOULD retry, via
+            // a fresh subscription on the next call) is a race this method does not control. Retrying
+            // explicitly whenever the existing subscription's last frame carried a live-refresh error
+            // covers the case where that teardown has not landed yet.
+            existing.retryWatch()
             return existing.socketPath
         }
         let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        guard let workspace = try store.workspace(id: workspaceID) else {
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(workspaceID)' was not found."])
+        }
         let streamQueue = DispatchQueue(label: "spaces.workspace-file-list-signature.\(workspaceID)")
-        let membershipCaches = SpacesDeviceWorkspaceFileListEngine.MembershipCaches()
+        let watch = acquireWorkspaceWatch(workspaceID: workspaceID, workspaceDir: workspace.dir)
         let subscription = WorkspaceFileListSignatureSubscription(
-            workspaceID: workspaceID, socketPath: socketPath, streamQueue: streamQueue,
+            workspaceID: workspaceID, socketPath: socketPath, streamQueue: streamQueue, watch: watch,
             signatureProvider: { [weak self] workspaceID in try? self?.computeWorkspaceFileListSignature(workspaceID: workspaceID) },
-            detectorProvider: { [weak self] workspaceID in
-                try? self?.computeWorkspaceFileListChangeDetector(workspaceID: workspaceID, caches: membershipCaches)
+            detectorProvider: { [weak self] workspaceID, touched, caches in
+                try? self?.computeWorkspaceFileListChangeDetector(workspaceID: workspaceID, caches: caches, touched: touched)
             })
+        // A failed `start()` here leaves `watch` in the map exactly as an idle, ordinary
+        // zero-subscriber watch would: no cleanup call, since none is needed (see `acquireWorkspaceWatch`'s
+        // doc comment).
         try subscription.start()
         subscription.subscriberCount = 1
         workspaceFileListSignatureSubscriptions[workspaceID] = subscription
@@ -2686,6 +2983,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         guard subscription.subscriberCount <= 0 else { return }
         subscription.stop()
         workspaceFileListSignatureSubscriptions.removeValue(forKey: workspaceID)
+        // `workspaceWatches[workspaceID]` is left in place: see `acquireWorkspaceWatch`'s doc comment for
+        // why this map only ever grows.
     }
 
     private func computeWorkspaceFileListSignature(workspaceID: String) throws -> String {
@@ -2698,26 +2997,30 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return SpacesDeviceWorkspaceFileListSignature.value(for: result)
     }
 
-    /// Produces the poll-only file-membership detector. Git has an index/status source that can distinguish
-    /// membership from ordinary content edits; a plain directory has no equivalent recursive change journal,
-    /// and a parent-directory mtime misses nested changes and 10 MiB/symlink openability crossings. Its
-    /// exact listing signature is therefore the smallest correct detector rather than a lossy shortcut.
+    /// Produces the event-gated file-membership detector. Git has an index/status source that can
+    /// distinguish membership from ordinary content edits; a plain directory has no equivalent recursive
+    /// change journal, and a parent-directory mtime misses nested changes and 10 MiB/symlink openability
+    /// crossings. Its exact listing signature is therefore the smallest correct detector rather than a
+    /// lossy shortcut. `touched` restricts the underlying `gitMembershipChangeToken` recompute to the
+    /// repositories a `WorkspaceWatch` firing actually marked touched; `caches.contributionCache` is what
+    /// makes an untouched repository's contribution a cache hit rather than a fresh git spawn.
     private func computeWorkspaceFileListChangeDetector(
-        workspaceID: String, caches: SpacesDeviceWorkspaceFileListEngine.MembershipCaches? = nil
+        workspaceID: String, caches: SpacesDeviceWorkspaceFileListEngine.MembershipCaches? = nil, touched: RepositoryTouchedSet = .recomputeAll
     ) throws -> String {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         guard let workspace = try store.workspace(id: workspaceID) else {
             throw NSError(
                 domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(workspaceID)' was not found."])
         }
-        // One clock for the whole tick: the workspace's repository and every submodule below it draw their
-        // git timeouts from this single window, so a tick cannot grow a fresh budget per repository.
-        let tickStart = Date()
+        // One clock for the whole recompute: the workspace's repository and every submodule below it draw
+        // their git timeouts from this single window, so a recompute cannot grow a fresh budget per
+        // repository.
+        let recomputeStart = Date()
         if let context = try SpacesDeviceWorkspaceFileListEngine.gitMembershipContext(
-            workspaceDir: workspace.dir, gitClient: workspaceGitClient, caches: caches, deadlineStart: tickStart)
+            workspaceDir: workspace.dir, gitClient: workspaceGitClient, caches: caches, deadlineStart: recomputeStart, touched: touched)
         {
             let token = try SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken(
-                context: context, gitClient: workspaceGitClient, deadlineStart: tickStart)
+                context: context, gitClient: workspaceGitClient, deadlineStart: recomputeStart)
             return "git:\(token)"
         }
         let result = try SpacesDeviceWorkspaceFileListEngine.listFiles(workspaceDir: workspace.dir, gitClient: workspaceGitClient)

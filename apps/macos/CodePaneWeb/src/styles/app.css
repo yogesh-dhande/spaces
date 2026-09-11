@@ -223,6 +223,66 @@
   font-weight: 600;
 }
 
+/* Live-refresh persistent notice (liveRefreshNotice.ts): one line in the content pane's
+   top-trailing corner, per docs/design.md's persistent-banner pattern. Outlined in the orange
+   state tint rather than filled, so it separates from the content behind it without blocking it.
+   Pointer-events (set inline on the elements, since only the Retry button should take clicks) let
+   a click anywhere else on the pane reach the content underneath. */
+.live-refresh-notice {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 24px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  /* A narrow pane must not let a long daemon error (e.g. a Linux inotify limit message) run past
+     the container: this mirrors the 10px right inset above on the left side, since the box has no
+     left/bottom position of its own to derive one from. */
+  max-width: calc(100% - 2 * 10px);
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--orange);
+  box-shadow: 0 6px 20px -8px rgba(0, 0, 0, 0.6);
+  font-size: 11px;
+  color: var(--orange);
+}
+
+/* The `hidden` attribute alone cannot hide this box: an author `display: flex` outranks the
+   browser's `[hidden] { display: none }`, so without this rule the empty box paints on every pane. */
+.live-refresh-notice[hidden] {
+  display: none;
+}
+
+.live-refresh-notice-label {
+  min-width: 0;
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.live-refresh-notice-retry {
+  appearance: none;
+  flex: none;
+  border: 1px solid var(--orange);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--orange);
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 7px;
+  cursor: default;
+}
+
+.live-refresh-notice-retry:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* The in-page context menu (contextMenu.ts): same surface as the compare dropdown above, but
    positioned at the pointer inside the pane rather than anchored under a control. */
 .ctx-menu {

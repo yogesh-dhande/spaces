@@ -176,8 +176,24 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// is not expected to fire — see `handleDiffSignatureFrame`). `nil` (both) means "no diff fetched
     /// yet for any scope this pane life has subscribed to" — a frame always forwards in that state.
     private var lastActedScopeSignature: String?
+    /// The `liveRefreshError` of the last diff-signature frame forwarded to the page, tracked
+    /// alongside `lastActedScopeSignature` as the other half of `handleDiffSignatureFrame`'s dedupe
+    /// key. A failed watch freezes `scopeSignature` (see `SpacesDeviceWorkspaceDiffSignatureFrame`'s
+    /// doc comment), so `scopeSignature` alone can't tell a stale keepalive apart from the one frame
+    /// that actually reports the watch recovering (or, mid-stream, newly failing): both keep the same
+    /// signature the whole time, only this field changes.
+    private var lastActedLiveRefreshError: String?
     private var lastActedScope: DiffSignatureScope = .none
     private var diffSignatureStream: (any CodePaneDiffSignatureStreamHandle)?
+    /// The `(refName, lastCommit, device)` most recently passed to `resubscribeDiffSignature`, stored
+    /// unconditionally at the top of that call regardless of whether the call turns out to be a no-op
+    /// (its own guard only decides whether to actually tear down and reopen the stream). `retryLiveRefresh`
+    /// needs this because `subscribedScope` alone briefly goes back to `.none` in the window between a
+    /// disconnect and its scheduled reconnect landing (see `handleDiffSignatureDisconnect`), which would
+    /// otherwise leave a Retry that lands in that window with nothing to reopen. `nil` only when this
+    /// pane life has never asked to subscribe a diff scope at all (e.g. a non-git workspace's Diff pane
+    /// never opens one).
+    private var lastDiffSignatureSubscriptionRequest: (refName: String?, lastCommit: Bool, device: SpacesPairedDeviceRecord)?
     /// Bumped at the top of every real (non-no-op) `resubscribeDiffSignature` call and captured by
     /// that call's `onDisconnect` closure, so a disconnect belonging to a subscription that a newer
     /// resubscribe already superseded can't clobber the newer subscription's state — a stale client
@@ -250,6 +266,12 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// signature must be forwarded again on the daemon's next keepalive rather than being suppressed as
     /// if the listing had already been refreshed.
     private var lastActedFileListSignature: String?
+    /// The `liveRefreshError` of the last file-list-signature frame forwarded to the page. Mirrors
+    /// `lastActedLiveRefreshError`'s reasoning exactly, but tracked independently of
+    /// `lastActedFileListSignature`'s own pull-ack update point: an error transition must forward as
+    /// soon as `handleFileListSignatureFrame` sees it, not only once a `workspaceFileList` pull
+    /// happens to catch up, since a pull is never required to observe a watcher recovering.
+    private var lastActedFileListLiveRefreshError: String?
     private var fileListSignatureStream: (any CodePaneFileListSignatureStreamHandle)?
     /// Set after the first successful `workspaceFileList` pull in this pane life. Until then there is
     /// no visible file-list consumer to keep fresh, so the workspace-level listing poll should not run.
@@ -817,7 +839,9 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         diffSignatureStream = nil
         subscribedScope = .none
         lastActedScopeSignature = nil
+        lastActedLiveRefreshError = nil
         lastActedScope = .none
+        lastDiffSignatureSubscriptionRequest = nil
         // Invalidates any in-flight reconnect backoff (see `scheduleDiffSignatureReconnect`): a
         // pending retry captured the generation that was live when it was scheduled, and hibernating
         // must stop it from resubscribing a pane the user is no longer looking at.
@@ -840,6 +864,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         fileListSignatureStream = nil
         fileListSignatureMonitoringEnabled = false
         lastActedFileListSignature = nil
+        lastActedFileListLiveRefreshError = nil
         fileListSignatureSubscriptionGeneration += 1
         fileListSignatureSubscriptionAttemptGeneration = nil
         fileListSignatureReconnectFailures = 0
@@ -1303,6 +1328,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         switch plan {
         case .workspaceFileList: performFileList(id: id, generation: generation, hosting: hosting)
         case .workspaceRefList: performRefList(id: id, generation: generation, hosting: hosting)
+        case .retryLiveRefresh: performRetryLiveRefresh(id: id, generation: generation, hosting: hosting)
         case .workspaceDiffManifestChunk(let scope, let manifestID, let fileIndex):
             performWorkspaceDiffManifestChunk(
                 scope: scope, manifestID: manifestID, fileIndex: fileIndex, id: id, generation: generation, hosting: hosting)
@@ -1827,6 +1853,62 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         }
     }
 
+    /// `retryLiveRefresh`'s implementation (see `CodePaneBridge.Plan.retryLiveRefresh`'s doc comment).
+    /// Tears down and reopens each stream that has ever been subscribed in this pane life; a stream
+    /// that was never opened (e.g. a non-git workspace's Diff pane never subscribes a diff signature at
+    /// all, or the Files tab/quick-open were never opened this pane life) has nothing to retry and is
+    /// skipped. Never awaits either reopen: the RPC's whole contract is "the host has issued the
+    /// reopen," not "the reopen succeeded"; the daemon retrying the watch and reporting the outcome
+    /// flows back through the ordinary `spaces:diffSignature`/`spaces:fileListSignature` push path
+    /// exactly like any other frame (see `SpacesDeviceAPIServer.addWorkspaceDiffSignatureSubscriber`'s
+    /// doc comment: a fresh subscription is what makes the daemon retry a failed watch).
+    private func performRetryLiveRefresh(id: String, generation: Int, hosting: any CodePaneHosting) {
+        // Clear both dedupe pairs before reopening anything: if the retry doesn't fix the watcher (it
+        // fails again for the exact same reason), the reopened stream's connect-time frame repeats the
+        // very (signature, error) pair `handleDiffSignatureFrame`/`handleFileListSignatureFrame` already
+        // recorded as acted on, and their dedupe guard would suppress it as an exact repeat. Only a
+        // forwarded frame clears the page's "Retrying…" state (the RPC's own ack does not, since it
+        // resolves before either reopen's outcome is known), so a suppressed connect-time frame here
+        // would leave that state stuck forever. Clearing forces each reopened stream's first frame
+        // through unconditionally, at the cost of an occasional redundant manifest or file-list refetch
+        // right after an explicit Retry, an acceptable price for the retry signal always landing.
+        // Resetting `lastActedFileListSignature` to `nil` is the same "nothing fetched yet" state a
+        // fresh pane life already starts in (see `teardownWebView`), not a special case: the next
+        // successful `workspaceFileList` pull re-establishes it exactly as it always does.
+        lastActedScopeSignature = nil
+        lastActedLiveRefreshError = nil
+        lastActedFileListSignature = nil
+        lastActedFileListLiveRefreshError = nil
+        if let request = lastDiffSignatureSubscriptionRequest {
+            // `resubscribeDiffSignature`'s own no-op guard exists for the ordinary same-scope
+            // `workspaceDiffManifestChunk` refetch case; force past it by clearing `subscribedScope`
+            // first, since Retry's whole point is a brand-new subscription even though the scope
+            // hasn't changed. Unlike the file-list half below, this has no separate "already attempting"
+            // marker to invalidate: `resubscribeDiffSignature` unconditionally bumps
+            // `diffSignatureSubscriptionGeneration` on every call that passes its guard, so an already
+            // in-flight attempt's captured generation is invalidated by this very call, and its eventual
+            // completion's own generation check discards it.
+            subscribedScope = .none
+            resubscribeDiffSignature(refName: request.refName, lastCommit: request.lastCommit, device: request.device)
+        }
+        if fileListSignatureMonitoringEnabled, let device = hosting.codePaneDevice(workspaceID: workspaceID) {
+            // Invalidate any subscribe attempt already in flight before nil-ing the stream, mirroring
+            // `teardownWebView`'s own invalidation: a subscribe call still awaiting the daemon leaves
+            // `fileListSignatureStream` nil with `fileListSignatureSubscriptionAttemptGeneration` set,
+            // so `ensureFileListSignatureSubscription` below would otherwise read that as "already
+            // attempting" and only schedule a bounded-backoff reconnect instead of opening a genuinely
+            // fresh subscription, while the stale in-flight attempt's own eventual completion would
+            // still pass its generation check and install the very connection Retry was meant to
+            // replace. Bumping the generation here makes that stale completion's guard fail instead.
+            fileListSignatureSubscriptionGeneration += 1
+            fileListSignatureSubscriptionAttemptGeneration = nil
+            fileListSignatureStream?.stop()
+            fileListSignatureStream = nil
+            ensureFileListSignatureSubscription(device: device)
+        }
+        reply(id: id, generation: generation, result: CodePaneBridge.AckPayload())
+    }
+
     private func performReviewCommentList(id: String, generation: Int, hosting: any CodePaneHosting) {
         guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
             reply(
@@ -2250,9 +2332,14 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     }
 
     /// (Re)points the live diff-signature stream at `refName` if it isn't already there. A repeat
-    /// `workspaceDiffManifestChunk` call for the same resolved scope is a no-op here — only an actual
-    /// scope change tears down and reopens the stream.
+    /// `workspaceDiffManifestChunk` call for the same resolved scope is a no-op here, only an actual
+    /// scope change tears down and reopens the stream. `performRetryLiveRefresh` forces past that
+    /// no-op guard by resetting `subscribedScope` to `.none` right before calling this again with the
+    /// same arguments, since Retry's whole point is a brand-new subscription even for an unchanged scope.
     private func resubscribeDiffSignature(refName: String?, lastCommit: Bool, device: SpacesPairedDeviceRecord) {
+        // Recorded unconditionally, ahead of the no-op guard below, so `performRetryLiveRefresh` always
+        // has the most recently requested arguments to reissue even when this particular call is a no-op.
+        lastDiffSignatureSubscriptionRequest = (refName: refName, lastCommit: lastCommit, device: device)
         guard subscribedScope != .scope(refName: refName, lastCommit: lastCommit) else { return }
         // Defensive: in the normal flow `lastActedScopeSignature` is already refreshed for `refName`
         // before this runs (`performWorkspaceDiffManifestChunk` sets it, then calls this), including for a
@@ -2403,27 +2490,36 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         }
     }
 
-    /// Invariant: a frame is forwarded iff its `scopeSignature` differs from the last diff the web
-    /// app is known to have fetched for the current scope (`lastActedScopeSignature`). Every scope
-    /// change (an ordinary `workspaceDiffManifestChunk` fetch, or a stream reconnect after an outage — see
-    /// `resubscribeDiffSignature`'s doc comment) opens with a connect-time frame carrying that scope's
-    /// current signature; forwarding it unconditionally would trigger a second, redundant metadata
-    /// manifest fetch plus its separately scheduled file-patch chunks the web app just performed a
-    /// moment ago (a scope switch) or doesn't need (a reconnect where nothing changed while disconnected).
+    /// Invariant: a frame is forwarded iff its `(scopeSignature, liveRefreshError)` pair differs from
+    /// the last one the web app is known to have acted on (`lastActedScopeSignature`/
+    /// `lastActedLiveRefreshError`). Every scope change (an ordinary `workspaceDiffManifestChunk`
+    /// fetch, or a stream reconnect after an outage (see `resubscribeDiffSignature`'s doc comment)
+    /// opens with a connect-time frame carrying that scope's current signature; forwarding it
+    /// unconditionally would trigger a second, redundant metadata manifest fetch plus its separately
+    /// scheduled file-patch chunks the web app just performed a moment ago (a scope switch) or doesn't
+    /// need (a reconnect where nothing changed while disconnected).
+    /// `liveRefreshError` must be part of the key, not just `scopeSignature`: a failed watch freezes
+    /// the signature (it never recomputes again on its own, see
+    /// `SpacesDeviceWorkspaceDiffSignatureFrame`'s doc comment), so the frame that reports a
+    /// `performRetryLiveRefresh`-driven recovery (or a later mid-stream failure) carries the SAME
+    /// signature as every frame before it, differing only in `liveRefreshError`. Keying on
+    /// `scopeSignature` alone would suppress that frame and leave the persistent notice stuck forever.
     /// Err toward forwarding: any
     /// doubt must forward, since a spurious refetch is cheap but a wrongly suppressed real change
     /// leaves the view stale until the next signature change.
     private func handleDiffSignatureFrame(_ frame: SpacesDeviceWorkspaceDiffSignatureFrame) {
-        guard frame.scopeSignature != lastActedScopeSignature else { return }
+        guard frame.scopeSignature != lastActedScopeSignature || frame.liveRefreshError != lastActedLiveRefreshError else { return }
         guard isReady, let scriptEvaluator else { return }
         guard
             let script = CodePaneBridge.dispatchEventScript(
-                name: Self.diffSignatureEventName, detail: CodePaneBridge.DiffSignaturePayload(scopeSignature: frame.scopeSignature))
+                name: Self.diffSignatureEventName,
+                detail: CodePaneBridge.DiffSignaturePayload(scopeSignature: frame.scopeSignature, liveRefreshError: frame.liveRefreshError))
         else { return }
         // Only recorded once the frame is actually about to be forwarded: if the page isn't ready
-        // (below) the web app never saw this signature, so a later identical frame must still forward
+        // (below) the web app never saw this pair, so a later identical frame must still forward
         // once it is.
         lastActedScopeSignature = frame.scopeSignature
+        lastActedLiveRefreshError = frame.liveRefreshError
         scriptEvaluator.evaluateCodePaneScript(script)
     }
 
@@ -2621,13 +2717,21 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         }
     }
 
+    /// Mirrors `handleDiffSignatureFrame`'s dedupe-key reasoning: `liveRefreshError` must be keyed
+    /// alongside `fileListSignature`, tracked here in `lastActedFileListLiveRefreshError` independently
+    /// of `lastActedFileListSignature`'s own pull-ack update point (see that field's doc comment),
+    /// since a watcher recovering (or later failing) is observable straight off the frame and must not
+    /// wait on an unrelated `workspaceFileList` pull to be noticed.
     private func handleFileListSignatureFrame(_ frame: SpacesDeviceWorkspaceFileListSignatureFrame) {
-        guard frame.fileListSignature != lastActedFileListSignature else { return }
+        guard frame.fileListSignature != lastActedFileListSignature || frame.liveRefreshError != lastActedFileListLiveRefreshError else { return }
         guard isReady, let scriptEvaluator else { return }
         guard
             let script = CodePaneBridge.dispatchEventScript(
-                name: Self.fileListSignatureEventName, detail: CodePaneBridge.FileListSignaturePayload(fileListSignature: frame.fileListSignature))
+                name: Self.fileListSignatureEventName,
+                detail: CodePaneBridge.FileListSignaturePayload(
+                    fileListSignature: frame.fileListSignature, liveRefreshError: frame.liveRefreshError))
         else { return }
+        lastActedFileListLiveRefreshError = frame.liveRefreshError
         scriptEvaluator.evaluateCodePaneScript(script)
     }
 

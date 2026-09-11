@@ -635,6 +635,14 @@ import spacesterminalcore
         #expect(CodePaneBridge.plan(for: request) == .success(.workspaceRefList))
     }
 
+    /// The live-refresh notice's Retry action (see `CodePaneBridge.Plan.retryLiveRefresh`'s doc
+    /// comment). Mirrors `planForWorkspaceRefListRequiresNoParams`: no per-request params.
+    @Test func planForRetryLiveRefreshRequiresNoParams() {
+        let request = CodePaneBridge.Request(id: "1", method: "retryLiveRefresh", params: [:])
+
+        #expect(CodePaneBridge.plan(for: request) == .success(.retryLiveRefresh))
+    }
+
     @Test func planForReviewCommentsSendDecodesEachEntrysIdAndRevision() {
         let request = CodePaneBridge.Request(
             id: "1", method: "reviewCommentsSend",
@@ -883,7 +891,8 @@ import spacesterminalcore
         // is entirely on the detail side, so it exercises a value with the same dangerous
         // characters instead.
         let script = try #require(
-            CodePaneBridge.dispatchEventScript(name: "spaces:diffSignature", detail: CodePaneBridge.DiffSignaturePayload(scopeSignature: "a\"b`c\nd"))
+            CodePaneBridge.dispatchEventScript(
+                name: "spaces:diffSignature", detail: CodePaneBridge.DiffSignaturePayload(scopeSignature: "a\"b`c\nd", liveRefreshError: nil))
         )
 
         let detailJSON = try #require(
@@ -891,6 +900,44 @@ import spacesterminalcore
         struct DecodedDiffSignaturePayload: Decodable { let scopeSignature: String }
         let decoded = try JSONDecoder().decode(DecodedDiffSignaturePayload.self, from: Data(detailJSON.utf8))
         #expect(decoded.scopeSignature == "a\"b`c\nd")
+    }
+
+    // MARK: - DiffSignaturePayload / FileListSignaturePayload encoding
+
+    @Test func diffSignaturePayloadOmitsLiveRefreshErrorWhenNil() throws {
+        let payload = CodePaneBridge.DiffSignaturePayload(scopeSignature: "sig-1", liveRefreshError: nil)
+
+        let data = try JSONEncoder().encode(payload)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["scopeSignature"] as? String == "sig-1")
+        #expect(json["liveRefreshError"] == nil, "liveRefreshError must be omitted (not sent as JSON null) when the watcher is healthy")
+    }
+
+    @Test func diffSignaturePayloadIncludesLiveRefreshErrorWhenPresent() throws {
+        let payload = CodePaneBridge.DiffSignaturePayload(scopeSignature: "sig-1", liveRefreshError: "watcher failed: too many open files")
+
+        let data = try JSONEncoder().encode(payload)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["scopeSignature"] as? String == "sig-1")
+        #expect(json["liveRefreshError"] as? String == "watcher failed: too many open files")
+    }
+
+    @Test func fileListSignaturePayloadOmitsLiveRefreshErrorWhenNil() throws {
+        let payload = CodePaneBridge.FileListSignaturePayload(fileListSignature: "list-1", liveRefreshError: nil)
+
+        let data = try JSONEncoder().encode(payload)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["fileListSignature"] as? String == "list-1")
+        #expect(json["liveRefreshError"] == nil, "liveRefreshError must be omitted (not sent as JSON null) when the watcher is healthy")
+    }
+
+    @Test func fileListSignaturePayloadIncludesLiveRefreshErrorWhenPresent() throws {
+        let payload = CodePaneBridge.FileListSignaturePayload(fileListSignature: "list-1", liveRefreshError: "watcher failed: ENOSPC")
+
+        let data = try JSONEncoder().encode(payload)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["fileListSignature"] as? String == "list-1")
+        #expect(json["liveRefreshError"] as? String == "watcher failed: ENOSPC")
     }
 
     // MARK: - FileSignaturePayload encoding

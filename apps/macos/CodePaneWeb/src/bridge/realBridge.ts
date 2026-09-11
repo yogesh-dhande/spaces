@@ -53,7 +53,9 @@ import {
  *     detail: CodePaneInitPayload), `spaces:diffSignature` (any time the
  *     active scope's git state changes, detail: DiffSignatureEvent),
  *     `spaces:fileListSignature` (any time the authoritative
- *     `workspaceFileList` result changes, detail: FileListSignatureEvent), and
+ *     `workspaceFileList` result changes, detail: FileListSignatureEvent; both of these carry
+ *     `liveRefreshError` whenever the workspace's file watcher is down, and keep carrying it on
+ *     every frame until a `retryLiveRefresh` call's watcher retry succeeds), and
  *     `spaces:fileSignature` (any time the editor's currently open file
  *     changes or is deleted on disk, detail: FileSignatureEvent), and
  *     `spaces:flushEdits` (the host is about to quit or tear this pane down and
@@ -66,7 +68,9 @@ import {
  *     no `id`. `workspaceStateChanged` atomically carries all workspace-local
  *     recovery state, including mode, editor source state, sidebar state,
  *     diff edit state, comments, and agent launch tracking. `editsFlushed`
- *     answers one `spaces:flushEdits` request, echoing its token.
+ *     answers one `spaces:flushEdits` request, echoing its token. `retryLiveRefresh` takes an
+ *     empty params object and resolves with no payload once the host has stopped and reopened
+ *     both signature streams, which is what makes the daemon re-attempt the workspace's watcher.
  */
 
 type PendingCall = {
@@ -259,6 +263,10 @@ class RealSpacesBridge implements SpacesBridge {
 
   async resumeWorkspaceCommandTracking(sessionId: string): Promise<StartWorkspaceCommandResult> {
     return (await this.post("resumeWorkspaceCommandTracking", { sessionId })) as StartWorkspaceCommandResult;
+  }
+
+  async retryLiveRefresh(): Promise<void> {
+    await this.post("retryLiveRefresh", {});
   }
 
   subscribeDiffSignature(_scope: DiffScope, listener: DiffSignatureListener): Unsubscribe {

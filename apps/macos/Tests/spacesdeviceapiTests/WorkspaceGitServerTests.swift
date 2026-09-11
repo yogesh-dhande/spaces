@@ -2040,6 +2040,56 @@
             }
         }
 
+        /// A non-git workspace must still get live refresh: `WorkspaceWatch.discoverRepositoryMap` treats
+        /// a plain project directory as one ungated repository-map entry instead of failing its install on
+        /// the `git rev-parse` a real repository's discovery would run, so the subscription's install
+        /// succeeds with no `liveRefreshError`, and an ordinary write still drives a changed
+        /// `fileListSignature` through the real (FSEvents-backed) watcher `withNonGitWorkspaceFixture`'s
+        /// server wires up.
+        func testFileListSignatureSubscriptionOnANonGitWorkspaceHasNoLiveRefreshErrorAndRefreshesOnANewFile() throws {
+            try withNonGitWorkspaceFixture { workspaceID, dir, server, _, clientApp, authToken in
+                let identity = try workspaceGitTestTLSIdentity()
+                let resolver = SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+                final class FileListFrameCollector: @unchecked Sendable {
+                    private let lock = NSLock()
+                    private var frames: [SpacesDeviceWorkspaceFileListSignatureFrame] = []
+                    func append(_ frame: SpacesDeviceWorkspaceFileListSignatureFrame) {
+                        lock.lock()
+                        frames.append(frame)
+                        lock.unlock()
+                    }
+                    var all: [SpacesDeviceWorkspaceFileListSignatureFrame] {
+                        lock.lock()
+                        defer { lock.unlock() }
+                        return frames
+                    }
+                }
+                let collector = FileListFrameCollector()
+                let client = try SpacesDeviceWorkspaceFileListSignatureStreamClient(
+                    workspaceID: workspaceID, authToken: authToken, clientApp: clientApp, resolver: resolver,
+                    onFrame: { frame in collector.append(frame) },
+                    onDisconnect: { error in if let error { XCTFail("unexpected disconnect: \(error)") } })
+                try client.start()
+                defer { client.stop() }
+
+                let firstFrameDeadline = Date().addingTimeInterval(5)
+                while collector.all.isEmpty, Date() < firstFrameDeadline { Thread.sleep(forTimeInterval: 0.02) }
+                let initialFrame = try XCTUnwrap(collector.all.first)
+                XCTAssertNil(initialFrame.liveRefreshError)
+
+                try "hello".write(to: dir.appendingPathComponent("new-file.txt"), atomically: true, encoding: .utf8)
+
+                let changedDeadline = Date().addingTimeInterval(20)
+                while collector.all.last?.fileListSignature == initialFrame.fileListSignature, Date() < changedDeadline {
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+                XCTAssertNotEqual(collector.all.last?.fileListSignature, initialFrame.fileListSignature)
+                XCTAssertNil(collector.all.last?.liveRefreshError)
+            }
+        }
+
         /// Ref listing shares one request-wide deadline across repository validation, both branch
         /// enumerations, and both commit-history probes. An already-expired clock must stop before the
         /// first branch command instead of granting each command a fresh 30-second timeout.
@@ -2425,23 +2475,26 @@
             }
         }
 
-        /// Round-4 regression: every `subscribeWorkspaceDiffSignature` scope's `WorkspaceDiffSignatureSubscription`
-        /// gets its own dedicated serial queue, created in `addWorkspaceDiffSignatureSubscriber`, never one
-        /// shared across scopes. Before the fix, every subscription's poll timer and producer socket ran on one
-        /// shared `workspaceDiffSignatureStreamQueue`; a wedged repository's `git` calls (now up to 30s, per the
-        /// git-command timeout) would serialize behind every other subscribed scope's polling, keepalives, and
-        /// socket accepts on that same queue, degrading every subscribed workspace at once, continuously, for as
-        /// long as the wedge lasted.
+        /// Every `subscribeWorkspaceDiffSignature` scope's `WorkspaceDiffSignatureSubscription` gets its
+        /// own dedicated serial queue, created in `addWorkspaceDiffSignatureSubscriber`, never one shared
+        /// across scopes. Sharing one queue across scopes would let a wedged repository's `git` calls (up
+        /// to 30s, per the git-command timeout) serialize behind every other subscribed scope's work on
+        /// that same queue, degrading every subscribed workspace at once, continuously, for as long as the
+        /// wedge lasted.
         ///
-        /// This constructs two subscriptions directly with injected `signatureProvider` closures — bypassing the
-        /// real git client, which has no injection seam on `SpacesDeviceAPIServer` — each on its own dedicated
-        /// queue built exactly the way `addWorkspaceDiffSignatureSubscriber` builds them. Scope A's provider
-        /// blocks for 3s on every call; scope B's returns immediately. It asserts scope B's ~2s poll cadence
-        /// (via provider-invocation counts, since these subscriptions are constructed outside a running
-        /// `SpacesDeviceAPIServer`/relay, so there is no broadcast to observe through this seam) keeps advancing
-        /// while scope A is still blocked inside its first call — the two must never be serialized against each
-        /// other.
-        func testIndependentDiffSignatureSubscriptionsPollOnSeparateQueuesSoASlowScopeNeverBlocksAnother() throws {
+        /// This constructs two subscriptions directly with injected `signatureProvider` closures (bypassing
+        /// the real git client, which has no injection seam on `SpacesDeviceAPIServer`) and two independent
+        /// fake-backed `WorkspaceWatch` instances, each on its own dedicated queue built exactly the way
+        /// `addWorkspaceDiffSignatureSubscriber` builds them. Scope A's provider blocks for 3s on every
+        /// call; scope B's returns immediately. After both installs complete, scope B is fired repeatedly
+        /// while scope A's install call is still sleeping: if the two subscriptions shared a queue, scope
+        /// B's events would queue up behind scope A's still-running call instead of each landing promptly.
+        func testIndependentDiffSignatureSubscriptionsRecomputeOnSeparateQueuesSoASlowScopeNeverBlocksAnother() throws {
+            let (rootA, watchA, boxA) = try makeEventGatedWorkspaceWatch()
+            defer { try? FileManager.default.removeItem(at: rootA) }
+            let (rootB, watchB, boxB) = try makeEventGatedWorkspaceWatch()
+            defer { try? FileManager.default.removeItem(at: rootB) }
+
             let scopeA = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace-\(UUID().uuidString)", refName: nil)
             let scopeB = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace-\(UUID().uuidString)", refName: nil)
             let socketPathA = try TerminalServicePaths.workspaceDiffSignatureSocketPath(workspaceID: scopeA.workspaceID, refName: scopeA.refName)
@@ -2454,19 +2507,16 @@
             // so this exercises the same "never shared" contract the fix establishes.
             let queueA = DispatchQueue(label: "spaces.workspace-diff-signature.\(scopeA.workspaceID).uncommitted")
             let subscriptionA = SpacesDeviceAPIServer.WorkspaceDiffSignatureSubscription(
-                scope: scopeA, socketPath: socketPathA, streamQueue: queueA,
-                signatureProvider: { _ in
+                scope: scopeA, socketPath: socketPathA, streamQueue: queueA, watch: watchA,
+                signatureProvider: { _, _, _ in
                     aCounter.increment()
                     Thread.sleep(forTimeInterval: 3)
                     return "signature-a"
                 })
             let queueB = DispatchQueue(label: "spaces.workspace-diff-signature.\(scopeB.workspaceID).uncommitted")
             let subscriptionB = SpacesDeviceAPIServer.WorkspaceDiffSignatureSubscription(
-                scope: scopeB, socketPath: socketPathB, streamQueue: queueB,
-                signatureProvider: { _ in
-                    bCounter.increment()
-                    return "signature-b"
-                })
+                scope: scopeB, socketPath: socketPathB, streamQueue: queueB, watch: watchB,
+                signatureProvider: { _, _, _ in "signature-b-\(bCounter.increment())" })
 
             try subscriptionA.start()
             defer {
@@ -2479,47 +2529,96 @@
                 try? FileManager.default.removeItem(atPath: socketPathB)
             }
 
-            // Both poll timers fire at t=2s (repeating every 2s thereafter). Scope A's provider is still inside
-            // its first, 3s-blocking call at t=4.5s; scope B's fast provider should have ticked twice (t=2s,
-            // t=4s) in that same window if — and only if — the two subscriptions are never serialized on a
-            // shared queue.
-            Thread.sleep(forTimeInterval: 4.5)
+            // Wait for both installs' own initial (recomputeAll) compute; scope A's is now inside its
+            // 3s-blocking call.
+            let installDeadline = Date().addingTimeInterval(5)
+            while (aCounter.value < 1 || bCounter.value < 1), Date() < installDeadline { Thread.sleep(forTimeInterval: 0.02) }
+            XCTAssertEqual(aCounter.value, 1)
+            XCTAssertEqual(bCounter.value, 1)
 
-            XCTAssertEqual(
-                aCounter.value, 1, "scope A's poll timer should have fired exactly once by 4.5s: one 2s tick, then still inside its 3s-blocking call")
-            XCTAssertGreaterThanOrEqual(
-                bCounter.value, 2, "scope B must keep polling on its own ~2s cadence while scope A is blocked inside its provider")
+            for _ in 0..<5 {
+                boxB.fire(paths: [rootB.appendingPathComponent("README.md").path])
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            let bDeadline = Date().addingTimeInterval(2)
+            while bCounter.value < 2, Date() < bDeadline { Thread.sleep(forTimeInterval: 0.02) }
+
+            XCTAssertEqual(aCounter.value, 1, "scope A must still be inside its first, 3s-blocking install call")
+            XCTAssertGreaterThanOrEqual(bCounter.value, 2, "scope B's own queue must keep processing events while scope A is blocked")
         }
 
-        /// Round-21 regression: the poll timer's tick computed `signature = signatureProvider(scope)`, recorded
-        /// it, then called `server.broadcast()` — but the producer's `lineProvider` closure independently
-        /// recomputed `signatureProvider(scope)` again to build the frame it actually sent, rather than reusing
-        /// the tick's own value. `signatureProvider` reads the live filesystem, so a workspace change landing
-        /// between those two calls could make the broadcast frame disagree with the very value the tick just
-        /// compared and recorded.
+        /// An event-driven recompute computes `signature = signatureProvider(scope, touched, cache)`,
+        /// records it, then calls `server.broadcast()`, but the producer's `lineProvider` closure must
+        /// never independently recompute to build the frame it actually sends, only read what the recompute
+        /// already recorded (`lineProvider` in the current design does exactly that unconditionally, so
+        /// this proves the invariant end to end rather than guarding a specific code path that could
+        /// regress back to a second, independent call).
         ///
-        /// This constructs a subscription directly (same pattern as
-        /// `testIndependentDiffSignatureSubscriptionsPollOnSeparateQueuesSoASlowScopeNeverBlocksAnother` above)
-        /// with an injected provider that returns a DIFFERENT value on every call, so any extra call is
-        /// immediately visible as a value mismatch rather than hiding behind a repeated constant. A raw Unix
-        /// socket client reads the producer's actual frames directly — `DeviceOverviewStreamServer` is a plain,
-        /// TLS-free Unix socket (the daemon's TLS/relay code is a client of it, not part of it), so no TLS or
-        /// relay harness is needed to observe what it broadcasts.
+        /// The injected provider returns a DIFFERENT value on every call, so any extra call is immediately
+        /// visible as a value mismatch rather than hiding behind a repeated constant. A raw Unix socket
+        /// client reads the producer's actual frames directly: `DeviceOverviewStreamServer` is a plain,
+        /// TLS-free Unix socket (the daemon's TLS/relay code is a client of it, not part of it), so no TLS
+        /// or relay harness is needed to observe what it broadcasts.
         ///
-        /// Expected frames with the fix: frame 0 is the connect-time fallback (the box is still nil pre-first-
-        /// tick, so `lineProvider` computes fresh for that one initial frame — provider call 1, "S1"); frame 1
-        /// is the first poll tick's broadcast (+2s), sharing that tick's own provider call 2, "S2". Before the
-        /// fix, frame 1 would instead carry call 3's value ("S3"): call 2 for the tick's own compare, plus a
-        /// second, independent call inside `lineProvider` to build the frame.
-        func testWorkspaceDiffSignatureBroadcastCarriesExactlyTheValueTheTickComparedAndRecorded() throws {
+        /// Expected frames: frame 0 is the install's own initial compute ("S1"), read after waiting for it
+        /// to land so the client's connect-time frame is guaranteed to see it rather than the pre-install
+        /// "unavailable" placeholder; frame 1 is the one fired event's recompute ("S2").
+        func testWorkspaceDiffSignatureBroadcastCarriesExactlyTheValueTheEventComparedAndRecorded() throws {
+            let (root, watch, box) = try makeEventGatedWorkspaceWatch()
+            defer { try? FileManager.default.removeItem(at: root) }
             let scope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace-\(UUID().uuidString)", refName: nil)
             let socketPath = try TerminalServicePaths.workspaceDiffSignatureSocketPath(workspaceID: scope.workspaceID, refName: scope.refName)
             let providerCallCounter = InvocationCounter()
 
             let subscription = SpacesDeviceAPIServer.WorkspaceDiffSignatureSubscription(
                 scope: scope, socketPath: socketPath,
-                streamQueue: DispatchQueue(label: "spaces.workspace-diff-signature.\(scope.workspaceID).uncommitted"),
-                signatureProvider: { _ in "S\(providerCallCounter.increment())" })
+                streamQueue: DispatchQueue(label: "spaces.workspace-diff-signature.\(scope.workspaceID).uncommitted"), watch: watch,
+                signatureProvider: { _, _, _ in "S\(providerCallCounter.increment())" })
+            try subscription.start()
+            defer {
+                subscription.stop()
+                try? FileManager.default.removeItem(atPath: socketPath)
+            }
+
+            let installDeadline = Date().addingTimeInterval(5)
+            while providerCallCounter.value < 1, Date() < installDeadline { Thread.sleep(forTimeInterval: 0.01) }
+            XCTAssertEqual(providerCallCounter.value, 1)
+
+            let receivedFrames = FrameSignatureCollector()
+            let secondFrameArrived = expectation(description: "the fired event's broadcast frame arrived")
+            // Keyed on the changed signature, not a frame count: the connect-time frame can arrive twice
+            // (accept-time send plus install's broadcast of the same value), which is legal on this stream.
+            let client = try RawWorkspaceDiffSignatureSocketClient(socketPath: socketPath) { frame in
+                receivedFrames.append(frame.scopeSignature)
+                if frame.scopeSignature == "S2" { secondFrameArrived.fulfill() }
+            }
+            defer { client.stop() }
+
+            box.fire(paths: [root.appendingPathComponent("README.md").path])
+            wait(for: [secondFrameArrived], timeout: 5)
+
+            XCTAssertEqual(receivedFrames.values.first, "S1")
+            XCTAssertEqual(receivedFrames.values.last, "S2")
+            XCTAssertEqual(Set(receivedFrames.values), ["S1", "S2"])
+            XCTAssertEqual(
+                providerCallCounter.value, 2, "the install's own compute and the one fired event must together produce exactly two provider calls")
+        }
+
+        /// This subscription has no ordinary poll timer, so a nil provider result (a git timeout or spawn
+        /// failure) must heal on its own after `unavailableRetryInterval`, with no file-system event at
+        /// all. `box.fire` is never called in this test.
+        func testDiffSignatureSubscriptionRetriesAfterANilResultWithNoFileSystemEvent() throws {
+            let (root, watch, _) = try makeEventGatedWorkspaceWatch()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let scope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace-\(UUID().uuidString)", refName: nil)
+            let socketPath = try TerminalServicePaths.workspaceDiffSignatureSocketPath(workspaceID: scope.workspaceID, refName: scope.refName)
+            let providerCallCounter = InvocationCounter()
+
+            let subscription = SpacesDeviceAPIServer.WorkspaceDiffSignatureSubscription(
+                scope: scope, socketPath: socketPath,
+                streamQueue: DispatchQueue(label: "spaces.workspace-diff-signature.retry.\(scope.workspaceID)"), watch: watch,
+                signatureProvider: { _, _, _ in providerCallCounter.increment() == 1 ? nil : "recovered" },
+                unavailableRetryInterval: 0.05)
             try subscription.start()
             defer {
                 subscription.stop()
@@ -2527,80 +2626,198 @@
             }
 
             let receivedFrames = FrameSignatureCollector()
-            let secondFrameArrived = expectation(description: "the first poll tick's broadcast frame arrived")
+            let recoveredFrameArrived = expectation(description: "the retried recompute's broadcast frame arrived")
             let client = try RawWorkspaceDiffSignatureSocketClient(socketPath: socketPath) { frame in
                 receivedFrames.append(frame.scopeSignature)
-                if receivedFrames.count == 2 { secondFrameArrived.fulfill() }
+                if frame.scopeSignature == "recovered" { recoveredFrameArrived.fulfill() }
             }
             defer { client.stop() }
 
-            wait(for: [secondFrameArrived], timeout: 5)
+            wait(for: [recoveredFrameArrived], timeout: 5)
+            XCTAssertTrue(receivedFrames.values.contains(SpacesDeviceAPIServer.workspaceDiffSignatureUnavailableSentinel))
+        }
 
-            XCTAssertEqual(receivedFrames.values, ["S1", "S2"])
-            XCTAssertEqual(
-                providerCallCounter.value, 2, "the first tick must feed exactly one provider call to both the change-compare and the broadcast frame")
+        /// The pending retry must be cancelled on teardown, not merely left to fire into a torn-down
+        /// subscription; a provider call after `stop()` would be observable here as a rising
+        /// `providerCallCounter` well past the (short, test-scale) retry interval.
+        func testDiffSignatureSubscriptionCancelsThePendingUnavailableRetryOnTeardown() throws {
+            let (root, watch, _) = try makeEventGatedWorkspaceWatch()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let scope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace-\(UUID().uuidString)", refName: nil)
+            let socketPath = try TerminalServicePaths.workspaceDiffSignatureSocketPath(workspaceID: scope.workspaceID, refName: scope.refName)
+            let providerCallCounter = InvocationCounter()
+
+            let subscription = SpacesDeviceAPIServer.WorkspaceDiffSignatureSubscription(
+                scope: scope, socketPath: socketPath,
+                streamQueue: DispatchQueue(label: "spaces.workspace-diff-signature.retry-teardown.\(scope.workspaceID)"), watch: watch,
+                signatureProvider: { _, _, _ in
+                    providerCallCounter.increment()
+                    return nil
+                }, unavailableRetryInterval: 0.1)
+            try subscription.start()
+
+            let installDeadline = Date().addingTimeInterval(5)
+            while providerCallCounter.value < 1, Date() < installDeadline { Thread.sleep(forTimeInterval: 0.01) }
+            XCTAssertEqual(providerCallCounter.value, 1)
+
+            subscription.stop()
+            try? FileManager.default.removeItem(atPath: socketPath)
+
+            // Long enough for the 0.1s retry interval to have elapsed several times over, had it not been
+            // cancelled by `stop()`.
+            Thread.sleep(forTimeInterval: 0.4)
+            XCTAssertEqual(providerCallCounter.value, 1, "no provider call must happen after the subscription is torn down")
         }
 
         func testWorkspaceFileListSubscriptionSkipsExactListingForAnUnchangedDetectorAndRefreshesOnceWhenItChanges() throws {
             try withTemporaryProfile { _ in
+                let (root, watch, box) = try makeEventGatedWorkspaceWatch()
+                defer { try? FileManager.default.removeItem(at: root) }
                 let workspaceID = "workspace-\(UUID().uuidString)"
                 let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
                 let exactCalls = InvocationCounter()
                 let detector = MutableString("unchanged")
                 let subscription = SpacesDeviceAPIServer.WorkspaceFileListSignatureSubscription(
                     workspaceID: workspaceID, socketPath: socketPath,
-                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.\(workspaceID).uncommitted"),
-                    signatureProvider: { _ in "exact-\(exactCalls.increment())" }, detectorProvider: { _ in detector.value })
+                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.\(workspaceID).uncommitted"), watch: watch,
+                    signatureProvider: { _ in "exact-\(exactCalls.increment())" }, detectorProvider: { _, _, _ in detector.value })
                 try subscription.start()
                 defer {
                     subscription.stop()
                     try? FileManager.default.removeItem(atPath: socketPath)
                 }
 
-                // t=2 establishes the cache. At t=4 the unchanged detector must not repeat the exact
-                // listing, which is the steady-state coding-agent churn path.
-                Thread.sleep(forTimeInterval: 4.5)
+                // Install establishes the cache with one exact listing.
+                let installDeadline = Date().addingTimeInterval(5)
+                while exactCalls.value < 1, Date() < installDeadline { Thread.sleep(forTimeInterval: 0.01) }
+                XCTAssertEqual(exactCalls.value, 1)
+
+                // An unchanged detector must not repeat the exact listing on a following touched event,
+                // which is the steady-state coding-agent churn path (content edits, no membership change).
+                box.fire(paths: [root.appendingPathComponent("README.md").path])
+                Thread.sleep(forTimeInterval: 0.3)
                 XCTAssertEqual(exactCalls.value, 1)
 
                 // Add/remove/rename/cap crossings surface as a changed detector token; one following
                 // exact list refresh is required to preserve the wire signature's pull-acknowledgement contract.
                 detector.value = "membership-changed"
-                Thread.sleep(forTimeInterval: 2.5)
+                box.fire(paths: [root.appendingPathComponent("README.md").path])
+                let refreshDeadline = Date().addingTimeInterval(2)
+                while exactCalls.value < 2, Date() < refreshDeadline { Thread.sleep(forTimeInterval: 0.02) }
                 XCTAssertEqual(exactCalls.value, 2)
             }
         }
 
         func testWorkspaceFileListSubscriptionRetriesAnExactListingAfterFailureEvenWhenTheDetectorIsUnchanged() throws {
             try withTemporaryProfile { _ in
+                let (root, watch, box) = try makeEventGatedWorkspaceWatch()
+                defer { try? FileManager.default.removeItem(at: root) }
                 let workspaceID = "workspace-\(UUID().uuidString)"
                 let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
                 let exactCalls = InvocationCounter()
                 let subscription = SpacesDeviceAPIServer.WorkspaceFileListSignatureSubscription(
                     workspaceID: workspaceID, socketPath: socketPath,
-                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.retry.\(workspaceID)"),
-                    signatureProvider: { _ in exactCalls.increment() == 1 ? nil : "recovered-exact" }, detectorProvider: { _ in "unchanged" })
+                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.retry.\(workspaceID)"), watch: watch,
+                    signatureProvider: { _ in exactCalls.increment() == 1 ? nil : "recovered-exact" }, detectorProvider: { _, _, _ in "unchanged" })
                 try subscription.start()
                 defer {
                     subscription.stop()
                     try? FileManager.default.removeItem(atPath: socketPath)
                 }
 
-                // The first tick cannot list; the second has the same membership token but must retry
-                // rather than treating the unavailable sentinel as a successfully acknowledged baseline.
-                Thread.sleep(forTimeInterval: 4.5)
+                // The install's own exact listing fails; a following touched event, even with the same
+                // detector token, must retry rather than treating the unavailable sentinel as a
+                // successfully acknowledged baseline.
+                let firstCallDeadline = Date().addingTimeInterval(5)
+                while exactCalls.value < 1, Date() < firstCallDeadline { Thread.sleep(forTimeInterval: 0.01) }
+                XCTAssertEqual(exactCalls.value, 1)
+
+                box.fire(paths: [root.appendingPathComponent("README.md").path])
+                let retryDeadline = Date().addingTimeInterval(2)
+                while exactCalls.value < 2, Date() < retryDeadline { Thread.sleep(forTimeInterval: 0.02) }
                 XCTAssertEqual(exactCalls.value, 2)
             }
         }
 
-        func testWorkspaceFileListSubscriptionInitializesDetectorBeforeExactListingWhenConnecting() throws {
+        /// Same as the diff-signature retry test above, for the file-list subscription, which also has
+        /// no ordinary poll timer. `box.fire` is never called in this test.
+        func testWorkspaceFileListSubscriptionRetriesAfterANilResultWithNoFileSystemEvent() throws {
             try withTemporaryProfile { _ in
+                let (root, watch, _) = try makeEventGatedWorkspaceWatch()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let workspaceID = "workspace-\(UUID().uuidString)"
+                let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
+                let exactCalls = InvocationCounter()
+                let subscription = SpacesDeviceAPIServer.WorkspaceFileListSignatureSubscription(
+                    workspaceID: workspaceID, socketPath: socketPath,
+                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.retry-no-event.\(workspaceID)"), watch: watch,
+                    signatureProvider: { _ in exactCalls.increment() == 1 ? nil : "recovered-exact" }, detectorProvider: { _, _, _ in "unchanged" },
+                    unavailableRetryInterval: 0.05)
+                try subscription.start()
+                defer {
+                    subscription.stop()
+                    try? FileManager.default.removeItem(atPath: socketPath)
+                }
+
+                let received = FrameSignatureCollector()
+                let recoveredFrameArrived = expectation(description: "the retried recompute's broadcast frame arrived")
+                let client = try RawWorkspaceFileListSignatureSocketClient(socketPath: socketPath) { frame in
+                    received.append(frame.fileListSignature)
+                    if frame.fileListSignature == "recovered-exact" { recoveredFrameArrived.fulfill() }
+                }
+                defer { client.stop() }
+
+                wait(for: [recoveredFrameArrived], timeout: 5)
+                XCTAssertTrue(received.values.contains(SpacesDeviceAPIServer.workspaceFileListSignatureUnavailableSentinel))
+            }
+        }
+
+        /// Teardown must cancel the pending retry, matching the diff-signature subscription's contract.
+        func testWorkspaceFileListSubscriptionCancelsThePendingUnavailableRetryOnTeardown() throws {
+            try withTemporaryProfile { _ in
+                let (root, watch, _) = try makeEventGatedWorkspaceWatch()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let workspaceID = "workspace-\(UUID().uuidString)"
+                let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
+                let exactCalls = InvocationCounter()
+                let subscription = SpacesDeviceAPIServer.WorkspaceFileListSignatureSubscription(
+                    workspaceID: workspaceID, socketPath: socketPath,
+                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.retry-teardown.\(workspaceID)"), watch: watch,
+                    signatureProvider: { _ in
+                        exactCalls.increment()
+                        return nil
+                    }, detectorProvider: { _, _, _ in "unchanged" }, unavailableRetryInterval: 0.1)
+                try subscription.start()
+
+                let installDeadline = Date().addingTimeInterval(5)
+                while exactCalls.value < 1, Date() < installDeadline { Thread.sleep(forTimeInterval: 0.01) }
+                XCTAssertEqual(exactCalls.value, 1)
+
+                subscription.stop()
+                try? FileManager.default.removeItem(atPath: socketPath)
+
+                Thread.sleep(forTimeInterval: 0.4)
+                XCTAssertEqual(exactCalls.value, 1, "no provider call must happen after the subscription is torn down")
+            }
+        }
+
+        /// The install step establishes the detector baseline before taking the exact listing. The
+        /// filesystem can change between those two calls (an agent can create/remove a file in that
+        /// window); if the exact listing ran first, the detector could observe the post-change state and
+        /// make that stale listing look current forever. `MembershipRaceProviders` models exactly that
+        /// transition landing between the two calls, so a detector-first implementation reports the new
+        /// state ("S1") while an exact-first one would report the stale one ("S0") forever.
+        func testWorkspaceFileListSubscriptionInitializesDetectorBeforeExactListingAtInstall() throws {
+            try withTemporaryProfile { _ in
+                let (root, watch, _) = try makeEventGatedWorkspaceWatch()
+                defer { try? FileManager.default.removeItem(at: root) }
                 let workspaceID = "workspace-\(UUID().uuidString)"
                 let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
                 let providers = MembershipRaceProviders()
                 let subscription = SpacesDeviceAPIServer.WorkspaceFileListSignatureSubscription(
                     workspaceID: workspaceID, socketPath: socketPath,
-                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.connect-race.\(workspaceID)"),
-                    signatureProvider: { _ in providers.exact() }, detectorProvider: { _ in providers.detector() })
+                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.connect-race.\(workspaceID)"), watch: watch,
+                    signatureProvider: { _ in providers.exact() }, detectorProvider: { _, _, _ in providers.detector() })
                 try subscription.start()
                 defer {
                     subscription.stop()
@@ -2614,43 +2831,320 @@
                 let deadline = Date().addingTimeInterval(2)
                 while received.count == 0, Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
 
-                // The detector models a membership transition that happens between the two provider
-                // calls. Detector-first ordering makes the initial exact frame describe the new state.
-                XCTAssertEqual(received.values, ["S1"])
+                // The client connects while install is still in flight (by design, to race the detector
+                // against the exact listing), so an accept-time send of the just-computed S1 can land
+                // alongside install's own broadcast of that same S1: two identical frames, not two distinct
+                // computes. That duplicate is already legal on this stream (the 20s keepalive rebroadcasts
+                // the same signature too), so only the first value and the absence of the stale "S0" matter.
+                XCTAssertEqual(received.values.first, "S1")
+                XCTAssertFalse(received.values.contains("S0"))
                 XCTAssertEqual(providers.exactCalls, 1)
                 XCTAssertEqual(providers.detectorCalls, 1)
             }
         }
 
-        func testWorkspaceFileListSubscriptionInitializesDetectorBeforeExactListingWhenTimerRunsFirst() throws {
+        /// Watcher-failure contract: when the workspace's `WorkspaceWatch` cannot start, the diff-signature
+        /// subscription still computes its one initial signature (so the first load works), every frame it
+        /// sends carries the OS error text in `liveRefreshError`, and it never spawns another provider call
+        /// afterward, since a failed watch never fires a touched-repository event.
+        func testDiffSignatureSubscriptionCarriesLiveRefreshErrorWhenTheWatchFailsAndSpawnsNoFurtherRecomputes() throws {
+            struct FakeStartError: Error, CustomStringConvertible { let description = "inotify watch limit reached" }
+            let (root, watch, _) = try makeEventGatedWorkspaceWatch(startResults: [.failure(FakeStartError())])
+            defer { try? FileManager.default.removeItem(at: root) }
+            let scope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace-\(UUID().uuidString)", refName: nil)
+            let socketPath = try TerminalServicePaths.workspaceDiffSignatureSocketPath(workspaceID: scope.workspaceID, refName: scope.refName)
+            let providerCallCounter = InvocationCounter()
+
+            let subscription = SpacesDeviceAPIServer.WorkspaceDiffSignatureSubscription(
+                scope: scope, socketPath: socketPath,
+                streamQueue: DispatchQueue(label: "spaces.workspace-diff-signature.\(scope.workspaceID).uncommitted"), watch: watch,
+                signatureProvider: { _, _, _ in "S\(providerCallCounter.increment())" })
+            try subscription.start()
+            defer {
+                subscription.stop()
+                try? FileManager.default.removeItem(atPath: socketPath)
+            }
+
+            final class DiffFrameCollector: @unchecked Sendable {
+                private let lock = NSLock()
+                private var frames: [SpacesDeviceWorkspaceDiffSignatureFrame] = []
+                func append(_ frame: SpacesDeviceWorkspaceDiffSignatureFrame) {
+                    lock.lock()
+                    frames.append(frame)
+                    lock.unlock()
+                }
+                var all: [SpacesDeviceWorkspaceDiffSignatureFrame] {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    return frames
+                }
+            }
+            let collector = DiffFrameCollector()
+            let firstFrameArrived = expectation(description: "the connect-time frame arrived")
+            // The accept-time send and install's own broadcast can both deliver the same initial frame
+            // (an identical duplicate is legal on this stream; the keepalive resends it too).
+            firstFrameArrived.assertForOverFulfill = false
+            let client = try RawWorkspaceDiffSignatureSocketClient(socketPath: socketPath) { frame in
+                collector.append(frame)
+                firstFrameArrived.fulfill()
+            }
+            defer { client.stop() }
+            wait(for: [firstFrameArrived], timeout: 5)
+
+            // Give any errant recompute a moment to run; there should never be one.
+            Thread.sleep(forTimeInterval: 0.3)
+
+            XCTAssertEqual(providerCallCounter.value, 1, "only the install's own initial compute should ever run")
+            XCTAssertEqual(collector.all.last?.scopeSignature, "S1")
+            XCTAssertEqual(collector.all.last?.liveRefreshError, "\(FakeStartError())")
+        }
+
+        /// Same contract as the diff-signature test above, for the file-list-signature subscription.
+        func testFileListSubscriptionCarriesLiveRefreshErrorWhenTheWatchFailsAndSpawnsNoFurtherRecomputes() throws {
             try withTemporaryProfile { _ in
+                struct FakeStartError: Error, CustomStringConvertible { let description = "inotify watch limit reached" }
+                let (root, watch, _) = try makeEventGatedWorkspaceWatch(startResults: [.failure(FakeStartError())])
+                defer { try? FileManager.default.removeItem(at: root) }
                 let workspaceID = "workspace-\(UUID().uuidString)"
                 let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
-                let providers = MembershipRaceProviders()
+                let exactCalls = InvocationCounter()
                 let subscription = SpacesDeviceAPIServer.WorkspaceFileListSignatureSubscription(
                     workspaceID: workspaceID, socketPath: socketPath,
-                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.timer-race.\(workspaceID)"),
-                    signatureProvider: { _ in providers.exact() }, detectorProvider: { _ in providers.detector() })
+                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.watch-failure.\(workspaceID)"), watch: watch,
+                    signatureProvider: { _ in "exact-\(exactCalls.increment())" }, detectorProvider: { _, _, _ in "unchanged" })
                 try subscription.start()
                 defer {
                     subscription.stop()
                     try? FileManager.default.removeItem(atPath: socketPath)
                 }
 
-                // Let the first poll establish the cache before a relay connects. The connect-time
-                // frame must use that detector-first exact value rather than a stale pre-transition one.
-                Thread.sleep(forTimeInterval: 2.4)
-                let received = FrameSignatureCollector()
-                let client = try RawWorkspaceFileListSignatureSocketClient(socketPath: socketPath) { frame in received.append(frame.fileListSignature)
+                final class FileListFrameCollector: @unchecked Sendable {
+                    private let lock = NSLock()
+                    private var frames: [SpacesDeviceWorkspaceFileListSignatureFrame] = []
+                    func append(_ frame: SpacesDeviceWorkspaceFileListSignatureFrame) {
+                        lock.lock()
+                        frames.append(frame)
+                        lock.unlock()
+                    }
+                    var all: [SpacesDeviceWorkspaceFileListSignatureFrame] {
+                        lock.lock()
+                        defer { lock.unlock() }
+                        return frames
+                    }
+                }
+                let collector = FileListFrameCollector()
+                let firstFrameArrived = expectation(description: "the connect-time frame arrived")
+                // Same identical-duplicate tolerance as the diff-signature test above.
+                firstFrameArrived.assertForOverFulfill = false
+                let client = try RawWorkspaceFileListSignatureSocketClient(socketPath: socketPath) { frame in
+                    collector.append(frame)
+                    firstFrameArrived.fulfill()
                 }
                 defer { client.stop() }
-                let deadline = Date().addingTimeInterval(2)
-                while received.count == 0, Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+                wait(for: [firstFrameArrived], timeout: 5)
 
-                XCTAssertEqual(received.values, ["S1"])
-                XCTAssertEqual(providers.exactCalls, 1)
-                XCTAssertEqual(providers.detectorCalls, 1)
+                Thread.sleep(forTimeInterval: 0.3)
+
+                XCTAssertEqual(exactCalls.value, 1, "only the install's own initial compute should ever run")
+                XCTAssertEqual(collector.all.last?.fileListSignature, "exact-1")
+                XCTAssertEqual(collector.all.last?.liveRefreshError, "\(FakeStartError())")
             }
+        }
+
+        /// `retryWatch()` is what `addWorkspaceDiffSignatureSubscriber` calls for a joining subscriber
+        /// instead of relying on `subscriberCount` alone, since bumping that count never re-attempts a
+        /// failed install (see the type doc on `WorkspaceDiffSignatureSubscription`, and the failure test
+        /// above). After it runs against a watch whose second install attempt succeeds, the next frame must
+        /// carry no error, and the signature provider must have run exactly once more, the retry's own
+        /// recompute, not a repeat of the cached failed one.
+        func testRetryWatchClearsTheLiveRefreshErrorAndRecomputesOnceMoreForTheDiffSignatureSubscription() throws {
+            struct FakeStartError: Error, CustomStringConvertible { let description = "inotify watch limit reached" }
+            let (root, watch, _) = try makeEventGatedWorkspaceWatch(startResults: [.failure(FakeStartError()), .success(())])
+            defer { try? FileManager.default.removeItem(at: root) }
+            let scope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace-\(UUID().uuidString)", refName: nil)
+            let socketPath = try TerminalServicePaths.workspaceDiffSignatureSocketPath(workspaceID: scope.workspaceID, refName: scope.refName)
+            let providerCallCounter = InvocationCounter()
+
+            let subscription = SpacesDeviceAPIServer.WorkspaceDiffSignatureSubscription(
+                scope: scope, socketPath: socketPath,
+                streamQueue: DispatchQueue(label: "spaces.workspace-diff-signature.\(scope.workspaceID).retry"), watch: watch,
+                signatureProvider: { _, _, _ in "S\(providerCallCounter.increment())" })
+            try subscription.start()
+            defer {
+                subscription.stop()
+                try? FileManager.default.removeItem(atPath: socketPath)
+            }
+
+            final class DiffFrameCollector: @unchecked Sendable {
+                private let lock = NSLock()
+                private var frames: [SpacesDeviceWorkspaceDiffSignatureFrame] = []
+                func append(_ frame: SpacesDeviceWorkspaceDiffSignatureFrame) {
+                    lock.lock()
+                    frames.append(frame)
+                    lock.unlock()
+                }
+                var all: [SpacesDeviceWorkspaceDiffSignatureFrame] {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    return frames
+                }
+            }
+            let collector = DiffFrameCollector()
+            let client = try RawWorkspaceDiffSignatureSocketClient(socketPath: socketPath) { frame in collector.append(frame) }
+            defer { client.stop() }
+
+            let failureDeadline = Date().addingTimeInterval(5)
+            while collector.all.isEmpty, Date() < failureDeadline { Thread.sleep(forTimeInterval: 0.01) }
+            XCTAssertEqual(collector.all.last?.liveRefreshError, "\(FakeStartError())")
+            XCTAssertEqual(providerCallCounter.value, 1)
+
+            subscription.retryWatch()
+
+            let recoveryDeadline = Date().addingTimeInterval(5)
+            while !collector.all.contains(where: { $0.scopeSignature == "S2" }), Date() < recoveryDeadline {
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+            let recoveredFrame = collector.all.first { $0.scopeSignature == "S2" }
+            XCTAssertNotNil(recoveredFrame)
+            XCTAssertNil(recoveredFrame?.liveRefreshError)
+            XCTAssertEqual(providerCallCounter.value, 2, "retryWatch's own recompute must be the only additional provider call")
+        }
+
+        /// `acquireWorkspaceWatch` never evicts a workspace's watch from the server's map (see its doc
+        /// comment for why), so `retryWatch` never needs to guard against a watch disappearing out from
+        /// under it. Its subscribe-before-unsubscribe order still matters for a different reason:
+        /// unsubscribing first would run a full zero-subscriber teardown (stopping the watcher, discarding
+        /// cached state) only to reinstall everything again immediately after, wasting a
+        /// teardown-then-rebuild cycle for no benefit. Proves that ordering still avoids the waste: exactly
+        /// one install happens on the initial (failing) subscribe and exactly one more on the retry's
+        /// successful reinstall, never a third, and the watch that second install produced keeps delivering
+        /// live events afterward rather than being some orphaned instance events silently stop reaching.
+        func testRetryWatchOnlyReinstallsOnceAndTheResultingWatchStaysLive() throws {
+            struct FakeStartError: Error, CustomStringConvertible { let description = "inotify watch limit reached" }
+            let (root, watch, box) = try makeEventGatedWorkspaceWatch(startResults: [.failure(FakeStartError()), .success(())])
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let scope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace-\(UUID().uuidString)", refName: nil)
+            let socketPath = try TerminalServicePaths.workspaceDiffSignatureSocketPath(workspaceID: scope.workspaceID, refName: scope.refName)
+            let providerCallCounter = InvocationCounter()
+            let subscription = SpacesDeviceAPIServer.WorkspaceDiffSignatureSubscription(
+                scope: scope, socketPath: socketPath,
+                streamQueue: DispatchQueue(label: "spaces.workspace-diff-signature.\(scope.workspaceID).retry-install-count"), watch: watch,
+                signatureProvider: { _, _, _ in "S\(providerCallCounter.increment())" })
+            try subscription.start()
+            defer {
+                subscription.stop()
+                try? FileManager.default.removeItem(atPath: socketPath)
+            }
+
+            let failureDeadline = Date().addingTimeInterval(5)
+            while watch.currentStartError() == nil, Date() < failureDeadline { Thread.sleep(forTimeInterval: 0.01) }
+            XCTAssertEqual(watch.currentStartError(), "\(FakeStartError())")
+            XCTAssertEqual(box.installCount, 1, "the failing initial subscribe must install exactly once")
+
+            subscription.retryWatch()
+
+            let recoveryDeadline = Date().addingTimeInterval(5)
+            while watch.currentStartError() != nil, Date() < recoveryDeadline { Thread.sleep(forTimeInterval: 0.01) }
+            XCTAssertNil(watch.currentStartError(), "retryWatch must clear the live-refresh error")
+            XCTAssertEqual(box.installCount, 2, "the retry's successful reinstall must be the only additional install, never a third")
+
+            // The watch the second install produced must be genuinely live: firing a synthetic event
+            // through it must still reach this subscription's recompute, proving it is the watch actually
+            // running rather than an orphaned instance nobody reads events from.
+            let providerCallsBeforeFiring = providerCallCounter.value
+            box.fire(paths: [root.appendingPathComponent("README.md").path])
+            let firingDeadline = Date().addingTimeInterval(5)
+            while providerCallCounter.value <= providerCallsBeforeFiring, Date() < firingDeadline { Thread.sleep(forTimeInterval: 0.01) }
+            XCTAssertGreaterThan(
+                providerCallCounter.value, providerCallsBeforeFiring, "the recovered watch must still deliver events to this subscription")
+            XCTAssertEqual(box.installCount, 2, "delivering an event must not trigger any further install")
+        }
+
+        /// Same contract as the diff-signature `retryWatch()` test above, for the file-list-signature
+        /// subscription.
+        func testRetryWatchClearsTheLiveRefreshErrorAndRecomputesOnceMoreForTheFileListSignatureSubscription() throws {
+            try withTemporaryProfile { _ in
+                struct FakeStartError: Error, CustomStringConvertible { let description = "inotify watch limit reached" }
+                let (root, watch, _) = try makeEventGatedWorkspaceWatch(startResults: [.failure(FakeStartError()), .success(())])
+                defer { try? FileManager.default.removeItem(at: root) }
+                let workspaceID = "workspace-\(UUID().uuidString)"
+                let socketPath = try TerminalServicePaths.workspaceFileListSignatureSocketPath(workspaceID: workspaceID)
+                let exactCalls = InvocationCounter()
+                let subscription = SpacesDeviceAPIServer.WorkspaceFileListSignatureSubscription(
+                    workspaceID: workspaceID, socketPath: socketPath,
+                    streamQueue: DispatchQueue(label: "spaces.workspace-file-list-signature.retry.\(workspaceID)"), watch: watch,
+                    signatureProvider: { _ in "exact-\(exactCalls.increment())" }, detectorProvider: { _, _, _ in "unchanged" })
+                try subscription.start()
+                defer {
+                    subscription.stop()
+                    try? FileManager.default.removeItem(atPath: socketPath)
+                }
+
+                final class FileListFrameCollector: @unchecked Sendable {
+                    private let lock = NSLock()
+                    private var frames: [SpacesDeviceWorkspaceFileListSignatureFrame] = []
+                    func append(_ frame: SpacesDeviceWorkspaceFileListSignatureFrame) {
+                        lock.lock()
+                        frames.append(frame)
+                        lock.unlock()
+                    }
+                    var all: [SpacesDeviceWorkspaceFileListSignatureFrame] {
+                        lock.lock()
+                        defer { lock.unlock() }
+                        return frames
+                    }
+                }
+                let collector = FileListFrameCollector()
+                let client = try RawWorkspaceFileListSignatureSocketClient(socketPath: socketPath) { frame in collector.append(frame) }
+                defer { client.stop() }
+
+                let failureDeadline = Date().addingTimeInterval(5)
+                while collector.all.isEmpty, Date() < failureDeadline { Thread.sleep(forTimeInterval: 0.01) }
+                XCTAssertEqual(collector.all.last?.liveRefreshError, "\(FakeStartError())")
+                XCTAssertEqual(exactCalls.value, 1)
+
+                subscription.retryWatch()
+
+                // The detector token is unchanged, so the retry's recompute skips the exact listing (the
+                // count stays at 1); what must still reach the attached client is a frame whose error
+                // cleared, with the signature it already had.
+                let recoveryDeadline = Date().addingTimeInterval(5)
+                while !collector.all.contains(where: { $0.liveRefreshError == nil }), Date() < recoveryDeadline {
+                    Thread.sleep(forTimeInterval: 0.01)
+                }
+                let recoveredFrame = collector.all.first { $0.liveRefreshError == nil }
+                XCTAssertNotNil(recoveredFrame)
+                XCTAssertEqual(recoveredFrame?.fileListSignature, "exact-1")
+                XCTAssertEqual(exactCalls.value, 1, "an unchanged detector token skips the exact listing even on a retry")
+            }
+        }
+
+        /// Underpins the gate inside `retryWatch()` (a healthy subscription is left alone): a
+        /// joining subscriber to an ALREADY-HEALTHY shared watch must not force a fresh install, since
+        /// `WorkspaceWatch.subscribe` only re-attempts the underlying `FileSystemWatcher` install when the
+        /// current one is not already running. Both `WorkspaceDiffSignatureSubscription` and
+        /// `WorkspaceFileListSignatureSubscription`'s own install call this same `watch.subscribe`, so
+        /// exercising it directly covers both.
+        ///
+        /// Not covered here: a true server-level test with two live subscribers sharing one
+        /// `acquireWorkspaceWatch`-vended `WorkspaceWatch`, one of which saw the failure and the other of
+        /// which triggers `retryWatch()` through `addWorkspaceDiffSignatureSubscriber`/
+        /// `addWorkspaceFileListSignatureSubscriber` themselves. `acquireWorkspaceWatch` hard-codes the live
+        /// FSEvents-backed watcher factory with no seam to inject a fake one at that level, so that path is
+        /// exercised only by the fake-watcher tests above and this one, not end to end through the server.
+        func testASecondSubscriberToAHealthyWatchDoesNotForceAReinstall() throws {
+            let (root, watch, box) = try makeEventGatedWorkspaceWatch()
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let (firstToken, firstError) = watch.subscribe { _ in }
+            XCTAssertNil(firstError)
+            let (secondToken, secondError) = watch.subscribe { _ in }
+            XCTAssertNil(secondError)
+            watch.unsubscribe(firstToken)
+            watch.unsubscribe(secondToken)
+
+            XCTAssertEqual(box.installCount, 1, "a second subscriber joining an already-healthy watch must not trigger another install")
         }
 
         // MARK: - workspaceFileSignature subscription (Phase 5 Part A)
@@ -2728,7 +3222,7 @@
         }
 
         /// Round-tripped through the same "construct the subscription directly + a raw socket reader" pattern
-        /// `testWorkspaceDiffSignatureBroadcastCarriesExactlyTheValueTheTickComparedAndRecorded` above uses:
+        /// `testWorkspaceDiffSignatureBroadcastCarriesExactlyTheValueTheEventComparedAndRecorded` above uses:
         /// an injected `signatureProvider` returning an unchanged value across multiple poll ticks must not
         /// rebroadcast beyond the first poll tick (divergence #1's `tick`-always-increments rule means the
         /// provider IS still called every tick; only the broadcast itself is suppressed for an unchanged
@@ -2968,6 +3462,105 @@
 
         // MARK: - Test helpers
 
+        /// Minimal fake `FileSystemWatcher` for constructing a `WorkspaceWatch` directly in these
+        /// producer-level tests. `stop()`/`addPaths` are no-ops; `onChange` is stashed in
+        /// `FakeWorkspaceWatchBox` so a test can fire synthetic filesystem events on demand; `start()`
+        /// resolves to whichever `Result` this instance was constructed with.
+        private final class FakeWorkspaceWatcher: FileSystemWatching, @unchecked Sendable {
+            let onChange: @Sendable (_ paths: [String], _ mustRescan: Bool) -> Void
+            private let startResult: Result<Void, any Error>
+            init(onChange: @escaping @Sendable (_ paths: [String], _ mustRescan: Bool) -> Void, startResult: Result<Void, any Error>) {
+                self.onChange = onChange
+                self.startResult = startResult
+            }
+            func start() async throws { try startResult.get() }
+            func stop() {}
+            func addPaths(_ paths: [String]) {}
+        }
+
+        /// Hands out one `start()` result per install attempt, not per `FakeWorkspaceWatcher` instance:
+        /// `WorkspaceWatch.attemptInstallLocked` discards a failed watcher and asks the factory for a brand
+        /// new one on the next attempt (which is exactly what `retryWatch()` triggers), so a plain
+        /// per-instance result would restart at its first entry every time and never reach a later,
+        /// successful one. The last entry repeats once exhausted.
+        private final class WorkspaceWatchStartScript: @unchecked Sendable {
+            private let lock = NSLock()
+            private var index = 0
+            private let results: [Result<Void, any Error>]
+            init(_ results: [Result<Void, any Error>]) { self.results = results }
+            func next() -> Result<Void, any Error> {
+                lock.lock()
+                defer { lock.unlock() }
+                let result = results[min(index, results.count - 1)]
+                index += 1
+                return result
+            }
+        }
+
+        /// Captures the `FakeWorkspaceWatcher` a `WorkspaceWatch`'s install creates, so a test can fire
+        /// synthetic filesystem events against it after subscribing, and counts how many times the factory
+        /// actually ran (one per install attempt), so a test can assert a joining subscriber to an
+        /// already-healthy watch did not force a second one.
+        private final class FakeWorkspaceWatchBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var watcher: FakeWorkspaceWatcher?
+            private var installAttempts = 0
+
+            func fire(paths: [String] = [], mustRescan: Bool = false) {
+                lock.lock()
+                let watcher = self.watcher
+                lock.unlock()
+                watcher?.onChange(paths, mustRescan)
+            }
+
+            func set(_ watcher: FakeWorkspaceWatcher) {
+                lock.lock()
+                self.watcher = watcher
+                installAttempts += 1
+                lock.unlock()
+            }
+
+            var installCount: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return installAttempts
+            }
+        }
+
+        /// Builds a `WorkspaceWatch` for a real, minimal git repository (its install path still spawns
+        /// real git for repository-map discovery and ignore-set reads), backed by a fake
+        /// `FileSystemWatcher` a test can fire events through via the returned box. Debounce intervals are
+        /// cut to a few tens of milliseconds so these tests do not each pay the production 0.5s/2s cadence.
+        /// `startResults` scripts each successive install attempt's outcome (see `WorkspaceWatchStartScript`),
+        /// for tests covering `WorkspaceDiffSignatureSubscription`/`WorkspaceFileListSignatureSubscription`'s
+        /// `liveRefreshError` behavior, including recovery via `retryWatch()`.
+        private func makeEventGatedWorkspaceWatch(startResults: [Result<Void, any Error>] = [.success(())]) throws -> (
+            root: URL, watch: WorkspaceWatch, box: FakeWorkspaceWatchBox
+        ) {
+            // Resolved (`realpath`) form on purpose: the fake watcher below fires paths under this root, and a
+            // real FSEvents/inotify watcher only ever reports the resolved spelling, which is also the form
+            // `WorkspaceWatch` resolves its root to before matching events.
+            let temporaryPointer = try XCTUnwrap(realpath(FileManager.default.temporaryDirectory.path, nil))
+            defer { free(temporaryPointer) }
+            let root = URL(fileURLWithPath: String(cString: temporaryPointer), isDirectory: true).appendingPathComponent(
+                "spaces-event-gated-watch-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            try runGit(["init", "--initial-branch", "main"], cwd: root.path)
+            try "hello".write(to: root.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runGit(["add", "-A"], cwd: root.path)
+            try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], cwd: root.path)
+            let box = FakeWorkspaceWatchBox()
+            let script = WorkspaceWatchStartScript(startResults)
+            let watch = WorkspaceWatch(
+                workspaceRoot: root.path, gitClient: RemoteWorkspaceGitClient(), debounceInterval: 0.02, debounceCeiling: 0.2,
+                watcherFactory: { _, onChange in
+                    let watcher = FakeWorkspaceWatcher(onChange: onChange, startResult: script.next())
+                    box.set(watcher)
+                    return watcher
+                })
+            return (root, watch, box)
+        }
+
         /// Thread-safe invocation counter for `signatureProvider` closures under test, which
         /// `WorkspaceDiffSignatureSubscription` calls from its own dedicated queue and which must be `@Sendable`.
         /// A local `var` capture cannot satisfy that; a lock-guarded reference type can.
@@ -3092,7 +3685,7 @@
 
         /// Minimal raw Unix-domain-socket line reader for a `WorkspaceDiffSignatureSubscription`'s producer
         /// socket. Used only by tests that construct the subscription directly (bypassing the full TLS
-        /// request/relay path, as `testIndependentDiffSignatureSubscriptionsPollOnSeparateQueuesSoASlowScopeNeverBlocksAnother`
+        /// request/relay path, as `testIndependentDiffSignatureSubscriptionsRecomputeOnSeparateQueuesSoASlowScopeNeverBlocksAnother`
         /// above does) and still need to observe the actual frames it broadcasts.
         /// `DeviceOverviewStreamServer` (the producer) is payload-agnostic newline-delimited `Data` over a
         /// plain Unix socket — the daemon's TLS/relay code is just one consumer of it, not part of it — so a

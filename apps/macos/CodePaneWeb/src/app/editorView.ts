@@ -130,6 +130,11 @@ export class EditorView {
   private readonly scheduler: AutosaveScheduler;
   private readonly codeHost: HTMLElement;
   private readonly banner: HTMLElement;
+  /** The scrollable content pane below the open-file bar (docs/design.md's "content pane" a
+   *  top-trailing banner overlays). Exposed through `overlayHost()` so root.ts can attach the
+   *  live-refresh persistent notice into the same container this view's own `banner` occupies,
+   *  without this view knowing anything about that notice. */
+  private readonly contentArea: HTMLElement;
   private codeView: CodeView | undefined;
 
   private currentPath: string | undefined;
@@ -290,6 +295,7 @@ export class EditorView {
     const codeArea = document.createElement("div");
     codeArea.className = "diff-area";
     codeArea.style.position = "relative";
+    this.contentArea = codeArea;
 
     // The CodeView mounts on this inner child, not on `.diff-area` itself, for the same
     // reason diffView.ts mounts on its own `.diff-view-root`: the element handed to
@@ -447,6 +453,11 @@ export class EditorView {
     if (!editorElement) return false;
     editorElement.id = "code-pane-editor-input";
     return true;
+  }
+
+  /** The content pane below the open-file bar; see `contentArea`'s doc comment. */
+  overlayHost(): HTMLElement {
+    return this.contentArea;
   }
 
   /** Logical source-line recovery avoids retaining a stale pixel offset after virtualization. */

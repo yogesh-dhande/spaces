@@ -263,11 +263,17 @@ let executableTargets: [Target] = [
         // run_linux_tests.sh's per-suite filter loop.
         .testTarget(
             name: "spacesdeviceapiTests",
-            dependencies: ["spacesdeviceapi", "spacesdevicecore", "spacesterminalcore"],
+            dependencies: ["spacesdeviceapi", "spacesdevicecore", "spacesterminalcore", "workspacecore", "spacesruntimecore"],
             sources: [
                 "WorkspaceFileWriteModePreservationTests.swift",
-                "SpacesDeviceWorkspaceGitHashingKnownAnswerTests.swift"
+                "SpacesDeviceWorkspaceGitHashingKnownAnswerTests.swift",
+                "SpacesDeviceWorkspaceWatchLinuxTests.swift",
             ]
+        ),
+        // workspacecoreTests otherwise pulls in AppKit-only test support (TestSupport.swift), so the
+        // Linux target compiles only the one file that needs none of it.
+        .testTarget(
+            name: "workspacecoreTests", dependencies: ["workspacecore"], sources: ["FileSystemWatcherLinuxInotifyTests.swift"]
         ),
     ]
 #else

@@ -120,6 +120,7 @@ function makeBridge(overrides: Partial<SpacesBridge> = {}): SpacesBridge {
     reviewCommentsSend: vi.fn().mockRejectedValue(new Error("not used")),
     startWorkspaceCommand: vi.fn().mockRejectedValue(new Error("not used")),
     resumeWorkspaceCommandTracking: vi.fn().mockRejectedValue(new Error("not used")),
+    retryLiveRefresh: vi.fn().mockRejectedValue(new Error("not used")),
     ...overrides,
   };
 }

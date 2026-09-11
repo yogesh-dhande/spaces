@@ -917,6 +917,67 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         #expect(before != after)
     }
 
+    // Mandatory per the event-gated refresh plan: a `RepositoryContributionCache` that reuses an
+    // untouched intermediate repository's cached contribution (only the touched submodule and its
+    // ancestor chain recompute) must produce byte-identical output to a fresh, fully recomputed
+    // signature. Dirt at both the superproject and the deepest nested submodule exercises the fold at
+    // every level.
+    @Test func cachedRecombinedSignatureEqualsAFreshFullComputation() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let client = RemoteWorkspaceGitClient()
+        let superRoot = fixture.superRoot
+
+        try "root edited".write(to: superRoot.appendingPathComponent("ROOT.md"), atomically: true, encoding: .utf8)
+        try "deep v1 edited".write(to: superRoot.appendingPathComponent("A/B/DEEP.txt"), atomically: true, encoding: .utf8)
+
+        let fresh = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(workspaceDir: superRoot.path, gitClient: client)
+
+        // Seed the cache with a full computation, then ask again naming only the touched submodule and
+        // its ancestor chain (workspace root, A, A/B) touched: the shape a `WorkspaceWatch` firing for
+        // an event confined to A/B reports: git's own submodule-dirty check recurses, so an edit two
+        // levels down really does change A's and the workspace root's own `git status` output too, and
+        // all three must recompute. What this test pins down is that the recombination is byte-identical
+        // to a fresh computation, not any particular repository being skipped.
+        let cache = RepositoryContributionCache()
+        _ = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(
+            workspaceDir: superRoot.path, gitClient: client, contributionCache: cache, touched: .recomputeAll)
+        let submoduleA = (superRoot.path as NSString).appendingPathComponent("A")
+        let submoduleB = (submoduleA as NSString).appendingPathComponent("B")
+        let touched = RepositoryTouchedSet(all: false, directories: [superRoot.path, submoduleA, submoduleB])
+        let recombined = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(
+            workspaceDir: superRoot.path, gitClient: client, contributionCache: cache, touched: touched)
+
+        #expect(recombined == fresh)
+    }
+
+    // The savings the cache exists for: a firing that touches only the workspace's own repository (no
+    // submodule event at all) must not spawn any git command against a submodule directory on the next
+    // computation: its cached combined signature is reused untouched.
+    @Test func untouchedSubmodulesSpawnNoGitOnARecomputeThatOnlyTouchesTheRoot() throws {
+        let fixture = try makeNestedSubmoduleSuperproject()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let log = fixture.container.appendingPathComponent("git-invocations.log")
+        let client = RemoteWorkspaceGitClient(gitExecutable: try makeGitInvocationRecorder(at: fixture.container, log: log).path)
+        let cache = RepositoryContributionCache()
+
+        _ = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(
+            workspaceDir: fixture.superRoot.path, gitClient: client, contributionCache: cache, touched: .recomputeAll)
+        try Data().write(to: log)
+
+        try "root edited".write(to: fixture.superRoot.appendingPathComponent("ROOT.md"), atomically: true, encoding: .utf8)
+        let touched = RepositoryTouchedSet(all: false, directories: [fixture.superRoot.path])
+        _ = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(
+            workspaceDir: fixture.superRoot.path, gitClient: client, contributionCache: cache, touched: touched)
+
+        let invocations = try String(contentsOf: log, encoding: .utf8)
+        let submoduleA = fixture.superRoot.appendingPathComponent("A").path
+        let submoduleB = fixture.superRoot.appendingPathComponent("A/B").path
+        #expect(!invocations.contains(submoduleA))
+        #expect(!invocations.contains(submoduleB))
+        #expect(invocations.contains(fixture.superRoot.path))
+    }
+
     // The unborn-HEAD variant of the restaging case: a superproject with no commits yet, whose submodule is
     // staged (`A  sub`) and then restaged at another commit. There is no HEAD to diff against, and an
     // index-to-worktree diff is empty both times, so `scopeSnapshot` must compare against the empty tree,
@@ -2387,6 +2448,35 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         try process.run()
         process.waitUntilExit()
         return process.terminationStatus
+    }
+}
+
+/// `RepositoryContributionCache.combinedSignature` must not leave a directory's PREVIOUS value cached
+/// after a recompute for it throws: a later, unrelated firing that never touches this directory would
+/// otherwise take the stale value for current, report success, and mask the failure (and cancel the
+/// caller's own retry) until this directory happens to be touched again.
+@Suite struct RepositoryContributionCacheTests {
+    private struct RecomputeFailure: Error {}
+
+    @Test func aFailedRecomputeLeavesAMissRatherThanTheStaleValue() throws {
+        let cache = RepositoryContributionCache()
+        let dir = "/workspace/repo"
+        let otherDir = "/workspace/other"
+
+        let cached = try cache.combinedSignature(for: dir, touched: RepositoryTouchedSet(all: false, directories: [dir])) { "a" }
+        #expect(cached == "a")
+
+        #expect(throws: RecomputeFailure.self) {
+            try cache.combinedSignature(for: dir, touched: RepositoryTouchedSet(all: false, directories: [dir])) { throw RecomputeFailure() }
+        }
+
+        var computeRan = false
+        let recovered = try cache.combinedSignature(for: dir, touched: RepositoryTouchedSet(all: false, directories: [otherDir])) {
+            computeRan = true
+            return "b"
+        }
+        #expect(recovered == "b", "the failed recompute must leave a miss, not the stale \"a\", so an untouched lookup still recomputes")
+        #expect(computeRan, "compute must actually run on the untouched lookup once the failed recompute cleared the cache")
     }
 }
 

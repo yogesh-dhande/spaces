@@ -1,13 +1,15 @@
 import Foundation
 
 /// The lifecycle surface `WorktreeDiscoveryService` needs from a filesystem watcher.
-/// Kept internal so tests can substitute a watcher whose `start()` blocks, verifying
-/// that a slow install never stalls the main actor. `start()` is async because the
-/// real watcher runs its (potentially slow) FSEvents/inotify setup off the caller's
-/// thread; the service awaits it so a stall suspends the actor instead of blocking it.
-protocol FileSystemWatching: Sendable {
+/// Public so a test (in this module or another, e.g. `spacesdeviceapi`'s `WorkspaceWatch`) can substitute
+/// a watcher whose `start()` blocks or fails, verifying that a slow or broken install never stalls or
+/// silently wedges its caller. `start()` is async because the real watcher runs its (potentially slow)
+/// FSEvents/inotify setup off the caller's thread; the caller awaits it so a stall suspends rather than
+/// blocks.
+public protocol FileSystemWatching: Sendable {
     func start() async throws
     func stop()
+    func addPaths(_ paths: [String]) throws
 }
 
 extension FileSystemWatcher: FileSystemWatching {}
@@ -63,7 +65,8 @@ extension FileSystemWatcher: FileSystemWatching {}
     /// Builds a watcher for a project's directories. Injected so tests can substitute
     /// a slow-starting watcher; production always uses `liveWatcherFactory`.
     typealias WatcherFactory =
-        @Sendable (_ paths: [String], _ latency: TimeInterval, _ onChange: @escaping @Sendable ([String]) -> Void) -> any FileSystemWatching
+        @Sendable (_ paths: [String], _ latency: TimeInterval, _ onChange: @escaping @Sendable (_ paths: [String], _ mustRescan: Bool) -> Void)
+            -> any FileSystemWatching
 
     private let databasePath: String
     private let onError: (@Sendable (any Error) -> Void)?
@@ -234,8 +237,12 @@ extension FileSystemWatcher: FileSystemWatching {}
         guard started, watchers[projectID] == nil else { return }
         let watchedDirectories = await Self.watchDirectories(commonDirectory: commonDirectory)
         guard started, watchers[projectID] == nil else { return }
-        let watcher = makeWatcher(watchedDirectories, 1) { [weak self] changedPaths in
-            guard Self.changedPathsAffectWorktrees(changedPaths, commonDirectory: commonDirectory) else { return }
+        let watcher = makeWatcher(watchedDirectories, 1) { [weak self] changedPaths, mustRescan in
+            // A rescan (an overflowed inotify queue, or FSEvents dropping/rewinding under load) carries no
+            // path list precise enough to check against `changedPathsAffectWorktrees`, so treat it the same
+            // as a directly-affecting change: the scan below is a full re-read of the project's worktrees
+            // regardless, so there is nothing more targeted to fall back to.
+            guard mustRescan || Self.changedPathsAffectWorktrees(changedPaths, commonDirectory: commonDirectory) else { return }
             // This callback fires on the watcher's own queue (FSEvents/inotify), never the main
             // actor, so it hops over before calling the main-actor-only `spawnTrackedTask`. The hop
             // itself is a scheduling gap, not a data race (only main-actor code ever touches

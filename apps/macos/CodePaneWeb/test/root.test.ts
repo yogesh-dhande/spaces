@@ -9,6 +9,8 @@ import {
   CodePaneInitPayload,
   CodePaneWorkspaceState,
   DiffFileEntry,
+  DiffSignatureEvent,
+  FileListSignatureEvent,
   PendingReviewCommentEntry,
   SpacesBridgeError,
   WorkspaceDiffFileChunkResult,
@@ -232,6 +234,7 @@ const hoisted = vi.hoisted(() => {
     status: "starting" as const,
     deadlineEpochMilliseconds: 90_000,
   });
+  const retryLiveRefresh = vi.fn().mockResolvedValue(undefined);
   const manifests = new Map<string, { scopeSignature: string; files: DiffFileEntry[] }>();
   let nextManifestID = 0;
   let manifestPageSize = Number.POSITIVE_INFINITY;
@@ -297,13 +300,13 @@ const hoisted = vi.hoisted(() => {
   // `pendingDiffCalls`' "controllable" approach for `workspaceDiff` above, but for the push side.
   // `resubscribeDiffSignature` replaces the previous subscription on every scope change, so the
   // LAST entry is always the one a real push would currently be delivered to.
-  const diffSignatureCallbacks: Array<() => void> = [];
-  const subscribeDiffSignature = vi.fn((_scope: unknown, callback: () => void) => {
+  const diffSignatureCallbacks: Array<(event: DiffSignatureEvent) => void> = [];
+  const subscribeDiffSignature = vi.fn((_scope: unknown, callback: (event: DiffSignatureEvent) => void) => {
     diffSignatureCallbacks.push(callback);
     return () => {};
   });
-  const fileListSignatureCallbacks: Array<() => void> = [];
-  const subscribeFileListSignature = vi.fn((callback: () => void) => {
+  const fileListSignatureCallbacks: Array<(event: FileListSignatureEvent) => void> = [];
+  const subscribeFileListSignature = vi.fn((callback: (event: FileListSignatureEvent) => void) => {
     fileListSignatureCallbacks.push(callback);
     return () => {};
   });
@@ -323,6 +326,7 @@ const hoisted = vi.hoisted(() => {
     workspaceFileWrite,
     startWorkspaceCommand,
     resumeWorkspaceCommandTracking,
+    retryLiveRefresh,
     notifyModeChanged,
     notifyEditorUIStateChanged,
     notifyWorkspaceStateChanged,
@@ -364,6 +368,7 @@ vi.mock("../src/bridge", () => ({
     reviewCommentsSend: vi.fn().mockRejectedValue(new Error("not used")),
     startWorkspaceCommand: hoisted.startWorkspaceCommand,
     resumeWorkspaceCommandTracking: hoisted.resumeWorkspaceCommandTracking,
+    retryLiveRefresh: hoisted.retryLiveRefresh,
   }),
 }));
 
@@ -445,17 +450,18 @@ function switchToUncommitted(container: HTMLElement): void {
 }
 
 /** Simulates a diff-signature push event on whichever scope is currently subscribed (see
- *  `hoisted.diffSignatureCallbacks`'s doc comment). */
-function fireDiffSignature(): void {
+ *  `hoisted.diffSignatureCallbacks`'s doc comment). `liveRefreshError` defaults to unset, matching
+ *  a healthy watcher; the live-refresh notice describe block below passes it explicitly. */
+function fireDiffSignature(liveRefreshError?: string): void {
   const callbacks = hoisted.diffSignatureCallbacks;
   if (callbacks.length === 0) throw new Error("no diff-signature subscription registered yet");
-  callbacks[callbacks.length - 1]!();
+  callbacks[callbacks.length - 1]!({ scopeSignature: "diff-signature", liveRefreshError });
 }
 
-function fireFileListSignature(): void {
+function fireFileListSignature(liveRefreshError?: string): void {
   const callbacks = hoisted.fileListSignatureCallbacks;
   if (callbacks.length === 0) throw new Error("no file-list-signature subscription registered yet");
-  callbacks[callbacks.length - 1]!();
+  callbacks[callbacks.length - 1]!({ fileListSignature: "file-list-signature", liveRefreshError });
 }
 
 describe("mountRoot's diff render metrics", () => {
@@ -2635,7 +2641,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     });
     expect(beginEditSpy).not.toHaveBeenCalled();
 
-    hoisted.diffSignatureCallbacks.at(-1)!();
+    hoisted.diffSignatureCallbacks.at(-1)!({ scopeSignature: "diff-signature" });
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
     resolveDiff(1, [lastCommitFile], "last-commit-retry-success-sig");
     await vi.waitFor(() =>
@@ -2706,7 +2712,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "saved\n" } }, { id: "editable.ts", type: "diff" });
     // Start the signature refresh before Save. Its file read is deliberately held while the save
     // completes, so the eventual snapshot has the old CAS baseline.
-    hoisted.diffSignatureCallbacks.at(-1)!();
+    hoisted.diffSignatureCallbacks.at(-1)!({ scopeSignature: "diff-signature" });
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
     resolveDiff(1, [testFile], "stale-reconcile");
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledTimes(2));
@@ -2767,7 +2773,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
 
     // The write has landed on disk, but its reply is still in flight. A file-signature refresh
     // therefore reconciles the exact saved buffer before saveDiffEdit can process the CAS result.
-    hoisted.diffSignatureCallbacks.at(-1)!();
+    hoisted.diffSignatureCallbacks.at(-1)!({ scopeSignature: "diff-signature" });
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
     resolveDiff(1, [testFile], "saved-signature");
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledTimes(2));
@@ -2819,7 +2825,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
       { baseSHA256: "sha-before", purpose: "inlineDiff" },
     ));
 
-    hoisted.diffSignatureCallbacks.at(-1)!();
+    hoisted.diffSignatureCallbacks.at(-1)!({ scopeSignature: "diff-signature" });
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
     resolveDiff(1, [testFile], "saved-before-rejection");
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledTimes(2));
@@ -2859,7 +2865,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "line 1 mine\nline 2\nline 3\n" } }, { id: "editable.ts", type: "diff" });
 
-    hoisted.diffSignatureCallbacks.at(-1)!();
+    hoisted.diffSignatureCallbacks.at(-1)!({ scopeSignature: "diff-signature" });
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
     resolveDiff(1, [testFile], "typing-during-reconcile");
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledTimes(2));
@@ -2905,7 +2911,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
 
     // The external refresh reconciles a non-overlapping disk edit while the old CAS write is
     // unresolved. Its generation bump must make the eventual old success retain this merge.
-    hoisted.diffSignatureCallbacks.at(-1)!();
+    hoisted.diffSignatureCallbacks.at(-1)!({ scopeSignature: "diff-signature" });
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
     resolveDiff(1, [testFile], "reconcile-in-flight-save");
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledTimes(2));
@@ -2950,7 +2956,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "my version\n" } }, { id: "editable.ts", type: "diff" });
 
     // First refresh establishes the read-only conflict comparison.
-    hoisted.diffSignatureCallbacks.at(-1)!();
+    hoisted.diffSignatureCallbacks.at(-1)!({ scopeSignature: "diff-signature" });
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
     resolveDiff(1, [testFile], "conflict-before-keep-mine");
     await vi.waitFor(() => expect(setConflictSpy).toHaveBeenCalledWith(
@@ -2967,7 +2973,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
 
     // Keep mine has landed, but its reply is still in flight. The next signature refresh observes
     // disk == the frozen buffer and must rebuild the normal editable renderer before that reply.
-    hoisted.diffSignatureCallbacks.at(-1)!();
+    hoisted.diffSignatureCallbacks.at(-1)!({ scopeSignature: "diff-signature" });
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(3));
     resolveDiff(2, [editableFile], "conflict-resolved-before-reply");
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledTimes(3));
@@ -3116,7 +3122,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
     const replaceSpy = vi.spyOn(DiffView.prototype, "replaceEditContent");
 
-    hoisted.diffSignatureCallbacks.at(-1)!();
+    hoisted.diffSignatureCallbacks.at(-1)!({ scopeSignature: "diff-signature" });
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
     resolveDiff(1, [editableFile], "editable-changed-sig");
 
@@ -3176,7 +3182,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "unsaved recovery\n" } }, { id: "editable.ts", type: "diff" });
 
-    hoisted.diffSignatureCallbacks.at(-1)!();
+    hoisted.diffSignatureCallbacks.at(-1)!({ scopeSignature: "diff-signature" });
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
     resolveDiff(1, [], "omitted-edit-sig");
 
@@ -3253,7 +3259,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "my version\n" } }, { id: "editable.ts", type: "diff" });
 
-    hoisted.diffSignatureCallbacks.at(-1)!();
+    hoisted.diffSignatureCallbacks.at(-1)!({ scopeSignature: "diff-signature" });
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
     resolveDiff(1, [testFile], "conflict-sig");
 
@@ -3296,7 +3302,7 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("editable.ts", "inlineDiff"));
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "restore mine\n" } }, { id: "editable.ts", type: "diff" });
 
-    hoisted.diffSignatureCallbacks.at(-1)!();
+    hoisted.diffSignatureCallbacks.at(-1)!({ scopeSignature: "diff-signature" });
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
     resolveDiff(1, [testFile], "deleted-edit-sig");
     const header = await vi.waitFor(() => {
@@ -5740,6 +5746,170 @@ describe("mountRoot's file-list-signature push — ⌘P overlay refresh is not m
     fireFileListSignature();
     await vi.waitFor(() => expect(hoisted.workspaceFileList).toHaveBeenCalledTimes(1));
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("mountRoot's live-refresh notice", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.diffSignatureCallbacks.length = 0;
+    hoisted.fileListSignatureCallbacks.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.workspaceFileList.mockClear();
+    hoisted.subscribeDiffSignature.mockClear();
+    hoisted.subscribeFileListSignature.mockClear();
+    hoisted.retryLiveRefresh.mockClear();
+    hoisted.retryLiveRefresh.mockResolvedValue(undefined);
+    container = document.createElement("div");
+  });
+
+  it("shows the daemon's reason verbatim in Diff mode without hiding the changed-files list", async () => {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [makeFile("a.ts")], "sig-a");
+    await mounted;
+    expect(container.querySelector('[id="code-pane-change-a.ts"]')).not.toBeNull();
+
+    fireDiffSignature("fsevents: too many open files");
+
+    const notice = container.querySelector<HTMLElement>("#code-pane-live-refresh-notice")!;
+    expect(notice.hidden).toBe(false);
+    expect(notice.textContent).toContain("Live refresh off: fsevents: too many open files");
+    // The banner overlays the content area; it never replaces or removes what was already showing.
+    expect(container.querySelector('[id="code-pane-change-a.ts"]')).not.toBeNull();
+  });
+
+  it("shows the same notice in Editor mode, over the editor's content area rather than the Files sidebar", async () => {
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [] });
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "sig-a");
+    await mounted;
+
+    clickButton(container, "Editor");
+    await vi.waitFor(() => expect(container.querySelector('.file-list [data-path="a.ts"]')).not.toBeNull());
+
+    fireDiffSignature("fsevents: too many open files");
+
+    const notice = container.querySelector<HTMLElement>("#code-pane-live-refresh-notice")!;
+    expect(notice.hidden).toBe(false);
+    expect(notice.textContent).toContain("Live refresh off: fsevents: too many open files");
+    // The Files sidebar gets no notice of its own (docs/spec.md), and keeps its own tree intact.
+    expect(container.querySelector('.file-list #code-pane-live-refresh-notice')).toBeNull();
+    expect(container.querySelector('.file-list [data-path="a.ts"]')).not.toBeNull();
+  });
+
+  it("clears once a later frame from the same stream carries no error", async () => {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "sig-a");
+    await mounted;
+
+    fireDiffSignature("watcher failed to start");
+    expect(container.querySelector<HTMLElement>("#code-pane-live-refresh-notice")!.hidden).toBe(false);
+
+    fireDiffSignature();
+    expect(container.querySelector<HTMLElement>("#code-pane-live-refresh-notice")!.hidden).toBe(true);
+  });
+
+  // Regression: the two streams share one daemon-side watcher, but a scope switch can reinstall it
+  // and clear one stream's error while the other stream's last frame still carries the stale
+  // reason. The notice tracks whichever stream's frame arrived most recently rather than merging
+  // both streams' last-known state, so it never shows a reason that has already cleared.
+  it("clears once the diff stream reports clean, even while the file-list stream's last frame still carried an error", async () => {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "sig-a");
+    await mounted;
+
+    fireFileListSignature("watcher failed to start");
+    fireDiffSignature("watcher failed to start");
+    expect(container.querySelector<HTMLElement>("#code-pane-live-refresh-notice")!.hidden).toBe(false);
+
+    fireDiffSignature();
+    expect(container.querySelector<HTMLElement>("#code-pane-live-refresh-notice")!.hidden).toBe(true);
+  });
+
+  it("shows the file-list stream's reason once the diff stream is clean and the file-list stream then reports an error", async () => {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "sig-a");
+    await mounted;
+
+    fireDiffSignature();
+    expect(container.querySelector<HTMLElement>("#code-pane-live-refresh-notice")!.hidden).toBe(true);
+
+    fireFileListSignature("fsevents: too many open files");
+    const notice = container.querySelector<HTMLElement>("#code-pane-live-refresh-notice")!;
+    expect(notice.hidden).toBe(false);
+    expect(notice.textContent).toContain("Live refresh off: fsevents: too many open files");
+  });
+
+  it("Retry sends one retryLiveRefresh request, creates no new stream listeners, and a subsequent clean frame hides the notice", async () => {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "sig-a");
+    await mounted;
+
+    fireDiffSignature("watcher failed to start");
+    expect(hoisted.subscribeDiffSignature).toHaveBeenCalledTimes(1);
+    expect(hoisted.subscribeFileListSignature).toHaveBeenCalledTimes(1);
+
+    clickButton(container, "Retry");
+    expect(hoisted.retryLiveRefresh).toHaveBeenCalledExactlyOnceWith();
+    // Retry asks the host to reopen the streams; it does not resubscribe from the page's own side.
+    expect(hoisted.subscribeDiffSignature).toHaveBeenCalledTimes(1);
+    expect(hoisted.subscribeFileListSignature).toHaveBeenCalledTimes(1);
+    const retryButton = [...container.querySelectorAll("button")].find((b) => b.textContent === "Retrying…") as HTMLButtonElement | undefined;
+    expect(retryButton).toBeDefined();
+    expect(retryButton!.disabled).toBe(true);
+
+    // A stream's next push frame answers the retry: here, the daemon's watcher recovered.
+    fireDiffSignature();
+    expect(container.querySelector<HTMLElement>("#code-pane-live-refresh-notice")!.hidden).toBe(true);
+  });
+
+  it("a rejected retryLiveRefresh request restores the Retry button with the banner still visible", async () => {
+    hoisted.retryLiveRefresh.mockRejectedValueOnce(new Error("host unreachable"));
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "sig-a");
+    await mounted;
+
+    fireDiffSignature("watcher failed to start");
+    clickButton(container, "Retry");
+    expect(hoisted.retryLiveRefresh).toHaveBeenCalledExactlyOnceWith();
+
+    const notice = container.querySelector<HTMLElement>("#code-pane-live-refresh-notice")!;
+    await vi.waitFor(() => {
+      const retryButton = [...container.querySelectorAll("button")].find((b) => b.textContent === "Retry") as HTMLButtonElement | undefined;
+      expect(retryButton).toBeDefined();
+      expect(retryButton!.disabled).toBe(false);
+    });
+    expect(notice.hidden).toBe(false);
+    expect(notice.textContent).toContain("Live refresh off: watcher failed to start");
+  });
+
+  it("yields to the diff edit error banner and reappears once it clears (docs/design.md: a pane has one banner)", async () => {
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "sig-a");
+    await mounted;
+
+    fireDiffSignature("watcher failed to start");
+    const notice = container.querySelector<HTMLElement>("#code-pane-live-refresh-notice")!;
+    expect(notice.hidden).toBe(false);
+
+    // DiffView's own inline-edit error banner shares the corner slot; toggling it the same way its
+    // owner does (style.display, no event) is what the arbitration in liveRefreshNotice.ts watches for.
+    const editErrorEl = container.querySelector<HTMLElement>("#code-pane-diff-edit-error")!;
+    editErrorEl.style.display = "flex";
+    await vi.waitFor(() => expect(notice.hidden).toBe(true));
+
+    editErrorEl.style.display = "none";
+    await vi.waitFor(() => expect(notice.hidden).toBe(false));
   });
 });
 

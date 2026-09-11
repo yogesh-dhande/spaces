@@ -235,6 +235,58 @@ enum SpacesDeviceWorkspaceBinaryGuess {
     static func isLikelyBinary(_ data: Data) -> Bool { data.prefix(sniffLength).contains(0) }
 }
 
+/// Which repositories a `WorkspaceWatch` firing says changed, in the shape `scopeSignature` and
+/// `gitMembershipChangeToken` consume to decide which repository's own git status/porcelain must be
+/// recomputed rather than reused from `RepositoryContributionCache`. `all` stands for an overflow or
+/// rescan event, where the touched set itself is not trustworthy and every repository must recompute.
+/// `recomputeAll` is also what every one-shot caller (`buildDiffPlanSnapshot`, the connect-time frame)
+/// gets by default, paired with a fresh `RepositoryContributionCache()`: a fresh cache never has
+/// anything to reuse regardless of what `touched` says, so those callers keep computing every
+/// repository's contribution fresh, exactly as before this cache existed.
+struct RepositoryTouchedSet: Sendable {
+    let all: Bool
+    let directories: Set<String>
+    static let recomputeAll = RepositoryTouchedSet(all: true, directories: [])
+}
+
+/// Caches one repository's combined scope/membership contribution (its own bytes plus, folded in
+/// recursively, every participating submodule's own combined contribution), keyed by that repository's
+/// working directory. A `WorkspaceWatch` firing recomputes only the repositories its touched set names
+/// (or every repository, for `RepositoryTouchedSet.all`); everything else is returned from here with no
+/// git spawned. Shared by `SpacesDeviceWorkspaceDiffEngine.scopeSignature` and
+/// `SpacesDeviceWorkspaceFileListEngine.gitMembershipChangeToken`, which both key their own cache
+/// instances by repository directory (never a shared instance between the two, since a diff scope
+/// signature and a membership token hash different bytes for the same repository).
+final class RepositoryContributionCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var signatures: [String: String] = [:]
+
+    /// Returns the cached combined signature for `directory` when the firing's touched set does not
+    /// name it (and is not `all`); otherwise recomputes via `compute`, caches the result, and returns
+    /// it. `compute` is expected to recurse into this same cache for `directory`'s own participating
+    /// submodules, so a cache hit here short-circuits that whole recursion, not just one repository's
+    /// own git spawn.
+    func combinedSignature(for directory: String, touched: RepositoryTouchedSet, compute: () throws -> String) rethrows -> String {
+        if !touched.all, !touched.directories.contains(directory) {
+            lock.lock()
+            let cached = signatures[directory]
+            lock.unlock()
+            if let cached { return cached }
+        }
+        // A failed recompute must not leave the previous value in place: a later UNTOUCHED lookup would
+        // otherwise treat it as still current, return it, and report success, masking the failure
+        // (and canceling the caller's own retry) until this directory happens to be touched again.
+        lock.lock()
+        signatures.removeValue(forKey: directory)
+        lock.unlock()
+        let signature = try compute()
+        lock.lock()
+        signatures[directory] = signature
+        lock.unlock()
+        return signature
+    }
+}
+
 /// Git-backed support for the workspace file/diff Device API commands: uncommitted/against-ref diff
 /// building and the cheap `scopeSignature` change-detection token both the manifest endpoint and
 /// `subscribeWorkspaceDiffSignature`'s poll timer use. Pure functions over an explicit `workspaceDir` and
@@ -382,16 +434,28 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// just the working tree changing. When `merge-base` fails (the ref was deleted, say), an error-marker
     /// string is folded in instead of the resolved SHA, so the signature still changes exactly once rather
     /// than silently pinning to a stale value.
-    /// `deadlineStart` is nil on the standalone poll path (`subscribeWorkspaceDiffSignature`'s timer calls
-    /// this directly), which keeps today's behavior: each command gets its own flat `gitCommandTimeout` with
-    /// no request-wide budget, because a poll tick has no such budget to share. `buildDiffPlanSnapshot` passes its own
-    /// `start` here so this call's commands are folded into the same request-wide deadline (`remainingTimeout`)
-    /// as the plan builder's other up-front commands.
+    /// `deadlineStart` is nil on the standalone poll path (`subscribeWorkspaceDiffSignature`'s event-gated
+    /// recompute calls this directly), which keeps today's behavior: each command gets its own flat
+    /// `gitCommandTimeout` with no request-wide budget, because a recompute has no such budget to share.
+    /// `buildDiffPlanSnapshot` passes its own `start` here so this call's commands are folded into the same
+    /// request-wide deadline (`remainingTimeout`) as the plan builder's other up-front commands.
+    ///
+    /// `contributionCache`/`touched` are the event-gated recompute's seam: the top-level repository (this
+    /// workspace's own directory) is not itself cached, since a `WorkspaceWatch` firing always marks it
+    /// touched (any accepted event's deepest repository has the workspace root as an ancestor, see
+    /// `WorkspaceWatch`'s event-acceptance rules), so wrapping it here would never hit. Only the recursive
+    /// per-submodule calls below consult the cache, which is where a workspace with many repositories
+    /// actually saves git spawns: an untouched submodule's whole subtree returns from
+    /// `RepositoryContributionCache` without recursing further. A one-shot caller's default fresh cache
+    /// never has anything cached, so it recomputes every repository exactly as before this cache existed.
     static func scopeSignature(
-        workspaceDir: String, refName: String? = nil, lastCommit: Bool = false, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date? = nil
+        workspaceDir: String, refName: String? = nil, lastCommit: Bool = false, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date? = nil,
+        contributionCache: RepositoryContributionCache = RepositoryContributionCache(), touched: RepositoryTouchedSet = .recomputeAll
     ) throws -> String {
-        try scopeSnapshot(workspaceDir: workspaceDir, refName: refName, lastCommit: lastCommit, gitClient: gitClient, deadlineStart: deadlineStart)
-            .signature
+        try scopeSnapshot(
+            workspaceDir: workspaceDir, refName: refName, lastCommit: lastCommit, gitClient: gitClient, deadlineStart: deadlineStart,
+            contributionCache: contributionCache, touched: touched
+        ).signature
     }
 
     /// `buildDiffPlanSnapshot` needs the same HEAD/status/prefix facts that form the signature. Keeping them in this
@@ -404,7 +468,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
     }
 
     private static func scopeSnapshot(
-        workspaceDir: String, refName: String? = nil, lastCommit: Bool = false, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date? = nil
+        workspaceDir: String, refName: String? = nil, lastCommit: Bool = false, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date? = nil,
+        contributionCache: RepositoryContributionCache, touched: RepositoryTouchedSet
     ) throws -> ScopeSnapshot {
         // `--verify --quiet` + `allowedExitCodes: [0, 1]` (no `try?`), not a bare `rev-parse HEAD`: an
         // unborn HEAD (a freshly `git init`ed repo, still a valid git project) exits 1 with empty stdout,
@@ -444,9 +509,13 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // mtime need not change when a file inside it is edited) even though the manifest plan would show that
         // edit once the client re-fetches. `all` reports each file individually, so per-file `size`/`mtime`
         // below sees it.
+        // `GIT_OPTIONAL_LOCKS=0`, as `gitMembershipChangeToken`'s own `status` already runs with: without
+        // it, `status` refreshes the on-disk index, which is itself a write this recompute would otherwise
+        // notice on the *next* firing (an inotify/FSEvents event on `.git/index`) with nothing having
+        // actually changed in the workspace.
         let statusOutput = try gitClient.runGitAndCapture(
             ["-C", workspaceDir, "status", "--porcelain", "-z", "--untracked-files=all"],
-            timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout)
+            timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout, environmentOverrides: ["GIT_OPTIONAL_LOCKS": "0"])
         // A workspace can be a monorepo subpackage rooted
         // below its repository's root (`Orchestrator.normalizeDir` accepts any dir where `rev-parse
         // --is-inside-work-tree` succeeds), so porcelain's repo-root-relative paths must be scoped down to
@@ -572,7 +641,11 @@ enum SpacesDeviceWorkspaceDiffEngine {
                 continue
             }
             let subDir = (workspaceDir as NSString).appendingPathComponent(entry.path)
-            let subSignature = try submoduleScopeSignature(subDir: subDir, depth: 1, gitClient: gitClient, deadlineStart: deadlineStart)
+            let subSignature = try contributionCache.combinedSignature(for: subDir, touched: touched) {
+                try submoduleScopeSignature(
+                    subDir: subDir, depth: 1, gitClient: gitClient, deadlineStart: deadlineStart, contributionCache: contributionCache,
+                    touched: touched)
+            }
             input.append(Data("submodule-scope:\(entry.path):\(subSignature)\n".utf8))
         }
 
@@ -653,7 +726,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// repository, so the pointers it compares are fixed by the parent's `HEAD` alone and nothing inside a
     /// submodule checkout can change what it renders.
     private static func submoduleScopeSignature(
-        subDir: String, depth: Int, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date?
+        subDir: String, depth: Int, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date?, contributionCache: RepositoryContributionCache,
+        touched: RepositoryTouchedSet
     ) throws -> String {
         let headSHA = try gitClient.runGitAndCapture(
             ["-C", subDir, "rev-parse", "--verify", "--quiet", "HEAD"],
@@ -661,7 +735,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
         ).trimmingCharacters(in: .whitespacesAndNewlines)
         let statusOutput = try gitClient.runGitAndCapture(
             ["-C", subDir, "status", "--porcelain", "-z", "--untracked-files=all"],
-            timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout)
+            timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout, environmentOverrides: ["GIT_OPTIONAL_LOCKS": "0"])
 
         // Accepted: the worktree dirt folded in here is not filtered by the parent's submodule ignore policy,
         // so an edit inside a `dirty`-ignored submodule still moves the signature and buys a manifest
@@ -701,8 +775,11 @@ enum SpacesDeviceWorkspaceDiffEngine {
             for entry in directoryEntries where entry.status != "??" {
                 guard SpacesDeviceWorkspacePathResolver.isContainedGitlinkCheckout(repoDir: subDir, repoRelativePath: entry.path) else { continue }
                 let nestedDir = (subDir as NSString).appendingPathComponent(entry.path)
-                let nestedSignature = try submoduleScopeSignature(
-                    subDir: nestedDir, depth: depth + 1, gitClient: gitClient, deadlineStart: deadlineStart)
+                let nestedSignature = try contributionCache.combinedSignature(for: nestedDir, touched: touched) {
+                    try submoduleScopeSignature(
+                        subDir: nestedDir, depth: depth + 1, gitClient: gitClient, deadlineStart: deadlineStart, contributionCache: contributionCache,
+                        touched: touched)
+                }
                 input.append(Data("submodule-scope:\(entry.path):\(nestedSignature)\n".utf8))
             }
         }
@@ -909,8 +986,11 @@ enum SpacesDeviceWorkspaceDiffEngine {
         workspaceDir: String, refName: String?, lastCommit: Bool = false, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date = Date()
     ) throws -> DiffPlanSnapshot {
         let start = deadlineStart
+        // Fresh cache, `touched: .recomputeAll`: a manifest build always wants a full, un-cached
+        // computation, never a reused submodule contribution from some other subscription's cache.
         let snapshot = try scopeSnapshot(
-            workspaceDir: workspaceDir, refName: refName, lastCommit: lastCommit, gitClient: gitClient, deadlineStart: start)
+            workspaceDir: workspaceDir, refName: refName, lastCommit: lastCommit, gitClient: gitClient, deadlineStart: start,
+            contributionCache: RepositoryContributionCache(), touched: .recomputeAll)
         let signature = snapshot.signature
 
         if lastCommit {
@@ -2008,6 +2088,9 @@ enum SpacesDeviceWorkspaceFileListEngine {
         let workspaceIndex = GitMembershipIndexCache()
         let submodules = SubmoduleIndexCaches()
         let repositoryPaths = RepositoryPathCache()
+        /// One repository's combined membership token, reused across firings for a repository the current
+        /// touched set does not name. See `RepositoryContributionCache`'s doc comment.
+        let contributionCache = RepositoryContributionCache()
     }
 
     /// Where one repository keeps the four files a detector tick stats. They are fixed for as long as the
@@ -2023,6 +2106,11 @@ enum SpacesDeviceWorkspaceFileListEngine {
         /// worktree's. `HEAD` itself is per worktree; the branch it names, `packed-refs`, and the reftable
         /// are shared.
         let commonDir: String
+        /// This repository's own git dir: for a linked worktree, `<commonDir>/worktrees/<name>` (distinct
+        /// from `commonDir`); for a submodule, `<superproject>/.git/modules/<name>`; otherwise equal to
+        /// `commonDir`. `WorkspaceWatch` watches this root directly, since it can sit outside the working
+        /// tree entirely (a worktree's git dir is never inside the worktree it backs).
+        let gitDir: String
     }
 
     final class RepositoryPathCache: @unchecked Sendable {
@@ -2066,6 +2154,12 @@ enum SpacesDeviceWorkspaceFileListEngine {
         /// How many submodule levels below the workspace this context sits; bounds the recursion the same
         /// way `SpacesDeviceWorkspaceDiffEngine.maxSubmoduleDepth` bounds the diff's.
         let depth: Int
+        /// Persists for the subscription's whole life, unlike `touched` below, which is this call's own
+        /// firing. See `RepositoryContributionCache`'s doc comment.
+        let contributionCache: RepositoryContributionCache
+        /// Which repositories the current `WorkspaceWatch` firing touched; `.recomputeAll` for a one-shot
+        /// caller (the exact listing has no touched set of its own, see `gitMembershipContext`'s default).
+        let touched: RepositoryTouchedSet
 
         static func == (lhs: GitMembershipContext, rhs: GitMembershipContext) -> Bool {
             lhs.workspaceDir == rhs.workspaceDir && lhs.workspacePrefix == rhs.workspacePrefix
@@ -2157,7 +2251,8 @@ enum SpacesDeviceWorkspaceFileListEngine {
     /// for, at every level. A one-off call (the exact listing, a test) passes none and gets caches that
     /// live exactly as long as the call, which is the same thing as having none.
     static func gitMembershipContext(
-        workspaceDir: String, gitClient: RemoteWorkspaceGitClient, caches: MembershipCaches? = nil, deadlineStart: Date = Date()
+        workspaceDir: String, gitClient: RemoteWorkspaceGitClient, caches: MembershipCaches? = nil, deadlineStart: Date = Date(),
+        touched: RepositoryTouchedSet = .recomputeAll
     ) throws -> GitMembershipContext? {
         guard try gitClient.isRepoStrict(path: workspaceDir) else { return nil }
         let prefix = strippingTrailingNewline(
@@ -2166,7 +2261,7 @@ enum SpacesDeviceWorkspaceFileListEngine {
         let caches = caches ?? MembershipCaches()
         return GitMembershipContext(
             workspaceDir: workspaceDir, workspacePrefix: prefix, indexCache: caches.workspaceIndex, submoduleCaches: caches.submodules,
-            repositoryPaths: caches.repositoryPaths, depth: 0)
+            repositoryPaths: caches.repositoryPaths, depth: 0, contributionCache: caches.contributionCache, touched: touched)
     }
 
     /// Cheap detector for "would `workspaceFileList` produce a different exact `{paths, truncated}`
@@ -2287,32 +2382,46 @@ enum SpacesDeviceWorkspaceFileListEngine {
                 let subDir = (context.workspaceDir as NSString).appendingPathComponent(path)
                 let subContext = GitMembershipContext(
                     workspaceDir: subDir, workspacePrefix: "", indexCache: context.submoduleCaches.cache(forDirectory: subDir),
-                    submoduleCaches: context.submoduleCaches, repositoryPaths: context.repositoryPaths, depth: context.depth + 1)
-                let token = try gitMembershipChangeToken(context: subContext, gitClient: gitClient, deadlineStart: deadlineStart)
+                    submoduleCaches: context.submoduleCaches, repositoryPaths: context.repositoryPaths, depth: context.depth + 1,
+                    contributionCache: context.contributionCache, touched: context.touched)
+                let token = try context.contributionCache.combinedSignature(for: subDir, touched: context.touched) {
+                    try gitMembershipChangeToken(context: subContext, gitClient: gitClient, deadlineStart: deadlineStart)
+                }
                 input.append(Data("submodule|\(path)|\(token)\n".utf8))
             }
         }
         return SpacesDeviceWorkspaceGitHashing.sha256Hex(input)
     }
 
-    /// The four per-repository paths a tick stats, in one `rev-parse`. Resolved once per subscription per
+    /// The five per-repository paths a tick stats, in one `rev-parse`. Resolved once per subscription per
     /// repository through `RepositoryPathCache`; a repository whose git dir is moved underneath a live
     /// subscription (absorbing a nested `.git`, for instance) keeps the paths it started with until the
     /// subscription ends, which costs it HEAD-move detection while its own `git status` keeps reporting
     /// every membership change in its worktree.
-    private static func repositoryPaths(workspaceDir: String, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date) throws -> RepositoryPaths {
+    ///
+    /// Internal, not private: `WorkspaceWatch` resolves the same per-repository paths (including `--git-dir`,
+    /// which this function's other callers do not need) to know what to watch, through the same
+    /// `RepositoryPathCache` a workspace's diff/file-list subscriptions share, so a repository's git-dir
+    /// layout is asked for once per subscription lifetime regardless of which producer asks first.
+    static func repositoryPaths(workspaceDir: String, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date) throws -> RepositoryPaths {
         let output = try gitClient.runGitAndCapture(
             ["-C", workspaceDir, "rev-parse", "--git-path", "index", "--git-path", "info/sparse-checkout", "--git-path", "HEAD",
-             "--git-common-dir"], timeout: try remainingTimeout(start: deadlineStart, budget: gitCommandTimeout))
+             "--git-common-dir", "--git-dir"], timeout: try remainingTimeout(start: deadlineStart, budget: gitCommandTimeout))
         // Git answers relative to the repository when the command runs inside it and absolutely for a
-        // submodule's own git dir, so each line is resolved against the directory it was asked in.
+        // submodule's own git dir, so each line is resolved against the directory it was asked in. The base
+        // URL is built with the `isDirectory: true` hint rather than left to Foundation to infer by
+        // stat'ing `workspaceDir`: without it, a relative output like ".git" can resolve against
+        // `workspaceDir`'s PARENT instead of `workspaceDir` itself when Foundation's own directory
+        // inference does not land the way this resolution needs, silently pointing every downstream watch
+        // and read at the wrong tree.
+        let workspaceDirURL = URL(fileURLWithPath: workspaceDir, isDirectory: true)
         let resolved = output.split(separator: "\n", omittingEmptySubsequences: true).map {
-            URL(fileURLWithPath: String($0), relativeTo: URL(fileURLWithPath: workspaceDir)).standardizedFileURL.path
+            URL(fileURLWithPath: String($0), relativeTo: workspaceDirURL).standardizedFileURL.path
         }
-        guard resolved.count == 4 else {
+        guard resolved.count == 5 else {
             throw SpacesRuntimeError.gitCommandFailed(message: "git rev-parse did not report this repository's paths: \(output)")
         }
-        return RepositoryPaths(index: resolved[0], sparseCheckout: resolved[1], head: resolved[2], commonDir: resolved[3])
+        return RepositoryPaths(index: resolved[0], sparseCheckout: resolved[1], head: resolved[2], commonDir: resolved[3], gitDir: resolved[4])
     }
 
     /// A file's identity and last write, as a signal that it was rewritten. `absent` is a state of its own,

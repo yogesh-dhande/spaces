@@ -1481,15 +1481,20 @@ public struct SpacesDeviceWorkspaceDiffSignatureFrame: Codable, Sendable, Equata
     public let refName: String?
     public let lastCommit: Bool
     public let scopeSignature: String
+    /// Set when this workspace's `WorkspaceWatch` could not start (or a retried start still fails): live
+    /// refresh is off, and every frame this subscription sends carries the same error text until a
+    /// re-subscription retries the watch. `nil` while healthy.
+    public let liveRefreshError: String?
 
-    public init(workspaceID: String, refName: String? = nil, lastCommit: Bool = false, scopeSignature: String) {
+    public init(workspaceID: String, refName: String? = nil, lastCommit: Bool = false, scopeSignature: String, liveRefreshError: String? = nil) {
         self.workspaceID = workspaceID
         self.refName = refName
         self.lastCommit = lastCommit
         self.scopeSignature = scopeSignature
+        self.liveRefreshError = liveRefreshError
     }
 
-    private enum CodingKeys: String, CodingKey { case workspaceID, refName, lastCommit, scopeSignature }
+    private enum CodingKeys: String, CodingKey { case workspaceID, refName, lastCommit, scopeSignature, liveRefreshError }
 
     /// Mirrors `SpacesDeviceWorkspaceDiffRequest`'s custom decode: absent `lastCommit` decodes as `false`.
     public init(from decoder: Decoder) throws {
@@ -1498,6 +1503,7 @@ public struct SpacesDeviceWorkspaceDiffSignatureFrame: Codable, Sendable, Equata
         refName = try container.decodeIfPresent(String.self, forKey: .refName)
         lastCommit = try container.decodeIfPresent(Bool.self, forKey: .lastCommit) ?? false
         scopeSignature = try container.decode(String.self, forKey: .scopeSignature)
+        liveRefreshError = try container.decodeIfPresent(String.self, forKey: .liveRefreshError)
     }
 }
 
@@ -1527,10 +1533,14 @@ public struct SpacesDeviceWorkspaceFileListSignatureRequest: Codable, Sendable, 
 public struct SpacesDeviceWorkspaceFileListSignatureFrame: Codable, Sendable, Equatable {
     public let workspaceID: String
     public let fileListSignature: String
+    /// See `SpacesDeviceWorkspaceDiffSignatureFrame.liveRefreshError`'s doc comment; the same contract,
+    /// for the Files list's own `WorkspaceWatch` subscription.
+    public let liveRefreshError: String?
 
-    public init(workspaceID: String, fileListSignature: String) {
+    public init(workspaceID: String, fileListSignature: String, liveRefreshError: String? = nil) {
         self.workspaceID = workspaceID
         self.fileListSignature = fileListSignature
+        self.liveRefreshError = liveRefreshError
     }
 }
 

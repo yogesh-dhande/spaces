@@ -88,13 +88,17 @@
             throw FSEventsLivenessProbeFailed()
         }
 
-        // Tests that a change under a watched directory delivers a callback with the changed path.
+        // Tests that a change under a watched directory delivers a callback with the changed path, and
+        // that an ordinary change (no dropped/coalesced-past-precision events) reports `mustRescan == false`.
         func testWatcherReportsChangesUnderWatchedDirectory() async throws {
             try requireHealthyFSEvents()
             let directory = try makeTempDirectory()
             let changed = XCTestExpectation(description: "file change reported")
-            let watcher = FileSystemWatcher(paths: [directory.path], latency: 0.1) { paths in
-                if paths.contains(where: { $0.contains("probe.txt") }) { changed.fulfill() }
+            let watcher = FileSystemWatcher(paths: [directory.path], latency: 0.1) { paths, mustRescan in
+                if paths.contains(where: { $0.contains("probe.txt") }) {
+                    XCTAssertFalse(mustRescan)
+                    changed.fulfill()
+                }
             }
             try await watcher.start()
             defer { watcher.stop() }
@@ -116,7 +120,7 @@
             try requireHealthyFSEvents()
             let directory = try makeTempDirectory()
             let changed = XCTestExpectation(description: "file change reported")
-            var watcher: FileSystemWatcher? = FileSystemWatcher(paths: [directory.path], latency: 0.1) { paths in
+            var watcher: FileSystemWatcher? = FileSystemWatcher(paths: [directory.path], latency: 0.1) { paths, _ in
                 if paths.contains(where: { $0.contains("probe.txt") }) { changed.fulfill() }
             }
             try await watcher?.start()
@@ -131,11 +135,17 @@
 
         // Tests that starting with no paths fails loudly instead of silently watching nothing.
         func testStartWithoutPathsThrows() async {
-            let watcher = FileSystemWatcher(paths: []) { _ in }
+            let watcher = FileSystemWatcher(paths: []) { _, _ in }
             do {
                 try await watcher.start()
                 XCTFail("expected start() to throw for an empty path list")
             } catch {}
+        }
+
+        // The `streamUnavailable` description is what reaches the live-refresh banner verbatim; this pins
+        // its exact wording so a future edit notices it changed.
+        func testStreamUnavailableDescriptionIsUserReadable() {
+            XCTAssertEqual("\(FileSystemWatcher.WatchError.streamUnavailable)", "the file watcher could not start")
         }
     }
 

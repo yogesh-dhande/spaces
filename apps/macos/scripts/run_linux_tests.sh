@@ -61,6 +61,10 @@ dump_lane_state() {
   echo "----- lane loadavg: $(cat /proc/loadavg) -----" >&2
 }
 
+# Roughly 3x the slowest suite observed in a full run: GhosttyLinuxHeadlessSessionBellTests and
+# GhosttyLinuxHeadlessSessionMetadataTests, both 128s.
+SUITE_TIMEOUT_SECONDS=400
+
 for suite in \
   AgentHookSubprocessTests \
   SpacesTestHostDetectionTests \
@@ -72,6 +76,8 @@ for suite in \
   TerminalSessionAttachmentSnapshotMutationsTests \
   WorkspaceFileWriteModePreservationTests \
   SpacesDeviceWorkspaceGitHashingKnownAnswerTests \
+  FileSystemWatcherLinuxInotifyTests \
+  SpacesDeviceWorkspaceWatchLinuxTests \
   GhosttyLinuxHeadlessSessionAttachmentAuthorityTests \
   GhosttyLinuxHeadlessKeyEncodingTests \
   GhosttyLinuxHeadlessMouseEncodingTests \
@@ -88,12 +94,22 @@ for suite in \
   suite_started="$(date +%s)"
   echo "==> $suite start $(date -Is)"
   # `set -e` would abandon the run before the state dump, so the invocation's status is captured
-  # instead of exiting on it; the dump runs and then the lane exits with that status.
+  # instead of exiting on it; the dump runs and then the lane exits with that status. `timeout` bounds a
+  # deadlocked suite to $SUITE_TIMEOUT_SECONDS instead of running the whole job to its own cap: a 124
+  # status here means the suite exceeded that bound. `--kill-after=30` escalates to SIGKILL if the suite
+  # ignores the initial SIGTERM.
   suite_status=0
-  swift test \
+  # `timeout` has no hook to run before it kills, and by the time its SIGTERM/SIGKILL lands the hung
+  # suite's git/xctest children are already gone, taking with them the process table `dump_lane_state`
+  # exists to capture. This watchdog dumps that state 30s ahead of the bound, while it still exists.
+  ( sleep $((SUITE_TIMEOUT_SECONDS - 30)); echo "==> $suite still running after $((SUITE_TIMEOUT_SECONDS - 30))s, dumping state before the bound" >&2; dump_lane_state ) &
+  watchdog_pid=$!
+  timeout --kill-after=30 "$SUITE_TIMEOUT_SECONDS" swift test \
     --scratch-path /root/spaces-test-build \
     --jobs 4 \
     --filter "$suite" 2>&1 | tee "$suite_log" || suite_status=$?
+  kill "$watchdog_pid" 2>/dev/null || true
+  wait "$watchdog_pid" 2>/dev/null || true
   echo "==> $suite end $(date -Is) duration=$(( $(date +%s) - suite_started ))s status=$suite_status"
   if [ "$suite_status" -ne 0 ]; then
     dump_lane_state
