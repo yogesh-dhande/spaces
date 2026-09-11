@@ -2643,6 +2643,7 @@
                 guard let self else { return }
                 let revision = self.pendingScreenStateChangeBroadcastRevision
                 self.pendingScreenStateChangeBroadcastRevision = nil
+                self.publishPendingIncomingOutputBeforeScreenStateChange()
                 guard self.screenStateRevisionNeedsExport(revision) else { return }
                 self.requestSurfaceRefreshAction()
                 GhosttyEmbeddedAppService.shared.tick()
@@ -3029,6 +3030,31 @@
             let coalescedData = incomingOutputBuffer.drain()
             guard !coalescedData.data.isEmpty else { return }
             appendOutput(coalescedData.data, interactiveResync: coalescedData.isInteractive, shouldBroadcastState: false)
+        }
+
+        /// Hands PTY bytes still waiting in the incoming-output buffer to the `output` broadcast before the
+        /// coalesced screen turn reads the screen, so the `output` export is the only publisher of a
+        /// terminal's own output.
+        ///
+        /// Ghostty raises the screen revision from the reader thread the instant it parses a chunk, while
+        /// the bytes of that same chunk reach the transcript on a separate engine-actor turn the delivery
+        /// schedules (`enqueueIncomingOutput`). Nothing orders those two turns. On an idle host the drain
+        /// runs first, so the `output` export ships the chunk and the trailing turn recognizes the screen as
+        /// already published. Under load, and always for output that follows no keystroke (where the drain
+        /// deliberately waits out its coalescing interval), the screen turn arrives first. Its capture then
+        /// drains the buffer silently (`flushPendingIncomingOutputForStateExport`) and publishes those bytes
+        /// as a `state_change` frame, leaving the drain that follows nothing to broadcast. Neither frame is
+        /// wrong on its own, but the two consumers alternate chunk by chunk, and a run of output then costs
+        /// one `output` frame plus one `state_change` frame where one frame would do.
+        ///
+        /// Publishing here removes the race rather than tolerating it: whichever turn reaches the engine
+        /// first, the bytes go out under `output`, that export claims the screen revision they raised, and
+        /// the gate below finds the screen already shipped. A turn with nothing pending (a resize, a
+        /// selection, a scroll) drains nothing and is unaffected.
+        private func publishPendingIncomingOutputBeforeScreenStateChange() {
+            let coalescedData = incomingOutputBuffer.drain()
+            guard !coalescedData.data.isEmpty else { return }
+            appendOutput(coalescedData.data, interactiveResync: coalescedData.isInteractive)
         }
 
         func prepareRenderStateExport() { flushPendingIncomingOutputForStateExport() }
