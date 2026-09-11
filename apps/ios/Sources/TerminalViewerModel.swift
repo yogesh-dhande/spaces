@@ -103,7 +103,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let clientID: String
         let commandChannel: SpacesDeviceAPICommandChannel
         let appearance: ThemeAppearance
-        let task: Task<Void, Error>
+        let task: Task<GhosttyRemoteSessionStatePayload?, Error>
     }
 
     private struct AutomaticTakeoverContext {
@@ -367,12 +367,62 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// Armed by `connect()`, consumed by `applyReducedState`: see `TerminalReattachCheckAfterReconnect`'s
     /// doc comment for why the reattach decision is settled there rather than fixed to the bootstrap read.
     private var reattachCheckAfterReconnect: TerminalReattachCheckAfterReconnect?
-    /// Set exactly when `applyReducedState` starts a `reattachAfterReconnect` call for the check it just
-    /// consumed, and cleared once that call is over: the "in flight" marker `attemptAutomaticTakeoverIfNeeded`
-    /// reads, kept separate from `reattachCheckAfterReconnect` itself so a stream payload landing while the
-    /// attach is still in flight (this session's stream delivers hundreds a second under a streaming agent)
-    /// finds nothing left to consume and starts nothing a second time.
-    private var reattachAfterReconnectTask: Task<Void, Never>?
+    /// Whether the daemon has broadcast this client's current attachment on the session stream, as opposed
+    /// to `hasAttachedToSession`, which an attach the daemon acknowledged also sets. It is the provenance
+    /// of that fact, not a second copy of it: `hasAttachedToSession` stays the single attachment fact
+    /// everything else reads, the teardown's detach decision included.
+    ///
+    /// One rule governs it. Only a payload that is evidence about the attachment this client holds now
+    /// writes it, which `isAttachmentEvidence` decides: a payload the session stream delivered, naming
+    /// this client for the attachment it holds (`attachmentIdentity`) or not naming it at all. Such a payload naming the
+    /// attachment arms the flag; such a payload without it clears the flag, and that transition is the
+    /// loss `applyReducedState` recovers from by re-attaching. Everything else is silent: a command's own
+    /// answer (the attach's, and the takeover's, which is submitted in band on purpose), a direct `.state`
+    /// read (whose answer can land ahead of an older stream payload that is still applied after it), and
+    /// the backlog the daemon exported for the attachment that is over, which names this client for an
+    /// attachment it no longer holds and would otherwise arm the flag just in time for the expiry behind
+    /// it in that backlog to read as a fresh loss.
+    ///
+    /// Because the confirmation belongs to one attachment and must not outlive it and arm a loss against
+    /// its replacement, it is cleared, besides by such a payload, wherever that attachment ends: the daemon
+    /// stating outright that it is gone (a heartbeat answered `notFound`), and the teardown that ends a
+    /// lifecycle.
+    ///
+    /// It is also what decides whether a connect attaches (`shouldAttachBeforeSubscribing`): an attachment
+    /// this flag never confirmed does not survive a redial, since an outage that outlasts the lease leaves
+    /// the daemon holding nothing, and with no confirmed attachment the fresh stream's snapshot without
+    /// this client would report no loss to recover from.
+    private var hasSnapshotConfirmedAttachment: Bool { snapshotConfirmedAttachmentMode != nil }
+    /// The confirmation itself: the mode the stream last confirmed this client's attachment in, or `nil`
+    /// for no confirmed attachment. The mode is part of the confirmation rather than a fact of its own
+    /// because it is what decides whether the recovery re-attaches as a plain viewer or goes on to reclaim
+    /// the session, and the client's own live belief about ownership cannot answer that: a direct `.state`
+    /// read can observe the post-expiry, ownerless session and clear `isOwner` before the expiry broadcast
+    /// that reports the loss arrives, which would leave the owner that just lost its attachment recovering
+    /// as a viewer and the terminal ownerless with nothing asking for it.
+    private var snapshotConfirmedAttachmentMode: TerminalAttachmentMode?
+    /// Which attachment this client currently holds, as the daemon records it: the `connectedAt` its
+    /// attachment snapshot carries for this client id. Set with the attachment and cleared with it.
+    ///
+    /// Identity rather than time. Every attach publishes a fresh `connectedAt` for this client, which the
+    /// daemon then carries in every snapshot, so a snapshot naming this client with this value is about
+    /// the attachment the model holds now and one naming it with any other value is about an attachment
+    /// that is over. Which side mints it depends on the daemon: a headless daemon stores the record this
+    /// model sent (`attachingClient()`, `TerminalSessionPersistence.attachClient`), while the macOS daemon
+    /// grants the lease itself and publishes its own attach stamp
+    /// (`GhosttyEmbeddedSessionHost.attachIdentityStamp`). Reading the value back off the acknowledgement
+    /// rather than remembering what was sent is what makes this rule independent of which one answered. Timestamps cannot answer that question: the daemon broadcasts the post-attach state before
+    /// it loads the state for the acknowledgement, so the confirming broadcast is stamped at or before the
+    /// acknowledgement and no ordering of the two is reliable.
+    ///
+    /// Read off the acknowledgement rather than assumed from what was sent, because the daemon keeps the
+    /// attachment it already has when a re-attach asks for the mode it is already in
+    /// (`GhosttyEmbeddedSessionHost.attachClient` applies nothing when the mode is unchanged): the row
+    /// keeps its original `connectedAt`, and the acknowledgement is what says so.
+    ///
+    /// A state rather than an optional, because "no identity" is two different situations and only one of
+    /// them may judge a snapshot by client id alone; see `TerminalViewerAttachmentIdentity`.
+    private var attachmentIdentity = TerminalViewerAttachmentIdentity.unattached
     private var viewerAttachmentLifecycle: UInt64 = 0
     /// `viewerAttachmentLifecycle` at the moment `latestState` last received a payload that actually
     /// contributed a frame (`reduction.frameToApply != nil`), not every `latestState = reduction.storedPayload`
@@ -398,6 +448,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// the daemon would no-op a same-value setAppearance anyway, but skipping it avoids the round-trip.
     private var lastAppearanceSentToSession: ThemeAppearance?
     private var hasAttemptedAutomaticTakeover = false
+    /// Whether the takeover attempt that most recently ran ended in a transport failure that never
+    /// reached the daemon (`isTransientReconnectError`), as opposed to landing, being refused, or never
+    /// having run. Cleared when an attempt starts and set only where that branch is taken, so the
+    /// automatic reclaim in `reattachAfterLosingAttachment` can tell an attempt still worth making from
+    /// the daemon's own answer.
+    private var didLastTakeoverFailTransiently = false
     /// Foreground ownership is decided by one explicit state read after the scene is active. A payload
     /// reduced while iOS still runs the app in the background cannot settle that decision, because its
     /// lease may expire during the rest of the suspension.
@@ -408,6 +464,39 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         return false
     }
     private var foregroundResumeCycle: UInt64 = 0
+    /// The reclaim a dropped attachment leaves this client owing the session: the mode the attachment the
+    /// daemon dropped was held in, or `nil` when nothing is owed.
+    ///
+    /// Every path that learns the daemon dropped an attachment this client had writes it, as it learns it:
+    /// the resume's heartbeat answered `notFound`, and a session-stream snapshot that takes a confirmed
+    /// attachment away. It is deliberately independent of `isOwner` and of `latestState`, which have both
+    /// moved on by the time the recovery finishes — a `.state` read answered after the expiry reports the
+    /// ownerless session it left, a takeover by another client reports theirs — and it outlives a
+    /// re-attach that fails and the redial behind it, because the recovery is unfinished until ownership
+    /// has been settled once.
+    ///
+    /// `settleExpiredAttachmentReclaimIfPending` is the one place it is read, and it replaces the ordinary
+    /// automatic takeover for that decision: the session is taken back only while nothing else owns it, so
+    /// a client that took over while this device was away keeps what it took and this device stays a
+    /// viewer with the Take Over action. The decision is made once this client holds an attachment again,
+    /// since the daemon refuses a takeover from a client with no attachment row, and it spends the
+    /// ordinary one-shot either way, so nothing behind it can turn this recovery into the preemption an
+    /// open or an ordinary foreground return is allowed.
+    ///
+    /// It is cleared by that decision, by the teardown that ends a lifecycle, and by a session that ends.
+    private var pendingExpiredAttachmentReclaim: TerminalAttachmentMode?
+    /// The last `connectedAt` an attach from this model carried, which the next mint is ordered against so
+    /// no two attachments of this model's can share one. See `mintAttachmentConnectedAt`.
+    private var lastMintedAttachmentConnectedAt: String?
+    /// The newest row a stream payload carried for this client that the identity could not judge at the
+    /// time: the attachment an acknowledgement still in flight is about, or one from an attachment that has
+    /// ended. `armConfirmationFromUnjudgedCandidate` decides which it was, once an acknowledgement names
+    /// the attachment this client holds.
+    private var unjudgedAttachmentCandidate: (connectedAt: String, mode: TerminalAttachmentMode)?
+    /// The owner the daemon named when it answered this client's own attach, read by the reclaim's settle
+    /// (`noteOwnerReportedByAttachAcknowledgement`). Cleared with the reclaim it decides and with the
+    /// attachment lifecycle, so a later recovery never decides on an answer about an earlier one.
+    private var ownerClientIDReportedByAttachAcknowledgement: String?
     /// True while a foreground-ownership evaluation is outstanding for the current
     /// `foregroundResumeCycle`, in either scene state. Derived from `sceneState`, the stored state; see
     /// `TerminalViewerState.swift`.
@@ -494,6 +583,16 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// across a stop/start, but an old lifecycle's direct read must not publish into its replacement after
     /// that baseline work completes.
     @ObservationIgnored private var stateSubmissionLifecycles: [UInt64: UInt64] = [:]
+    /// The submissions that carry a command's own answer rather than a payload the stream delivered.
+    /// `isOutOfBand` cannot stand in for this: a takeover's acknowledgement is deliberately submitted in
+    /// band (see `takeOver`), and the attachment rules must still not take a command answer for the
+    /// stream's word. Pruned with `stateSubmissionLifecycles`, against the same applied counter.
+    @ObservationIgnored private var commandResponseSubmissions: Set<UInt64> = []
+    /// Submissions that carried the first payload of a subscription, read back in `applyReducedState` the
+    /// same way `commandResponseSubmissions` is: a subscription's first payload is the session's `initial`
+    /// export, which `ApplyMailbox.mayCollapse` never collapses, so the output that accounts for such a
+    /// submission is that payload's own.
+    @ObservationIgnored private var firstSubscriptionPayloadSubmissions: Set<UInt64> = []
     @ObservationIgnored private var stateApplyWaiters:
         [(target: UInt64, continuation: CheckedContinuation<TerminalRemoteStateReductionOutput, Never>)] = []
     private var reportedOwnerReadyEpochID: String?
@@ -1054,17 +1153,37 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 needsFollowUpStateRead = true
                 if Self.isAttachmentNotFound(error) {
                     guard isCurrent() else { return }
+                    // The attachment the daemon dropped was this session's owner attachment if either the
+                    // stream confirmed it as one or this client still holds ownership, which is what says
+                    // whether the recovery below owes the session a reclaim or comes back a plain viewer.
+                    self.noteExpiredAttachment(droppedMode: self.snapshotConfirmedAttachmentMode == .owner || self.isOwner ? .owner : .viewer)
                     self.hasAttachedToSession = false
+                    // The daemon has just said this client holds no attachment, which retires the
+                    // confirmation the stream published for the attachment that is now gone. Left standing,
+                    // a snapshot captured before the re-attach below (the expiry's own broadcast, or a
+                    // reconnect's) would arrive against it and read as a second loss, sending a `.viewer`
+                    // attach that can demote the owner this resume is in the middle of restoring, with the
+                    // one automatic takeover already spent.
+                    self.snapshotConfirmedAttachmentMode = nil
+                    self.noteAttachmentDropped()
                     do {
                         try await self.attachViewerForCurrentLifecycle()
                         self.trace("foreground_resume_attach_success cycle=\(resumeCycle)")
                     } catch {
+                        // Nothing was recovered, and the state this resume owes itself cannot be read for a
+                        // client the daemon does not know about. Hand recovery to the model's one redial
+                        // path, exactly as `reattachAfterLosingAttachment` does when its own attach fails:
+                        // the connect bootstrap behind it attaches again and settles ownership on the state
+                        // it reads. The reclaim intent is left standing, so that decision, whenever it
+                        // lands, is still this recovery's: ownerless only, never a preemption.
                         self.finishForegroundStateEvaluation(resumeCycle: resumeCycle, acceptedState: nil)
+                        self.scheduleReconnect(after: self.shouldReconnectSilently ? Self.silentReconnectDelay : .seconds(1))
                         return
                     }
                 } else if Self.isTerminalNoLongerLiveError(error) {
                     hasLiveAttachment = false
                     self.hasAttachedToSession = false
+                    self.noteAttachmentDropped()
                     self.trace("foreground_resume_heartbeat_terminal_not_running cycle=\(resumeCycle)")
                 } else {
                     _ = self.handleAuthenticationFailure(error)
@@ -1164,15 +1283,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         cancelAutomaticTakeover()
         takeoverAttemptState = .none
         hasAttachedToSession = false
+        snapshotConfirmedAttachmentMode = nil
+        attachmentIdentity = .unattached
+        unjudgedAttachmentCandidate = nil
+        ownerClientIDReportedByAttachAcknowledgement = nil
+        pendingExpiredAttachmentReclaim = nil
         // The lifecycle bump above already makes a stale check's lifecycle comparison fail on its own,
         // but clearing it here keeps no armed check outliving the run it was armed for even in principle.
         reattachCheckAfterReconnect = nil
-        // Cancelling this does not cancel the attach operation `reattachAfterReconnect` may be awaiting
-        // (`attachViewerForCurrentLifecycle` joins a shared, independently-owned `Task` another lifecycle
-        // can also be awaiting, and cancelling this wrapper does not propagate to it), so this only stops
-        // treating a reattach as in flight; it never tears down an attach this stop's own detach depends on.
-        reattachAfterReconnectTask?.cancel()
-        reattachAfterReconnectTask = nil
         hasAttemptedAutomaticTakeover = false
         sceneState = isSceneActive ? .active(resume: .none) : .backgrounded(resume: .none)
         hasConfirmedOwnerInputReadiness = false
@@ -1277,6 +1395,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let lifecycle = automaticContext?.lifecycle ?? viewerAttachmentLifecycle
         guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
         hasAttemptedAutomaticTakeover = true
+        didLastTakeoverFailTransiently = false
         hasConfirmedOwnerInputReadiness = false
         isInputSurfaceReady = false
         takeoverAttemptState = .awaitingConfirmation
@@ -1319,7 +1438,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // metadata alone, so this payload carries no render update, touches no delta baseline, and
             // changes nothing but the attachment. The frame for the epoch the transfer opens comes down the
             // subscription instead, as the `attachment_state` broadcast every subscriber receives.
-            if let takeoverState { await applyLatestState(takeoverState, isOutOfBand: false, lifecycle: lifecycle) }
+            if let takeoverState { await applyLatestState(takeoverState, isOutOfBand: false, isCommandResponse: true, lifecycle: lifecycle) }
             guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
             guard automaticContext.map(isCurrentAutomaticTakeover) ?? true else { return }
             if !isOwner {
@@ -1348,6 +1467,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             if Self.isTransientReconnectError(error) {
                 trace("takeover_transient_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
                 errorMessage = nil
+                didLastTakeoverFailTransiently = true
                 return
             }
             if handleAuthenticationFailure(error) { return }
@@ -2269,8 +2389,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// retired and cancelled here, synchronously, before the payload behind this call reaches the
     /// reduction pipeline. A loser therefore contributes nothing after this point: its later payloads and
     /// its disconnect both fail `isCurrentConnect` on arrival.
-    private func registerLiveStreamFrame(for generation: UInt64) {
-        guard let attempt = connectAttempts[generation] else { return }
+    /// Answers whether this payload is the first one this subscription has delivered, which is what makes
+    /// it causally later than everything this client asked the daemon for before the stream was opened.
+    @discardableResult private func registerLiveStreamFrame(for generation: UInt64) -> Bool {
+        guard let attempt = connectAttempts[generation] else { return false }
         // Only a live attempt's frame counts, which is why this sits below the membership guard: a
         // retired attempt's late frame proves nothing and must not make a suspended failure handler
         // believe it was overtaken.
@@ -2287,10 +2409,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 attempt.firstFrameElapsedMSAwaitingHost = elapsedMS
             }
         }
+        let isFirstPayload = !attempt.deliveredFrame
         attempt.deliveredFrame = true
         streamAttemptGeneration = generation
         for losingGeneration in Array(connectAttempts.keys) where losingGeneration != generation { retireConnectAttempt(losingGeneration) }
         clearConnectionOutage()
+        return isFirstPayload
     }
 
     /// Declares the connection outage over: cancels the grace timer and any in-flight input-timeout
@@ -2578,25 +2702,49 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
 
         guard let attempt = connectAttempts[reconnectAttempt] else { return }
-        // Arms this connect's reattach check with what this client held going into it, before the
-        // pre-subscribe attach below can change it: see `TerminalReattachCheckAfterReconnect`'s doc
-        // comment for why the check is settled at the first snapshot `applyReducedState` applies, not
-        // fixed here to whatever the bootstrap read below answers. A first connect always has
-        // `hasAttachedToSession == false` here (its only attach is the pre-subscribe one, via
-        // `shouldAttachBeforeSubscribing`), so this arms nothing for it. `submittedStateCount` is read
-        // here, before this connect's own bootstrap read or subscribe submits anything, so it names the
-        // last submission the connection being replaced could possibly own; see the field's own doc
-        // comment for why that boundary, not `lifecycle`/`clientID`, is what catches a snapshot that
-        // connection submitted just before disconnecting and that lands only after this arm.
-        reattachCheckAfterReconnect =
-            hasAttachedToSession
-            ? TerminalReattachCheckAfterReconnect(
-                wasOwner: isOwner, lifecycle: lifecycle, clientID: clientID, submissionBoundary: submittedStateCount) : nil
         let reconnectSilently = shouldReconnectSilently
         // Anchors this attempt's timing events. They live on the attempt, not on the model: a losing
         // stage 2 dial must report its own numbers when it ends, not the winner's.
         attempt.beginUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
         attempt.isSilent = reconnectSilently
+        // An attach no snapshot ever confirmed does not survive a reconnect. The daemon publishes the
+        // attachment on the stream, so an attach whose confirming broadcast never arrived is an attach
+        // this client cannot show evidence of: if the outage that dropped the stream outlasted the lease,
+        // the daemon has since expired the attachment, and carrying the optimistic fact across would make
+        // this connect skip its attach and leave the fresh snapshot's missing row reading as no loss at
+        // all, since there was no confirmed attachment to lose. Cleared here rather than at teardown so
+        // the attach below is the same statement that acts on it, leaving no window where a dismissal
+        // would think there is nothing to detach.
+        if !hasSnapshotConfirmedAttachment {
+            // The attach this connect makes is a viewer attach, like every attach this model sends, so
+            // giving the unconfirmed attachment up gives up the ownership held through it. That is the
+            // same thing an expiry does to an owner's attachment, so it is recorded the same way, as a
+            // reclaim this connect's bootstrap settles: the session comes back only if nothing owns it by
+            // then, and a device that took it over during the outage keeps it, with the user offered the
+            // ordinary Take Over action. Handing the one-shot automatic takeover back instead would make
+            // the bootstrap preempt that device, which only an open or an ordinary foreground return may
+            // do. A takeover still sending (`isBusy`) counts as that ownership: this client is not the
+            // owner yet, but the attach below queues behind that request on the one command channel they
+            // share, so it lands as a demotion of the ownership the takeover is in the middle of winning.
+            if isOwner || isBusy { noteExpiredAttachment(droppedMode: .owner) }
+            hasAttachedToSession = false
+            noteAttachmentDropped()
+        }
+        // Arms this connect's reattach check with what this client holds going into its subscribe: see
+        // `TerminalReattachCheckAfterReconnect`'s doc comment for why the check is settled at the first
+        // snapshot `applyReducedState` applies, not fixed here to whatever the bootstrap read below
+        // answers. Read after the discard above and after the pre-subscribe attach it leads to, not
+        // before: a connect that gives an unconfirmed attachment up has already performed this recovery
+        // itself, and arming on the fact it just cleared would have the bootstrap read start a second one
+        // behind it. A first connect arms nothing for the same reason. `submittedStateCount` is read here,
+        // before this connect's own bootstrap read or subscribe submits anything, so it names the last
+        // submission the connection being replaced could possibly own; see the field's own doc comment for
+        // why that boundary, not `lifecycle`/`clientID`, is what catches a snapshot that connection
+        // submitted just before disconnecting and that lands only after this arm.
+        reattachCheckAfterReconnect =
+            hasAttachedToSession
+            ? TerminalReattachCheckAfterReconnect(
+                wasOwner: isOwner, lifecycle: lifecycle, clientID: clientID, submissionBoundary: submittedStateCount) : nil
         trace("connect_begin silent=\(reconnectSilently ? 1 : 0) attach_before_subscribe=\(shouldAttachBeforeSubscribing ? 1 : 0)")
         connectionState = reconnectSilently ? .idle : .connecting
         do {
@@ -2642,12 +2790,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 // Any frame at all on a live stream is proof the connection is up, regardless of what it
                 // contains; settle the banner (and, in stage 2, the race) before doing anything with the
                 // payload itself.
-                self.registerLiveStreamFrame(for: reconnectAttempt)
+                let isFirstSubscriptionPayload = self.registerLiveStreamFrame(for: reconnectAttempt)
                 // Hand off and return. This is the session's flush rate — up to a few hundred payloads a
                 // second under a streaming agent — and everything expensive about a payload (decoding the
                 // render update, applying it to the baseline, re-encoding the full frame) happens in the
                 // pipeline, off this actor.
-                submitLatestState(payload, isOutOfBand: false)
+                submitLatestState(payload, isOutOfBand: false, isFirstSubscriptionPayload: isFirstSubscriptionPayload)
             } onDisconnect: { [weak self] disconnect in
                 Task { @MainActor [weak self] in
                     guard let self, self.isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else {
@@ -2739,6 +2887,135 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             && isForegroundResumeEvaluationPending
     }
 
+    /// The client record an attach sends: this client, stamped with the moment it asks.
+    ///
+    /// What the daemon does with that `connectedAt` depends on which daemon it is, and the identity rule
+    /// works either way because it reads the value back off the acknowledgement rather than remembering
+    /// what it sent. A headless daemon stores and publishes the record as sent, so this stamp becomes the
+    /// attachment's identity; the macOS daemon grants the lease itself and replaces the field with its own
+    /// attach stamp (`GhosttyEmbeddedSessionHost.clientForAttachLease`), because a client whose liveness
+    /// the lease decides cannot be trusted to date its own attachment. Each daemon guards its own mint the
+    /// way `mintAttachmentConnectedAt` guards this one, so an attachment is identifiable on either.
+    private func attachingClient() -> TerminalClient {
+        TerminalClient(id: remoteClient.id, kind: remoteClient.kind, identity: remoteClient.identity, connectedAt: mintAttachmentConnectedAt())
+    }
+
+    /// The `connectedAt` this attach carries: now, or one millisecond past the last value this model
+    /// minted, whichever is later.
+    ///
+    /// On a daemon that stores the record as sent, this value is the attachment's identity, and a clock
+    /// reading is not enough to be one. The attaches that matter come back to back -- a recovery's
+    /// re-attach and the redial behind it are consecutive round trips on the one command channel this
+    /// model holds -- so two of them land inside the same millisecond, and a device whose clock steps
+    /// backwards can even mint the same value minutes apart. Either way the second attachment would be
+    /// indistinguishable from the first, and a snapshot the daemon exported for the attachment that ended
+    /// would arm the confirmation for the one that replaced it, leaving the expiry behind it to read as a
+    /// fresh loss. Ordering each mint against the last one is what makes them tell apart; the stamp stays
+    /// an ISO8601 timestamp of the same precision the daemon mints at, and every reader parses both that
+    /// and the whole-second form (`GhosttyRemoteSessionStateTimestamp.date`), including the lease this
+    /// value seeds on a daemon that keeps it.
+    private func mintAttachmentConnectedAt() -> String {
+        let minted = TerminalSessionTimestamp.fractionalString(from: Date())
+        var stamp = minted
+        if let last = lastMintedAttachmentConnectedAt, let lastDate = TerminalSessionTimestamp.date(from: last),
+            let mintedDate = TerminalSessionTimestamp.date(from: minted), mintedDate <= lastDate
+        {
+            stamp = TerminalSessionTimestamp.fractionalString(from: lastDate.addingTimeInterval(0.001))
+        }
+        lastMintedAttachmentConnectedAt = stamp
+        return stamp
+    }
+
+    /// Records which attachment this client now holds, from the acknowledgement of the attach that
+    /// established it: the `connectedAt` the daemon reports for this client id. An acknowledgement that
+    /// names no attachment for this client leaves this model having never seen the daemon name its
+    /// attachment, so it goes back to judging a snapshot by client id alone, which is all such a model can
+    /// do -- and the one thing the unresolved state must not do forever, since nothing else would ever
+    /// resolve it.
+    private func noteAttachmentAcknowledged(_ payload: GhosttyRemoteSessionStatePayload?) {
+        guard let entry = payload?.attachmentSnapshot?.clients.first(where: { $0.id == remoteClient.id }) else {
+            // The daemon acknowledged the attach, so this client holds an attachment; it just did not name
+            // it, which its own `try?` load of the post-control state allows. That is not the same as never
+            // having attached: reading it as `unattached` would make the pre-first-attach rule admit any
+            // later snapshot naming this client id — including the backlog the daemon exported for the
+            // attachment that just ended — and re-arm the confirmation for an attachment that is over.
+            attachmentIdentity = .acknowledgedWithoutIdentity
+            return
+        }
+        attachmentIdentity = .resolved(entry.connectedAt)
+        armConfirmationFromUnjudgedCandidate(resolvedIdentity: entry.connectedAt)
+    }
+
+    /// Arms the attachment confirmation from a broadcast that arrived before this acknowledgement did.
+    ///
+    /// The daemon broadcasts a new attachment to every subscriber before it answers the attach that made
+    /// it, so on a subscription that is already open the payload naming the replacement can reach this
+    /// client while the identity it would be matched against is still the previous attachment's, or none
+    /// at all. That payload is refused at the time — it cannot be told apart from the backlog of the
+    /// attachment that just ended, which matches on the same client id — and the daemon never sends it
+    /// again: on a quiet session nothing else names the attachment, so the confirmation would stay unarmed
+    /// and the next expiry would be read as nothing at all. Retaining that row and matching it against the
+    /// identity the acknowledgement resolves closes the gap without weakening the rule: it is admitted only
+    /// when it names exactly the attachment the daemon just confirmed, the same test the pre-first-attach
+    /// path applies to a broadcast stamped before its acknowledgement.
+    private func armConfirmationFromUnjudgedCandidate(resolvedIdentity: String) {
+        guard let candidate = unjudgedAttachmentCandidate else { return }
+        // Spent either way: a row naming another attachment describes one this client no longer holds.
+        unjudgedAttachmentCandidate = nil
+        guard candidate.connectedAt == resolvedIdentity else { return }
+        trace("attachment_confirmed_by_retained_broadcast owner=\(candidate.mode == .owner ? 1 : 0)")
+        snapshotConfirmedAttachmentMode = candidate.mode
+    }
+
+    /// Records that the attachment this client held is gone, so nothing the daemon published for it may
+    /// speak for the attachment that replaces it until the daemon names that one. Called wherever the model
+    /// learns an attachment ended -- the stream reporting the loss, a heartbeat answered `notFound`, a
+    /// session that is no longer running, and the redial that gives an unconfirmed attachment up.
+    private func noteAttachmentDropped() {
+        attachmentIdentity = attachmentIdentity.afterAttachmentDropped
+        // The window this opens is about a different attachment than any retained row describes.
+        unjudgedAttachmentCandidate = nil
+    }
+
+    /// Whether this payload's attachment snapshot is evidence about the attachment this client holds now.
+    ///
+    /// Only the stream's own payloads are. A direct `.state` read is ordered against what the pipeline has
+    /// already reduced rather than against the stream, so its answer can land ahead of an older stream
+    /// payload that is still applied after it; and a command's own answer is the daemon replying to this
+    /// client, not the session telling every subscriber what it holds -- the takeover acknowledgement,
+    /// which `takeOver` submits in band on purpose, is exactly that.
+    ///
+    /// Among stream payloads, one that names this client for a different attachment than the one it holds
+    /// (a different `connectedAt`) is about an attachment that is over: the backlog the daemon exported
+    /// before this attachment existed, which would otherwise arm the confirmation and let the expiry that
+    /// follows it in that backlog read as a fresh loss. A payload that names this client at all is judged
+    /// against that identity; one that names it not at all is evidence either way, since that is what a
+    /// loss looks like, and the confirmation being armed is what decides whether it is one.
+    ///
+    /// While an attach is unresolved the daemon has not named the attachment this client is establishing,
+    /// so no snapshot naming this client can be matched against it and none of them is evidence: the
+    /// pre-expiry backlog is exactly what arrives in that window, and admitting it would re-arm the
+    /// confirmation for an attachment the daemon has already dropped, leaving the expiry behind it to read
+    /// as a second loss and send a second attach that gives the reclaimed ownership away. A snapshot that
+    /// still carries the identity that went away is refused for the same reason once the replacement is
+    /// resolved, so the window closes with the acknowledgement rather than reopening the question.
+    private func isAttachmentEvidence(
+        _ output: TerminalRemoteStateReductionOutput, payload: GhosttyRemoteSessionStatePayload, isCommandResponse: Bool
+    ) -> Bool {
+        guard !output.isOutOfBand, !isCommandResponse else { return false }
+        guard let entry = payload.attachmentSnapshot?.clients.first(where: { $0.id == remoteClient.id }) else { return true }
+        switch attachmentIdentity {
+        case .unattached: return true
+        case .unresolved: return false
+        // An acknowledgement that named nothing is resolved by the read that follows it, not by the
+        // stream: a subscription opened before this attach keeps delivering payloads that may predate it,
+        // and every snapshot naming this client matches on the id alone, which every attachment this
+        // client ever made shares. The window is one round trip wide, and silent.
+        case .acknowledgedWithoutIdentity: return false
+        case .resolved(let identity): return entry.connectedAt == identity
+        }
+    }
+
     /// Starts or joins this lifecycle's sole viewer attach. The operation captures the client and command
     /// channel that created it, so stopping or restarting cannot let its late completion mutate a newer
     /// lifecycle. Stop awaits a captured operation before detaching that same client and channel.
@@ -2749,7 +3026,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             operation = existing
         } else {
             let lifecycle = viewerAttachmentLifecycle
-            let client = remoteClient
+            let client = attachingClient()
             let channel = commandChannel
             let appearance = AppAppearanceStorage.current.resolvedThemeAppearance
             let task = Task { [bridgeClient, sessionID = session.id] in
@@ -2760,7 +3037,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             viewerAttachmentOperation = operation
         }
 
-        do { try await operation.task.value } catch {
+        let acknowledgement: GhosttyRemoteSessionStatePayload?
+        do { acknowledgement = try await operation.task.value } catch {
             if viewerAttachmentOperation?.lifecycle == operation.lifecycle { viewerAttachmentOperation = nil }
             throw error
         }
@@ -2768,78 +3046,85 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         viewerAttachmentOperation = nil
         guard viewerAttachmentLifecycle == operation.lifecycle, !isStopping, remoteClient.id == operation.clientID else { return }
         hasAttachedToSession = true
+        noteAttachmentAcknowledged(acknowledgement)
         lastAppearanceSentToSession = operation.appearance
+        noteOwnerReportedByAttachAcknowledgement(acknowledgement)
+        // Decided on what the acknowledgement left behind rather than on whether one arrived at all: a
+        // payload can carry the session and no attachment snapshot (the daemon answers that way when its
+        // attachment cache cannot be reseeded), which names the attachment no better than no payload does.
+        try await resolveAttachmentIdentityWithStateRead(operation: operation)
     }
 
-    /// Consumes a reattach check `applyReducedState` found still due: this client held an attachment
-    /// going into the connect the check was armed for, and the settling snapshot no longer names it. The
-    /// daemon publishes this client's attachment (if it has one) in every snapshot it answers, so being
-    /// told, authoritatively, that the attachment is gone is what a daemon restart looks like (it wipes
-    /// every `terminal_clients`/`terminal_attachments` row), and a lease expiry during an outage that
-    /// outlived it reads the same way. This mirrors the Mac pane's `refreshNow`
-    /// (`TerminalSessionPaneViewController.swift`, `attachmentModeToRequest`), which re-attaches under the
-    /// identical condition.
+    /// Records which client the daemon reported as this session's owner when it answered this client's own
+    /// attach, or the read that named the attachment behind it.
     ///
-    /// A former owner is handed back its one automatic takeover so it reclaims the session it owned,
-    /// restoring pre-restart ownership instead of leaving the session ownerless until some other client
-    /// takes over; a former viewer simply becomes an attached viewer again, matching what it was. The Mac
-    /// pane does the equivalent by re-attaching directly as owner; this client re-attaches as viewer first
-    /// and then takes over, since `attachViewerForCurrentLifecycle` has no owner mode.
+    /// A re-attach sent to recover a dropped attachment is answered in a window another device can take the
+    /// session in, and this answer is the newest thing the client has about that: the loss that started the
+    /// recovery is what cleared the ownership the stream last published, so a reclaim settled on that
+    /// reading alone would send its unconditional takeover straight through the device that owns the
+    /// session now.
     ///
-    /// The reclaim is gated on `activeOwnerClientID == nil`: a former owner reclaims only a session the
-    /// settling snapshot still shows as ownerless (the daemon-restart rule in docs/spec.md). A session
-    /// another client took over while this client was away comes back as a viewer of that owner, exactly
-    /// like a former viewer, and the ordinary Take Over affordance is how the user gets it back from
-    /// there; `attemptAutomaticTakeoverIfNeeded` itself has no such guard, so this check is what keeps a
-    /// returning owner from displacing a newer, legitimate one. The residual is accepted: the check reads
-    /// the settling snapshot, so another client attaching as owner in the brief window between that
-    /// snapshot and this takeover is preempted, the same one-round-trip race the Mac pane's attach path
-    /// documents (`attachLocalClientIfNeeded`), and the attachment broadcast that follows shows both
-    /// clients the true state.
+    /// Kept as a fact of its own rather than applied through the pipeline. The daemon broadcasts the
+    /// post-attach snapshot before it loads the state it answers this control with, so that broadcast is
+    /// stamped at or before this answer; applying the answer would raise the reduction's staleness floor
+    /// above the broadcast and refuse the one payload that can confirm the attachment -- the answer itself
+    /// never can, being the daemon replying to this client rather than the session addressing its
+    /// subscribers -- leaving the client attached with nothing able to report the next expiry as a loss.
     ///
-    /// A failed re-attach is handled exactly like a failed pre-subscribe attach: retiring the live
-    /// stream's attempt and handing the error to `handleConnectError`, so it schedules the redial whose
-    /// own pre-subscribe attach (`shouldAttachBeforeSubscribing`) is the retry. The stream this reattach's
-    /// connect subscribed is deliberately not kept: a subscriber with no attachment looks alive, since
-    /// frames keep arriving, while every input and takeover it sends is refused, and a fresh dial costs
-    /// less than leaving that state in place with nothing scheduled to end it. The accepted residual: a
-    /// former owner recovering through that redial captures no prior attachment (the redial's own
-    /// `connect()` finds `hasAttachedToSession` false and arms no check for itself), so it comes back as a
-    /// viewer of an ownerless session; the Take Over affordance is how it reclaims it from there.
+    /// An answer carrying no attachment snapshot at all says nothing about ownership (the daemon's
+    /// attachment authority is unknown there), so it leaves what is known standing rather than clearing it.
+    private func noteOwnerReportedByAttachAcknowledgement(_ payload: GhosttyRemoteSessionStatePayload?) {
+        guard let snapshot = payload?.attachmentSnapshot else { return }
+        ownerClientIDReportedByAttachAcknowledgement = snapshot.attachments.first { $0.mode == .owner && $0.detachedAt == nil }?.clientID
+    }
+
+    /// Names the attachment an acknowledgement left unnamed, with the one thing that can: a `.state` read
+    /// on the same command channel.
     ///
-    /// `applyReducedState` clears `reattachCheckAfterReconnect` the moment it reads it, before ever
-    /// spawning this call, so this function tracks its own "in flight" state through the separate
-    /// `reattachAfterReconnectTask` instead: `applyReducedState`'s own consume site checks that field's
-    /// nil-ness before starting a second call while one is still running, and `attemptAutomaticTakeoverIfNeeded`
-    /// reads the same field as "a reattach is in flight" and refuses to fire while it is, which is what
-    /// keeps the pre-existing "claim an ownerless session" mechanism from racing this call's own attach
-    /// to the daemon. The `defer` below is what clears it, so every exit path (success, stale, and
-    /// failure) is covered by the one line rather than repeated at each return.
-    private func reattachAfterReconnect(_ check: TerminalReattachCheckAfterReconnect) async {
-        defer { reattachAfterReconnectTask = nil }
-        do {
-            try await attachViewerForCurrentLifecycle()
-            guard isCurrentStateRefresh(lifecycle: check.lifecycle, clientID: check.clientID) else { return }
-            // Cleared before the explicit re-arm below, which calls `attemptAutomaticTakeoverIfNeeded`
-            // directly and needs its guard on this field already open; the `defer` above re-clears it
-            // harmlessly on the way out regardless of which branch below runs.
-            reattachAfterReconnectTask = nil
-            trace("connect_reattach_success owner_before=\(check.wasOwner ? 1 : 0)")
-            if check.wasOwner, activeOwnerClientID == nil {
-                hasAttemptedAutomaticTakeover = false
-                attemptAutomaticTakeoverIfNeeded()
-            }
-        } catch {
-            guard isCurrentStateRefresh(lifecycle: check.lifecycle, clientID: check.clientID) else { return }
-            trace("connect_reattach_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
-            // Retires whichever attempt currently owns the live stream, exactly like round 4's pre-subscribe
-            // failure path: `streamAttemptGeneration` names it regardless of which connect this check was
-            // armed for, and by the time a reattach fails that connect's own dial work is long since over.
-            guard let generation = streamAttemptGeneration, let attempt = connectAttempts[generation] else { return }
-            retireConnectAttempt(generation)
-            connectionState = .idle
-            await handleConnectError(error, attempt: attempt)
+    /// The daemon loads the post-control state with `try?`, so an acknowledgement can land carrying no
+    /// session state at all, leaving this client holding an attachment it cannot recognize in any snapshot
+    /// (`acknowledgedWithoutIdentity`). Nothing on the stream resolves that: a subscription opened before
+    /// this attach keeps delivering payloads that may predate it, and matching on the client id alone is
+    /// exactly what admits the backlog of the attachment that just ended. The read is the answer because
+    /// it is ordered after the attach on the daemon -- the same command channel carries one round trip at a
+    /// time -- and it carries the attachment snapshot that names this client's `connectedAt`.
+    ///
+    /// A read that throws leaves the identity unresolved, so the throw is passed to the caller, whose own
+    /// failure path is the model's one redial: the bootstrap behind it attaches again, and that attach's
+    /// acknowledgement is the ordinary one that names the attachment.
+    private func resolveAttachmentIdentityWithStateRead(operation: ViewerAttachmentOperation) async throws {
+        guard case .acknowledgedWithoutIdentity = attachmentIdentity else { return }
+        trace("attach_ack_without_state")
+        let state = try await fetchTerminalState(timeout: Self.stateRequestTimeout, includesRenderUpdate: false)
+        guard viewerAttachmentLifecycle == operation.lifecycle, !isStopping, remoteClient.id == operation.clientID else { return }
+        noteAttachmentAcknowledged(state)
+        noteOwnerReportedByAttachAcknowledgement(state)
+        guard case .resolved = attachmentIdentity else {
+            // One read, and never a second: the answer came back without a row for this client, so the
+            // daemon is reporting a session whose attachment authority it cannot give (no snapshot at all)
+            // or one this client's row is already gone from, and asking again on the same channel can only
+            // get the same answer. The attach itself landed, so this is not turned into a failure either:
+            // a redial tears down the subscription the viewer is reading output over, and a daemon in this
+            // state would answer the next attach the same way, which is a redial loop paced by the
+            // reconnect backoff -- a worse outcome than the one this read exists to avoid. The identity
+            // stays unnamed instead, which is silent about every snapshot that matches on the client id,
+            // and the ordinary paths still recover: a subscription's first payload with no row for this
+            // client is read as the loss it is, and any redial attaches again and is named by that
+            // acknowledgement.
+            //
+            // Accepted, with one gap named: on a subscription that was already open before this attach (the
+            // recovery's re-attach), later payloads are not first-subscription payloads, so a stale-client
+            // expiry landing after an unnamed attach is not read as a loss here, and the viewer can sit
+            // attached in its own belief but refused input until something redials it. Reaching that needs
+            // the same daemon's database to fail the post-control state load AND then answer this naming
+            // read without this client's row, two failed reads around an attach that itself committed,
+            // which describes a broken daemon rather than a path the product takes. Against such a daemon a
+            // redial loop paced by the reconnect backoff is the worse outcome, and the gap closes on its
+            // own at the next open or redial of the pane, whose attach is named by its own acknowledgement.
+            trace("attach_identity_unnamed_by_read")
+            return
         }
+        trace("attach_identity_resolved_by_read")
     }
 
     /// - Parameter includesRenderUpdate: Whether this read asks the daemon for the session's screen. Only
@@ -3324,12 +3609,27 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             ?? attachmentSnapshot.clients.first(where: { $0.id == ownerAttachment.clientID })?.identity.label
     }
 
+    /// A reclaim this cycle's own recovery left owed (`pendingExpiredAttachmentReclaim`) settles here
+    /// instead of the ordinary attempt, under its own ownerless-only rule. The ordinary attempt is
+    /// unchanged and may still preempt an active owner, which is what an iOS open and an ordinary
+    /// foreground return do.
     private func finishForegroundStateEvaluation(resumeCycle: UInt64, acceptedState: GhosttyRemoteSessionStatePayload?) {
         guard foregroundResumeCycle == resumeCycle, isForegroundResumeEvaluationPending, isSceneActive else { return }
         // `isSceneActive` is guaranteed true by the guard above (nothing async runs between it and here).
         sceneState = .active(resume: .none)
         guard let acceptedState else {
             trace("foreground_resume_state_evaluation_finished_without_accepted_state cycle=\(resumeCycle)")
+            // This cycle read nothing, so it decides nothing -- but a recovery it was in the middle of is
+            // still owed its one ownership decision, and settlement stood down for the whole evaluation
+            // precisely because this cycle owns that decision. Nothing else makes it on its own: a reclaim
+            // is settled by a payload, and an ownerless terminal nobody is typing at produces none, so the
+            // owner whose lease expired would sit as a viewer of a session nothing owns until the next
+            // resume. Hand it to the model's one redial path, the same one the re-attach failure above
+            // uses, whose connect bootstrap reads the state that settles it under the ownerless-only rule.
+            if pendingExpiredAttachmentReclaim != nil, !isEndedState, !isSessionUnavailable, !isStopping {
+                trace("foreground_resume_unsettled_reclaim_redial cycle=\(resumeCycle)")
+                scheduleReconnect(after: shouldReconnectSilently ? Self.silentReconnectDelay : .seconds(1))
+            }
             return
         }
         let fetchedRuntimeState = acceptedState.runtimeState?.state ?? session.state
@@ -3349,8 +3649,134 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             trace("foreground_resume_owner_confirmed cycle=\(resumeCycle)")
             return
         }
+        // A recovery this resume performed, or one a stream snapshot started while this evaluation was
+        // still pending, owns this cycle's ownership decision: it is the same decision, and this cycle
+        // makes exactly one.
+        //
+        // Settled against the owner this client has actually seen (`activeOwnerClientID`, the last applied
+        // snapshot's), not the one this cycle's own response carried. The response is one payload, and
+        // what it says about attachments can be less than what this client already knows: a stream payload
+        // handing the session to another device can be applied in the same mailbox drain right behind it,
+        // and an answer whose attachment snapshot is missing entirely (the daemon's attachment authority
+        // unknown) names no owner at all. Reading "ownerless" out of either would take a live session away
+        // from the device that owns it, which this rule exists to prevent. The ordinary attempt below is
+        // deliberately left reading the response: preempting an active owner is what it is for.
+        if recoveryOwnsTheOwnershipDecision(ownerClientID: activeOwnerClientID) {
+            trace("foreground_resume_expired_attachment_reclaim cycle=\(resumeCycle)")
+            return
+        }
         trace("foreground_resume_rearm_auto_takeover cycle=\(resumeCycle) ownerless=\(fetchedOwnerClientID == nil ? 1 : 0)")
         beginAutomaticTakeover()
+    }
+
+    /// Whether an unfinished recovery, rather than the ordinary automatic takeover, owns this moment's
+    /// ownership decision.
+    ///
+    /// The settle answers for a reclaim it can decide now. A reclaim it cannot decide yet owns the
+    /// decision just as much: the settle stands down until this client holds an attachment again, since
+    /// the daemon refuses a takeover from a client with no attachment row, and the re-attach that gets it
+    /// there is asynchronous — so the very payload that reported the loss reaches the ordinary attempt
+    /// with the intent recorded and nothing attached. An ordinary takeover sent in that window is the
+    /// preemption the reclaim exists to prevent: refused outright for a detached client, or landing behind
+    /// the re-attach and taking a live session from the device that owns it, against the rule that a
+    /// lease-expired device comes back ownerless-only (`docs/spec.md`). Standing down costs nothing, since
+    /// the one-shot is left unspent and the reclaim's own settle makes the decision the moment the
+    /// re-attach lands; an open or an ordinary foreground return that lost no attachment never records an
+    /// intent and so never reaches this branch.
+    private func recoveryOwnsTheOwnershipDecision(ownerClientID: String?) -> Bool {
+        if settleExpiredAttachmentReclaimIfPending(ownerClientID: ownerClientID) { return true }
+        return pendingExpiredAttachmentReclaim != nil
+    }
+
+    /// Follows a reclaim's takeover to its outcome, so every path that settles one recovers the same way.
+    ///
+    /// A takeover that failed transiently never reached the daemon, which leaves the reclaim as unfinished
+    /// as a re-attach that threw: the intent goes back and the retry is handed to `scheduleReconnect`, the
+    /// model's one redial path. It drops the subscription, so nothing else can arrive before the redial,
+    /// and the connect bootstrap's read is what settles the intent again, under the same ownerless-only
+    /// rule and at the delay every other connect failure is paced by. The daemon's own answer is never
+    /// retried: a refusal leaves the intent spent and its message on screen, and a session another client
+    /// owns by now is left to that client, with the Take Over action for the user to decide.
+    ///
+    /// Started by the settle rather than awaited by its callers, because the three paths that settle a
+    /// reclaim -- the snapshot-driven recovery, the foreground evaluation, and the connect bootstrap --
+    /// are not all in a position to await a takeover, and a takeover whose retry depended on which of them
+    /// asked for it would leave the other two ownerless on a timeout.
+    private func retryReclaimTakeoverIfItFailedTransiently() {
+        guard let takeover = automaticTakeoverTask else { return }
+        let lifecycle = viewerAttachmentLifecycle
+        let clientID = remoteClient.id
+        Task { [weak self] in
+            await takeover.value
+            guard let self, self.isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID), self.didLastTakeoverFailTransiently else { return }
+            guard !self.isEndedState, !self.isSessionUnavailable, !self.isStopping else { return }
+            self.trace("expired_attachment_reclaim_takeover_retry")
+            self.pendingExpiredAttachmentReclaim = .owner
+            self.scheduleReconnect(after: self.shouldReconnectSilently ? Self.silentReconnectDelay : .seconds(1))
+        }
+    }
+
+    /// Records the reclaim a dropped attachment leaves owed. The intent only ever rises: the second
+    /// signal about one recovery knows less about the attachment that went away than the first did, since
+    /// the confirmation and this client's ownership are both cleared by the time it arrives — a heartbeat
+    /// answered `notFound` behind the snapshot that already reported the same expiry is exactly that — so
+    /// an owner's reclaim is never lowered to a viewer's by what follows it.
+    private func noteExpiredAttachment(droppedMode: TerminalAttachmentMode) {
+        guard pendingExpiredAttachmentReclaim != .owner else { return }
+        pendingExpiredAttachmentReclaim = droppedMode
+    }
+
+    /// Settles the reclaim a dropped attachment left owed, judged against the owner the state this
+    /// decision is made on reports, and answers whether it settled anything so the ordinary attempt runs
+    /// only when nothing was owed.
+    ///
+    /// The rule is the whole of `pendingExpiredAttachmentReclaim`'s meaning: take the session back only
+    /// while nothing else owns it. It waits for this client to hold an attachment again, since the daemon
+    /// refuses a takeover from a client with no attachment row — the re-attach the recovery owes, or the
+    /// one a redial's connect bootstrap makes after a re-attach that failed.
+    @discardableResult private func settleExpiredAttachmentReclaimIfPending(ownerClientID: String?) -> Bool {
+        guard let droppedMode = pendingExpiredAttachmentReclaim else { return false }
+        guard !isDemoMode, !isEndedState, !isSessionUnavailable, isSceneActive, !isStopping else { return false }
+        // A pending foreground evaluation owns its cycle's one ownership decision and settles this same
+        // intent itself, so nothing decides it out from under that evaluation here.
+        guard !isForegroundResumeEvaluationPending else { return false }
+        guard hasAttachedToSession else { return false }
+        guard (latestState?.runtimeState?.state ?? session.state) == .running else { return false }
+        // This client holds the session by the daemon's own answer to a takeover, and the stream has not
+        // published that yet, so the answer can still be overtaken by this recovery's own attach: every
+        // attach this model sends is a viewer attach, and one queued behind the takeover on the command
+        // channel they share -- or sent by the redial that gave the attachment up in the first place --
+        // demotes that ownership the moment it lands. Spending the reclaim on an ownership that is about to
+        // be given away would leave the session ownerless with its one decision already made. The reclaim
+        // stays owed instead, and the next payload settles it: the stream confirming this client's
+        // attachment as the owner's satisfies it, and one reporting that it is not decides it under the
+        // ordinary rule. The decision is still this recovery's in the meantime, which is what the answer
+        // below says, so nothing else makes it.
+        if isOwner, snapshotConfirmedAttachmentMode != .owner {
+            trace("expired_attachment_reclaim_awaits_confirmed_ownership")
+            return true
+        }
+        // The owner this decision is judged against is whichever of the two sources names one. The applied
+        // snapshot is the session as this client has seen it; the answer to this client's own re-attach is
+        // the daemon's own, from after the loss that started the recovery cleared the ownership the stream
+        // had published, and it is the only place a device that took the session inside that round trip
+        // appears. Either naming an owner is enough to stand down, which is what keeps the reclaim from
+        // ever being the preemption only an open or an ordinary foreground return may make.
+        let ownerToRespect = ownerClientID ?? ownerClientIDReportedByAttachAcknowledgement
+        pendingExpiredAttachmentReclaim = nil
+        ownerClientIDReportedByAttachAcknowledgement = nil
+        // Spent whichever way this decision goes: the recovery has had its one ownership decision, and
+        // leaving the one-shot armed would let the next payload turn it into the preemption only an open
+        // or an ordinary foreground return is allowed to make.
+        hasAttemptedAutomaticTakeover = true
+        guard droppedMode == .owner, !isOwner, ownerToRespect == nil else {
+            trace("expired_attachment_reclaim_stays_viewer owner=\(droppedMode == .owner ? 1 : 0) ownerless=\(ownerToRespect == nil ? 1 : 0)")
+            return true
+        }
+        trace("expired_attachment_reclaim_takeover")
+        beginAutomaticTakeover()
+        retryReclaimTakeoverIfItFailedTransiently()
+        return true
     }
 
     private func attemptAutomaticTakeoverIfNeeded() {
@@ -3360,22 +3786,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard !isEndedState else { return }
         guard isSceneActive else { return }
         guard !isForegroundResumeEvaluationPending else { return }
+        // A recovery that has not settled ownership yet owns this decision, under its own rule.
+        if recoveryOwnsTheOwnershipDecision(ownerClientID: activeOwnerClientID) {
+            trace("auto_takeover_deferred_to_reclaim")
+            return
+        }
         guard !hasAttemptedAutomaticTakeover else { return }
         guard !isOwner else { return }
         guard !isSessionUnavailable else { return }
-        // A reattach `applyReducedState` just started (`reattachAfterReconnect`, still in flight) has not
-        // yet told the daemon this client is attached, so a takeover sent here races it there: whichever
-        // request the daemon serializes first decides whether the takeover is rejected (as intended) or,
-        // if the reattach's own attach wins that race, accepted from a client the reattach itself has not
-        // finished earning any standing for. This guard removes the race outright rather than depend on
-        // its outcome: the reattach either succeeds, in which case its own gated re-arm
-        // (`reattachAfterReconnect`, `activeOwnerClientID == nil`) is the only path back to a takeover, or
-        // it fails, in which case `hasAttemptedAutomaticTakeover` is untouched and this fires again the
-        // next time something calls it once `reattachAfterReconnectTask` clears. Reading the task, not the
-        // check, matters because the check itself is cleared as soon as `applyReducedState` reads it
-        // (before this call's own attach even starts), so it would already read nil for the whole
-        // stretch this guard needs to cover.
-        guard reattachAfterReconnectTask == nil else { return }
         let state = latestState?.runtimeState?.state ?? session.state
         guard state == .running else { return }
         beginAutomaticTakeover()
@@ -3729,14 +4147,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         cancelTrailingRenderUpdateResync()
         bufferedInputText = ""
         hasAttachedToSession = false
+        snapshotConfirmedAttachmentMode = nil
+        attachmentIdentity = .unattached
+        unjudgedAttachmentCandidate = nil
+        ownerClientIDReportedByAttachAcknowledgement = nil
+        pendingExpiredAttachmentReclaim = nil
         // This tears the viewer down without bumping `viewerAttachmentLifecycle` (see the comment on
         // `runState` above), so a stale check's lifecycle comparison alone would not catch it: cleared
         // here so no armed check outlives this run.
         reattachCheckAfterReconnect = nil
-        // Same cancellation note as `beginStop`'s: this does not cancel the shared attach operation
-        // `reattachAfterReconnect` may be awaiting, only this wrapper's own "in flight" bookkeeping.
-        reattachAfterReconnectTask?.cancel()
-        reattachAfterReconnectTask = nil
         hasConfirmedOwnerInputReadiness = false
         isInputSurfaceReady = false
         reportedOwnerReadyEpochID = nil
@@ -3917,11 +4336,20 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         return nsError.code
     }
 
+    /// Whether this connect attaches before it subscribes. Only the stream's own confirmation excuses it:
+    /// an attachment no stream snapshot has confirmed may already be gone, since an outage that outlasts
+    /// the lease is exactly the case a redial has to recover from, and nothing else would notice
+    /// afterwards — with no confirmed attachment there is none to lose, so the fresh stream's snapshot
+    /// without this client reports nothing.
+    ///
+    /// Fetched state is deliberately not consulted. A `.state` read answered before the outage still lists
+    /// an attachment the lease has since expired, and reading it here is what let such a redial skip its
+    /// attach. Asking again for an attach the daemon already holds costs nothing:
+    /// `attachViewerForCurrentLifecycle` serves one attach per lifecycle and returns immediately once this
+    /// connection's own attach has landed.
     private var shouldAttachBeforeSubscribing: Bool {
         guard !isEndedState else { return false }
-        guard !hasAttachedToSession else { return false }
-        guard let latestState else { return true }
-        return !activeAttachmentExists(in: latestState.attachmentSnapshot)
+        return !hasSnapshotConfirmedAttachment
     }
 
     /// Applies a program's OSC 52 copy to this device's pasteboard when this client owns the session
@@ -3951,9 +4379,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     private var activeOwnerClientID: String? { activeOwnerAttachment?.clientID }
 
-    private func activeAttachmentExists(in snapshot: TerminalSessionAttachmentSnapshot?) -> Bool {
-        guard let snapshot else { return false }
-        return snapshot.attachments.contains { attachment in attachment.clientID == remoteClient.id && attachment.detachedAt == nil }
+    /// The mode this client's live attachment is held in, as this snapshot records it, or `nil` when the
+    /// snapshot carries no live attachment for this client.
+    private func activeAttachmentMode(in snapshot: TerminalSessionAttachmentSnapshot?) -> TerminalAttachmentMode? {
+        snapshot?.attachments.first { attachment in attachment.clientID == remoteClient.id && attachment.detachedAt == nil }?.mode
     }
 
     private func payloadByClearingScreenState(_ payload: GhosttyRemoteSessionStatePayload) -> GhosttyRemoteSessionStatePayload {
@@ -3974,9 +4403,22 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     ///   call site rather than defaulted: nothing on the wire distinguishes a fetch response from a
     ///   subscriber's initial, and the routes into this model disagree — the takeover response is a read
     ///   answer that must nonetheless apply in-band (see `takeOver`).
-    func submitLatestState(_ payload: GhosttyRemoteSessionStatePayload, isOutOfBand: Bool, lifecycle: UInt64? = nil) {
+    ///
+    /// - Parameter isCommandResponse: True for a payload that is a command's own answer rather than one the
+    ///   stream delivered. Defaulted, unlike `isOutOfBand`, because the stream and the tests that stand in
+    ///   for it are the ordinary carrier; the command routes state it.
+    ///
+    /// - Parameter isFirstSubscriptionPayload: True for the first payload a subscription delivers, which is
+    ///   the one payload that can report the loss of an attachment no snapshot ever confirmed; see
+    ///   `applyReducedState`.
+    func submitLatestState(
+        _ payload: GhosttyRemoteSessionStatePayload, isOutOfBand: Bool, isCommandResponse: Bool = false, isFirstSubscriptionPayload: Bool = false,
+        lifecycle: UInt64? = nil
+    ) {
         submittedStateCount += 1
         stateSubmissionLifecycles[submittedStateCount] = lifecycle ?? viewerAttachmentLifecycle
+        if isCommandResponse { commandResponseSubmissions.insert(submittedStateCount) }
+        if isFirstSubscriptionPayload { firstSubscriptionPayloadSubmissions.insert(submittedStateCount) }
         statePipeline.submit(payload, isOutOfBand: isOutOfBand)
     }
 
@@ -3999,13 +4441,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// body runs synchronously on the main actor (`withCheckedContinuation` inherits the caller's
     /// isolation and nothing here suspends), and the mailbox drain that resumes waiters always hops
     /// through a `Task`, so no apply can land between the two lines below.
-    @discardableResult func applyLatestState(_ payload: GhosttyRemoteSessionStatePayload, isOutOfBand: Bool, lifecycle: UInt64? = nil) async
-        -> TerminalRemoteStateReductionOutput
-    {
+    @discardableResult func applyLatestState(
+        _ payload: GhosttyRemoteSessionStatePayload, isOutOfBand: Bool, isCommandResponse: Bool = false, lifecycle: UInt64? = nil
+    ) async -> TerminalRemoteStateReductionOutput {
         let target = submittedStateCount + 1
         return await withCheckedContinuation { continuation in
             stateApplyWaiters.append((target: target, continuation: continuation))
-            submitLatestState(payload, isOutOfBand: isOutOfBand, lifecycle: lifecycle)
+            submitLatestState(payload, isOutOfBand: isOutOfBand, isCommandResponse: isCommandResponse, lifecycle: lifecycle)
         }
     }
 
@@ -4017,6 +4459,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         appliedStateCount += UInt64(output.coalescedAwayCount) + 1
         let applied = appliedStateCount
         stateSubmissionLifecycles = stateSubmissionLifecycles.filter { $0.key > applied }
+        commandResponseSubmissions = commandResponseSubmissions.filter { $0 > applied }
+        firstSubscriptionPayloadSubmissions = firstSubscriptionPayloadSubmissions.filter { $0 > applied }
         guard !stateApplyWaiters.isEmpty else { return }
         let released = stateApplyWaiters.filter { $0.target <= applied }
         stateApplyWaiters.removeAll { $0.target <= applied }
@@ -4036,6 +4480,20 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // write must land even though its stale session state will not.
         applyClipboardWrite(from: incomingPayload)
         let applicationSubmission = appliedStateCount + UInt64(output.coalescedAwayCount) + 1
+        // A command's answer is never collapsed away (its reason is a barrier and it carries no frame), so
+        // when one is among the submissions this output accounts for it is this output's own.
+        let isCommandResponse = commandResponseSubmissions.contains(applicationSubmission)
+        // A subscription's first payload, unlike a command's answer, can be collapsed away: the mailbox
+        // lets any newer full frame absorb a pending output, and then only the survivor's number is asked
+        // about here. So the question is asked of the whole span of submissions this output accounts for.
+        // The survivor answers for them: it carries the newer attachment snapshot, which is at least as
+        // new as the first payload's, so reading the attachment out of it is reading the more current
+        // fact under the same causal ordering the first payload earned (the daemon opened the stream
+        // after this lifecycle's attach was acknowledged, so an omission at or after that point is a real
+        // sweep, not an unapplied attach). The mailbox itself is left alone deliberately: making the
+        // initial reason a barrier would keep an extra frame on the open paint path, and the pipeline is
+        // shared with the macOS pane, while this accounting is the client's own.
+        let isFirstSubscriptionPayload = firstSubscriptionPayloadSubmissions.contains { $0 > appliedStateCount && $0 <= applicationSubmission }
         let applicationLifecycle = stateSubmissionLifecycles[applicationSubmission]
         guard applicationLifecycle == nil || applicationLifecycle == viewerAttachmentLifecycle else {
             trace("drop_state_from_stale_lifecycle submission=\(applicationSubmission)")
@@ -4085,6 +4543,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             latestStateLifecycle = viewerAttachmentLifecycle
             heldFrameIdentity = TerminalHeldFrameIdentity(frame: appliedFrame)
         }
+        var lostAttachment = false
+        // Whether the attachment this payload took away was the one holding this session's ownership.
+        var didLoseOwnerAttachment = false
         // A payload the reducer refused whole carries the attachment snapshot as it was when the `.state`
         // read was answered, which is before whatever superseded it — a handoff, or this device's own
         // attach. Reading it here would rewrite this client's attachment from that pre-handoff snapshot
@@ -4095,41 +4556,141 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // `isBusy` is not touched here, so this derives whichever case a concurrently in-flight
             // `takeOver()` currently holds instead of assuming the attempt is settled.
             takeoverAttemptState = TerminalViewerTakeoverAttemptState(isBusy: isBusy, isAwaitingTakeoverConfirmation: false)
-            hasAttachedToSession = activeAttachmentExists(in: payload.attachmentSnapshot)
+            let attachedMode = activeAttachmentMode(in: payload.attachmentSnapshot)
+            let isStillAttached = attachedMode != nil
+            // Only a payload that is evidence about the attachment this client holds now may write the
+            // confirmation or report its loss; see `isAttachmentEvidence`.
+            let isAttachmentEvidence = isAttachmentEvidence(output, payload: payload, isCommandResponse: isCommandResponse)
+            if isAttachmentEvidence {
+                // What this payload can take away is normally the attachment the stream confirmed, and
+                // nothing else: an attach the daemon acknowledged but has not broadcast yet is genuinely
+                // missing from payloads emitted before it landed. The first payload of a subscription is
+                // the exception, because it cannot be one of those: the daemon builds a subscriber's
+                // initial export on the same engine actor that applied this client's attach, and the attach
+                // was acknowledged before this stream was opened, so an initial export with no row for this
+                // client is the daemon saying the attachment is gone -- the stale-client sweep having
+                // reached an overdue lease in the gap between the acknowledgement and the export, which is
+                // exactly the window a re-attach on a redial cannot renew (the daemon applies nothing, and
+                // so touches no lease and broadcasts nothing, when a re-attach asks for the mode the
+                // attachment already has). Left unread, the client sits attached to nothing with its input
+                // refused until the next resume or redial.
+                let isAcknowledgedAttachmentThisPayloadSettles = isFirstSubscriptionPayload && attachmentIdentity.isAcknowledged
+                lostAttachment = (hasSnapshotConfirmedAttachment || isAcknowledgedAttachmentThisPayloadSettles) && !isStillAttached
+                // Read before the write below, which is the payload that takes the attachment away: what
+                // the recovery reclaims is the ownership the lost attachment held, not whatever this
+                // client believes about ownership now, since a read answered after the expiry can already
+                // have reported the session ownerless.
+                // With no confirmation to read the mode off, the ownership this client held going into this
+                // payload is what says whether the dropped attachment was the owner's -- the same rule the
+                // redial applies to an attachment no snapshot confirmed. `wasOwner`, not `isOwner`: this
+                // payload is the one that took the attachment away, and `latestState` has already moved to
+                // it, so reading ownership now would read the session the loss left rather than the one the
+                // lost attachment held.
+                didLoseOwnerAttachment = lostAttachment && (snapshotConfirmedAttachmentMode ?? (wasOwner ? .owner : .viewer)) == .owner
+                snapshotConfirmedAttachmentMode = attachedMode
+                unjudgedAttachmentCandidate = nil
+            } else if !output.isOutOfBand, !isCommandResponse, let attachedMode,
+                let entry = payload.attachmentSnapshot?.clients.first(where: { $0.id == remoteClient.id })
+            {
+                // The stream named this client and the identity could not say which attachment it named.
+                // Held for the acknowledgement in flight to judge (`armConfirmationFromUnjudgedCandidate`).
+                // Only the stream's own payloads are kept: a command's answer is the daemon replying to
+                // this client and never confirms an attachment, whichever order it lands in.
+                unjudgedAttachmentCandidate = (connectedAt: entry.connectedAt, mode: attachedMode)
+            }
+            // A snapshot writes the attachment fact when it shows the attachment, and when it is the
+            // payload that takes a confirmed attachment away (`lostAttachment`). It says nothing about an
+            // attach the daemon acknowledged but has not broadcast yet: the daemon publishes the
+            // attachment only once the attach lands, so payloads emitted before it keep arriving with a
+            // snapshot that predates it, and letting one of those clear the fact would leave a viewer that
+            // is genuinely attached believing it is not -- so the dismissal would skip its detach and
+            // strand the attachment on the daemon until its lease expires.
+            // Gated on evidence for the same reason the confirmation is, and the loss it reads is why:
+            // a command's own answer carries the session as the daemon loaded it for that command, which
+            // can predate an expiry this client has already read -- the reply and the expiry broadcast sit
+            // in the mailbox together and the drain applies both inside one main-actor turn, the reply
+            // last. Allowed to write this fact, it would put the attachment back up under the re-attach the
+            // expiry just scheduled, and that re-attach, which cannot run until the drain yields, would
+            // exit at its own `guard !hasAttachedToSession` and leave a quiet terminal detached with its
+            // input refused until the next resume or redial. The attach's own acknowledgement writes the
+            // fact directly (`attachViewerForCurrentLifecycle`), so nothing else needs to.
+            if isAttachmentEvidence, isStillAttached || lostAttachment {
+                hasAttachedToSession = isStillAttached
+                if !isStillAttached { noteAttachmentDropped() }
+            }
+            // Who owns this session is a fact about this client's own attachment, since a takeover rewrites
+            // the mode of both clients' attachments, and every state that names an owner says it whichever
+            // way it arrived — a read and a command's own answer included, unlike the attachment's
+            // existence, which only the stream can speak to. So a confirmed attachment's mode follows the
+            // owner the session reports, both ways, while the confirmation itself is left to the stream:
+            // an owner confirmation left standing past another client's takeover would make the next expiry
+            // read as the loss of an ownership that client has held since, and the recovery would take a
+            // live session away from it; a viewer confirmation left standing past this client's own
+            // acknowledged takeover would make that expiry read as a viewer's loss, so the recovery would
+            // come back a viewer and leave the terminal ownerless — the daemon applies a takeover when it
+            // answers it, and the stream's own broadcast of it can be lost to an outage that outlasts the
+            // lease.
+            if snapshotConfirmedAttachmentMode != nil, let owner = activeOwnerClientID {
+                snapshotConfirmedAttachmentMode = owner == remoteClient.id ? .owner : .viewer
+            }
             // This is the first authoritative snapshot a reconnect's armed reattach check settles
             // against, from whichever source produced it: the bootstrap read's own reduction, or the
             // subscription's stream payload when the bootstrap read answered nothing (a request failure,
             // or its fixed timeout) before the stream did. See `TerminalReattachCheckAfterReconnect`'s
             // doc comment for why deciding here, rather than fixing the decision to the bootstrap read
-            // alone, is what covers both sources with one rule; see `reattachAfterReconnect` for what the
-            // reattach itself does and how a failure recovers.
+            // alone, is what covers both sources with one rule.
             // Cleared here unconditionally, the moment it is read, regardless of whether a reattach
             // actually starts below: this call site runs once per snapshot (hundreds a second under a
             // streaming agent), so leaving the check itself set as an "in flight" signal would have this
-            // same `if let` spawn a brand new `reattachAfterReconnect` Task on every later snapshot that
-            // arrives while an earlier one is still running. `reattachAfterReconnectTask` is the separate,
-            // dedicated in-flight marker for that; only its own nil check below decides whether this
-            // snapshot starts a reattach.
+            // same `if let` spawn a brand new recovery on every later snapshot that arrives while an
+            // earlier one is still running.
             // `applicationSubmission` (computed above, before this apply's own `noteStateApplied` runs)
             // names the highest submission this output stands for. A reconnect keeps the same
             // `viewerAttachmentLifecycle` and the same remote client as the connection it replaces, so a
             // snapshot that connection submitted just before disconnecting can still land here after this
             // reconnect's own arm and pass both those checks; only the submission boundary distinguishes
             // it, since it is a fact about when the snapshot was produced rather than what it names. A
-            // submission at or below the boundary predates this reconnect and is left unconsumed — the
+            // submission at or below the boundary predates this reconnect and is left unconsumed: the
             // check stays armed for whichever later snapshot (this reconnect's own bootstrap read or
             // stream) actually settles it.
             if let reattachCheck = reattachCheckAfterReconnect, applicationSubmission > reattachCheck.submissionBoundary {
                 reattachCheckAfterReconnect = nil
-                if isCurrentStateRefresh(lifecycle: reattachCheck.lifecycle, clientID: reattachCheck.clientID), !hasAttachedToSession, !isEndedState,
-                    reattachAfterReconnectTask == nil
+                // One recovery owns a lost attachment, whichever way the loss was learned, and it is the
+                // one below: it records the ownership the attachment held as an intent that survives a
+                // failed re-attach and the redial behind it, and settles it once this client holds an
+                // attachment again under the ownerless-only rule. So this check contributes the fact only
+                // it has, the ownership this client held going into the connect, and hands the recovery
+                // itself over rather than running a second one beside it. It stands down outright when
+                // this same payload is the loss (the call below is the same recovery, with a confirmation
+                // to read the dropped mode off) or when a reclaim is already owed, which is what keeps a
+                // reconnect from sending a second attach and making a second ownership decision.
+                // Read off this snapshot rather than off `hasAttachedToSession`, which only a stream
+                // payload writes: the reason a `.state` read is not evidence in general is that its answer
+                // can land ahead of an older stream payload still queued behind it, and the submission
+                // boundary above is exactly the fact that rules that out here. So a settling snapshot past
+                // the boundary answers for this reconnect whichever source produced it, which is what lets
+                // a bootstrap read report a daemon restart without waiting for a stream payload that a
+                // quiet session may not send for minutes.
+                if !lostAttachment, pendingExpiredAttachmentReclaim == nil,
+                    isCurrentStateRefresh(lifecycle: reattachCheck.lifecycle, clientID: reattachCheck.clientID),
+                    activeAttachmentMode(in: payload.attachmentSnapshot) == nil, !isEndedState
                 {
-                    reattachAfterReconnectTask = Task { [weak self] in await self?.reattachAfterReconnect(reattachCheck) }
+                    // The same trio the resume's own `notFound` recovery writes before it re-attaches: the
+                    // attachment is gone, so the fact, the confirmation the stream published for it and the
+                    // identity all end with it. Left standing, the subscription's own first payload would
+                    // arrive against a confirmation for an attachment that is over and read as a second
+                    // loss, sending a second attach behind this one.
+                    hasAttachedToSession = false
+                    snapshotConfirmedAttachmentMode = nil
+                    noteAttachmentDropped()
+                    reattachAfterLosingAttachment(reclaimingOwnership: reattachCheck.wasOwner)
                 }
             }
         }
         if isEndedState {
             cancelAllConnectAttempts()
+            // Nothing is owed a session that has ended: there is no ownership left to reclaim.
+            pendingExpiredAttachmentReclaim = nil
             endedStateTask?.cancel()
             endedStateTask = nil
             // The ended notice is what the view reports from here on, and no stream frame can ever arrive
@@ -4301,8 +4862,99 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             beginOwnerRecoveryGracePeriod()
             scheduleOwnershipSynchronization()
         }
+        if lostAttachment { reattachAfterLosingAttachment(reclaimingOwnership: didLoseOwnerAttachment) }
         attemptAutomaticTakeoverIfNeeded()
         releaseOpenScreenHoldIfNoViewportFrameIsComing()
+    }
+
+    /// Re-attaches this viewer after an authoritative attachment snapshot showed its attachment gone.
+    ///
+    /// The daemon detaches a remote client whose lease elapsed (stale-client expiry) and answers that
+    /// client's next heartbeat with `notFound`, but the heartbeats an attached viewer relies on are sent
+    /// by the daemon's own subscription relay, which discards the answer. What the client does see is the
+    /// broadcast the expiry emits before it returns: an attachment snapshot with this client's row gone.
+    /// Without this reaction that leaves the viewer a zombie — output still streams over a subscription
+    /// nothing tore down, while input is rejected and no path re-attaches, because both paths that would
+    /// (the connect bootstrap's `shouldAttachBeforeSubscribing` and the foreground resume's heartbeat)
+    /// only run on a reconnect or a scene resume that may never come.
+    ///
+    /// Fires exactly once per attached -> detached transition, so a backlog of pre-attach payloads cannot
+    /// stack one attach per payload. A re-attach that throws hands recovery to `scheduleReconnect`, the
+    /// model's one redial path, rather than retrying here: it retires the in-flight attempts and cancels
+    /// their stream handles, so the subscription this viewer is still reading output over goes down the
+    /// way a failed link takes it down, and the connect bootstrap behind it attaches again through
+    /// `shouldAttachBeforeSubscribing`, paced by the delay every other connect failure uses. A retry loop
+    /// here would be a second recovery mechanism with its own pacing racing that one, and it would leave
+    /// the viewer reading a subscription whose client the daemon does not know about.
+    ///
+    /// The same recovery answers for a reconnect, which learns the identical fact a different way: a
+    /// client that held an attachment going into a connect arms `TerminalReattachCheckAfterReconnect`, and
+    /// the first authoritative snapshot that connect applies settles it. A daemon restart is what that
+    /// looks like (its start wipes every `terminal_clients` and `terminal_attachments` row), and so is a
+    /// lease expiry during an outage that outlived it. The check contributes only the fact it alone holds,
+    /// the ownership this client had going into the connect, and hands the recovery over rather than
+    /// running a second one beside it: a reconnect that re-attached on its own would send a second attach
+    /// and make a second ownership decision beside this one's reclaim intent. The Mac pane's `refreshNow`
+    /// (`TerminalSessionPaneViewController`, `attachmentModeToRequest`) re-attaches under the identical
+    /// condition.
+    ///
+    /// The attach itself is always `.viewer`, like every other attach this model makes: ownership on iOS
+    /// is a separate takeover. A client that held the owner attachment when it was detached
+    /// (`reclaimingOwnership`) takes the session back afterwards through the ordinary automatic-takeover
+    /// path, the same reclaim the foreground resume performs for a lease-expired owner — but only while
+    /// the session is still ownerless, so a client that legitimately took over in the meantime keeps it
+    /// and this viewer stays a viewer. The takeover is ordered behind the attach because the daemon
+    /// rejects a takeover from a client with no attachment row. It carries the rest of
+    /// `attemptAutomaticTakeoverIfNeeded`'s gates too — everything except the once-per-open one-shot,
+    /// which a fresh detachment is a legitimate new reason to spend: it stands down while a foreground
+    /// resume is pending, since that evaluation owns the one ownership decision per foreground cycle and
+    /// performs this very reclaim itself when its heartbeat comes back `notFound`, and it stands down
+    /// once the daemon has said this terminal no longer exists, which no dial of any kind can change. A
+    /// takeover that fails transiently goes to the same redial the attach failure does, since a reclaim
+    /// whose takeover never reached the daemon is as unfinished as one whose attach did not.
+    private func reattachAfterLosingAttachment(reclaimingOwnership: Bool) {
+        // Demo Mode renders a recorded session read-only and its backend owns no attachment to lose.
+        guard !isDemoMode else { return }
+        guard !isStopping, !isEndedState, !isSessionUnavailable else { return }
+        trace("reattach_after_lost_attachment reclaim=\(reclaimingOwnership ? 1 : 0)")
+        // Recorded here, where the loss is detected, and never once the attach below returns: everything
+        // the ownership decision must not be read from has already moved on by then (a `.state` read
+        // answered after the expiry, a heartbeat the shared command channel runs the moment this attach
+        // frees it, another client's takeover), and the decision itself may be made somewhere else
+        // entirely — by the foreground evaluation this lands under, or by the connect bootstrap of the
+        // redial an attach failure hands recovery to.
+        // A takeover still in flight (`isBusy`) counts as owning the dropped attachment, the same rule
+        // the redial in `connect()` applies: the daemon takes ownership when it answers the takeover, so
+        // an acknowledgement can land behind the loss snapshot that expired the lease, and the reclaim
+        // must still be the ownership the user asked for. Settling stays ownerless-only, so a session
+        // another client owns by then is left alone either way.
+        noteExpiredAttachment(droppedMode: reclaimingOwnership || isBusy ? .owner : .viewer)
+        let lifecycle = viewerAttachmentLifecycle
+        let clientID = remoteClient.id
+        Task { [weak self] in
+            guard let self, self.isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID), !self.isEndedState else { return }
+            do { try await self.attachViewerForCurrentLifecycle() } catch {
+                guard self.isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID), !self.isEndedState else { return }
+                self.scheduleReconnect(after: self.shouldReconnectSilently ? Self.silentReconnectDelay : .seconds(1))
+                return
+            }
+            guard self.isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
+            // This client holds an attachment again, so the reclaim can be settled. A foreground evaluation
+            // still pending owns this cycle's one ownership decision and settles the same intent itself,
+            // so nothing is decided here in that window — the intent simply stands until it does.
+            //
+            // The ownerless test the rule applies reads the snapshot this client last applied, while the
+            // takeover request itself is unconditional, so a client that takes ownership inside that
+            // request's round trip is displaced by it. Closing that window means a takeover the daemon
+            // applies only while the session is ownerless, which is a wire change; the window is one round
+            // trip wide, and every automatic takeover the spec already allows to preempt carries the
+            // identical one. Accepted.
+            //
+            // Settling is the whole of what this recovery still owes, and the takeover it may start
+            // follows itself up (`retryReclaimTakeoverIfItFailedTransiently`), so there is nothing left to
+            // await here.
+            self.settleExpiredAttachmentReclaimIfPending(ownerClientID: self.activeOwnerClientID)
+        }
     }
 
     /// Asks the daemon for a full frame after a delta failed to apply against the pipeline's baseline.
@@ -4559,14 +5211,25 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// `previousPayload` to merge the next real submission against, so that submission would replace
     /// this owner attachment outright instead of carrying it forward — silently dropping ownership out
     /// from under whatever the test does next, rather than raising anything a caller would notice.
+    /// Mints the `connectedAt` an attach would carry, so a suite can pin the identity's uniqueness without
+    /// a round trip per attach -- the mints that collide are the ones no round trip separates.
+    func mintAttachmentConnectedAtForTesting() -> String { mintAttachmentConnectedAt() }
+
     func configureOwnerInteractiveForTesting(ownerEpoch: UInt64) async {
+        // The daemon names this client by the attachment it holds now, so a stand-in for its snapshot has
+        // to carry the identity the attach established rather than the model's own base record: a snapshot
+        // naming any other one is a snapshot about an attachment this client no longer holds, which is
+        // exactly what the evidence rule refuses.
+        var connectedAt = remoteClient.connectedAt
+        if case .resolved(let identity) = attachmentIdentity { connectedAt = identity }
+        let ownerClient = TerminalClient(id: remoteClient.id, kind: remoteClient.kind, identity: remoteClient.identity, connectedAt: connectedAt)
         let ownerAttachment = TerminalAttachment(sessionID: session.id, clientID: remoteClient.id, mode: .owner, attachedAt: "2026-01-01T00:00:00Z")
         let runtime = TerminalSessionRuntimeState(
             sessionID: session.id, servicePID: 100, childPID: 200, state: .running, updatedAt: "2026-01-01T00:00:00Z")
         let payload = GhosttyRemoteSessionStatePayload(
             sessionID: session.id, reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-01-01T00:00:00Z",
             sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: runtime,
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [remoteClient], attachments: [ownerAttachment]), title: session.title,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [ownerClient], attachments: [ownerAttachment]), title: session.title,
             workingDirectory: session.workingDirectory, outputByteCount: 0)
         await applyLatestState(payload, isOutOfBand: false)
         // A real apply that turns this client into the owner (`wasOwner` false going in) schedules the

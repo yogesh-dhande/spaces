@@ -1221,6 +1221,383 @@
             XCTAssertTrue(model.acceptsInput, "the reclaimed terminal must return to its interactive owner state")
         }
 
+        /// Stale-client expiry detaches a lease-expired viewer and broadcasts the attachment state before it
+        /// returns, so the payload that carries the expiry is what tells the client its attachment is gone.
+        /// Nothing else does: the heartbeats an attached viewer relies on are sent by the daemon's own relay,
+        /// which discards the `notFound` answer.
+        func testStreamStateShowingThisClientDetachedReattachesItWithoutUserAction() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            let macClient = TerminalClient(
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:26:00Z")
+            let macOwner = TerminalAttachment(sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:26:00Z")
+            let expiredState = Self.runningTerminalState(
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwner]),
+                emittedAt: "2026-06-04T14:26:00Z")
+            await model.applyLatestState(expiredState, isOutOfBand: false)
+
+            let didAttach = try await waitForTerminalControlAction(.attach, count: 1, recorder: recorder)
+            XCTAssertTrue(didAttach, "a client the daemon detached must reattach on its own")
+            let attachRequests = await recorder.snapshot().compactMap { request -> SpacesDeviceTerminalControlRequest? in
+                guard case .terminalControl(let payload) = request.command, payload.action == .attach else { return nil }
+                return payload
+            }
+            XCTAssertEqual(attachRequests.count, 1)
+            XCTAssertEqual(attachRequests.first?.attachmentMode, .viewer, "an expired owner must not displace the client that owns the session now")
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 0, "the reattach must not take ownership back from another client")
+        }
+
+        /// The daemon broadcasts the attachment only once the reattach lands, so payloads emitted before it
+        /// keep arriving with a snapshot that predates the attachment. Reacting to each of those would send
+        /// one attach per payload for as long as an output stream lasts.
+        func testStaleStatesArrivingAfterAnAutomaticReattachDoNotStackMoreAttaches() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let control) = request.command, control.action == .attach, let client = control.client {
+                    // The daemon carries the post-attach state on the control's own response, which is
+                    // where this client reads which attachment it now holds.
+                    let attached = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:26:30Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attached]),
+                            emittedAt: "2026-06-04T14:26:30Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            let macClient = TerminalClient(
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:26:00Z")
+            let macOwner = TerminalAttachment(sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:26:00Z")
+            let detachedSnapshot = TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwner])
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: detachedSnapshot, emittedAt: "2026-06-04T14:26:00Z"), isOutOfBand: false)
+            let didAttach = try await waitForTerminalControlAction(.attach, count: 1, recorder: recorder)
+            XCTAssertTrue(didAttach, "a client the daemon detached must reattach on its own")
+
+            for index in 0..<3 {
+                await model.applyLatestState(
+                    Self.runningTerminalState(attachmentSnapshot: detachedSnapshot, emittedAt: "2026-06-04T14:26:0\(index + 1)Z"), isOutOfBand: false)
+            }
+            try await Task.sleep(for: .milliseconds(150))
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            XCTAssertEqual(attachCount, 1, "the reattach must fire once per detachment, not once per payload")
+        }
+
+        /// The reclaim's takeover can fail on the transport before it ever reaches the daemon, and the
+        /// attempt it consumed is the only one this open makes on its own. Recovery goes to the same redial
+        /// a failed reattach uses, and the state its connect bootstrap reads performs the takeover again.
+        func testATransientTakeoverFailureInTheReclaimRetriesOnceThroughThePacedRedial() async throws {
+            let backend = ReclaimTakeoverBackend(firstTakeoverFailure: SpacesDeviceAPIClientError.requestTimedOut)
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:00Z"),
+                isOutOfBand: false)
+
+            let didRetry = await backend.waitForTakeoverCount(2)
+            XCTAssertTrue(didRetry, "a takeover that never reached the daemon must be retried")
+            let redialDelay = model.lastScheduledReconnectDelayForTesting
+            XCTAssertNotNil(redialDelay, "the retry must be armed by the redial rather than run on its own timer")
+            if let redialDelay {
+                XCTAssertGreaterThan(redialDelay, .zero, "the retry must be paced by the reconnect backoff, not spun as fast as payloads arrive")
+            }
+            await waitUntil("the expired owner to take the session back") { model.isOwner }
+
+            try await Task.sleep(for: .milliseconds(250))
+            XCTAssertEqual(backend.takeoverCount(), 2, "one transient failure must produce one further takeover, not a retry loop")
+            let subscribeCount = await backend.subscribeCount()
+            XCTAssertEqual(subscribeCount, 1, "recovery must run through a single redial")
+        }
+
+        /// The daemon's own answer is not a transport failure: a refusal is the session saying no, and
+        /// retrying it would spend redials on a decision that will not change.
+        func testATakeoverTheDaemonRefusesDuringTheReclaimIsNotRetried() async throws {
+            let backend = ReclaimTakeoverBackend(
+                firstTakeoverFailure: SpacesDeviceAPIClientError.requestFailed("another client owns this session", code: nil))
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:00Z"),
+                isOutOfBand: false)
+
+            let didTakeOver = await backend.waitForTakeoverCount(1)
+            XCTAssertTrue(didTakeOver, "the expired owner must still make its one reclaim attempt")
+            try await Task.sleep(for: .milliseconds(300))
+            XCTAssertEqual(backend.takeoverCount(), 1, "a refused takeover must not be retried")
+            XCTAssertNil(model.lastScheduledReconnectDelayForTesting, "a refused takeover must not arm a redial")
+            let subscribeCount = await backend.subscribeCount()
+            XCTAssertEqual(subscribeCount, 0, "a refused takeover must not redial")
+        }
+
+        /// The daemon publishes an attachment on the stream, so an attach whose confirming broadcast never
+        /// arrived is one this client cannot show evidence of. If the outage that dropped the stream
+        /// outlasts the lease the daemon has expired that attachment, and carrying the optimistic fact
+        /// across the redial would leave the viewer detached with nothing able to notice: the connect would
+        /// skip its attach, and the fresh snapshot's missing row would read as no loss, there being no
+        /// confirmed attachment to lose.
+        /// A `.state` read answered before the outage still lists an attachment the lease has since expired,
+        /// so a redial that consults it skips the attach it exists to make, and nothing afterwards notices:
+        /// with no confirmed attachment there is none to lose, so the fresh stream's snapshot without this
+        /// client reports nothing either.
+        func testARedialAttachesAgainWhenFetchedStateStillListsTheUnconfirmedAttachment() async throws {
+            let tracker = AttachRequestTracker()
+            let backend = StageTrackerTestBackend(transportFactory: { AttachedClientStateRequestTransport(tracker: tracker) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the open must attach and subscribe")
+            await waitUntil("the open's attach to be sent") { tracker.attachCount() == 1 }
+            // The bootstrap read lands and lists this client, while the stream never broadcasts it.
+            await waitUntil("the bootstrap read listing this client to apply") {
+                model.attachmentSnapshot.attachments.contains { $0.clientID == model.remoteClientForTesting.id && $0.detachedAt == nil }
+            }
+
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+
+            let didRedial = await backend.waitForSubscribeCount(2)
+            XCTAssertTrue(didRedial, "a dropped stream must redial")
+            await waitUntil("the redial to attach again") { tracker.attachCount() == 2 }
+            try await Task.sleep(for: .milliseconds(200))
+            XCTAssertEqual(tracker.attachCount(), 2, "the redial must attach exactly once more")
+        }
+
+        func testAnAttachNoSnapshotConfirmedDoesNotSurviveTheRedial() async throws {
+            let tracker = AttachRequestTracker()
+            let backend = StageTrackerTestBackend(transportFactory: { AttachCountingRequestTransport(tracker: tracker) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the open must attach and subscribe")
+            await waitUntil("the open's attach to be sent") { tracker.attachCount() == 1 }
+
+            // The stream dies before the daemon ever broadcasts this client's attachment, which is the
+            // only evidence the attach left anywhere this client can read.
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+
+            let didRedial = await backend.waitForSubscribeCount(2)
+            XCTAssertTrue(didRedial, "a dropped stream must redial")
+            await waitUntil("the redial to attach again") { tracker.attachCount() == 2 }
+            try await Task.sleep(for: .milliseconds(200))
+            XCTAssertEqual(tracker.attachCount(), 2, "the redial must attach exactly once more")
+        }
+
+        /// A direct `.state` read is ordered against what the pipeline has already reduced, but the
+        /// stream's own payloads are trusted as ordered and are never refused, so one delayed behind a read
+        /// that answered first still applies after it. Arming the attachment confirmation from the read
+        /// would make that older payload's pre-expiry snapshot read as a fresh loss, sending a viewer
+        /// attach that can demote the owner the read just restored.
+        func testAnOutOfBandReadDoesNotArmTheLossADelayedStreamPayloadWouldThenReport() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            // The state read a resume applies after re-attaching: this client is attached again, and the
+            // read is out of band.
+            let ownClient = TerminalClient(
+                id: model.remoteClientForTesting.id, kind: .remote, identity: TerminalClientIdentity(label: "iPhone"),
+                connectedAt: "2026-06-04T14:26:10Z")
+            let ownAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: ownClient.id, mode: .owner, attachedAt: "2026-06-04T14:26:10Z")
+            await model.applyLatestState(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [ownClient], attachments: [ownAttachment]),
+                    emittedAt: "2026-06-04T14:26:10Z"), isOutOfBand: true)
+
+            // The stream payload the daemon emitted before the expiry, delivered after that read.
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:00Z"),
+                isOutOfBand: false)
+
+            try await Task.sleep(for: .milliseconds(200))
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            XCTAssertEqual(attachCount, 0, "a snapshot older than the read that restored the attachment must not report a loss")
+        }
+
+        /// The daemon publishes the attachment only once the reattach lands, so payloads emitted before it
+        /// keep arriving with a snapshot that predates it. One of those must not erase an attach the daemon
+        /// acknowledged: a viewer that believed itself detached would leave without detaching, stranding
+        /// the attachment on the daemon until its lease expired.
+        func testAStaleSnapshotAfterAnAutomaticReattachStillLeavesTheDismissalADetachToSend() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            let macClient = TerminalClient(
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:26:00Z")
+            let macOwner = TerminalAttachment(sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:26:00Z")
+            let detachedSnapshot = TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwner])
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: detachedSnapshot, emittedAt: "2026-06-04T14:26:00Z"), isOutOfBand: false)
+            let didAttach = try await waitForTerminalControlAction(.attach, count: 1, recorder: recorder)
+            XCTAssertTrue(didAttach, "a client the daemon detached must reattach on its own")
+
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: detachedSnapshot, emittedAt: "2026-06-04T14:26:01Z"), isOutOfBand: false)
+            model.stop()
+
+            let didDetach = try await waitForTerminalControlAction(.detach, count: 1, recorder: recorder)
+            XCTAssertTrue(didDetach, "leaving must detach the attachment the reattach acknowledged")
+            try await Task.sleep(for: .milliseconds(150))
+            let detachCount = await recorder.countTerminalControlAction(.detach)
+            XCTAssertEqual(detachCount, 1, "leaving must send exactly one detach")
+        }
+
+        /// A reattach can fail on the command channel alone while the subscription the viewer reads output
+        /// over stays up, so nothing tears the viewer down on its own and the once-per-detachment gate is
+        /// already spent. Recovery goes to `scheduleReconnect`, the model's one redial path: it drops the
+        /// subscription and attaches again from the connect bootstrap, at the delay every other connect
+        /// failure is paced by, instead of a retry loop at the failure site racing that pacing with its own.
+        func testAReattachThatFailsOnTheCommandChannelRecoversThroughOnePacedRedial() async throws {
+            let backend = LostAttachmentRedialBackend()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            let macClient = TerminalClient(
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:26:00Z")
+            let macOwner = TerminalAttachment(sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:26:00Z")
+            let detachedSnapshot = TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwner])
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: detachedSnapshot, emittedAt: "2026-06-04T14:26:00Z"), isOutOfBand: false)
+            let didAttach = await backend.waitForAttachCount(1)
+            XCTAssertTrue(didAttach, "a client the daemon detached must start its reattach")
+
+            for index in 0..<3 {
+                await model.applyLatestState(
+                    Self.runningTerminalState(attachmentSnapshot: detachedSnapshot, emittedAt: "2026-06-04T14:26:0\(index + 1)Z"), isOutOfBand: false)
+            }
+            try await Task.sleep(for: .milliseconds(150))
+            XCTAssertEqual(backend.attachModes().count, 1, "payloads arriving while the reattach is in flight must not stack more attaches")
+            XCTAssertNil(model.lastScheduledReconnectDelayForTesting, "a reattach still in flight must not have armed a redial")
+
+            backend.releaseHeldAttach()
+
+            let didRedial = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didRedial, "a reattach that fails on the command channel must hand recovery to the redial path")
+            let redialDelay = model.lastScheduledReconnectDelayForTesting
+            XCTAssertNotNil(redialDelay, "the failed reattach must arm the redial rather than abandon recovery")
+            if let redialDelay {
+                XCTAssertGreaterThan(redialDelay, .zero, "the retry must be paced by the reconnect backoff, not spun as fast as payloads arrive")
+            }
+            XCTAssertEqual(
+                backend.attachModes(), [.viewer, .viewer], "the redial's connect bootstrap must attach exactly once more, still as a viewer")
+
+            try await Task.sleep(for: .milliseconds(250))
+            XCTAssertEqual(backend.attachModes().count, 2, "one failed reattach must produce one further attach, not a redial loop")
+            let subscribeCount = await backend.subscribeCount()
+            XCTAssertEqual(subscribeCount, 1, "recovery must run through a single redial")
+        }
+
+        /// A viewer that held the session when its lease expired takes it back, the same reclaim the
+        /// foreground resume performs — but only because nothing else owns it by then.
+        func testExpiredOwnerTakesTheOwnerlessSessionBackAfterReattaching() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let control) = request.command, control.action == .attach, let client = control.client {
+                    // The daemon carries the post-attach state on the control's own response, which is
+                    // where this client reads which attachment it now holds.
+                    let attached = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:26:30Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attached]),
+                            emittedAt: "2026-06-04T14:26:30Z"))
+                }
+                guard case .terminalControl(let payload) = request.command, payload.action == .takeover, let clientID = payload.clientID else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                let client = TerminalClient(
+                    id: clientID, kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:26:10Z")
+                let attachment = TerminalAttachment(
+                    sessionID: "terminal-session", clientID: clientID, mode: .owner, attachedAt: "2026-06-04T14:26:10Z")
+                return Self.terminalStateResponse(
+                    Self.runningTerminalState(
+                        attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]),
+                        emittedAt: "2026-06-04T14:26:10Z"))
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:00Z"),
+                isOutOfBand: false)
+
+            let didTakeOver = try await waitForTerminalControlAction(.takeover, count: 1, recorder: recorder)
+            XCTAssertTrue(didTakeOver, "an expired owner must reclaim a session nothing else owns")
+            let requests = await recorder.snapshot()
+            let attachIndex = requests.firstIndex { request in
+                guard case .terminalControl(let payload) = request.command else { return false }
+                return payload.action == .attach
+            }
+            let takeoverIndex = requests.firstIndex { request in
+                guard case .terminalControl(let payload) = request.command else { return false }
+                return payload.action == .takeover
+            }
+            XCTAssertNotNil(attachIndex)
+            XCTAssertNotNil(takeoverIndex)
+            if let attachIndex, let takeoverIndex {
+                XCTAssertLessThan(attachIndex, takeoverIndex, "the daemon rejects a takeover from a client with no attachment row")
+            }
+            await waitUntil("the reattached viewer to become the owner again") { model.isOwner }
+        }
+
         func testForegroundResumeConsumesLeaseExpiryStateThatArrivedWhileBackgrounded() async throws {
             let recorder = DeviceAPIRequestRecorder()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
@@ -1284,6 +1661,1830 @@
 
             let takeoverCount = await recorder.countTerminalControlAction(.takeover)
             XCTAssertEqual(takeoverCount, 0, "an owner-confirming resume state must consume the one-shot intent before a later handoff")
+        }
+
+        /// Payloads the daemon exported before this attachment existed say nothing about it. They arrive
+        /// after it all the same: the stream's backlog is delivered behind the foreground recovery that
+        /// re-attached, still listing the attachment that expired and then its expiry. Judged against the
+        /// new attachment they read as another loss, and the `.viewer` attach that follows can demote the
+        /// owner the recovery just restored.
+        func testStreamPayloadsFromBeforeTheReattachReportNoSecondLoss() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let gate = ReclaimTakeoverGate()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalControl(let payload) = request.command else {
+                    if case .state = request.command {
+                        return Self.terminalStateResponse(
+                            Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:35Z"))
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                switch payload.action {
+                case .heartbeat: return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound)
+                case .attach:
+                    // The daemon answers an attach with the session's state, and the client record in that
+                    // answer names the attachment's identity.
+                    guard let client = payload.client else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    let attachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:26:30Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]),
+                            emittedAt: "2026-06-04T14:26:30Z"))
+                case .takeover:
+                    guard let clientID = payload.clientID else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    await gate.markStarted()
+                    await gate.waitForRelease()
+                    let client = TerminalClient(
+                        id: clientID, kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:26:40Z")
+                    let attachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: clientID, mode: .owner, attachedAt: "2026-06-04T14:26:40Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]),
+                            emittedAt: "2026-06-04T14:26:40Z"))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            let ownClient = TerminalClient(
+                id: model.remoteClientForTesting.id, kind: .remote, identity: TerminalClientIdentity(label: "iPhone"),
+                connectedAt: "2026-06-04T14:25:00Z")
+            let expiredAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: ownClient.id, mode: .owner, attachedAt: "2026-06-04T14:25:00Z")
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            await gate.waitForStart()
+
+            // The stream's backlog, delivered behind the recovery: the attachment that has since expired,
+            // then the expiry itself, both exported before the reattach the daemon has just acknowledged.
+            await model.applyLatestState(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [ownClient], attachments: [expiredAttachment]),
+                    emittedAt: "2026-06-04T14:26:10Z"), isOutOfBand: false)
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:20Z"),
+                isOutOfBand: false)
+            await gate.release()
+
+            await waitUntil("the reclaimed viewer to become the owner again") { model.isOwner }
+            try await Task.sleep(for: .milliseconds(250))
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            XCTAssertEqual(attachCount, 1, "payloads exported before the reattach must not report a loss of the attachment that replaced them")
+            XCTAssertTrue(model.isOwner, "the restored owner must not be demoted by the backlog its own recovery outran")
+        }
+
+        /// A takeover's acknowledgement is a command answer this model applies in band on purpose, so the
+        /// carrier alone cannot tell it apart from the stream's own payloads and the submission it is
+        /// applied under is what does. Arming the confirmation from it would make the session's next
+        /// attachment broadcast, an expiry included, read as a loss against an attachment the stream never
+        /// confirmed.
+        func testATakeoverAcknowledgementDoesNotConfirmTheAttachment() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalControl(let payload) = request.command else {
+                    if case .state = request.command {
+                        return Self.terminalStateResponse(
+                            Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:35Z"))
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                switch payload.action {
+                case .heartbeat: return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound)
+                case .attach:
+                    guard let client = payload.client else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    let attachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:26:30Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]),
+                            emittedAt: "2026-06-04T14:26:30Z"))
+                case .takeover:
+                    guard let clientID = payload.clientID else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    let client = TerminalClient(
+                        id: clientID, kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:26:40Z")
+                    let attachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: clientID, mode: .owner, attachedAt: "2026-06-04T14:26:40Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]),
+                            emittedAt: "2026-06-04T14:26:40Z"))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            // The resume re-attaches for the client the daemon dropped and its state read is refused, so the
+            // reclaim it recorded is carried to the redial behind it, whose bootstrap read is what settles
+            // it -- one more attach and the takeover that takes the ownerless session back.
+            let didReclaim = try await waitForTerminalControlAction(.takeover, count: 1, recorder: recorder)
+            XCTAssertTrue(didReclaim, "the recovery must settle the reclaim the dropped attachment left owed")
+            await waitUntil("the reclaimed viewer to own the session again") { model.isOwner }
+            try await Task.sleep(for: .milliseconds(100))
+
+            // The session's next attachment broadcast, exported after the takeover: with the takeover's own
+            // acknowledgement counted as a confirmation, this reads as a loss and sends another attach.
+            // Counted against what the recovery already sent, since what this test is about is this
+            // broadcast sending one more.
+            let attachesBeforeBroadcast = await recorder.countTerminalControlAction(.attach)
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:50Z"),
+                isOutOfBand: false)
+
+            try await Task.sleep(for: .milliseconds(250))
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            XCTAssertEqual(
+                attachCount, attachesBeforeBroadcast, "the broadcast must send no attach: no stream snapshot ever confirmed an attachment to lose")
+        }
+
+        /// The daemon broadcasts the session's post-attach state before it loads the state it answers the
+        /// attach with, so the confirming broadcast is stamped at or before the acknowledgement that
+        /// established the attachment. Ordering the confirmation by time would therefore reject the only
+        /// payload that can arm it, and the viewer would go on believing a live attachment unconfirmed:
+        /// every reconnect discarding it and attaching again, and no expiry ever reported as a loss.
+        func testAConfirmingBroadcastStampedBeforeItsAcknowledgementStillArmsTheConfirmation() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let attaches = AttachAcknowledgementRecorder()
+            let macClient = TerminalClient(
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:26:00Z")
+            let macOwner = TerminalAttachment(sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:26:00Z")
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalControl(let payload) = request.command else {
+                    if case .state = request.command {
+                        return Self.terminalStateResponse(
+                            Self.runningTerminalState(
+                                attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwner]),
+                                emittedAt: "2026-06-04T14:26:35Z"))
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                switch payload.action {
+                case .heartbeat: return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound)
+                case .attach:
+                    guard let client = payload.client else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    attaches.record(client)
+                    let attachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:26:30Z")
+                    // Stamped after the broadcast the test publishes below, which is the order the daemon
+                    // produces: it broadcasts the new snapshot, then loads the state for this answer.
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(
+                                clients: [macClient, client], attachments: [macOwner, attachment]), emittedAt: "2026-06-04T14:26:40Z"))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            await waitUntil("the resume's reattach to be acknowledged") { attaches.count() == 1 }
+            // The resume's follow-up read is issued after that attach is acknowledged, so its Mac owner
+            // landing means the acknowledgement has been read for the attachment's identity.
+            await waitUntil("the resume's state read to apply") {
+                model.attachmentSnapshot.attachments.contains { $0.clientID == macClient.id && $0.mode == .owner }
+            }
+            guard let attached = attaches.lastClient() else { return XCTFail("the resume must have attached") }
+
+            // The daemon's own broadcast for that attach, exported before the answer above.
+            let attachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: attached.id, mode: .viewer, attachedAt: "2026-06-04T14:26:30Z")
+            await model.applyLatestState(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient, attached], attachments: [macOwner, attachment]),
+                    emittedAt: "2026-06-04T14:26:30Z"), isOutOfBand: false)
+            // The lease expires again, and the confirmed attachment's disappearance is the loss.
+            await model.applyLatestState(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwner]),
+                    emittedAt: "2026-06-04T14:26:45Z"), isOutOfBand: false)
+
+            let didReattach = try await waitForTerminalControlAction(.attach, count: 2, recorder: recorder)
+            XCTAssertTrue(didReattach, "a broadcast confirming the attachment must arm the loss the next expiry reports")
+            try await Task.sleep(for: .milliseconds(200))
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            XCTAssertEqual(attachCount, 2, "the loss must send exactly one reattach")
+        }
+
+        /// The daemon broadcasts a new attachment to every subscriber before it answers the attach that
+        /// made it, so on a subscription that was already open the payload naming the replacement can reach
+        /// this client while the identity it would be judged against is still the attachment that ended.
+        /// Refused and forgotten, that payload is the only one that ever names the replacement on a quiet
+        /// session: the sweep that eventually takes it away then reads as nothing at all, and the viewer
+        /// sits detached with its input refused until the next resume or redial.
+        func testABroadcastRefusedWhileTheReattachIsUnansweredStillConfirmsItOnceItIsNamed() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let attaches = AttachAcknowledgementRecorder()
+            let attachGate = ReclaimTakeoverGate()
+            let macClient = TerminalClient(
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:25:00Z")
+            let macOwner = TerminalAttachment(sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:25:00Z")
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalControl(let payload) = request.command else {
+                    guard case .state = request.command else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    // What the resume reads once it holds an attachment again: the Mac still owns the
+                    // session, and this client is the viewer its re-attach just made.
+                    var clients = [macClient]
+                    var attachments = [macOwner]
+                    if let attached = attaches.lastClient() {
+                        clients.append(attached)
+                        attachments.append(
+                            TerminalAttachment(
+                                sessionID: "terminal-session", clientID: attached.id, mode: .viewer, attachedAt: "2026-06-04T14:26:50Z"))
+                    }
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: clients, attachments: attachments),
+                            emittedAt: "2026-06-04T14:27:00Z"))
+                }
+                switch payload.action {
+                case .heartbeat: return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound)
+                case .attach:
+                    guard let client = payload.client else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    attaches.record(client)
+                    // Only the re-attach the expiry sends is held, so the broadcast below arrives while the
+                    // attachment it names is still unacknowledged; whatever the loss sends must run freely.
+                    if attaches.count() == 1 {
+                        await attachGate.markStarted()
+                        await attachGate.waitForRelease()
+                    }
+                    // The daemon stores and echoes the `connectedAt` the client sent, so this is the
+                    // identity the acknowledgement resolves -- the same one the broadcast carries.
+                    let attachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:26:50Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(
+                                clients: [macClient, client], attachments: [macOwner, attachment]), emittedAt: "2026-06-04T14:26:55Z"))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            await attachGate.waitForStart()
+            guard let attaching = attaches.lastClient() else { return XCTFail("the resume must have re-attached") }
+            let readsBeforeTheAcknowledgement = await recorder.countStateRequests()
+
+            // The daemon's own broadcast for that attach, delivered on the subscription that was already
+            // open: it names the attachment being established, and nothing has named that one yet.
+            let attachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: attaching.id, mode: .viewer, attachedAt: "2026-06-04T14:26:50Z")
+            await model.applyLatestState(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient, attaching], attachments: [macOwner, attachment]),
+                    emittedAt: "2026-06-04T14:26:50Z"), isOutOfBand: false)
+            await attachGate.release()
+
+            // The read the recovery issues once the attach is acknowledged, which is what makes its arrival
+            // observable: the identity is resolved by then.
+            await waitUntilAsync("the re-attach to be acknowledged and read") { await recorder.countStateRequests() > readsBeforeTheAcknowledgement }
+            try await Task.sleep(for: .milliseconds(150))
+
+            // The lease expires on a session nothing else is saying anything about, so this sweep is the
+            // last word on the attachment the broadcast named.
+            await model.applyLatestState(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwner]),
+                    emittedAt: "2026-06-04T14:28:00Z"), isOutOfBand: false)
+
+            let didReattach = try await waitForTerminalControlAction(.attach, count: 2, recorder: recorder)
+            XCTAssertTrue(didReattach, "a broadcast the acknowledgement behind it names must arm the loss the sweep reports")
+            try await Task.sleep(for: .milliseconds(200))
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            XCTAssertEqual(attachCount, 2, "the loss must send exactly one re-attach")
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 0, "and a viewer's loss must leave the device that owns the session alone")
+        }
+
+        /// A command's answer carries the session as of the moment the daemon loaded it for that command,
+        /// which can be before an expiry this client has already read: the takeover's acknowledgement and
+        /// the expiry broadcast reach the reducer together, and the drain applies both inside one
+        /// main-actor turn with the acknowledgement last. Letting it write the attachment fact puts the
+        /// attachment back up under the re-attach the expiry just scheduled, and that re-attach -- which
+        /// cannot run until the drain yields the main actor -- then exits at its own guard, leaving a quiet
+        /// terminal attached to nothing with its input refused until the next resume or redial.
+        func testACommandAnswerLandingBehindTheExpiryDoesNotStrandTheReattach() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if let acknowledgement = Self.attachAcknowledgement(for: request) { return acknowledgement }
+                if case .state = request.command {
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T15:01:00Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            // A confirmed owner attachment: the expiry below is a loss of the ownership it held.
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+
+            // Both submitted before the main actor is given up, which is what puts them in the mailbox
+            // together: the lease expiry the session broadcast, then the acknowledgement `takeOver()`
+            // submits in band (stamped when the daemon loaded it, before the expiry, which is exactly the
+            // ordering that makes it name an attachment the expiry has already ended).
+            model.submitLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T15:00:00Z"),
+                isOutOfBand: false)
+            model.submitLatestState(
+                Self.ownedState(clientID: model.remoteClientForTesting.id, emittedAt: "2026-06-04T14:59:00Z"), isOutOfBand: false,
+                isCommandResponse: true)
+            Thread.sleep(forTimeInterval: 0.2)
+
+            let didReattach = try await waitForTerminalControlAction(.attach, count: 1, recorder: recorder)
+            XCTAssertTrue(didReattach, "the loss must re-attach even when a command's answer lands behind it")
+            try await Task.sleep(for: .milliseconds(250))
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            XCTAssertEqual(attachCount, 1, "and it must re-attach exactly once")
+            XCTAssertTrue(model.isOwner, "the ownership the acknowledgement reported is still this client's")
+        }
+
+        /// The mints that can collide are the ones no round trip separates: a recovery's re-attach and the
+        /// redial behind it are consecutive requests on one command channel, so they land inside the same
+        /// millisecond, and a clock that steps backwards can repeat a value outright. A stamp is only an
+        /// identity if no two of them are ever equal, so every mint is ordered against the last.
+        func testEveryAttachmentIdentityThisModelMintsIsDistinctAndIncreasing() async throws {
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: SpacesDeviceAPIClient(settings: settings()) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") })
+            defer { model.stop() }
+
+            // Minted back to back, which is what puts several of them inside one clock millisecond.
+            let identities = (0..<50).map { _ in model.mintAttachmentConnectedAtForTesting() }
+
+            XCTAssertEqual(Set(identities).count, identities.count, "two attaches must never be published under one identity")
+            for (earlier, later) in zip(identities, identities.dropFirst()) {
+                let earlierDate = try XCTUnwrap(TerminalSessionTimestamp.date(from: earlier), "an identity must stay a timestamp every reader parses")
+                let laterDate = try XCTUnwrap(TerminalSessionTimestamp.date(from: later), "an identity must stay a timestamp every reader parses")
+                XCTAssertGreaterThan(laterDate, earlierDate, "each attachment must be dated after the one it replaces")
+            }
+        }
+
+        /// A headless daemon stores the client record as sent, so on one the attachment identity is the
+        /// `connectedAt` this client mints, and its precision is what decides whether two attaches can be
+        /// told apart. Attaches come in bursts -- an expiry's re-attach, the redial behind it -- well
+        /// inside one second, and at whole-second precision they would share an identity: a snapshot of
+        /// the attachment that ended would then pass as evidence about the one that replaced it. (The
+        /// macOS daemon replaces the field with its own lease stamp, minted at the same precision for the
+        /// same reason; `GhosttyEmbeddedSessionHostTests` covers that side.)
+        func testTwoAttachesInsideOneSecondGetDistinctIdentities() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let attaches = AttachAcknowledgementRecorder()
+            let macClient = TerminalClient(
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:25:00Z")
+            let macOwner = TerminalAttachment(sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:25:00Z")
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalControl(let payload) = request.command else {
+                    if case .state = request.command {
+                        return Self.terminalStateResponse(
+                            Self.runningTerminalState(
+                                attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwner]),
+                                emittedAt: "2026-06-04T14:26:35Z"))
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                switch payload.action {
+                case .heartbeat: return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound)
+                case .attach:
+                    guard let client = payload.client else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    attaches.record(client)
+                    let attachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:26:30Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(
+                                clients: [macClient, client], attachments: [macOwner, attachment]), emittedAt: "2026-06-04T14:26:40Z"))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            await waitUntil("the resume's re-attach to be acknowledged") { attaches.count() == 1 }
+            await waitUntil("the resume's state read to apply") {
+                model.attachmentSnapshot.attachments.contains { $0.clientID == macClient.id && $0.mode == .owner }
+            }
+            guard let attached = attaches.lastClient() else { return XCTFail("the resume must have re-attached") }
+
+            // Confirm that attachment from the stream, then take it away: the loss sends the second attach,
+            // milliseconds after the first.
+            let attachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: attached.id, mode: .viewer, attachedAt: "2026-06-04T14:26:30Z")
+            await model.applyLatestState(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient, attached], attachments: [macOwner, attachment]),
+                    emittedAt: "2026-06-04T14:26:30Z"), isOutOfBand: false)
+            await model.applyLatestState(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwner]),
+                    emittedAt: "2026-06-04T14:26:45Z"), isOutOfBand: false)
+            let didReattach = try await waitForTerminalControlAction(.attach, count: 2, recorder: recorder)
+            XCTAssertTrue(didReattach, "the loss must send the re-attach this test measures")
+
+            let clients = attaches.allClients()
+            XCTAssertEqual(clients.count, 2, "exactly the attach the resume sent and the one the loss sent")
+            XCTAssertNotEqual(
+                clients[0].connectedAt, clients[1].connectedAt, "two attaches this close together must not share an attachment identity")
+            for client in clients {
+                XCTAssertNotNil(
+                    TerminalSessionTimestamp.date(from: client.connectedAt), "the daemon must be able to read the identity this client mints")
+                XCTAssertTrue(
+                    client.connectedAt.contains("."),
+                    "the identity must carry sub-second precision, or two attaches inside one second would be the same attachment")
+            }
+        }
+
+        /// A re-attach asking for the mode the attachment already has is a daemon-side no-op
+        /// (`GhosttyEmbeddedSessionHost.attachClient` applies nothing when the mode is unchanged), so the
+        /// attachment keeps the `connectedAt` it was created with and the value this client sent is never
+        /// published. The identity the confirmation is judged against therefore has to be read back off the
+        /// acknowledgement's own snapshot; remembering what was sent would leave a short outage's re-attach
+        /// permanently unconfirmable.
+        func testTheAttachmentIdentityIsReadFromTheAcknowledgementNotFromTheRequest() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let attaches = AttachAcknowledgementRecorder()
+            let macClient = TerminalClient(
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:26:00Z")
+            let macOwner = TerminalAttachment(sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:26:00Z")
+            // The value the daemon kept from the attachment this re-attach did not replace.
+            let keptConnectedAt = "2026-06-04T14:20:00Z"
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalControl(let payload) = request.command else {
+                    if case .state = request.command {
+                        return Self.terminalStateResponse(
+                            Self.runningTerminalState(
+                                attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwner]),
+                                emittedAt: "2026-06-04T14:26:35Z"))
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                switch payload.action {
+                case .heartbeat: return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound)
+                case .attach:
+                    guard let client = payload.client else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    attaches.record(client)
+                    let kept = TerminalClient(id: client.id, kind: client.kind, identity: client.identity, connectedAt: keptConnectedAt)
+                    let attachment = TerminalAttachment(sessionID: "terminal-session", clientID: kept.id, mode: .viewer, attachedAt: keptConnectedAt)
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient, kept], attachments: [macOwner, attachment]),
+                            emittedAt: "2026-06-04T14:26:20Z"))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            await waitUntil("the resume's reattach to be acknowledged") { attaches.count() == 1 }
+            await waitUntil("the resume's state read to apply") {
+                model.attachmentSnapshot.attachments.contains { $0.clientID == macClient.id && $0.mode == .owner }
+            }
+            guard let attached = attaches.lastClient() else { return XCTFail("the resume must have attached") }
+            XCTAssertNotEqual(attached.connectedAt, keptConnectedAt, "the request must carry its own value for the daemon to keep or replace")
+
+            // Every snapshot the daemon publishes for this attachment carries the value it kept.
+            let kept = TerminalClient(id: attached.id, kind: attached.kind, identity: attached.identity, connectedAt: keptConnectedAt)
+            let attachment = TerminalAttachment(sessionID: "terminal-session", clientID: kept.id, mode: .viewer, attachedAt: keptConnectedAt)
+            await model.applyLatestState(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient, kept], attachments: [macOwner, attachment]),
+                    emittedAt: "2026-06-04T14:26:40Z"), isOutOfBand: false)
+            await model.applyLatestState(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwner]),
+                    emittedAt: "2026-06-04T14:26:45Z"), isOutOfBand: false)
+
+            let didReattach = try await waitForTerminalControlAction(.attach, count: 2, recorder: recorder)
+            XCTAssertTrue(didReattach, "the identity the daemon published must be the one the confirmation is judged against")
+            try await Task.sleep(for: .milliseconds(200))
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            XCTAssertEqual(attachCount, 2, "the loss must send exactly one reattach")
+        }
+
+        /// Ownership this model holds is held through an attachment, and a reconnect discards an attachment
+        /// no snapshot ever confirmed. The attach that replaces it is a `.viewer` attach, like every attach
+        /// this model sends, so the discard gives the session back — and with the one automatic takeover
+        /// already spent on the takeover that won it, nothing would ask for it again: the viewer would come
+        /// back from a dropped stream demoted, with only the manual Take Over action left.
+        func testARedialThatDiscardsAnUnconfirmedAttachmentAsksForTheSessionAgain() async throws {
+            let ownership = SessionOwnershipTracker()
+            let backend = StageTrackerTestBackend(transportFactory: { OwnershipTrackingRequestTransport(ownership: ownership, takeoverGate: nil) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the open must attach and subscribe")
+            await waitUntil("the open's automatic takeover to win the session") { model.isOwner }
+            XCTAssertEqual(ownership.takeoverCount(), 1, "the open takes over once")
+
+            // The stream dies before the daemon ever broadcasts this client's attachment, so the ownership
+            // won through it rests on an attachment nothing confirmed.
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+
+            let didRedial = await backend.waitForSubscribeCount(2)
+            XCTAssertTrue(didRedial, "a dropped stream must redial")
+            await waitUntil("the redial to ask for the session again") { ownership.takeoverCount() == 2 }
+            await waitUntil("the redialed viewer to own the session again") { model.isOwner }
+            XCTAssertEqual(ownership.attachCount(), 2, "the redial must attach exactly once more")
+        }
+
+        /// The confirmation the stream published belongs to the attachment that has just expired, so it must
+        /// not outlive it. A snapshot captured before the resume re-attached (the expiry's own broadcast, or
+        /// a reconnect's) can arrive while the reclaim takeover is still in flight, and against a stale
+        /// confirmation it reads as a second loss: another `.viewer` attach, sent with the one automatic
+        /// takeover already spent, which demotes the owner this resume just restored.
+        func testAPreExpirySnapshotArrivingDuringTheReclaimTakeoverSendsNoSecondAttach() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let gate = ReclaimTakeoverGate()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalControl(let payload) = request.command else {
+                    if case .state = request.command {
+                        return Self.terminalStateResponse(
+                            Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:20Z"))
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                if payload.action == .heartbeat { return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound) }
+                guard payload.action == .takeover, let clientID = payload.clientID else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                await gate.markStarted()
+                await gate.waitForRelease()
+                let client = TerminalClient(
+                    id: clientID, kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:26:40Z")
+                let attachment = TerminalAttachment(
+                    sessionID: "terminal-session", clientID: clientID, mode: .owner, attachedAt: "2026-06-04T14:26:40Z")
+                return Self.terminalStateResponse(
+                    Self.runningTerminalState(
+                        attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]),
+                        emittedAt: "2026-06-04T14:26:40Z"))
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            // A stream snapshot confirmed this client's attachment before the lease expired.
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            await gate.waitForStart()
+
+            // The expiry's own broadcast, captured before the resume re-attached and delivered while the
+            // reclaim takeover is still in flight.
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:00Z"),
+                isOutOfBand: false)
+            await gate.release()
+
+            await waitUntil("the reclaimed viewer to become the owner again") { model.isOwner }
+            try await Task.sleep(for: .milliseconds(250))
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            XCTAssertEqual(attachCount, 1, "only the resume's own reattach may be sent, not a second one for an attachment already replaced")
+            XCTAssertTrue(model.isOwner, "the restored owner must not be demoted by a snapshot older than its reclaim")
+        }
+
+        /// A resume that finds this client's attachment expired is the lease-expired owner's reclaim, not
+        /// the ordinary foreground attempt: it takes the session back only while nothing else owns it, so a
+        /// client that took over while the phone was away keeps what it took. The ordinary attempt above
+        /// still preempts, which is what an open and an ordinary foreground return do.
+        func testForegroundResumeOfALeaseExpiredOwnerLeavesAnotherClientsOwnershipAlone() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let macClient = TerminalClient(
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:25:00Z")
+            let macOwner = TerminalAttachment(sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:25:00Z")
+            let macOwnedState = Self.runningTerminalState(
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwner]),
+                emittedAt: "2026-06-04T14:26:00Z")
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let payload) = request.command, payload.action == .heartbeat {
+                    return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound)
+                }
+                if case .state = request.command { return Self.terminalStateResponse(macOwnedState) }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+
+            let didReattach = try await waitForTerminalControlAction(.attach, count: 1, recorder: recorder)
+            XCTAssertTrue(didReattach, "a resume whose heartbeat reports the client missing must reattach")
+            try await Task.sleep(for: .milliseconds(250))
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 0, "a device whose lease expired must not take the session from the client that owns it now")
+            XCTAssertFalse(model.isOwner, "the expired owner comes back as a viewer")
+            XCTAssertTrue(model.showsTakeOverAction, "the user keeps the Take Over action for a session another client owns")
+        }
+
+        /// A loss the stream reports while a foreground evaluation is still waiting on its heartbeat is the
+        /// same expiry that heartbeat would otherwise have discovered, and re-attaching first is exactly
+        /// what makes it succeed instead. The evaluation must not read that success as an ordinary
+        /// foreground return: this device was detached for its lease and another client owns the session by
+        /// now, so the ordinary attempt's preemption would take a live session away from the client holding
+        /// it.
+        func testALossReportedBeforeTheResumeHeartbeatLeavesAnotherClientsOwnershipAlone() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let attaches = AttachAcknowledgementRecorder()
+            let macClient = TerminalClient(
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:25:00Z")
+            let macOwner = TerminalAttachment(sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:25:00Z")
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalControl(let payload) = request.command else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                switch payload.action {
+                case .heartbeat:
+                    // The lease this heartbeat renews is the one the reattach below already restored, so it
+                    // succeeds: nothing in this answer says the attachment was ever gone.
+                    let viewer = attaches.lastClient()
+                    let viewerAttachment = viewer.map {
+                        TerminalAttachment(sessionID: "terminal-session", clientID: $0.id, mode: .viewer, attachedAt: "2026-06-04T14:26:30Z")
+                    }
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(
+                                clients: [macClient] + (viewer.map { [$0] } ?? []), attachments: [macOwner] + (viewerAttachment.map { [$0] } ?? [])),
+                            emittedAt: "2026-06-04T14:26:35Z"))
+                case .attach:
+                    guard let client = payload.client else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    attaches.record(client)
+                    let attachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:26:30Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(
+                                clients: [macClient, client], attachments: [macOwner, attachment]), emittedAt: "2026-06-04T14:26:30Z"))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            // Backgrounding arms the foreground evaluation; the expiry's own broadcast reaches the stream
+            // before the app comes forward, so the reattach that answers it runs first and the evaluation
+            // still owes itself its ownership decision.
+            model.prepareForBackgrounding()
+            await model.applyLatestState(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwner]),
+                    emittedAt: "2026-06-04T14:26:20Z"), isOutOfBand: false)
+            let didReattach = try await waitForTerminalControlAction(.attach, count: 1, recorder: recorder)
+            XCTAssertTrue(didReattach, "the reported loss must reattach")
+
+            model.resumeAfterBackgrounding()
+            let didHeartbeat = try await waitForTerminalControlAction(.heartbeat, count: 1, recorder: recorder)
+            XCTAssertTrue(didHeartbeat, "the resume must still evaluate ownership")
+            try await Task.sleep(for: .milliseconds(300))
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 0, "a device whose lease expired must not take the session from the client that owns it now")
+            XCTAssertFalse(model.isOwner, "the expired owner comes back as a viewer")
+            XCTAssertTrue(model.showsTakeOverAction, "the user keeps the Take Over action for a session another client owns")
+        }
+
+        /// The same recovery against an ownerless session is still a reclaim: nothing else holds the
+        /// session, so the resume takes it back, exactly once.
+        func testALossReportedBeforeTheResumeHeartbeatStillReclaimsAnOwnerlessSession() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let attaches = AttachAcknowledgementRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalControl(let payload) = request.command else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                switch payload.action {
+                case .heartbeat:
+                    guard let viewer = attaches.lastClient() else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    let attachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: viewer.id, mode: .viewer, attachedAt: "2026-06-04T14:26:30Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [viewer], attachments: [attachment]),
+                            emittedAt: "2026-06-04T14:26:35Z"))
+                case .attach:
+                    guard let client = payload.client else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    attaches.record(client)
+                    let attachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:26:30Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]),
+                            emittedAt: "2026-06-04T14:26:30Z"))
+                case .takeover:
+                    guard let clientID = payload.clientID else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    let client = TerminalClient(
+                        id: clientID, kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:26:30Z")
+                    let attachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: clientID, mode: .owner, attachedAt: "2026-06-04T14:26:40Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]),
+                            emittedAt: "2026-06-04T14:26:40Z"))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:20Z"),
+                isOutOfBand: false)
+            let didReattach = try await waitForTerminalControlAction(.attach, count: 1, recorder: recorder)
+            XCTAssertTrue(didReattach, "the reported loss must reattach")
+
+            model.resumeAfterBackgrounding()
+            await waitUntil("the reclaimed viewer to own the ownerless session again") { model.isOwner }
+            try await Task.sleep(for: .milliseconds(200))
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 1, "an ownerless session is reclaimed by exactly one takeover")
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            XCTAssertEqual(attachCount, 1, "the reported loss must send exactly one reattach")
+        }
+
+        /// The recovery's attach and the resume's heartbeat travel the one command channel a viewer uses
+        /// for both, so the heartbeat runs the moment that attach frees the channel — which can be before
+        /// the recovery's own task resumes. The provenance that makes this resume a reclaim is therefore
+        /// recorded where the loss is detected, not once the attach returns; read a moment too late, the
+        /// evaluation decides as an ordinary foreground return and preempts the client that owns the
+        /// session now.
+        func testARecoveryWhoseAttachSharesTheChannelWithTheResumeHeartbeatLeavesAnotherClientsOwnershipAlone() async throws {
+            let tracker = ExpiredOwnerRecoveryTracker(failsFirstAttach: false)
+            let backend = StageTrackerTestBackend(transportFactory: { ExpiredOwnerRecoveryTransport(tracker: tracker) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: ExpiredOwnerRecoveryTracker.macOwnedSnapshot, emittedAt: "2026-06-04T14:26:20Z"),
+                isOutOfBand: false)
+            await waitUntil("the reported loss to attach") { tracker.attachCount() == 1 }
+
+            model.resumeAfterBackgrounding()
+            await waitUntil("the resume's heartbeat to be answered") { tracker.heartbeatCount() == 1 }
+            try await Task.sleep(for: .milliseconds(300))
+            XCTAssertEqual(tracker.takeoverCount(), 0, "a device whose lease expired must not take the session from the client that owns it now")
+            XCTAssertFalse(model.isOwner, "the expired owner comes back as a viewer")
+            XCTAssertTrue(model.showsTakeOverAction, "the user keeps the Take Over action for a session another client owns")
+        }
+
+        /// A recovery whose attach fails is still this resume's recovery: the redial it hands itself to
+        /// picks the attach up, and the daemon may well have applied the attach whose answer was lost, so
+        /// the heartbeat behind it renews a live lease either way. Dropping the provenance on that failure
+        /// would leave the evaluation reading an ordinary foreground return and preempting the owner.
+        func testARecoveryWhoseAttachFailsStillLeavesAnotherClientsOwnershipAlone() async throws {
+            let tracker = ExpiredOwnerRecoveryTracker(failsFirstAttach: true)
+            let backend = StageTrackerTestBackend(transportFactory: { ExpiredOwnerRecoveryTransport(tracker: tracker) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: ExpiredOwnerRecoveryTracker.macOwnedSnapshot, emittedAt: "2026-06-04T14:26:20Z"),
+                isOutOfBand: false)
+            await waitUntil("the reported loss to attach") { tracker.attachCount() == 1 }
+
+            model.resumeAfterBackgrounding()
+            await waitUntil("the resume's heartbeat to be answered") { tracker.heartbeatCount() == 1 }
+            try await Task.sleep(for: .milliseconds(300))
+            XCTAssertEqual(tracker.takeoverCount(), 0, "a recovery that failed is still a recovery: the resume must not preempt the current owner")
+            XCTAssertFalse(model.isOwner, "the expired owner comes back as a viewer")
+            XCTAssertTrue(model.showsTakeOverAction, "the user keeps the Take Over action for a session another client owns")
+        }
+
+        /// A takeover still in flight is ownership this client is about to hold, and the redial's viewer
+        /// attach queues behind that very request on the channel they share — so it lands as a demotion of
+        /// the ownership the takeover just won. With the one automatic takeover already spent on that
+        /// takeover, nothing would ask again and the viewer would come back demoted from a dropped stream.
+        func testARedialWhileTheBootstrapsTakeoverIsInFlightAsksForTheSessionAgain() async throws {
+            let ownership = SessionOwnershipTracker()
+            let gate = ReclaimTakeoverGate()
+            let backend = StageTrackerTestBackend(transportFactory: { OwnershipTrackingRequestTransport(ownership: ownership, takeoverGate: gate) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the open must attach and subscribe")
+            await gate.waitForStart()
+
+            // The stream dies with the open's takeover still sending, so the attachment it wins is one no
+            // snapshot ever confirmed.
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+            await waitUntil("the dropped stream to arm its redial") { model.lastScheduledReconnectDelayForTesting != nil }
+            // Held until that redial has begun, which is the window this finding is about: its connect
+            // decides what to do with the unconfirmed attachment while the takeover is still in flight.
+            let redialDelay = model.lastScheduledReconnectDelayForTesting ?? .seconds(1)
+            try await Task.sleep(for: redialDelay + .milliseconds(400))
+            XCTAssertEqual(ownership.takeoverCount(), 1, "the open's takeover must still be the only one in flight")
+            await gate.release()
+
+            let didRedial = await backend.waitForSubscribeCount(2)
+            XCTAssertTrue(didRedial, "a dropped stream must redial")
+            await waitUntil("the redial to ask for the session again") { ownership.takeoverCount() == 2 }
+            await waitUntil("the redialed viewer to own the session again") { model.isOwner }
+            XCTAssertEqual(ownership.attachCount(), 2, "the redial must attach exactly once more")
+        }
+
+        /// The expiry leaves the session ownerless, and a `.state` read answered after it reports exactly
+        /// that — possibly before the expiry's own broadcast reaches this client. Reading ownership off
+        /// what the client believes at that moment would make the owner that just lost its attachment
+        /// recover as a plain viewer, leaving a running terminal ownerless with nothing asking for it. What
+        /// the recovery reclaims is the ownership the lost attachment held, which is what the stream
+        /// confirmed about it.
+        func testAnOwnerlessReadBeforeTheExpiryBroadcastStillReclaimsTheLostOwnership() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let control) = request.command, control.action == .attach, let client = control.client {
+                    // The daemon carries the post-attach state on the control's own response, which is
+                    // where this client reads which attachment it now holds.
+                    let attached = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:26:30Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attached]),
+                            emittedAt: "2026-06-04T14:26:30Z"))
+                }
+                guard case .terminalControl(let payload) = request.command else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                guard payload.action == .takeover, let clientID = payload.clientID else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                let client = TerminalClient(
+                    id: clientID, kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:26:30Z")
+                let attachment = TerminalAttachment(
+                    sessionID: "terminal-session", clientID: clientID, mode: .owner, attachedAt: "2026-06-04T14:26:40Z")
+                return Self.terminalStateResponse(
+                    Self.runningTerminalState(
+                        attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]),
+                        emittedAt: "2026-06-04T14:26:40Z"))
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            // A read answered after the expiry: the session is ownerless, and this client is no longer
+            // attached. Out of band, so it says nothing about the attachment, but it does clear `isOwner`.
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:10Z"),
+                isOutOfBand: true)
+            XCTAssertFalse(model.isOwner, "the read reports the session the expiry left: ownerless")
+
+            // The expiry's own broadcast, behind it on the stream: this is the loss.
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:20Z"),
+                isOutOfBand: false)
+
+            await waitUntil("the reclaimed viewer to own the session again") { model.isOwner }
+            try await Task.sleep(for: .milliseconds(250))
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            XCTAssertEqual(attachCount, 1, "the loss must send exactly one reattach")
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 1, "the ownerless session must be reclaimed once")
+        }
+
+        /// A resume whose heartbeat comes back `notFound` recovers by re-attaching, and that attach can
+        /// fail on the command channel like any other request. Nothing is left to read for a client the
+        /// daemon does not know about, so recovery goes to the model's one redial path, the same one a
+        /// snapshot-driven reattach uses when its attach fails; without it the resume ends detached, with
+        /// no confirmed attachment for a later expiry snapshot to report as lost either.
+        func testAResumeReattachThatFailsRecoversThroughOnePacedRedial() async throws {
+            let ownership = SessionOwnershipTracker()
+            let backend = StageTrackerTestBackend(transportFactory: {
+                OwnershipTrackingRequestTransport(ownership: ownership, takeoverGate: nil, expiresLease: true, failingAttachIndex: 1)
+            })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+
+            await waitUntil("the resume's reattach to fail") { ownership.attachCount() == 1 }
+            // The attach is counted where the request lands, which is a hop or two ahead of the failure
+            // reaching the model, so the arming is waited for rather than read the instant the count moves.
+            await waitUntil("the failed reattach to arm the redial") { model.lastScheduledReconnectDelayForTesting != nil }
+            let redialDelay = model.lastScheduledReconnectDelayForTesting
+            XCTAssertNotNil(redialDelay, "a resume whose reattach failed must arm the redial rather than abandon recovery")
+            if let redialDelay { XCTAssertGreaterThan(redialDelay, .zero, "the retry must be paced by the reconnect backoff") }
+
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the redial must reconnect the stream it never had")
+            await waitUntil("the redial to attach again") { ownership.attachCount() == 2 }
+            await waitUntil("the ownerless session to be reclaimed") { model.isOwner }
+            XCTAssertEqual(ownership.takeoverCount(), 1, "the ownerless session must be reclaimed once")
+            XCTAssertEqual(ownership.attachCount(), 2, "one failed reattach must produce one further attach, not a redial loop")
+        }
+
+        /// The recovery is unfinished while its re-attach keeps failing, and the client that took the
+        /// session while this device was suspended owns it throughout. Deciding ownership on what the
+        /// redial happens to read — a client that still believes it is the owner, an ordinary automatic
+        /// takeover nothing has spent — would preempt that client. The reclaim the dropped attachment left
+        /// owed is what decides instead, wherever the decision finally lands.
+        func testAResumeReattachThatKeepsFailingNeverPreemptsTheClientThatTookTheSession() async throws {
+            let tracker = ExpiredOwnerRecoveryTracker(failsFirstAttach: true)
+            let backend = StageTrackerTestBackend(transportFactory: { ExpiredOwnerRecoveryTransport(tracker: tracker, expiresLease: true) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+
+            await waitUntil("the resume's reattach to fail") { tracker.attachCount() == 1 }
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the failed reattach must hand recovery to the redial")
+            await waitUntil("the redial to attach again") { tracker.attachCount() == 2 }
+            await waitUntil("the redial's bootstrap read to settle ownership") { model.showsTakeOverAction }
+            try await Task.sleep(for: .milliseconds(250))
+            XCTAssertEqual(tracker.takeoverCount(), 0, "a device whose lease expired must not take the session from the client that owns it now")
+            XCTAssertFalse(model.isOwner, "the expired owner comes back as a viewer")
+            XCTAssertTrue(model.showsTakeOverAction, "the user keeps the Take Over action for a session another client owns")
+        }
+
+        /// The mirror case: nothing else owns the session, so the recovery owes it a reclaim — and the
+        /// payload that reported the loss has already cleared this client's ownership, while the open's own
+        /// automatic takeover was spent long before. Neither is what the redial reads: the reclaim the
+        /// dropped attachment left owed survives the failed re-attach and is settled by the connect
+        /// bootstrap that finally lands one.
+        func testAReattachThatFailsOnAnOwnerlessSessionIsStillReclaimedAfterTheRedial() async throws {
+            let ownership = SessionOwnershipTracker()
+            let backend = StageTrackerTestBackend(transportFactory: {
+                OwnershipTrackingRequestTransport(ownership: ownership, takeoverGate: nil, failingAttachIndex: 2)
+            })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the open must attach and subscribe")
+            await waitUntil("the open's automatic takeover to win the session") { model.isOwner }
+            XCTAssertEqual(ownership.takeoverCount(), 1, "the open spends its one automatic takeover")
+
+            // The daemon's broadcast for the attachment this client holds, then the expiry that takes it.
+            await backend.fireFrame(ownership.state())
+            await backend.fireFrame(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T15:00:00Z"))
+
+            await waitUntil("the reported loss's reattach to fail") { ownership.attachCount() == 2 }
+            let didRedial = await backend.waitForSubscribeCount(2)
+            XCTAssertTrue(didRedial, "the failed reattach must hand recovery to the redial")
+            await waitUntil("the redial to attach again") { ownership.attachCount() == 3 }
+            await waitUntil("the ownerless session to be reclaimed") { model.isOwner }
+            XCTAssertEqual(ownership.takeoverCount(), 2, "the reclaim takes the ownerless session back once")
+            XCTAssertEqual(ownership.attachCount(), 3, "one failed reattach must produce one further attach, not a redial loop")
+        }
+
+        /// The expiry reaches the client twice when a foreground resume is in flight over it: the snapshot
+        /// that reports it, and the heartbeat behind it answered `notFound`. The second telling knows less
+        /// than the first — the confirmation the snapshot cleared is what said the attachment was the
+        /// owner's, and ownership has been cleared with it — so a reclaim already owed is never lowered by
+        /// it, or the recovery comes back a plain viewer of a session nothing owns.
+        func testAnExpirySnapshotAheadOfTheResumeHeartbeatKeepsTheOwnersReclaim() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let gate = ReclaimTakeoverGate()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalControl(let payload) = request.command else {
+                    if case .state = request.command {
+                        return Self.terminalStateResponse(
+                            Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:35Z"))
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                switch payload.action {
+                case .heartbeat:
+                    // Held until the expiry's own broadcast has been applied, which is the ordering this
+                    // finding is about: this answer is the second telling of the same expiry.
+                    await gate.markStarted()
+                    await gate.waitForRelease()
+                    return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound)
+                case .attach:
+                    guard let client = payload.client else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    let attachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:26:30Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]),
+                            emittedAt: "2026-06-04T14:26:30Z"))
+                case .takeover:
+                    guard let clientID = payload.clientID else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    let client = TerminalClient(
+                        id: clientID, kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:26:30Z")
+                    let attachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: clientID, mode: .owner, attachedAt: "2026-06-04T14:26:40Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]),
+                            emittedAt: "2026-06-04T14:26:40Z"))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            await gate.waitForStart()
+
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:20Z"),
+                isOutOfBand: false)
+            await gate.release()
+
+            await waitUntil("the ownerless session to be reclaimed") { model.isOwner }
+            try await Task.sleep(for: .milliseconds(250))
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 1, "the reclaim the expiry snapshot owed must survive the heartbeat that reports the same expiry")
+        }
+
+        /// The daemon applies a takeover when it answers it, so an acknowledged takeover is ownership this
+        /// client holds whether or not the stream's own broadcast of it ever arrived — and an outage that
+        /// outlasts the lease is exactly the case where it did not. The attachment the expiry then drops is
+        /// an owner's, not the viewer's the last stream snapshot saw, and only reading it that way brings
+        /// the ownership back rather than leaving the terminal ownerless.
+        func testAnAcknowledgedTakeoverTheStreamNeverConfirmedIsStillReclaimedAfterTheExpiry() async throws {
+            let ownership = SessionOwnershipTracker()
+            let gate = ReclaimTakeoverGate()
+            let backend = StageTrackerTestBackend(transportFactory: { OwnershipTrackingRequestTransport(ownership: ownership, takeoverGate: gate) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the open must attach and subscribe")
+            await gate.waitForStart()
+            guard let attached = ownership.lastAttachedClient() else { return XCTFail("the open must have attached") }
+
+            // The stream confirms the attachment as the viewer attachment it was made as, while the open's
+            // takeover is still in flight.
+            let viewerAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: attached.id, mode: .viewer, attachedAt: "2026-06-04T14:30:00Z")
+            await backend.fireFrame(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [attached], attachments: [viewerAttachment]),
+                    emittedAt: "2026-06-04T14:30:00Z"))
+            await gate.release()
+            await waitUntil("the acknowledged takeover to make this client the owner") { model.isOwner }
+
+            // The stream drops before the broadcast that would have confirmed the takeover, and the outage
+            // outlasts the lease, so the daemon drops the attachment and the ownership held through it.
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+            ownership.expireAttachment()
+            let didRedial = await backend.waitForSubscribeCount(2)
+            XCTAssertTrue(didRedial, "a dropped stream must redial")
+
+            // The fresh stream's first snapshot is the expiry: this client holds nothing.
+            await backend.fireFrame(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:40:00Z"))
+
+            await waitUntil("the reported loss to reattach") { ownership.attachCount() == 2 }
+            await waitUntil("the ownerless session to be reclaimed") { model.isOwner }
+            XCTAssertEqual(ownership.takeoverCount(), 2, "the recovery must take back the ownership the acknowledged takeover won")
+            XCTAssertEqual(ownership.attachCount(), 2, "the loss must send exactly one reattach")
+        }
+
+        /// The expiry can reach this client while its own takeover is still sending: the daemon takes the
+        /// ownership when it answers a takeover, and one command channel carries one round trip at a time,
+        /// so the answer queues behind the loss snapshot that arrives meanwhile. The attachment the lease
+        /// dropped was the one carrying the ownership the user asked for, so what it leaves owed is an
+        /// owner's reclaim. Read as a viewer's, the recovery attach — which re-attaches as a viewer and so
+        /// gives up the ownership the acknowledgement just won — settles with no takeover and leaves the
+        /// session owned by nobody and taking no input.
+        func testALossReportedWhileThisClientsTakeoverIsStillSendingIsReclaimedAsAnOwners() async throws {
+            let ownership = SessionOwnershipTracker()
+            let gate = ReclaimTakeoverGate()
+            let backend = StageTrackerTestBackend(transportFactory: { OwnershipTrackingRequestTransport(ownership: ownership, takeoverGate: gate) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the open must attach and subscribe")
+            await gate.waitForStart()
+            guard let attached = ownership.lastAttachedClient() else { return XCTFail("the open must have attached") }
+
+            // The stream confirms the attachment as the viewer attachment the open made it as, while this
+            // client's own takeover is still sending.
+            let viewerAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: attached.id, mode: .viewer, attachedAt: "2026-06-04T14:30:00Z")
+            await backend.fireFrame(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [attached], attachments: [viewerAttachment]),
+                    emittedAt: "2026-06-04T14:30:00Z"))
+
+            // The lease expires before the takeover is answered, so the loss reaches this client first.
+            ownership.expireAttachment()
+            await backend.fireFrame(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:31:00Z"))
+            try await Task.sleep(for: .milliseconds(150))
+
+            // The takeover is answered now: the daemon applied it, and the recovery attach the loss started
+            // runs behind it on the same channel, re-attaching as a viewer.
+            await gate.release()
+            await waitUntil("the reported loss to reattach") { ownership.attachCount() == 2 }
+            await waitUntil("the ownerless session to be reclaimed") { ownership.takeoverCount() == 2 }
+            await waitUntil("the reclaim to make this client the owner again") { model.isOwner }
+            XCTAssertEqual(ownership.attachCount(), 2, "the loss must send exactly one reattach")
+        }
+
+        /// The daemon's backlog can still name the attachment the lease dropped, and a heartbeat answered
+        /// `notFound` is exactly the moment such a payload arrives: the confirmation and the identity that
+        /// would have caught it are both cleared, and the re-attach that will name the replacement has not
+        /// been answered yet. Admitting it re-arms the confirmation for an attachment that is over, so the
+        /// expiry behind it in that backlog reads as a fresh loss and sends a second viewer attach — which
+        /// lands behind the reclaim's takeover and hands the session straight back, ownerless.
+        func testTheExpiredAttachmentsOwnSnapshotIsNotEvidenceWhileTheReattachIsUnanswered() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let attachGate = ReclaimTakeoverGate()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalControl(let payload) = request.command else {
+                    guard case .state = request.command else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    // What the resume reads once it has re-attached: the session the expiry left, owned by nobody.
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:27:00Z"))
+                }
+                switch payload.action {
+                case .heartbeat: return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound)
+                case .attach:
+                    guard let client = payload.client else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    // Held so the backlog below arrives while this attach is still unanswered.
+                    await attachGate.markStarted()
+                    await attachGate.waitForRelease()
+                    let attachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:26:50Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]),
+                            emittedAt: "2026-06-04T14:26:50Z"))
+                case .takeover:
+                    guard let clientID = payload.clientID else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    let client = TerminalClient(
+                        id: clientID, kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:26:50Z")
+                    let attachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: clientID, mode: .owner, attachedAt: "2026-06-04T14:27:10Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]),
+                            emittedAt: "2026-06-04T14:27:10Z"))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            let expiredClient = model.remoteClientForTesting
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            await attachGate.waitForStart()
+
+            // The daemon exported this before the expiry: it names the attachment the lease has since
+            // dropped, held as this session's owner.
+            let expiredAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: expiredClient.id, mode: .owner, attachedAt: "2026-06-04T14:20:00Z")
+            await model.applyLatestState(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [expiredClient], attachments: [expiredAttachment]),
+                    emittedAt: "2026-06-04T14:25:00Z"), isOutOfBand: false)
+            await attachGate.release()
+
+            // The recovery's own decision, made on the state it reads once it holds an attachment again:
+            // nothing owns the session the expiry left, so it is taken back. Read from the requests rather
+            // than from `isOwner`, which the backlog above would answer by itself.
+            await waitUntilAsync("the recovery to take the ownerless session back") { await recorder.countTerminalControlAction(.takeover) == 1 }
+            // The expiry's own broadcast, behind the backlog that named the attachment it ended.
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:28:00Z"),
+                isOutOfBand: false)
+            try await Task.sleep(for: .milliseconds(250))
+
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            XCTAssertEqual(attachCount, 1, "the expiry must not read as a second loss for the attachment that replaced the one it ended")
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 1, "and the recovery must make exactly one ownership decision")
+        }
+
+        /// A resume settles its cycle's ownership against the owner this client has actually seen, not
+        /// against whatever its own answer happened to carry. The daemon answers with the attachment
+        /// authority it has, and it can have none — `currentLiveWireAttachmentSnapshot` is nil when the
+        /// cache is empty and the reseeding read failed — so the payload names no owner while saying
+        /// nothing about who owns the session. Read as an ownerless session, that takes a live terminal
+        /// away from the device that owns it.
+        func testAResumeAnsweredWithNoAttachmentStateLeavesTheDeviceThatOwnsTheSessionAlone() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let macClient = TerminalClient(
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:25:00Z")
+            let macOwned = TerminalSessionAttachmentSnapshot(
+                clients: [macClient],
+                attachments: [
+                    TerminalAttachment(sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:25:00Z")
+                ])
+            let stateWithoutAttachments = GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-06-04T14:30:00Z",
+                sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: "terminal-session", servicePID: 100, childPID: 200, state: .running, updatedAt: "2026-06-04T14:30:00Z"),
+                attachmentSnapshot: nil, title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0)
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let payload) = request.command, payload.action == .heartbeat {
+                    return Self.terminalStateResponse(stateWithoutAttachments)
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            // The lease expires while the device is away and a Mac takes the session: the snapshot that
+            // reports the loss reaches this client before the resume runs, so the reclaim is owed and the
+            // owner is already visible in the state this client holds.
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: macOwned, emittedAt: "2026-06-04T14:29:00Z"), isOutOfBand: false)
+            model.resumeAfterBackgrounding()
+
+            let didHeartbeat = try await waitForTerminalControlAction(.heartbeat, count: 1, recorder: recorder)
+            XCTAssertTrue(didHeartbeat, "the resume must evaluate the first post-background state")
+            try await Task.sleep(for: .milliseconds(250))
+
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 0, "an answer that carries no attachment state must not settle the reclaim as an ownerless session")
+            XCTAssertFalse(model.isOwner, "the device whose lease expired comes back a viewer of the session the Mac owns")
+            XCTAssertTrue(model.showsTakeOverAction, "the user keeps the Take Over action for a session another device owns")
+        }
+
+        /// The ownership an acknowledged takeover won is held through an attachment, and a redial gives up
+        /// an attachment no snapshot confirmed — so the redial gives that ownership up too, exactly as an
+        /// expiry does. What it leaves owed is therefore the same reclaim, settled on the state the connect
+        /// bootstrap reads under the ownerless-only rule. Handing the ordinary one-shot back instead would
+        /// make the bootstrap preempt the device that took the session during the outage.
+        func testARedialThatDiscardsAnUnconfirmedTakeoverLeavesTheDeviceThatTookTheSessionAlone() async throws {
+            let ownership = SessionOwnershipTracker()
+            let backend = StageTrackerTestBackend(transportFactory: { OwnershipTrackingRequestTransport(ownership: ownership, takeoverGate: nil) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the open must attach and subscribe")
+            await waitUntil("the open's automatic takeover to win the session") { model.isOwner }
+            XCTAssertEqual(ownership.takeoverCount(), 1, "the open spends its one automatic takeover")
+
+            // No snapshot ever confirmed the attachment that ownership is held through: the stream drops,
+            // the outage outlasts the lease, and another device takes the session while this one is away.
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+            ownership.expireAttachment()
+            ownership.handOverToOtherClient()
+            let didRedial = await backend.waitForSubscribeCount(2)
+            XCTAssertTrue(didRedial, "a dropped stream must redial")
+
+            await waitUntil("the redial to attach again") { ownership.attachCount() == 2 }
+            await waitUntil("the bootstrap to settle ownership") { model.showsTakeOverAction }
+            try await Task.sleep(for: .milliseconds(250))
+            XCTAssertEqual(
+                ownership.takeoverCount(), 1, "a device whose attachment no snapshot confirmed must not preempt the client that owns the session now")
+            XCTAssertFalse(model.isOwner, "it comes back a viewer of the session the other device owns")
+            XCTAssertTrue(model.showsTakeOverAction, "the user keeps the Take Over action")
+        }
+
+        /// A resume that learns its attachment is gone owes the session an ownership decision, and it is
+        /// the only thing allowed to make it while the evaluation is pending. So a cycle that ends with no
+        /// state read at all -- the re-attach worked, the state read behind it did not -- must not simply
+        /// return: nothing else settles a reclaim on an idle session, since settling one takes a payload
+        /// and an ownerless terminal nobody is typing at produces none, and the owner would stay a viewer
+        /// of a session nothing owns until the next foreground return.
+        func testAResumeWhoseStateReadFailsStillSettlesItsReclaimThroughTheRedial() async throws {
+            let ownership = SessionOwnershipTracker()
+            let backend = StageTrackerTestBackend(transportFactory: {
+                OwnershipTrackingRequestTransport(ownership: ownership, takeoverGate: nil, expiresLease: true)
+            })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the open must attach and subscribe")
+            await waitUntil("the open's automatic takeover to win the session") { model.isOwner }
+            // The stream publishes the owner attachment the takeover won, so the loss below is an owner's.
+            await backend.fireFrame(ownership.state())
+
+            // The lease expires while the device is away, which the resume's heartbeat is told outright.
+            model.prepareForBackgrounding()
+            ownership.expireAttachment()
+            ownership.failNextStateRead()
+            model.resumeAfterBackgrounding()
+
+            // The re-attach lands, the state read behind it does not, and the redial that follows is what
+            // carries this cycle's unsettled reclaim to a state that can settle it.
+            await waitUntil("the resume to re-attach") { ownership.attachCount() == 2 }
+            let didRedial = await backend.waitForSubscribeCount(2)
+            XCTAssertTrue(didRedial, "an evaluation that read nothing must hand its unsettled reclaim to the redial")
+            await waitUntil("the redial's bootstrap read to reclaim the ownerless session") { ownership.takeoverCount() == 2 }
+            await waitUntil("the reclaim to make this client the owner again") { model.isOwner }
+        }
+
+        /// A reclaim is settled by whichever path gets a state to settle it on -- the snapshot-driven
+        /// recovery, the foreground resume, or the connect bootstrap -- and every one of them settles it by
+        /// starting the same takeover. That takeover can fail the way any other request does, and a
+        /// transient failure never reached the daemon: the session is still ownerless and the reclaim still
+        /// owed. So the retry belongs to the takeover rather than to the path that started it, or a resume
+        /// comes back a viewer of a session nothing owns, with its input refused, until the user takes it
+        /// over by hand.
+        func testAResumeWhoseReclaimTakeoverTimesOutRetriesItThroughTheRedial() async throws {
+            let ownership = SessionOwnershipTracker()
+            let backend = StageTrackerTestBackend(transportFactory: {
+                OwnershipTrackingRequestTransport(ownership: ownership, takeoverGate: nil, expiresLease: true, failingTakeoverIndex: 1)
+            })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+
+            // The heartbeat is answered `notFound`, the re-attach behind it lands, and the state read
+            // behind that finds the session ownerless -- so the resume settles its reclaim by taking the
+            // session back, and that takeover times out on its way to the daemon.
+            await waitUntil("the resume to re-attach after its heartbeat was refused") { ownership.attachCount() == 1 }
+            await waitUntil("the resume's reclaim to send its takeover") { ownership.takeoverAttemptCount() == 1 }
+            let didRedial = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didRedial, "a reclaim takeover that never reached the daemon must hand the retry to the redial")
+            await waitUntil("the redial to attach again") { ownership.attachCount() == 2 }
+            await waitUntil("the redial's bootstrap read to reclaim the ownerless session") { model.isOwner }
+            XCTAssertEqual(ownership.takeoverAttemptCount(), 2, "the reclaim must be retried exactly once, not abandoned and not looped")
+            XCTAssertEqual(ownership.takeoverCount(), 1, "only the retry reaches the daemon")
+            XCTAssertEqual(ownership.attachCount(), 2, "one redial, not a redial loop")
+        }
+
+        /// A control carries the session as it stands after the daemon applied it, and a re-attach sent to
+        /// recover a dropped attachment is answered in a window another device can take the session in.
+        /// That acknowledgement is the newest thing this client knows about ownership, so the reclaim
+        /// behind it is settled on it; settled on the state the loss left -- an ownerless session, since
+        /// the expiry cleared the ownership with the attachment -- the recovery sends its unconditional
+        /// takeover straight through the device that owns the session now.
+        func testAReattachAcknowledgedAfterAnotherDeviceTookTheSessionLeavesThatDeviceAlone() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let macClient = TerminalClient(
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:26:30Z")
+            let macOwnership = TerminalAttachment(
+                sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:26:30Z")
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalControl(let payload) = request.command, payload.action == .attach, let client = payload.client else {
+                    guard case .state = request.command else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwnership]),
+                            emittedAt: "2026-06-04T14:26:45Z"))
+                }
+                // The Mac took the session over while this attach was in flight, so the state the daemon
+                // carries back on the acknowledgement already names that device the owner.
+                let attachment = TerminalAttachment(
+                    sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:26:40Z")
+                return Self.terminalStateResponse(
+                    Self.runningTerminalState(
+                        attachmentSnapshot: TerminalSessionAttachmentSnapshot(
+                            clients: [macClient, client], attachments: [macOwnership, attachment]), emittedAt: "2026-06-04T14:26:40Z"))
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            // The expiry's broadcast: the owner attachment this client held is gone, and the ownership it
+            // held is gone with it, which is the state the recovery would otherwise decide on.
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:20Z"),
+                isOutOfBand: false)
+
+            await waitUntilAsync("the loss to re-attach") { await recorder.countTerminalControlAction(.attach) == 1 }
+            await waitUntil("the reclaim to settle against the device that owns the session") { model.showsTakeOverAction }
+            try await Task.sleep(for: .milliseconds(250))
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 0, "a recovery must never displace the device that took the session while its re-attach was in flight")
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            XCTAssertEqual(attachCount, 1, "the loss must send exactly one re-attach")
+            XCTAssertFalse(model.isOwner, "the expired owner comes back a viewer of the session the Mac owns")
+            XCTAssertTrue(model.showsTakeOverAction, "the user keeps the Take Over action to decide for themselves")
+        }
+
+        /// An acknowledgement that names no attachment leaves this client unable to recognize its own
+        /// attachment in any snapshot, and nothing on the stream can answer that: a subscription opened
+        /// before the attach keeps delivering payloads that may predate it. The `.state` read on the same
+        /// command channel can, since the daemon orders it after the attach and it carries the snapshot
+        /// that names this client's `connectedAt`. Unresolved, the confirmation never arms and the next
+        /// expiry is read as nothing at all, leaving the viewer attached to nothing with its input refused.
+        func testAnAcknowledgementWithoutStateIsNamedByTheReadBehindIt() async throws {
+            let ownership = SessionOwnershipTracker()
+            let backend = StageTrackerTestBackend(transportFactory: {
+                OwnershipTrackingRequestTransport(ownership: ownership, takeoverGate: nil, unnamedAttachAcknowledgement: .empty)
+            })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the open must attach and subscribe")
+            await waitUntil("the open's automatic takeover to win the session") { model.isOwner }
+
+            // The daemon's own broadcast for the attachment this client holds. It names the attachment by
+            // the `connectedAt` only the read behind the acknowledgement could have told this model about.
+            await backend.fireFrame(ownership.state())
+            // The sweep takes that attachment, and this payload is the daemon saying so.
+            ownership.expireAttachment()
+            await backend.fireFrame(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T15:00:00Z"))
+
+            await waitUntil("the expiry to be read as the loss it is") { ownership.attachCount() == 2 }
+            await waitUntil("the reclaim to make this client the owner again") { model.isOwner }
+            XCTAssertEqual(ownership.attachCount(), 2, "the loss must send exactly one re-attach")
+        }
+
+        /// The daemon can also answer an attach with the session and no attachment snapshot at all, which
+        /// its own attachment cache is allowed to leave it unable to report. That answer names the
+        /// attachment no better than an empty one does, so what decides the naming read is the unnamed
+        /// identity rather than whether an answer arrived: read the other way, this client holds an
+        /// attachment it can never recognize, and the expiry that ends it reads as nothing at all.
+        func testAnAcknowledgementCarryingNoAttachmentSnapshotIsNamedByTheReadBehindIt() async throws {
+            let ownership = SessionOwnershipTracker()
+            let backend = StageTrackerTestBackend(transportFactory: {
+                OwnershipTrackingRequestTransport(
+                    ownership: ownership, takeoverGate: nil, unnamedAttachAcknowledgement: .sessionWithoutAttachmentSnapshot)
+            })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the open must attach and subscribe")
+            await waitUntil("the open's automatic takeover to win the session") { model.isOwner }
+
+            // The daemon's own broadcast for the attachment this client holds, named by the `connectedAt`
+            // only the read behind that acknowledgement could have told this model about.
+            await backend.fireFrame(ownership.state())
+            // The sweep takes that attachment, and this payload is the daemon saying so.
+            ownership.expireAttachment()
+            await backend.fireFrame(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T15:00:00Z"))
+
+            await waitUntil("the expiry to be read as the loss it is") { ownership.attachCount() == 2 }
+            await waitUntil("the reclaim to make this client the owner again") { model.isOwner }
+            XCTAssertEqual(ownership.attachCount(), 2, "the loss must send exactly one re-attach")
+        }
+
+        /// The read that names the attachment is a request like any other and can fail. Nothing local can
+        /// finish the attach then, so recovery goes to the model's one redial path, whose bootstrap attaches
+        /// again -- and that acknowledgement is the ordinary one, carrying the state that names it.
+        func testAnAcknowledgementWhoseNamingReadFailsRecoversThroughOnePacedRedial() async throws {
+            let ownership = SessionOwnershipTracker()
+            let backend = StageTrackerTestBackend(transportFactory: {
+                OwnershipTrackingRequestTransport(ownership: ownership, takeoverGate: nil, unnamedAttachAcknowledgement: .empty)
+            })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            // The first `.state` read of the run is the one the acknowledgement above owes its name to.
+            ownership.failNextStateRead()
+            model.start()
+
+            await waitUntil("the open's attach to be acknowledged without a name") { ownership.attachCount() == 1 }
+            await waitUntil("the failed read to arm the redial") { model.lastScheduledReconnectDelayForTesting != nil }
+            if let redialDelay = model.lastScheduledReconnectDelayForTesting {
+                XCTAssertGreaterThan(redialDelay, .zero, "the retry must be paced by the reconnect backoff")
+            }
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the redial must open the subscription the failed attach never reached")
+            await waitUntil("the redial to attach again") { ownership.attachCount() == 2 }
+            await waitUntil("the bootstrap to reclaim the ownerless session") { model.isOwner }
+            XCTAssertEqual(ownership.attachCount(), 2, "one failed read must produce one further attach, not a redial loop")
+        }
+
+        /// An attach the daemon acknowledges without a session state is an ordinary answer, not a failure:
+        /// it loads the post-control state with `try?`. The attachment is real, so the acknowledgement is
+        /// not the same as never having attached -- read that way, a snapshot naming this client by id
+        /// alone is admitted under the pre-first-attach rule, and the daemon's pre-expiry backlog is
+        /// exactly such a snapshot. Admitting it re-arms the confirmation for the attachment that just
+        /// ended, so the expiry behind it reads as a second loss and sends a second viewer attach, which
+        /// lands behind the reclaim's takeover and hands the session back, ownerless. The window is the
+        /// read that names the attachment, held open here, and it is silent about this client throughout.
+        func testAnAcknowledgementThatNamesNothingStillRefusesTheEndedAttachmentsOwnSnapshot() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let namingReadGate = ReclaimTakeoverGate()
+            let attaches = AttachAcknowledgementRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalControl(let payload) = request.command else {
+                    guard case .state = request.command else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    // The read that names the attachment the acknowledgement left unnamed, held so the
+                    // backlog below arrives while this client still cannot recognize its own attachment.
+                    // It reports the session the expiry left: this client attached again, owned by nobody.
+                    await namingReadGate.markStarted()
+                    await namingReadGate.waitForRelease()
+                    guard let attached = attaches.lastClient() else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    // The attachment the attach above made, under the `connectedAt` the daemon stored as
+                    // sent -- the name the acknowledgement withheld.
+                    let named = TerminalClient(id: attached.id, kind: attached.kind, identity: attached.identity, connectedAt: "2026-06-04T14:26:35Z")
+                    let attachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: named.id, mode: .viewer, attachedAt: "2026-06-04T14:26:35Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [named], attachments: [attachment]),
+                            emittedAt: "2026-06-04T14:26:35Z"))
+                }
+                switch payload.action {
+                case .heartbeat: return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound)
+                // The acknowledgement the daemon gives when its own load of the post-control state came
+                // back empty: the attach landed, and nothing in the answer names the attachment it made.
+                case .attach:
+                    if let client = payload.client { attaches.record(client) }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case .takeover:
+                    guard let clientID = payload.clientID else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                    let client = TerminalClient(
+                        id: clientID, kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:26:35Z")
+                    let attachment = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: clientID, mode: .owner, attachedAt: "2026-06-04T14:26:40Z")
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]),
+                            emittedAt: "2026-06-04T14:26:40Z"))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            let expiredClient = model.remoteClientForTesting
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+
+            // The heartbeat is refused and the re-attach is acknowledged with nothing, so the attachment is
+            // real and unnamed while the read that will name it is still in flight.
+            await namingReadGate.waitForStart()
+
+            // The daemon's own export for the attachment the lease dropped, delivered late: it names this
+            // client, and the client id is all it has in common with the attachment that replaced it.
+            let endedAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: expiredClient.id, mode: .owner, attachedAt: "2026-06-04T14:20:00Z")
+            await model.applyLatestState(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [expiredClient], attachments: [endedAttachment]),
+                    emittedAt: "2026-06-04T14:26:30Z"), isOutOfBand: false)
+            await namingReadGate.release()
+
+            await waitUntilAsync("the recovery to take the ownerless session back") { await recorder.countTerminalControlAction(.takeover) == 1 }
+            // The expiry's own broadcast, behind the backlog that named the attachment it ended.
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:27:00Z"),
+                isOutOfBand: false)
+            try await Task.sleep(for: .milliseconds(250))
+
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            XCTAssertEqual(
+                attachCount, 1, "an attachment the daemon acknowledged without naming must not be re-armed by a snapshot matching the id alone")
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 1, "and the recovery must make exactly one ownership decision")
+        }
+
+        /// The daemon applies nothing when a re-attach asks for the mode the attachment already has, so a
+        /// redial made while the lease is already overdue renews nothing and the stale-client sweep can
+        /// still take the attachment away between the acknowledgement and the subscription's initial state.
+        /// That initial state is the one payload a snapshot predating the attach cannot be — the daemon
+        /// builds it on the engine actor that applied the attach — so its silence about this client is the
+        /// loss itself, confirmation or no confirmation. Read any other way, the client stays attached to
+        /// nothing with its input refused.
+        func testASweepInsideTheRedialsAttachGapIsReadAsALossFromTheSubscriptionsFirstPayload() async throws {
+            let ownership = SessionOwnershipTracker()
+            let backend = StageTrackerTestBackend(transportFactory: { OwnershipTrackingRequestTransport(ownership: ownership, takeoverGate: nil) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the open must attach and subscribe")
+            await waitUntil("the open's automatic takeover to win the session") { model.isOwner }
+
+            // Nothing on the stream ever confirmed this attachment, so the redial gives it up and attaches
+            // again — the re-attach the daemon answers without touching the lease it is racing.
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+            let didRedial = await backend.waitForSubscribeCount(2)
+            XCTAssertTrue(didRedial, "a dropped stream must redial")
+            await waitUntil("the redial to attach again") { ownership.attachCount() == 2 }
+            await waitUntil("the redial's bootstrap read to settle the reclaim") { ownership.takeoverCount() == 2 }
+
+            // The sweep reaches the overdue lease inside the gap between that acknowledgement and the new
+            // subscription's initial state, which therefore carries no row for this client.
+            ownership.expireAttachment()
+            await backend.fireFrame(ownership.state())
+
+            await waitUntil("the initial state's silence to be read as the loss it is") { ownership.attachCount() == 3 }
+            await waitUntil("the reclaim to make this client the owner again") { model.isOwner }
+            XCTAssertEqual(ownership.takeoverCount(), 3, "the ownership the dropped attachment held is taken back once")
+        }
+
+        /// That initial state is not guaranteed an apply of its own: the pipeline hands the main actor a
+        /// whole queued segment at once, and a newer output carrying a full frame absorbs whatever is still
+        /// pending ahead of it, so the session's next output can arrive before the main actor has applied
+        /// the subscription's first payload and the two land as one. The surviving apply still has to be
+        /// read as the first payload -- its own snapshot is the newer one and says the same thing -- or the
+        /// sweep goes unreported exactly when the session is busy enough to produce a frame.
+        func testAFirstPayloadCollapsedIntoTheOutputBehindItIsStillReadAsTheLoss() async throws {
+            let ownership = SessionOwnershipTracker()
+            let backend = StageTrackerTestBackend(transportFactory: { OwnershipTrackingRequestTransport(ownership: ownership, takeoverGate: nil) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the open must attach and subscribe")
+            await waitUntil("the open's automatic takeover to win the session") { model.isOwner }
+
+            // The same overdue-lease redial as above: the re-attach renews nothing, and the sweep lands in
+            // the gap between its acknowledgement and the new subscription's initial state.
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+            let didRedial = await backend.waitForSubscribeCount(2)
+            XCTAssertTrue(didRedial, "a dropped stream must redial")
+            await waitUntil("the redial to attach again") { ownership.attachCount() == 2 }
+            await waitUntil("the redial's bootstrap read to settle the reclaim") { ownership.takeoverCount() == 2 }
+            // Waited for so the takeover's own answer is applied before the payloads below are submitted:
+            // it is stamped when the daemon builds it, and a test payload stamped ahead of it would be
+            // refused as stale metadata rather than read at all.
+            await waitUntil("the reclaim's takeover to be applied") { model.isOwner }
+            ownership.expireAttachment()
+
+            // Both payloads are submitted without giving the main actor up in between, and it is then held
+            // long enough for the reduce loop to queue both: the apply that follows is the one the full
+            // frame collapsed the initial payload into. Both are stamped past everything this daemon
+            // emits, so what they report is read rather than refused for being older than the last apply.
+            model.submitLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:59:00Z"),
+                isOutOfBand: false, isFirstSubscriptionPayload: true)
+            model.submitLatestState(
+                try Self.framedState(
+                    text: "busy", sessionRevision: 5, ownerEpoch: 1, emittedAt: "2026-06-04T15:00:00Z",
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot()), isOutOfBand: false)
+            Thread.sleep(forTimeInterval: 0.2)
+
+            await waitUntil("the collapsed-into apply to be read as the loss it carries") { ownership.attachCount() == 3 }
+            await waitUntil("the reclaim to make this client the owner again") { model.isOwner }
+            XCTAssertEqual(ownership.takeoverCount(), 3, "the ownership the dropped attachment held is taken back once")
+        }
+
+        /// The payload that reports a loss clears the attachment fact with it, so the reclaim it records
+        /// cannot be settled until the re-attach behind it lands -- and the ordinary automatic takeover
+        /// runs off that same payload. A session still starting when this viewer opened it leaves the
+        /// open's one takeover unspent for exactly that moment, so the ordinary attempt would send it for a
+        /// client the daemon holds no attachment row for: refused outright, or landing behind the re-attach
+        /// and taking the session from the device that owns it, which a device recovering from a dropped
+        /// attachment may never do. The reclaim owns the decision from the moment it is recorded, settled
+        /// or not.
+        func testALossBeforeTheOpensTakeoverIsSpentNeverPreemptsTheOwnerWhileTheReattachIsInFlight() async throws {
+            let tracker = SweptViewerTracker()
+            let reattachGate = ReclaimTakeoverGate()
+            let backend = StageTrackerTestBackend(transportFactory: { SweptViewerRequestTransport(tracker: tracker, reattachGate: reattachGate) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the open must attach and subscribe")
+            await waitUntil("the open's attach to be acknowledged") { tracker.attachCount() == 1 }
+
+            // The subscription's initial state: the session is running now, the Mac owns it, and the sweep
+            // has already taken this client's row -- the loss, on the first payload that could report one.
+            await backend.fireFrame(SweptViewerTracker.state(client: nil, state: .running, emittedAt: "2026-06-04T14:26:00Z"))
+
+            await reattachGate.waitForStart()
+            try await Task.sleep(for: .milliseconds(250))
+            XCTAssertEqual(
+                tracker.takeoverCount(), 0, "no takeover may be sent for a client whose attachment is gone and whose re-attach is still in flight")
+            XCTAssertFalse(model.isOwner, "the session belongs to the Mac throughout")
+
+            await reattachGate.release()
+            await waitUntil("the re-attach to land and the reclaim to settle") { model.showsTakeOverAction }
+            try await Task.sleep(for: .milliseconds(250))
+            XCTAssertEqual(tracker.takeoverCount(), 0, "a viewer's reclaim comes back a viewer of the session the Mac owns")
+            XCTAssertEqual(tracker.attachCount(), 2, "the loss must send exactly one re-attach")
+            XCTAssertFalse(model.isOwner, "the device that owns the session keeps it")
+            XCTAssertTrue(model.showsTakeOverAction, "the user keeps the Take Over action to decide for themselves")
         }
 
         func testForegroundResumePreemptsAnotherActiveOwnerOnce() async throws {
@@ -5308,24 +7509,21 @@
             let bootstrapFailed = await backend.waitForStateReadCount(2, timeout: .seconds(5))
             XCTAssertTrue(bootstrapFailed, "the reconnect's own bootstrap read must have been attempted (and failed) by now")
 
-            // The bootstrap read is done and answered nothing; nothing has reattached from it, since
-            // `hasAttachedToSession` reads exactly what it did before this connect until some snapshot
-            // says otherwise.
-            let attachCountAfterFailedBootstrap = await backend.currentAttachCount()
-            XCTAssertEqual(attachCountAfterFailedBootstrap, 1, "a failed bootstrap read alone must not have triggered anything yet")
-
-            // The subscription's own stream now delivers the empty-snapshot payload the bootstrap read
-            // never got to answer with — the reconnect's other, equally authoritative source for the same
-            // fact.
-            let emptySnapshotFrame = TerminalViewerModelTests.runningTerminalState(
-                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:24:00Z")
-            await backend.fireFrame(emptySnapshotFrame)
-
+            // The subscription this reconnect opens delivers the daemon's initial export, which carries the
+            // empty snapshot the bootstrap read never got to answer with: the reconnect's other, equally
+            // authoritative source for the same fact.
             let reattached = await backend.waitForAttachCount(2, timeout: .seconds(5))
             XCTAssertTrue(reattached, "the stream's own payload must trigger the reattach the failed bootstrap read could not")
 
             let order = await backend.requestOrderSnapshot()
             XCTAssertEqual(order.filter { $0 == "attach" }.count, 2, "exactly the first connect's attach and this recovering one")
+            // What proves the read did not trigger it: the recovering attach is sent after this reconnect's
+            // own subscribe, so the payload it reacted to came off the stream. A reattach driven by the
+            // bootstrap read would have been sent before the subscribe, the way the first connect's
+            // pre-subscribe attach is.
+            XCTAssertGreaterThan(
+                order.lastIndex(of: "attach") ?? -1, order.lastIndex(of: "subscribe") ?? -1,
+                "a failed bootstrap read must not be what triggered the reattach")
             let finalSnapshot = await backend.currentAttachmentSnapshot()
             XCTAssertTrue(
                 finalSnapshot.attachments.contains { $0.clientID == client.id && $0.detachedAt == nil },
@@ -5334,6 +7532,58 @@
             XCTAssertEqual(takeoverCount, 0, "a former viewer recovering this way must not take over")
             let mode = await backend.lastAttachedMode()
             XCTAssertEqual(mode, .viewer, "the recovering attach must stay a viewer attach")
+        }
+
+        /// The bootstrap read answers for the reconnect on its own, without waiting on the stream. A quiet
+        /// session's subscription can be up for a long time before it exports anything, and a client with
+        /// no attachment has every input and takeover it sends refused for as long as that takes, so the
+        /// read this connect already makes is what has to settle it. A daemon restart is the shape that
+        /// takes: its start clears every client and attachment row, so the snapshot the read answers with
+        /// names nobody at all, this client included, and no owner either.
+        func testAReconnectReattachesFromItsBootstrapReadWhenTheStreamExportsNothing() async throws {
+            let backend = RestartedDaemonBackend(attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.connectionBannerGraceSecondsForTesting = 30
+            model.prepareForBackgrounding()
+
+            let client = model.remoteClientForTesting
+            let viewerAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:23:30Z")
+            await backend.setAttachmentSnapshot(TerminalSessionAttachmentSnapshot(clients: [client], attachments: [viewerAttachment]))
+
+            model.start()
+            _ = await backend.waitForSubscribeCount(1)
+            _ = await backend.waitForAttachCount(1)
+            await waitUntil("the first connect's attachment to be confirmed on the stream") {
+                model.attachmentSnapshot.attachments.contains { $0.clientID == client.id && $0.detachedAt == nil }
+            }
+
+            // The daemon restarts: every row is gone, so its next answer names nobody attached and no
+            // owner. The subscription this reconnect opens stays silent, leaving the bootstrap read as the
+            // only thing that can report it.
+            await backend.setAttachmentSnapshot(TerminalSessionAttachmentSnapshot())
+            await backend.setSuppressNextInitialExport()
+            await backend.reportDisconnect(POSIXError(.ECONNRESET))
+
+            let resubscribed = await backend.waitForSubscribeCount(2, timeout: .seconds(5))
+            XCTAssertTrue(resubscribed, "a reset stream must reconnect")
+            let reattached = await backend.waitForAttachCount(2, timeout: .seconds(5))
+            XCTAssertTrue(reattached, "the bootstrap read's empty, ownerless snapshot must re-attach this client on its own")
+
+            let order = await backend.requestOrderSnapshot()
+            XCTAssertEqual(order.filter { $0 == "attach" }.count, 2, "exactly the first connect's attach and this recovering one")
+            let mode = await backend.lastAttachedMode()
+            XCTAssertEqual(mode, .viewer, "the recovering attach must stay a viewer attach")
+            let finalSnapshot = await backend.currentAttachmentSnapshot()
+            XCTAssertTrue(
+                finalSnapshot.attachments.contains { $0.clientID == client.id && $0.detachedAt == nil },
+                "the recovering attach must register the client")
+            let takeoverCount = await backend.currentTakeoverCount()
+            XCTAssertEqual(takeoverCount, 0, "a former viewer recovering this way must not take over")
         }
 
         /// codex P1 (round 6): `lifecycle` and `clientID` alone do not tell a reconnect's own settling
@@ -5549,6 +7799,7 @@
 
         private struct StalledStreamRequestTransport: SpacesDeviceAPIRequestTransport {
             func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                if let acknowledgement = TerminalViewerModelTests.attachAcknowledgement(for: request) { return acknowledgement }
                 // The reconnect reads state before it resubscribes, and a read that answers `ok` without
                 // terminal state is itself an error the viewer reports — so answer it the way the daemon
                 // would, leaving the stall as the only thing under test.
@@ -5609,6 +7860,10 @@
             /// exactly like the read's own fixed timeout expiring for real — reproducing that outcome
             /// without a test actually waiting one out.
             private var failNextStateRead = false
+            /// One-shot switch: when set, the next subscription opens without delivering the daemon's
+            /// initial export, the way a stream that is up but has not exported yet looks from the client.
+            /// Clears itself the moment it is consumed, so only that one subscription stays silent.
+            private var suppressNextInitialExport = false
 
             init(attachmentSnapshot: TerminalSessionAttachmentSnapshot) { self.attachmentSnapshot = attachmentSnapshot }
 
@@ -5626,17 +7881,41 @@
             private func recordSubscribe(
                 onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
                 onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
-            ) {
+            ) async {
                 subscribeCount += 1
                 requestOrder.append("subscribe")
                 openedStreamEventHandlers.append(onEvent)
                 self.onDisconnect = onDisconnect
+                // Every real subscription opens with the daemon's initial export of the session, and that
+                // payload is the only thing that can confirm this client's attachment: a `.state` read
+                // reports a loss but never confirms one. Without it the model treats the attachment as one
+                // no stream ever confirmed and gives it up on the next redial.
+                guard !suppressNextInitialExport else {
+                    suppressNextInitialExport = false
+                    return
+                }
+                await deliverCurrentState(to: onEvent)
+            }
+
+            /// Publishes the session as it stands on the live stream, which is what a real daemon does after
+            /// every attachment change and before it answers the control request that made it.
+            private func broadcastCurrentState() async {
+                guard let handler = openedStreamEventHandlers.last else { return }
+                await deliverCurrentState(to: handler)
+            }
+
+            private func deliverCurrentState(to handler: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void) async {
+                sequence += 1
+                let payload = TerminalViewerModelTests.runningTerminalState(
+                    attachmentSnapshot: attachmentSnapshot, emittedAt: Self.emittedAt(sequence))
+                await MainActor.run { handler(payload) }
             }
 
             func setAttachmentSnapshot(_ snapshot: TerminalSessionAttachmentSnapshot) { attachmentSnapshot = snapshot }
 
             func setFailNextAttach(_ value: Bool = true) { failNextAttach = value }
             func setFailNextStateRead(_ value: Bool = true) { failNextStateRead = value }
+            func setSuppressNextInitialExport(_ value: Bool = true) { suppressNextInitialExport = value }
 
             func reportDisconnect(_ error: any Error) async {
                 let handler = onDisconnect
@@ -5682,7 +7961,11 @@
                         attachments.append(attachment)
                         attachmentSnapshot = TerminalSessionAttachmentSnapshot(clients: clients, attachments: attachments)
                     }
-                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                    // The daemon broadcasts the new attachment to its subscribers before it loads the state
+                    // it answers the attach with, and answers with that state rather than a bare `ok`.
+                    await broadcastCurrentState()
+                    return TerminalViewerModelTests.terminalStateResponse(
+                        TerminalViewerModelTests.runningTerminalState(attachmentSnapshot: attachmentSnapshot, emittedAt: Self.emittedAt(sequence)))
                 case .terminalControl(let payload) where payload.action == .takeover:
                     // A real daemon has no row for a client that has never attached (or whose row a
                     // restart wiped), so it cannot promote one to owner. Rejecting here is what makes the
@@ -5702,6 +7985,7 @@
                         sessionID: "terminal-session", clientID: owningClient.id, mode: .owner, attachedAt: Self.emittedAt(sequence))
                     let ownerSnapshot = TerminalSessionAttachmentSnapshot(clients: [owningClient], attachments: [ownerAttachment])
                     attachmentSnapshot = ownerSnapshot
+                    await broadcastCurrentState()
                     return TerminalViewerModelTests.terminalStateResponse(
                         TerminalViewerModelTests.runningTerminalState(attachmentSnapshot: ownerSnapshot, emittedAt: Self.emittedAt(sequence)))
                 default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
@@ -5765,6 +8049,763 @@
             func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse { try await backend.send(request) }
 
             func close() async {}
+        }
+
+        /// Serves the automatic-reattach path with no real network: the first attach parks until the test
+        /// releases it and then fails the way a command-channel connection failure does, every later
+        /// request answers the way the daemon would, and every subscription is a handle that delivers
+        /// nothing. That leaves the redial a failed reattach hands recovery to as the only thing moving,
+        /// countable as one subscribe and one further attach.
+        private actor LostAttachmentRedialBackend: SpacesDeviceAPIBackend {
+            private let requestTransport = LostAttachmentRedialTransport()
+            private var subscribes = 0
+
+            nonisolated func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { requestTransport }
+
+            nonisolated func openSessionStream(
+                request: SpacesDeviceAPIRequest, initialEventTimeout: Duration,
+                onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
+            ) async throws -> SpacesDeviceAPIStreamHandle {
+                await recordSubscribe()
+                return SpacesDeviceAPIStreamHandle {}
+            }
+
+            nonisolated func attachModes() -> [TerminalAttachmentMode?] { requestTransport.attachModes() }
+            nonisolated func releaseHeldAttach() { requestTransport.releaseHeldAttach() }
+            func subscribeCount() -> Int { subscribes }
+
+            /// Polls rather than parking a continuation, so an attach that never happens fails the
+            /// assertion in the test instead of hanging the run.
+            func waitForAttachCount(_ count: Int, timeout: Duration = .seconds(5)) async -> Bool {
+                let deadline = ContinuousClock().now + timeout
+                while ContinuousClock().now < deadline {
+                    if requestTransport.attachModes().count >= count { return true }
+                    try? await Task.sleep(for: .milliseconds(5))
+                }
+                return requestTransport.attachModes().count >= count
+            }
+
+            func waitForSubscribeCount(_ count: Int, timeout: Duration = .seconds(5)) async -> Bool {
+                let deadline = ContinuousClock().now + timeout
+                while ContinuousClock().now < deadline {
+                    if subscribes >= count { return true }
+                    try? await Task.sleep(for: .milliseconds(5))
+                }
+                return subscribes >= count
+            }
+
+            private func recordSubscribe() { subscribes += 1 }
+        }
+
+        /// Holds the reclaim's takeover inside the request handler until the test releases it, so a payload
+        /// can be delivered while that takeover is genuinely in flight rather than raced against it.
+        private actor ReclaimTakeoverGate {
+            private var didStart = false
+            private var isReleased = false
+            private var startWaiters: [CheckedContinuation<Void, Never>] = []
+            private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+            func markStarted() {
+                didStart = true
+                let waiters = startWaiters
+                startWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+
+            func waitForStart() async {
+                guard !didStart else { return }
+                await withCheckedContinuation { continuation in startWaiters.append(continuation) }
+            }
+
+            func waitForRelease() async {
+                guard !isReleased else { return }
+                await withCheckedContinuation { continuation in releaseWaiters.append(continuation) }
+            }
+
+            func release() {
+                isReleased = true
+                let waiters = releaseWaiters
+                releaseWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+        }
+
+        /// The daemon a lease-expired owner recovers against: another client owns the session throughout,
+        /// and every heartbeat is answered as a live lease, which is what the recovery's own attach makes
+        /// true (and stays true when that attach's answer is lost rather than its request). Shared across
+        /// the transports the model's channels build, since the counts are one run's.
+        private final class ExpiredOwnerRecoveryTracker: @unchecked Sendable {
+            static let macClient = TerminalClient(
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:25:00Z")
+            static let macOwnedSnapshot = TerminalSessionAttachmentSnapshot(
+                clients: [macClient],
+                attachments: [
+                    TerminalAttachment(sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:25:00Z")
+                ])
+
+            private let lock = NSLock()
+            private let failsFirstAttach: Bool
+            private var attaches = 0
+            private var takeovers = 0
+            private var heartbeats = 0
+            private var attachedClient: TerminalClient?
+
+            init(failsFirstAttach: Bool) { self.failsFirstAttach = failsFirstAttach }
+
+            /// Records the attach and answers whether this one is the failure the test asked for.
+            func recordAttach(_ client: TerminalClient) -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                attaches += 1
+                attachedClient = client
+                return failsFirstAttach && attaches == 1
+            }
+
+            func recordTakeover() {
+                lock.lock()
+                takeovers += 1
+                lock.unlock()
+            }
+
+            func recordHeartbeat() {
+                lock.lock()
+                heartbeats += 1
+                lock.unlock()
+            }
+
+            func attachCount() -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return attaches
+            }
+
+            func takeoverCount() -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return takeovers
+            }
+
+            func heartbeatCount() -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return heartbeats
+            }
+
+            func state(emittedAt: String) -> GhosttyRemoteSessionStatePayload {
+                lock.lock()
+                let client = attachedClient
+                lock.unlock()
+                let macOwner = TerminalAttachment(
+                    sessionID: "terminal-session", clientID: Self.macClient.id, mode: .owner, attachedAt: "2026-06-04T14:25:00Z")
+                guard let client else {
+                    return TerminalViewerModelTests.runningTerminalState(
+                        attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [Self.macClient], attachments: [macOwner]),
+                        emittedAt: emittedAt)
+                }
+                let viewer = TerminalAttachment(sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:26:30Z")
+                return TerminalViewerModelTests.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [Self.macClient, client], attachments: [macOwner, viewer]),
+                    emittedAt: emittedAt)
+            }
+        }
+
+        /// Serves one `ExpiredOwnerRecoveryTracker` over the model's own command channels, so the recovery's
+        /// attach and the resume's heartbeat queue against each other exactly as they do in production.
+        private struct ExpiredOwnerRecoveryTransport: SpacesDeviceAPIRequestTransport {
+            let tracker: ExpiredOwnerRecoveryTracker
+            /// Answers every heartbeat the way the daemon answers one from a client whose lease it expired.
+            var expiresLease = false
+
+            func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                if case .terminalControl(let payload) = request.command {
+                    switch payload.action {
+                    case .attach:
+                        guard let client = payload.client else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                        if tracker.recordAttach(client) {
+                            // The daemon applied the attach and the connection dropped before its answer
+                            // came back, which is why the heartbeat behind it still renews a live lease.
+                            throw SpacesPinnedTLSConnectionError.connectionClosed
+                        }
+                        return TerminalViewerModelTests.terminalStateResponse(tracker.state(emittedAt: "2026-06-04T14:26:30Z"))
+                    case .heartbeat:
+                        tracker.recordHeartbeat()
+                        if expiresLease { return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound) }
+                        return TerminalViewerModelTests.terminalStateResponse(tracker.state(emittedAt: "2026-06-04T14:26:35Z"))
+                    case .takeover:
+                        tracker.recordTakeover()
+                        return TerminalViewerModelTests.terminalStateResponse(tracker.state(emittedAt: "2026-06-04T14:26:40Z"))
+                    default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                    }
+                }
+                if case .state = request.command {
+                    return TerminalViewerModelTests.terminalStateResponse(tracker.state(emittedAt: "2026-06-04T14:26:36Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+
+            func close() async {}
+        }
+
+        /// Records the client record each attach carried, so a test can publish the broadcast the daemon
+        /// would publish for that attachment. A lock rather than an actor because `waitUntil` polls a
+        /// synchronous condition while the request closure runs off the main actor.
+        private final class AttachAcknowledgementRecorder: @unchecked Sendable {
+            private let lock = NSLock()
+            private var clients: [TerminalClient] = []
+
+            func record(_ client: TerminalClient) {
+                lock.lock()
+                clients.append(client)
+                lock.unlock()
+            }
+
+            func count() -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return clients.count
+            }
+
+            func lastClient() -> TerminalClient? {
+                lock.lock()
+                defer { lock.unlock() }
+                return clients.last
+            }
+
+            func allClients() -> [TerminalClient] {
+                lock.lock()
+                defer { lock.unlock() }
+                return clients
+            }
+        }
+
+        /// As much of the daemon's attachment bookkeeping as a redial needs to be judged against: a takeover
+        /// makes the asking client the owner, and a `.viewer` attach from that owner gives the session back,
+        /// which is what makes discarding an unconfirmed attachment a real loss of ownership. Every answer
+        /// is stamped later than the last so the reducer never refuses one of these reads as stale.
+        private final class SessionOwnershipTracker: @unchecked Sendable {
+            /// The device that takes the session over while this client is away.
+            static let otherClient = TerminalClient(
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:25:00Z")
+
+            private let lock = NSLock()
+            private var attaches = 0
+            private var takeovers = 0
+            private var takeoverAttempts = 0
+            private var stamps = 0
+            private var ownerClientID: String?
+            private var attachedClient: TerminalClient?
+            private var failsNextStateRead = false
+
+            /// Records the attach and answers which one of the run it is.
+            func recordAttach(_ client: TerminalClient, mode: TerminalAttachmentMode?) -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                attaches += 1
+                attachedClient = client
+                if ownerClientID == client.id, mode != .owner { ownerClientID = nil }
+                return attaches
+            }
+
+            /// Records that a takeover request was sent and answers which one of the run it is. Counted
+            /// apart from `recordTakeover`, which is what the daemon applied: a request that failed in
+            /// flight is an attempt with no ownership behind it.
+            func recordTakeoverAttempt() -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                takeoverAttempts += 1
+                return takeoverAttempts
+            }
+
+            func takeoverAttemptCount() -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return takeoverAttempts
+            }
+
+            func recordTakeover(clientID: String) {
+                lock.lock()
+                takeovers += 1
+                ownerClientID = clientID
+                lock.unlock()
+            }
+
+            func attachCount() -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return attaches
+            }
+
+            func takeoverCount() -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return takeovers
+            }
+
+            func lastAttachedClient() -> TerminalClient? {
+                lock.lock()
+                defer { lock.unlock() }
+                return attachedClient
+            }
+
+            /// Fails the next `.state` read, the way a read whose connection drops under it fails.
+            func failNextStateRead() {
+                lock.lock()
+                failsNextStateRead = true
+                lock.unlock()
+            }
+
+            /// Whether this read is the one the test asked to fail, consuming that request.
+            func shouldFailStateRead() -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                let shouldFail = failsNextStateRead
+                failsNextStateRead = false
+                return shouldFail
+            }
+
+            /// Hands the session to the other device, the way its own takeover does while this client is
+            /// offline. Not a takeover of this client's: `takeoverCount` counts what this client sent.
+            func handOverToOtherClient() {
+                lock.lock()
+                ownerClientID = Self.otherClient.id
+                lock.unlock()
+            }
+
+            /// Drops the attachment and the ownership held through it, the way stale-client expiry does.
+            func expireAttachment() {
+                lock.lock()
+                attachedClient = nil
+                ownerClientID = nil
+                lock.unlock()
+            }
+
+            func state() -> GhosttyRemoteSessionStatePayload {
+                lock.lock()
+                let client = attachedClient
+                let owner = ownerClientID
+                stamps += 1
+                let stamp = stamps
+                lock.unlock()
+                let emittedAt = String(format: "2026-06-04T%02d:%02d:%02dZ", 14 + stamp / 3600, (stamp / 60) % 60, stamp % 60)
+                var clients: [TerminalClient] = []
+                var attachments: [TerminalAttachment] = []
+                if let client {
+                    clients.append(client)
+                    attachments.append(
+                        TerminalAttachment(
+                            sessionID: "terminal-session", clientID: client.id, mode: owner == client.id ? .owner : .viewer,
+                            attachedAt: "2026-06-04T14:00:00Z"))
+                }
+                // The other device's attachment, listed only once it owns the session.
+                if owner == Self.otherClient.id {
+                    clients.append(Self.otherClient)
+                    attachments.append(
+                        TerminalAttachment(
+                            sessionID: "terminal-session", clientID: Self.otherClient.id, mode: .owner, attachedAt: "2026-06-04T14:25:00Z"))
+                }
+                return TerminalViewerModelTests.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: clients, attachments: attachments), emittedAt: emittedAt)
+            }
+        }
+
+        /// The daemon a viewer meets when it opens a session another device owns while that session is
+        /// still starting. Nothing spends the open's one automatic takeover while the session is not
+        /// running, so it is still unspent when the subscription's initial state arrives with this client's
+        /// row already swept away -- the moment a loss and the ordinary attempt land on the same payload.
+        private final class SweptViewerTracker: @unchecked Sendable {
+            /// The device that owns the session throughout, so a takeover sent here is a preemption.
+            static let macClient = TerminalClient(
+                id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:25:00Z")
+
+            private let lock = NSLock()
+            private var attaches = 0
+            private var takeovers = 0
+
+            func recordAttach() -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                attaches += 1
+                return attaches
+            }
+
+            func recordTakeover() {
+                lock.lock()
+                takeovers += 1
+                lock.unlock()
+            }
+
+            func attachCount() -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return attaches
+            }
+
+            func takeoverCount() -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return takeovers
+            }
+
+            /// The session as the daemon reports it: the Mac's ownership always, and this viewer's row
+            /// whenever it holds one.
+            static func state(client: TerminalClient?, state: TerminalSessionState, emittedAt: String) -> GhosttyRemoteSessionStatePayload {
+                var clients = [macClient]
+                var attachments = [
+                    TerminalAttachment(sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:25:00Z")
+                ]
+                if let client {
+                    clients.append(client)
+                    attachments.append(
+                        TerminalAttachment(sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:23:30Z"))
+                }
+                return TerminalViewerModelTests.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: clients, attachments: attachments), emittedAt: emittedAt,
+                    state: state)
+            }
+        }
+
+        /// Answers a `SweptViewerTracker`'s session: the open's attach is acknowledged while the session is
+        /// still starting, and every attach after it -- the one a reported loss sends -- is held until the
+        /// test releases it, which is the window this viewer spends detached with its reclaim unsettled.
+        private struct SweptViewerRequestTransport: SpacesDeviceAPIRequestTransport {
+            let tracker: SweptViewerTracker
+            let reattachGate: ReclaimTakeoverGate
+
+            func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                if case .terminalControl(let payload) = request.command {
+                    switch payload.action {
+                    case .attach:
+                        guard let client = payload.client else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                        guard tracker.recordAttach() > 1 else {
+                            return TerminalViewerModelTests.terminalStateResponse(
+                                SweptViewerTracker.state(client: client, state: .starting, emittedAt: "2026-06-04T14:23:30Z"))
+                        }
+                        await reattachGate.markStarted()
+                        await reattachGate.waitForRelease()
+                        return TerminalViewerModelTests.terminalStateResponse(
+                            SweptViewerTracker.state(client: client, state: .running, emittedAt: "2026-06-04T14:27:00Z"))
+                    case .takeover:
+                        tracker.recordTakeover()
+                        return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                    default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                    }
+                }
+                if case .state = request.command {
+                    // The open's bootstrap read, answered before the session started running: a running one
+                    // would spend the open's automatic takeover before the loss below ever arrives.
+                    return TerminalViewerModelTests.terminalStateResponse(
+                        SweptViewerTracker.state(client: nil, state: .starting, emittedAt: "2026-06-04T14:23:35Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+
+            func close() async {}
+        }
+
+        /// The two shapes an acknowledgement takes when the daemon cannot name the attachment it made.
+        private enum UnnamedAttachAcknowledgement {
+            case empty
+            case sessionWithoutAttachmentSnapshot
+        }
+
+        /// Answers attaches, takeovers and `.state` reads out of one `SessionOwnershipTracker`, so a test
+        /// driving the stream through `StageTrackerTestBackend` sees the ownership its own requests produced
+        /// rather than a fixed script. The tracker is shared rather than owned because the model opens
+        /// several command channels and the factory builds one transport for each.
+        private struct OwnershipTrackingRequestTransport: SpacesDeviceAPIRequestTransport {
+            let ownership: SessionOwnershipTracker
+            /// Holds every takeover until the test releases it, so a test can act while one is in flight.
+            let takeoverGate: ReclaimTakeoverGate?
+            /// Answers every heartbeat the way the daemon answers one from a client whose lease it expired.
+            var expiresLease = false
+            /// Fails this attach of the run (1-based) the way a command channel dropped under it does.
+            var failingAttachIndex: Int?
+            /// Times this takeover of the run (1-based) out before it reaches the daemon, so the session
+            /// keeps the ownership it had and the caller is told the request never landed.
+            var failingTakeoverIndex: Int?
+            /// How the daemon answers an attach when it cannot name the attachment it just made: with
+            /// nothing but `ok` (its post-control state load is a `try?`), or with the session and no
+            /// attachment snapshot at all (its attachment cache could not be reseeded).
+            var unnamedAttachAcknowledgement: UnnamedAttachAcknowledgement?
+
+            func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                if case .terminalControl(let payload) = request.command {
+                    switch payload.action {
+                    case .attach:
+                        guard let client = payload.client else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                        if ownership.recordAttach(client, mode: payload.attachmentMode) == failingAttachIndex {
+                            throw SpacesPinnedTLSConnectionError.connectionClosed
+                        }
+                        switch unnamedAttachAcknowledgement {
+                        case .empty: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                        case .sessionWithoutAttachmentSnapshot:
+                            return TerminalViewerModelTests.terminalStateResponse(
+                                TerminalViewerModelTests.stateWithoutAttachmentSnapshot(emittedAt: "2026-06-04T14:23:31Z"))
+                        case nil: return TerminalViewerModelTests.terminalStateResponse(ownership.state())
+                        }
+                    case .heartbeat where expiresLease: return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound)
+                    case .takeover:
+                        guard let clientID = payload.clientID else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                        if ownership.recordTakeoverAttempt() == failingTakeoverIndex { throw SpacesDeviceAPIClientError.requestTimedOut }
+                        await takeoverGate?.markStarted()
+                        // The daemon applies the takeover and then answers it, so the gate holds the answer
+                        // rather than the effect: the ownership is real while the caller is still sending.
+                        ownership.recordTakeover(clientID: clientID)
+                        await takeoverGate?.waitForRelease()
+                        return TerminalViewerModelTests.terminalStateResponse(ownership.state())
+                    default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                    }
+                }
+                if case .state = request.command {
+                    if ownership.shouldFailStateRead() { throw SpacesPinnedTLSConnectionError.connectionClosed }
+                    return TerminalViewerModelTests.terminalStateResponse(ownership.state())
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+
+            func close() async {}
+        }
+
+        /// Counts the attaches a run sends. `SpacesDeviceAPIRequestTransport.send` runs off the main actor,
+        /// so this uses a lock, the same as `ScrollAfterKeyFailureTracker` above.
+        private final class AttachRequestTracker: @unchecked Sendable {
+            private let lock = NSLock()
+            private var attaches = 0
+
+            func recordAttach() {
+                lock.lock()
+                attaches += 1
+                lock.unlock()
+            }
+
+            func attachCount() -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return attaches
+            }
+        }
+
+        /// Counts the attaches and answers every `.state` read with a snapshot that lists the client it saw
+        /// attach, which is what a read answered before an outage does: it still names an attachment the
+        /// lease may since have expired.
+        private final class AttachedClientStateRequestTransport: SpacesDeviceAPIRequestTransport, @unchecked Sendable {
+            private let tracker: AttachRequestTracker
+            private let lock = NSLock()
+            private var attachedClient: TerminalClient?
+
+            init(tracker: AttachRequestTracker) { self.tracker = tracker }
+
+            func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                if case .terminalControl(let payload) = request.command, payload.action == .attach {
+                    tracker.recordAttach()
+                    if let client = payload.client {
+                        lock.lock()
+                        attachedClient = client
+                        lock.unlock()
+                    }
+                }
+                guard case .state = request.command else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                lock.lock()
+                let client = attachedClient
+                lock.unlock()
+                guard let client else {
+                    return TerminalViewerModelTests.terminalStateResponse(
+                        TerminalViewerModelTests.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:31Z"))
+                }
+                let attachment = TerminalAttachment(
+                    sessionID: "terminal-session", clientID: client.id, mode: .viewer, attachedAt: "2026-06-04T14:23:31Z")
+                return TerminalViewerModelTests.terminalStateResponse(
+                    TerminalViewerModelTests.runningTerminalState(
+                        attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]),
+                        emittedAt: "2026-06-04T14:23:31Z"))
+            }
+
+            func close() async {}
+        }
+
+        /// Answers requests exactly as `StalledStreamRequestTransport` does and counts the attaches, so a
+        /// test driving the stream through `StageTrackerTestBackend` can assert how often a run attached.
+        private struct AttachCountingRequestTransport: SpacesDeviceAPIRequestTransport {
+            let tracker: AttachRequestTracker
+
+            func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                if case .terminalControl(let payload) = request.command, payload.action == .attach { tracker.recordAttach() }
+                if let acknowledgement = TerminalViewerModelTests.attachAcknowledgement(for: request) { return acknowledgement }
+                if case .state = request.command {
+                    return TerminalViewerModelTests.terminalStateResponse(
+                        TerminalViewerModelTests.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:31Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+
+            func close() async {}
+        }
+
+        /// Serves the reclaim's takeover with no real network: the first takeover fails with the error the
+        /// test supplies, later ones answer with this client owning the session, `.state` reads answer with
+        /// whatever the session's ownership currently is, and every subscription is a handle that delivers
+        /// nothing. That leaves the paced redial a transient failure hands the reclaim to as the only thing
+        /// moving, countable as one subscribe and one further takeover.
+        private actor ReclaimTakeoverBackend: SpacesDeviceAPIBackend {
+            private let requestTransport: ReclaimTakeoverTransport
+            private var subscribes = 0
+
+            init(firstTakeoverFailure: any Error) { requestTransport = ReclaimTakeoverTransport(firstTakeoverFailure: firstTakeoverFailure) }
+
+            nonisolated func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { requestTransport }
+
+            nonisolated func openSessionStream(
+                request: SpacesDeviceAPIRequest, initialEventTimeout: Duration,
+                onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
+            ) async throws -> SpacesDeviceAPIStreamHandle {
+                await recordSubscribe()
+                return SpacesDeviceAPIStreamHandle {}
+            }
+
+            nonisolated func takeoverCount() -> Int { requestTransport.takeoverCount() }
+            func subscribeCount() -> Int { subscribes }
+
+            /// Polls rather than parking a continuation, so a takeover that never happens fails the
+            /// assertion in the test instead of hanging the run.
+            func waitForTakeoverCount(_ count: Int, timeout: Duration = .seconds(5)) async -> Bool {
+                let deadline = ContinuousClock().now + timeout
+                while ContinuousClock().now < deadline {
+                    if requestTransport.takeoverCount() >= count { return true }
+                    try? await Task.sleep(for: .milliseconds(5))
+                }
+                return requestTransport.takeoverCount() >= count
+            }
+
+            private func recordSubscribe() { subscribes += 1 }
+        }
+
+        /// The request half of `ReclaimTakeoverBackend`, locked for the same reason as
+        /// `LostAttachmentRedialTransport`.
+        private final class ReclaimTakeoverTransport: SpacesDeviceAPIRequestTransport, @unchecked Sendable {
+            private let lock = NSLock()
+            private let firstTakeoverFailure: any Error
+            private var takeovers = 0
+            private var ownerClientID: String?
+
+            init(firstTakeoverFailure: any Error) { self.firstTakeoverFailure = firstTakeoverFailure }
+
+            func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                if case .terminalControl(let payload) = request.command, payload.action == .takeover, let clientID = payload.clientID {
+                    if recordTakeover() == 1 { throw firstTakeoverFailure }
+                    markOwned(clientID: clientID)
+                    return TerminalViewerModelTests.terminalStateResponse(currentState())
+                }
+                if case .state = request.command { return TerminalViewerModelTests.terminalStateResponse(currentState()) }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+
+            func close() async {}
+
+            func takeoverCount() -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return takeovers
+            }
+
+            /// The session as this daemon stand-in holds it: ownerless until a takeover lands, owned by
+            /// this client afterwards, which is what lets the redial's bootstrap read drive the retry and
+            /// then confirm it.
+            private func currentState() -> GhosttyRemoteSessionStatePayload {
+                lock.lock()
+                let owner = ownerClientID
+                lock.unlock()
+                guard let owner else {
+                    return TerminalViewerModelTests.runningTerminalState(
+                        attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:30Z")
+                }
+                let client = TerminalClient(
+                    id: owner, kind: .remote, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:26:30Z")
+                let attachment = TerminalAttachment(sessionID: "terminal-session", clientID: owner, mode: .owner, attachedAt: "2026-06-04T14:26:30Z")
+                return TerminalViewerModelTests.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]),
+                    emittedAt: "2026-06-04T14:26:31Z")
+            }
+
+            private func recordTakeover() -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                takeovers += 1
+                return takeovers
+            }
+
+            private func markOwned(clientID: String) {
+                lock.lock()
+                ownerClientID = clientID
+                lock.unlock()
+            }
+        }
+
+        /// The request half of `LostAttachmentRedialBackend`. A lock rather than an actor because the
+        /// model opens several command channels and `send` runs off the main actor on all of them, and
+        /// because the test reads the attach log synchronously while one attach is still parked inside
+        /// `send`.
+        private final class LostAttachmentRedialTransport: SpacesDeviceAPIRequestTransport, @unchecked Sendable {
+            private let lock = NSLock()
+            private var attaches: [TerminalAttachmentMode?] = []
+            private var isHeldAttachReleased = false
+
+            func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                if case .terminalControl(let payload) = request.command, payload.action == .attach {
+                    if recordAttach(payload.attachmentMode) == 1 {
+                        while !isHeldAttachReleasedNow() { try? await Task.sleep(for: .milliseconds(5)) }
+                        // A command-channel connection failure, not a stream failure: the subscription the
+                        // viewer is reading output over is a separate connection and stays up, which is
+                        // what leaves the client stranded unless the failure arms a redial itself.
+                        throw SpacesPinnedTLSConnectionError.connectionClosed
+                    }
+                }
+                if case .state = request.command {
+                    // The redial reads state before it resubscribes, and a read that answers `ok` without
+                    // terminal state is itself an error the viewer reports, so answer it the way the daemon
+                    // would: the session still belongs to the Mac client this viewer lost its owner
+                    // attachment to.
+                    let macClient = TerminalClient(
+                        id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:26:00Z")
+                    let macOwner = TerminalAttachment(
+                        sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:26:00Z")
+                    return TerminalViewerModelTests.terminalStateResponse(
+                        TerminalViewerModelTests.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwner]),
+                            emittedAt: "2026-06-04T14:26:10Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+
+            func close() async {}
+
+            func attachModes() -> [TerminalAttachmentMode?] {
+                lock.lock()
+                defer { lock.unlock() }
+                return attaches
+            }
+
+            func releaseHeldAttach() {
+                lock.lock()
+                isHeldAttachReleased = true
+                lock.unlock()
+            }
+
+            private func recordAttach(_ mode: TerminalAttachmentMode?) -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                attaches.append(mode)
+                return attaches.count
+            }
+
+            private func isHeldAttachReleasedNow() -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return isHeldAttachReleased
+            }
         }
 
         /// Hands out stream handles the test drives directly (`fireFrame`, `fireDisconnect`) and can be
@@ -6087,6 +9128,7 @@
             }
 
             func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                if let acknowledgement = TerminalViewerModelTests.attachAcknowledgement(for: request) { return acknowledgement }
                 if case .state(let payload) = request.command {
                     if isHoldArmed, payload.includesRenderUpdate {
                         isHoldArmed = false
@@ -6209,6 +9251,7 @@
         /// request and answer it, so nothing here is link evidence.
         private struct InputDaemonTimeoutRejectionRequestTransport: SpacesDeviceAPIRequestTransport {
             func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                if let acknowledgement = TerminalViewerModelTests.attachAcknowledgement(for: request) { return acknowledgement }
                 if case .state = request.command {
                     return TerminalViewerModelTests.terminalStateResponse(
                         TerminalViewerModelTests.runningTerminalState(
@@ -6230,6 +9273,7 @@
         /// `ECONNRESET`: this is the client's own typed transport-failure shape for a clean peer close.
         private struct InputConnectionClosedRequestTransport: SpacesDeviceAPIRequestTransport {
             func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                if let acknowledgement = TerminalViewerModelTests.attachAcknowledgement(for: request) { return acknowledgement }
                 if case .state = request.command {
                     return TerminalViewerModelTests.terminalStateResponse(
                         TerminalViewerModelTests.runningTerminalState(
@@ -6501,6 +9545,27 @@
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "terminal-session", servicePID: 100, childPID: 200, state: state, updatedAt: emittedAt),
                 attachmentSnapshot: attachmentSnapshot, title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0)
+        }
+
+        /// The answer a daemon gives an attach: the session state it produced, naming the attachment that
+        /// attach just made, which is where a client reads which attachment it now holds. A transport that
+        /// answers `ok` alone is telling the client its attachment has no name, which is a real but rare
+        /// daemon answer (the post-control state load is a `try?`) and sends the client down the read that
+        /// names it -- not what a test about input, dialing or reconnect pacing is exercising.
+        private nonisolated static func attachAcknowledgement(for request: SpacesDeviceAPIRequest) -> SpacesDeviceAPIResponse? {
+            TerminalAttachAcknowledgementFixture.acknowledgement(for: request)
+        }
+
+        /// A payload that carries the session and no attachment snapshot at all: what the daemon answers
+        /// with when its attachment cache cannot be reseeded, so the answer says nothing about who is
+        /// attached rather than saying nobody is.
+        private nonisolated static func stateWithoutAttachmentSnapshot(emittedAt: String) -> GhosttyRemoteSessionStatePayload {
+            GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: emittedAt,
+                sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: "terminal-session", servicePID: 100, childPID: 200, state: .running, updatedAt: emittedAt), attachmentSnapshot: nil,
+                title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0)
         }
 
         /// A payload carrying the session's metadata and no render update: what the daemon answers a

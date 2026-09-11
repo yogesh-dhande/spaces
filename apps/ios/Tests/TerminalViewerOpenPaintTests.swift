@@ -946,6 +946,10 @@
             }
 
             fileprivate func answer(_ request: SpacesDeviceAPIRequest) async -> SpacesDeviceAPIResponse {
+                // An attach is answered with the attachment it made, the way the daemon answers one; a bare
+                // `ok` would be a daemon that could not load its post-control state, which costs the open a
+                // `.state` read it does not pay on a device -- and this test counts those reads.
+                if let acknowledgement = TerminalAttachAcknowledgementFixture.acknowledgement(for: request) { return acknowledgement }
                 switch request.command {
                 case .state(let payload):
                     stateReads.append(payload)
@@ -1032,6 +1036,11 @@
 
                 func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
                     backend.record(request)
+                    // The attach carries the attachment it made, as the daemon's answer does. Answered with
+                    // a bare `ok` it is an attach the daemon could not name, which the viewer resolves with
+                    // a `.state` read on this same channel -- one this backend answers with nothing usable,
+                    // so the open would fail before it ever subscribed.
+                    if let acknowledgement = TerminalAttachAcknowledgementFixture.acknowledgement(for: request) { return acknowledgement }
                     return SpacesDeviceAPIResponse(ok: true, message: "ok")
                 }
 
@@ -1095,6 +1104,11 @@
 
                 func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
                     backend.record(request)
+                    // The attach carries the attachment it made, as the daemon's answer does. Answered with
+                    // a bare `ok` it is an attach the daemon could not name, which the viewer resolves with
+                    // a `.state` read on this same channel -- one this backend answers with nothing usable,
+                    // so the open would fail before it ever subscribed.
+                    if let acknowledgement = TerminalAttachAcknowledgementFixture.acknowledgement(for: request) { return acknowledgement }
                     return SpacesDeviceAPIResponse(ok: true, message: "ok")
                 }
 
