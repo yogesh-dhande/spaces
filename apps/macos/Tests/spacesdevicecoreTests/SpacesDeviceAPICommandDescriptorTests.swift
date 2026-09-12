@@ -19,7 +19,7 @@ import Testing
 /// `SpacesDeviceAPICommandDescriptor`'s own switch, so a descriptor case that silently drifted fails here
 /// even though the descriptor's own exhaustiveness check would not catch it. Samples come from
 /// `SpacesDeviceAPICommandWireKeyTests.samples` (one instance per case) so this suite exercises the
-/// identical 74 commands that file's wire-key assertions do, rather than a second hand-built payload table
+/// identical 76 commands that file's wire-key assertions do, rather than a second hand-built payload table
 /// that could drift out of sync with that one.
 @Suite struct SpacesDeviceAPICommandDescriptorTests {
     @Test func descriptorLaneMatchesTheIntendedPerCommandGrouping() {
@@ -75,7 +75,7 @@ import Testing
             .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .startWorkspaceCommandSession, .stopWorkspaceTerminal,
             .stopWorkspaceTerminalIfBareShell, .runWorkspaceProcess, .stopWorkspaceProcess, .restartWorkspaceProcess, .stopCodingAgent,
             .installAgentHooks, .spawnAgentSession, .killAgentSession, .createAutomation, .updateAutomation, .setAutomationNextRun, .deleteAutomation,
-            .triggerAutomation, .cancelAutomationRun, .endAutomationAgents:
+            .triggerAutomation, .cancelAutomationRun, .endAutomationAgents, .restoreSessions, .discardRestorableSessions:
             60
         case .agentHooksStatus: 20
         case .terminalTranscript, .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk,

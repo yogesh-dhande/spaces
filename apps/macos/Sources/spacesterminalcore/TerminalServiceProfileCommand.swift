@@ -531,6 +531,20 @@ public enum TerminalServiceProfileCommand: Sendable, Equatable {
     case automationTrigger(id: String)
     case automationRunCancel(runID: String)
     case automationEndAgents(runID: String)
+    /// Captures every live coding-agent session across every workspace as the restorable record, under a
+    /// fresh generation. Sent once by the Mac app's Stop All and Quit before the first workspace stop,
+    /// which is the only clean teardown a client offers to bring agents back from: a single workspace
+    /// stop, or stopping one agent, is a deliberate end to that work.
+    case parkAgentSessionsForRestore
+    /// Reconciles the parked record named by `generation` against what is still running, for the quit that
+    /// parked it and then did not happen. A cancelled quit can have stopped some workspaces before it was
+    /// cancelled, so the record describes two situations at once: an agent still running needs no offer,
+    /// and restoring it would bring up a second copy of a conversation the user is still looking at, while
+    /// an agent whose workspace did stop is gone and this record is the only way back to it. The daemon
+    /// drops the rows whose sessions are live and keeps the rest; a generation left with nothing is gone.
+    /// Naming the generation keeps the reconcile to that client's own record, so a newer one written in the
+    /// meantime stands.
+    case reconcileParkedAgentSessions(generation: String)
 }
 
 extension TerminalServiceProfileCommand: Codable {
@@ -563,6 +577,8 @@ extension TerminalServiceProfileCommand: Codable {
         case automationTrigger
         case automationRunCancel
         case automationEndAgents
+        case parkAgentSessionsForRestore
+        case reconcileParkedAgentSessions
     }
 
     public init(from decoder: any Decoder) throws {
@@ -607,6 +623,11 @@ extension TerminalServiceProfileCommand: Codable {
         case .automationTrigger: self = .automationTrigger(id: try container.decodeRequiredNonEmpty(forKey: key))
         case .automationRunCancel: self = .automationRunCancel(runID: try container.decodeRequiredNonEmpty(forKey: key))
         case .automationEndAgents: self = .automationEndAgents(runID: try container.decodeRequiredNonEmpty(forKey: key))
+        case .parkAgentSessionsForRestore:
+            _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
+            self = .parkAgentSessionsForRestore
+        case .reconcileParkedAgentSessions:
+            self = .reconcileParkedAgentSessions(generation: try container.decodeRequiredNonEmpty(forKey: key))
         }
     }
 
@@ -642,6 +663,8 @@ extension TerminalServiceProfileCommand: Codable {
         case .automationTrigger(let id): try container.encode(id, forKey: .automationTrigger)
         case .automationRunCancel(let runID): try container.encode(runID, forKey: .automationRunCancel)
         case .automationEndAgents(let runID): try container.encode(runID, forKey: .automationEndAgents)
+        case .parkAgentSessionsForRestore: try container.encode(TerminalServiceEmptyPayload(), forKey: .parkAgentSessionsForRestore)
+        case .reconcileParkedAgentSessions(let generation): try container.encode(generation, forKey: .reconcileParkedAgentSessions)
         }
     }
 }

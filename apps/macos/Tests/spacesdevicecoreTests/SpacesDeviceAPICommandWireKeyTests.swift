@@ -37,7 +37,7 @@ import spacesterminalcore
     /// One representative instance per case, in declaration order. Field values are arbitrary — this test
     /// pins the command's wire *key* and round-trip identity, not any payload type's own field encoding.
     /// Not `private`: `SpacesDeviceAPICommandDescriptorTests` reuses this same one-per-case list so its
-    /// descriptor assertions run over the identical 74 commands this file's own assertions do, rather than
+    /// descriptor assertions run over the identical 76 commands this file's own assertions do, rather than
     /// hand-building a second payload table that could drift out of sync with this one.
     static let samples: [SpacesDeviceAPICommand] = [
         .pair(SpacesDevicePairRequest(pairingCode: "code", pairingNonce: "nonce", clientProtocolVersion: 1)), .ping, .daemonStatus,
@@ -117,6 +117,8 @@ import spacesterminalcore
             SpacesDeviceWorkspaceReviewCommentsSendRequest(
                 workspaceID: "workspace-1", sessionID: "session-1", text: "text",
                 comments: [SpacesDeviceReviewCommentSendEntry(id: "comment-1", revision: 1)])),
+        .restoreSessions(SpacesDeviceRestorableSessionsRequest(generation: "generation-1")),
+        .discardRestorableSessions(SpacesDeviceRestorableSessionsRequest(generation: "generation-1")),
     ]
 
     private static let automationFields = TerminalServiceAutomationFields(
@@ -134,18 +136,18 @@ import spacesterminalcore
     ///  1. `goldenWireKey`'s default-less `switch` forces a golden mapping entry for any case added to
     ///     `SpacesDeviceAPICommand` at compile time (a missing arm fails the build).
     ///  2. This assertion rejects a duplicated sample: mapping every sample through `goldenWireKey` and
-    ///     checking the resulting set is exactly 74 distinct keys catches two samples for the same case
-    ///     (the set would be smaller than the list), which a bare `count == 74` check would miss.
-    ///  3. What neither closes: a new 75th case added to the enum but never added to `samples` — the
+    ///     checking the resulting set is exactly 76 distinct keys catches two samples for the same case
+    ///     (the set would be smaller than the list), which a bare `count == 76` check would miss.
+    ///  3. What neither closes: a new 77th case added to the enum but never added to `samples`: the
     ///     switch still compiles (it only requires *a* mapping, not that every mapping is exercised) and
-    ///     the set stays "74 distinct out of 74 samples". `SpacesDeviceAPICommand` still cannot conform to
+    ///     the set stays "76 distinct out of 76 samples". `SpacesDeviceAPICommand` still cannot conform to
     ///     `CaseIterable` (its cases carry differently-typed associated values), so no enumeration source
     ///     independent of a hand-maintained list exists to close this gap against; both `goldenWireKey` and
     ///     `SpacesDeviceAPICommandDescriptor`'s own switch are default-less exhaustive switches over the
     ///     same enum, not case lists, so neither one can be diffed against `samples` to catch an omission.
     @Test func sampleListCoversEveryCurrentCaseExactlyOnce() {
         let keys = Set(Self.samples.map(Self.goldenWireKey))
-        #expect(keys.count == 74)
+        #expect(keys.count == 76)
         #expect(keys.count == Self.samples.count)
     }
 
@@ -176,7 +178,7 @@ import spacesterminalcore
     }
 
     /// The descriptor's wire keys, taken over `samples`, must be the exact same set as the golden wire
-    /// keys taken over `samples` — same 74 distinct members, none extra, none missing. Redundant with the
+    /// keys taken over `samples`: the same 76 distinct members, none extra, none missing. Redundant with the
     /// per-sample equality above in what it would catch (a mismatched key would fail both), but it asserts
     /// the requirement at the set level explicitly, matching how `sampleListCoversEveryCurrentCaseExactlyOnce`
     /// asserts distinctness at the set level rather than only per-element.
@@ -265,6 +267,8 @@ import spacesterminalcore
         case .workspaceReviewCommentUpsert: "workspaceReviewCommentUpsert"
         case .workspaceReviewCommentDelete: "workspaceReviewCommentDelete"
         case .workspaceReviewCommentsSend: "workspaceReviewCommentsSend"
+        case .restoreSessions: "restoreSessions"
+        case .discardRestorableSessions: "discardRestorableSessions"
         }
     }
 }

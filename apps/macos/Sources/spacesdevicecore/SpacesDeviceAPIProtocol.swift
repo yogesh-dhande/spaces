@@ -2319,6 +2319,28 @@ public struct SpacesDeviceAgentSessionsResult: Codable, Sendable, Equatable {
     public init(rows: [SpacesDeviceAgentSessionRow]) { self.rows = rows }
 }
 
+/// Answers the restore offer a device is making, naming the record the client acted on. The generation
+/// is the whole point of the payload: a client can be looking at an offer the daemon has already
+/// replaced (a second unclean exit, say), and the daemon refuses a mismatch rather than restoring a set
+/// the user never saw. Carried by both answers, because Skip discards a record and must discard the one
+/// the user actually dismissed.
+public struct SpacesDeviceRestorableSessionsRequest: Codable, Sendable, Equatable {
+    public let generation: String
+
+    public init(generation: String) { self.generation = generation }
+}
+
+/// What `restoreSessions` brought back: each captured session id mapped to the id of the session now
+/// running in its place. A client uses it to move a restored agent back into the pane its predecessor
+/// occupied; a row that could not be relaunched is absent.
+public struct SpacesDeviceRestoredSessionsResult: Codable, Sendable, Equatable {
+    public let newSessionIDsByCapturedSessionID: [String: String]
+
+    public init(newSessionIDsByCapturedSessionID: [String: String]) {
+        self.newSessionIDsByCapturedSessionID = newSessionIDsByCapturedSessionID
+    }
+}
+
 /// Names an automation by id for the delete/trigger Device API commands. A one-field struct (rather than a
 /// bare string) keeps the command payloads uniform with the rest of the Device API contract.
 public struct SpacesDeviceAutomationReference: Codable, Sendable, Equatable {
@@ -2443,6 +2465,11 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     /// Ends the still-live coding-agent sessions attributed to a terminal automation run. The remote
     /// counterpart of the profile-socket `automationEndAgents` command; leaves the run status untouched.
     case endAutomationAgents(SpacesDeviceAutomationRunReference)
+    /// Relaunches every coding-agent session in the device's outstanding restorable record, resuming each
+    /// agent's own conversation where it reported one, and clears the record.
+    case restoreSessions(SpacesDeviceRestorableSessionsRequest)
+    /// Discards the outstanding restorable record without relaunching anything.
+    case discardRestorableSessions(SpacesDeviceRestorableSessionsRequest)
     /// Reads one file inside a workspace's checkout, capped at 10 MiB. Read-only.
     case workspaceFileRead(SpacesDeviceWorkspaceFileReadRequest)
     /// Reads one file from an explicit immutable Git revision inside a workspace repository, capped at 10 MiB. Read-only.
@@ -2558,6 +2585,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .workspaceReviewCommentUpsert: "workspaceReviewCommentUpsert"
         case .workspaceReviewCommentDelete: "workspaceReviewCommentDelete"
         case .workspaceReviewCommentsSend: "workspaceReviewCommentsSend"
+        case .restoreSessions: "restoreSessions"
+        case .discardRestorableSessions: "discardRestorableSessions"
         }
     }
 
@@ -2737,6 +2766,8 @@ extension SpacesDeviceAPICommand: Codable {
         case triggerAutomation
         case cancelAutomationRun
         case endAutomationAgents
+        case restoreSessions
+        case discardRestorableSessions
         case workspaceFileRead
         case workspaceRevisionFileRead
         case workspaceFileWrite
@@ -2839,6 +2870,9 @@ extension SpacesDeviceAPICommand: Codable {
         case .triggerAutomation: self = .triggerAutomation(try container.decode(SpacesDeviceAutomationReference.self, forKey: key))
         case .cancelAutomationRun: self = .cancelAutomationRun(try container.decode(SpacesDeviceAutomationRunReference.self, forKey: key))
         case .endAutomationAgents: self = .endAutomationAgents(try container.decode(SpacesDeviceAutomationRunReference.self, forKey: key))
+        case .restoreSessions: self = .restoreSessions(try container.decode(SpacesDeviceRestorableSessionsRequest.self, forKey: key))
+        case .discardRestorableSessions:
+            self = .discardRestorableSessions(try container.decode(SpacesDeviceRestorableSessionsRequest.self, forKey: key))
         case .workspaceFileRead: self = .workspaceFileRead(try container.decode(SpacesDeviceWorkspaceFileReadRequest.self, forKey: key))
         case .workspaceRevisionFileRead:
             self = .workspaceRevisionFileRead(try container.decode(SpacesDeviceWorkspaceRevisionFileReadRequest.self, forKey: key))
@@ -2930,6 +2964,8 @@ extension SpacesDeviceAPICommand: Codable {
         case .triggerAutomation(let payload): try container.encode(payload, forKey: .triggerAutomation)
         case .cancelAutomationRun(let payload): try container.encode(payload, forKey: .cancelAutomationRun)
         case .endAutomationAgents(let payload): try container.encode(payload, forKey: .endAutomationAgents)
+        case .restoreSessions(let payload): try container.encode(payload, forKey: .restoreSessions)
+        case .discardRestorableSessions(let payload): try container.encode(payload, forKey: .discardRestorableSessions)
         case .workspaceFileRead(let payload): try container.encode(payload, forKey: .workspaceFileRead)
         case .workspaceRevisionFileRead(let payload): try container.encode(payload, forKey: .workspaceRevisionFileRead)
         case .workspaceFileWrite(let payload): try container.encode(payload, forKey: .workspaceFileWrite)
@@ -3035,6 +3071,7 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case workspaceDiffFileChunk(SpacesDeviceWorkspaceDiffFileChunkResult)
     case workspaceReviewCommentList(SpacesDeviceWorkspaceReviewCommentListResult)
     case workspaceReviewCommentUpsert(SpacesDeviceWorkspaceReviewCommentUpsertResult)
+    case restoredSessions(SpacesDeviceRestoredSessionsResult)
 }
 
 extension SpacesDeviceAPIResult: Codable {
@@ -3067,6 +3104,7 @@ extension SpacesDeviceAPIResult: Codable {
         case workspaceDiffFileChunk
         case workspaceReviewCommentList
         case workspaceReviewCommentUpsert
+        case restoredSessions
     }
 
     public init(from decoder: any Decoder) throws {
@@ -3107,6 +3145,7 @@ extension SpacesDeviceAPIResult: Codable {
             self = .workspaceReviewCommentList(try container.decode(SpacesDeviceWorkspaceReviewCommentListResult.self, forKey: key))
         case .workspaceReviewCommentUpsert:
             self = .workspaceReviewCommentUpsert(try container.decode(SpacesDeviceWorkspaceReviewCommentUpsertResult.self, forKey: key))
+        case .restoredSessions: self = .restoredSessions(try container.decode(SpacesDeviceRestoredSessionsResult.self, forKey: key))
         }
     }
 
@@ -3141,6 +3180,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .workspaceDiffFileChunk(let payload): try container.encode(payload, forKey: .workspaceDiffFileChunk)
         case .workspaceReviewCommentList(let payload): try container.encode(payload, forKey: .workspaceReviewCommentList)
         case .workspaceReviewCommentUpsert(let payload): try container.encode(payload, forKey: .workspaceReviewCommentUpsert)
+        case .restoredSessions(let payload): try container.encode(payload, forKey: .restoredSessions)
         }
     }
 }
@@ -3254,6 +3294,11 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
 
     public var workspaceReviewCommentUpsert: SpacesDeviceWorkspaceReviewCommentUpsertResult? {
         if case .workspaceReviewCommentUpsert(let payload) = result { payload } else { nil }
+    }
+
+    /// The captured-to-new session id map a `restoreSessions` answer carries.
+    public var restoredSessions: [String: String]? {
+        if case .restoredSessions(let payload) = result { payload.newSessionIDsByCapturedSessionID } else { nil }
     }
 }
 

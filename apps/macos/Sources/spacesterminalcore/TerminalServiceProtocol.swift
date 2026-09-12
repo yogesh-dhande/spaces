@@ -419,13 +419,18 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
     /// Automation runs returned by `automationRunsList` (and the single triggered/canceled run, as a
     /// one-element list). Nil for commands that touch no runs.
     public let automationRuns: [TerminalServiceAutomationRunSummary]?
+    /// The generation `parkAgentSessionsForRestore` wrote, so the quit that asked for it can name that
+    /// record again and drop it if the quit does not happen. Nil when the park found no live coding agents
+    /// (nothing was written), and for every other command.
+    public let parkedRestoreGeneration: String?
 
     public init(
         message: String, projects: [TerminalServiceProfileProjectSummary]? = nil, workspaces: [TerminalServiceProfileWorkspaceRecord]? = nil,
         workspace: TerminalServiceProfileWorkspaceRecord? = nil, terminalSessions: [TerminalServiceSessionSummary]? = nil,
         terminalSession: TerminalServiceSessionSummary? = nil, terminalOutput: String? = nil, agentSessions: [TerminalServiceAgentSessionRow]? = nil,
         agentSpawn: TerminalServiceAgentSpawnResult? = nil, pendingAgentEvents: [String]? = nil,
-        automations: [TerminalServiceAutomationSummary]? = nil, automationRuns: [TerminalServiceAutomationRunSummary]? = nil
+        automations: [TerminalServiceAutomationSummary]? = nil, automationRuns: [TerminalServiceAutomationRunSummary]? = nil,
+        parkedRestoreGeneration: String? = nil
     ) {
         self.message = message
         self.projects = projects
@@ -439,6 +444,7 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         self.pendingAgentEvents = pendingAgentEvents
         self.automations = automations
         self.automationRuns = automationRuns
+        self.parkedRestoreGeneration = parkedRestoreGeneration
     }
 
     /// Returns a copy with `pendingAgentEvents` attached, or `self` unchanged when there is nothing to
@@ -449,7 +455,8 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         return TerminalServiceProfileCommandResponse(
             message: message, projects: projects, workspaces: workspaces, workspace: workspace, terminalSessions: terminalSessions,
             terminalSession: terminalSession, terminalOutput: terminalOutput, agentSessions: agentSessions, agentSpawn: agentSpawn,
-            pendingAgentEvents: events, automations: automations, automationRuns: automationRuns)
+            pendingAgentEvents: events, automations: automations, automationRuns: automationRuns,
+            parkedRestoreGeneration: parkedRestoreGeneration)
     }
 }
 
@@ -695,6 +702,12 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     /// concluding the daemon has become unreachable everywhere — see
     /// `SpacesMobileDeviceStore.mergeAdvertisedHosts`.
     public let deviceAPIAddresses: [String]
+    /// The coding-agent sessions this device is offering to bring back, all from one capture (they share
+    /// a `generation`). Empty when there is nothing outstanding, which is the steady state: the record is
+    /// written when sessions end with work unfinished and cleared as soon as a client answers Restore or
+    /// Skip. Every client reads the offer from here, so a device's own Mac app and a paired phone see the
+    /// same list.
+    public let restorableSessions: [RestorableSessionSummary]
 
     /// Protocol version reported when a peer's status omits the field entirely — i.e. a daemon old
     /// enough to predate wire-version negotiation. It must compare as incompatible against any real
@@ -706,7 +719,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         version: String, installedVersion: String?, certificateFingerprint: String?, activeSessionCount: Int,
         protocolVersion: Int = SpacesWireProtocol.version, runningProcesses: Int = 0, activeAgents: Int = 0, waitingAgents: Int = 0,
         operatingSystem: String = TerminalServiceDaemonStatus.currentOperatingSystem, timeZoneIdentifier: String? = nil,
-        deviceAPIAddresses: [String] = []
+        deviceAPIAddresses: [String] = [], restorableSessions: [RestorableSessionSummary] = []
     ) {
         self.version = version
         self.installedVersion = installedVersion
@@ -719,6 +732,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         self.operatingSystem = operatingSystem
         self.timeZoneIdentifier = timeZoneIdentifier
         self.deviceAPIAddresses = deviceAPIAddresses
+        self.restorableSessions = restorableSessions
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -733,6 +747,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         case operatingSystem
         case timeZoneIdentifier
         case deviceAPIAddresses
+        case restorableSessions
     }
 
     /// This is the frozen core's contract: its decode must tolerate version skew so an incompatible
@@ -754,6 +769,37 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         operatingSystem = try container.decodeIfPresent(String.self, forKey: .operatingSystem) ?? Self.currentOperatingSystem
         timeZoneIdentifier = try container.decodeIfPresent(String.self, forKey: .timeZoneIdentifier)
         deviceAPIAddresses = try container.decodeIfPresent([String].self, forKey: .deviceAPIAddresses) ?? []
+        restorableSessions = try Self.decodeRestorableSessions(from: container)
+    }
+
+    /// Decodes the restore offer row by row, keeping the rows this build understands and stepping over the
+    /// ones it does not.
+    ///
+    /// Every other field of this status is a scalar or a list of strings, so `decodeIfPresent` is all the
+    /// skew tolerance they need. `restorableSessions` is the one nested payload, and it carries a closed
+    /// enum (`TerminalDetectedAgentKind`): a daemon that has learned an agent kind an older client has not
+    /// would otherwise fail that client's decode of the entire status, on the very handshake that exists to
+    /// tell the user the two builds do not match. Dropping the unreadable row keeps the status landing, and
+    /// costs nothing the client could have used: an offer row it cannot describe is one it must not show.
+    private static func decodeRestorableSessions(from container: KeyedDecodingContainer<CodingKeys>) throws -> [RestorableSessionSummary] {
+        guard container.contains(.restorableSessions) else { return [] }
+        var rows = try container.nestedUnkeyedContainer(forKey: .restorableSessions)
+        var summaries: [RestorableSessionSummary] = []
+        while !rows.isAtEnd {
+            let position = rows.currentIndex
+            if let summary = try? rows.decode(RestorableSessionSummary.self) { summaries.append(summary) }
+            // A row that failed to decode may or may not have moved the cursor, depending on the decoder, and
+            // `SkippedStatusRow` reads nothing and so consumes whatever is there. Stepping only when the
+            // cursor has not moved steps over each unreadable row exactly once, without swallowing the next.
+            if rows.currentIndex == position { _ = try? rows.decode(SkippedStatusRow.self) }
+        }
+        return summaries
+    }
+
+    /// Consumes one element of a status array without reading it, so a row this build cannot decode can be
+    /// stepped over rather than failing the handshake.
+    private struct SkippedStatusRow: Decodable {
+        init(from decoder: any Decoder) throws {}
     }
 
     /// The OS of the process building this status (the daemon's own host).

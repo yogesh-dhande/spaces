@@ -224,6 +224,14 @@ extension SpacesDeviceAPICommand {
             return Self.descriptor(wireKey: "workspaceReviewCommentDelete", lane: .terminalControl, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .workspaceReviewCommentsSend:
             return Self.descriptor(wireKey: "workspaceReviewCommentsSend", lane: .terminalControl, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        // Restoring relaunches one coding agent per captured row through the same workspace launch path a
+        // spawn takes, so it shares `spawnAgentSession`'s lane and its long-running mutation deadline.
+        // Discarding only clears the record, but it is the other answer to the same offer and runs on the
+        // same lane so the two can never overtake each other.
+        case .restoreSessions:
+            return Self.descriptor(wireKey: "restoreSessions", lane: .mainQueue, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
+        case .discardRestorableSessions:
+            return Self.descriptor(wireKey: "discardRestorableSessions", lane: .mainQueue, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         }
     }
 

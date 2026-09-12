@@ -105,6 +105,60 @@ final class TerminalServiceProtocolTests: XCTestCase {
         XCTAssertNil(try TerminalServiceCodec.decodeResponse(successData).errorCode)
     }
 
+    func testDaemonStatusRestorableSessionsRoundTripEveryFieldThroughEncodeAndDecode() throws {
+        let summaries = [
+            RestorableSessionSummary(
+                sessionID: "session-1", workspaceID: "workspace-1", agentKind: .claudeCode, title: "Fix the bug", workingDirectory: "/srv/work",
+                hasResumeKey: true, generation: "generation-1"),
+            RestorableSessionSummary(
+                sessionID: "session-2", workspaceID: "workspace-2", agentKind: nil, title: "Untitled agent", workingDirectory: "/srv/other",
+                hasResumeKey: false, generation: "generation-1"),
+        ]
+        let status = TerminalServiceDaemonStatus(
+            version: "1.2.3", installedVersion: "1.2.3", certificateFingerprint: "SHA256:abcdef", activeSessionCount: 2,
+            restorableSessions: summaries)
+
+        let decoded = try JSONDecoder().decode(TerminalServiceDaemonStatus.self, from: try JSONEncoder().encode(status))
+
+        XCTAssertEqual(decoded, status)
+        XCTAssertEqual(decoded.restorableSessions, summaries)
+    }
+
+    /// A peer that predates this field omits the key entirely; the frozen-core decode must tolerate that
+    /// and report an empty list rather than throwing `keyNotFound`, matching every other field on this
+    /// status.
+    func testDaemonStatusDecodesEmptyRestorableSessionsWhenFieldIsAbsentFromJSON() throws {
+        let json = Data(
+            #"{"version":"1.2.3","installedVersion":null,"certificateFingerprint":null,"activeSessionCount":0}"#.utf8)
+
+        let decoded = try JSONDecoder().decode(TerminalServiceDaemonStatus.self, from: json)
+
+        XCTAssertEqual(decoded.restorableSessions, [])
+    }
+
+    /// The status is what every client decodes before it can tell whether it is compatible with the daemon,
+    /// so a restore row naming an agent kind this build has never heard of must not take the whole status
+    /// down with it: the client would then never reach the guidance telling the user what to update. The
+    /// unreadable row is dropped and the rest of the status, including the rows it can read, still lands.
+    func testDaemonStatusDropsARestorableRowNamingAnUnknownAgentKindAndKeepsTheRest() throws {
+        let json = Data(
+            #"""
+            {"version":"1.2.3","activeSessionCount":1,"protocolVersion":49,"restorableSessions":[
+              {"sessionID":"session-future","workspaceID":"workspace-1","agentKind":"agent-from-the-future","title":"Future",
+               "workingDirectory":"/srv/work","hasResumeKey":true,"generation":"generation-1"},
+              {"sessionID":"session-known","workspaceID":"workspace-1","agentKind":"claude-code","title":"Fix the bug",
+               "workingDirectory":"/srv/work","hasResumeKey":true,"generation":"generation-1"}
+            ]}
+            """#.utf8)
+
+        let decoded = try JSONDecoder().decode(TerminalServiceDaemonStatus.self, from: json)
+
+        XCTAssertEqual(decoded.version, "1.2.3")
+        XCTAssertEqual(decoded.protocolVersion, 49)
+        XCTAssertEqual(decoded.restorableSessions.map(\.sessionID), ["session-known"])
+        XCTAssertEqual(decoded.restorableSessions.first?.agentKind, .claudeCode)
+    }
+
     func testProfileCommandResponseCarriesStructuredAgentSpawnResult() throws {
         // The spawn command response carries the structured outcome (the MCP tool encodes this response
         // as its result), so a client reads the session id / detected agent / subscribed flag from fields

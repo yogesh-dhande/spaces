@@ -278,4 +278,27 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.controlSocketPath))
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.subscriptionSocketPath))
     }
+
+    // MARK: - sessionsStrandedByUncleanExit names only the dead-foreign-pid repair
+
+    /// `.failed` (a foreign daemon that vanished without finalizing its row) is a run cut short.
+    /// `.exited` (this image's own pid, not adopted: a predecessor's exited write was lost) is a run the
+    /// predecessor deliberately ended, just with a dropped write. Both are repaired by this pass, but
+    /// only the first is the daemon's own record of "cut short" that a restorable-session capture reads.
+    func testSessionsStrandedByUncleanExitNamesOnlyTheDeadForeignPidSession() throws {
+        let deadPID: Int32 = 999_999
+        let deadForeignPidSession = "session-dead-foreign-pid"
+        let ownPidUnadoptedSession = "session-own-pid-unadopted"
+        _ = try seedSession(sessionID: deadForeignPidSession, servicePID: deadPID, state: .running)
+        _ = try seedSession(sessionID: ownPidUnadoptedSession, servicePID: getpid(), state: .running)
+
+        let result = try TerminalSessionStaleRecovery.reconcile(
+            ownPID: getpid(), adoptedSessionIDs: [], isProcessAlive: { $0 != deadPID })
+
+        XCTAssertEqual(Set(result.finalized.map(\.sessionID)), [deadForeignPidSession, ownPidUnadoptedSession], "both rows are repaired")
+        XCTAssertEqual(
+            result.sessionsStrandedByUncleanExit, [deadForeignPidSession],
+            "only the foreign daemon that vanished mid-run counts as cut short; the own-pid row was a deliberately-ended session whose write was lost"
+        )
+    }
 }
