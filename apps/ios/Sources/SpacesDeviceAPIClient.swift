@@ -452,6 +452,39 @@ struct SpacesDeviceAPIClient: Sendable {
                 clientApp: clientAppIdentity), commandChannel: commandChannel)
     }
 
+    /// Relaunches every coding-agent session in the device's outstanding restorable record, resuming each
+    /// agent's conversation where it reported one, and answers with each captured session id mapped to
+    /// the session now running in its place plus the rows that could not be relaunched.
+    ///
+    /// `generation` names the record this client showed the user; a device that has captured again since
+    /// refuses it as a conflict rather than restoring a set the user never saw.
+    ///
+    /// The 60-second budget is the daemon's own deadline for this command (the long-running mutation
+    /// lane it shares with spawning an agent, `SpacesDeviceAPICommandDescriptor`): giving up earlier
+    /// would leave this client without the map of a restore the daemon went on to complete, and the
+    /// record is cleared either way.
+    func restoreSessions(generation: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> SpacesDeviceRestoredSessionsResult
+    {
+        let response = try await sendRequest(
+            .init(command: .restoreSessions(.init(generation: generation)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            timeout: .seconds(60), commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+        guard let result = response.restoredSessionsResult else {
+            throw SpacesDeviceAPIClientError.requestFailed("The Device API did not return a session restore result.")
+        }
+        return result
+    }
+
+    /// Discards the device's outstanding restorable record without relaunching any of it. The other
+    /// answer to the same offer, refused on the same stale-generation terms as `restoreSessions`.
+    func discardRestorableSessions(generation: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws {
+        let response = try await sendRequest(
+            .init(
+                command: .discardRestorableSessions(.init(generation: generation)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity
+            ), timeout: .seconds(60), commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+    }
+
     /// Manually fires an automation, respecting the daemon's concurrency gate. The response carries the
     /// resulting run (started, queued, or skipped) but no overview, so the caller reloads the overview to
     /// reflect it — see `SpacesMobileAppModel.triggerAutomation`.

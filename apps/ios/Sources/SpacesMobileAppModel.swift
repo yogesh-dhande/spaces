@@ -448,15 +448,25 @@ private enum SpacesMobileMutationTimeoutRecovery {
 @MainActor @Observable final class SpacesMobileAppModel {
     var settings: SpacesMobileConnectionSettings
     var pairedDevices: [SpacesMobilePairedDeviceRecord]
-    var activeDeviceID: String?
+    /// The device every published fact below is about. `didSet` re-derives the restore offer, because an
+    /// offer names the device it was made for: the identity moving is what takes a question about the
+    /// previous device off screen, and what lets the next device's own status raise its own.
+    var activeDeviceID: String? { didSet { updateSessionRestoreOffer() } }
     /// Whether Demo Mode is on. While on, the device list shows only the synthetic Demo Mac and the
     /// active client is backed by the in-memory `DemoDeviceBackend`; the real paired devices are parked
     /// in memory and left untouched on disk. Persisted across launches via `DemoModeStore`.
     private(set) var isDemoModeEnabled: Bool
     /// `didSet` invalidates `cachedRuntimeRowIndex`: every assignment here (a fresh fetch, or one of the
     /// several resets to `nil`) replaces the runtime rows the index was built from, so a stale index must
-    /// not survive it.
-    var overview: SpacesDeviceOverviewPayload? { didSet { cachedRuntimeRowIndex = nil } }
+    /// not survive it. It also re-derives the restore offer, whose group headings are the workspace names this
+    /// payload carries: the first status of a launch or a reconnect can report a record before any
+    /// overview has landed, and this is what puts the names above those groups as soon as they exist.
+    var overview: SpacesDeviceOverviewPayload? {
+        didSet {
+            cachedRuntimeRowIndex = nil
+            updateSessionRestoreOffer()
+        }
+    }
     /// The clock every relative-time label (automation next-fire, run started/duration, alert age) reads
     /// at render time instead of calling `Date()` directly. Advances in 30-second jumps off the existing
     /// poll cadence (`advanceRelativeTimeReferenceIfDue`, called from every `performRefresh`) — matching
@@ -469,7 +479,29 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var relativeTimeReference: Date
     /// Wire-protocol status of the active device, read on each successful refresh. `nil` until the
     /// first handshake. Drives the compatibility banner and blocks incompatible interaction.
-    var daemonStatus: TerminalServiceDaemonStatus?
+    ///
+    /// `didSet` re-derives the restore offer: the device reports its restorable record here, so every
+    /// path that lands a status (a poll, the standalone handshake, a device switch, the resets that
+    /// clear it) is a path that can raise or retire the offer, and deriving it from the setter means
+    /// none of them has to remember to.
+    var daemonStatus: TerminalServiceDaemonStatus? {
+        didSet {
+            daemonStatusDeviceID = activeDeviceID
+            updateSessionRestoreOffer()
+        }
+    }
+    /// The device `daemonStatus` was read from, stamped as it lands. A device switch replaces the
+    /// identity, the overview, and the status in three separate assignments, and each of them re-derives
+    /// the restore offer, so a derivation reading the status alone would, in between, pair the device
+    /// just switched to with the sessions the previous one reported. Nothing reads this directly; it is
+    /// what `activeDeviceDaemonStatus` checks.
+    private var daemonStatusDeviceID: String?
+    /// `daemonStatus`, but only while it is still a statement about the active device. Every
+    /// restore-offer decision reads the status through here so a status can never be paired with another
+    /// device's identity; the compatibility banner and the update surfaces keep reading `daemonStatus`
+    /// itself, since they are rendered for whatever device last reported and are cleared by the same
+    /// switch.
+    private var activeDeviceDaemonStatus: TerminalServiceDaemonStatus? { daemonStatusDeviceID == activeDeviceID ? daemonStatus : nil }
     var compatibility: SpacesWireCompatibility?
     var isLoading = false
     /// In flight for every mutation that rides the shared `commandChannel` — create, rename, hide/unhide,
@@ -498,6 +530,33 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// blocked device's hero and its Try Again (see `stagedApplyDidNotLand`), and is retired the moment
     /// the device's own facts stop justifying it.
     private var stagedApplyDidNotLandAttempts: Set<DaemonStagedApplyAttempt> = []
+    /// The coding agents the active device is offering to bring back, or nil when it is offering nothing
+    /// this app has not already answered, which is the steady state. Derived (see
+    /// `updateSessionRestoreOffer`), and the sheet the app shell raises is presented on it.
+    ///
+    /// Settable because that is what presenting a sheet on it takes; the model is its only deliberate
+    /// writer. A dismissal that clears it without an answer loses nothing: the device still reports the
+    /// record, so the next status re-derives the same offer and raises it again.
+    var sessionRestoreOffer: SessionRestoreOffer?
+    /// Which agents a Restore could not bring back, as one report to show. Non-nil only after a device
+    /// accepted an answer and named rows it failed to relaunch: it clears its record either way, so this
+    /// is the one word the user gets about those agents.
+    var sessionRestoreFailureReport: String?
+    /// True from the moment an answer is sent until the device has answered it. The offer is not
+    /// re-derived while it is set: a device clears its record as it accepts the answer, so the status
+    /// that lands mid-call would otherwise pull the sheet out from under the answer it is still making.
+    private var isAnsweringSessionRestore = false
+    /// The record this app has taken off screen without the device having accepted an answer, per
+    /// device: one the device refused as stale, and one whose answer the device would not authenticate.
+    ///
+    /// Both arrive before any status saying the question is over: the app is holding the status the offer
+    /// was built from, and the next one can be a poll away (a tab that polls nothing is on screen) or
+    /// longer. Without this the same record would be derived again the moment the sheet closed, putting
+    /// the user back in a question that has already gone one of those two ways. Held in memory for the
+    /// run, keyed like the answered generations: a record that replaced a refused one carries a different
+    /// generation, so it is offered as soon as a status reports it, and pairing again clears this
+    /// entirely, which is what brings back a record whose answer failed to authenticate.
+    private var retiredSessionRestoreGenerations: [String: String] = [:]
     var isShowingConnectionSettings = false
     var isShowingWorkspaceCreateSheet = false
     var connectionNotice: String?
@@ -651,9 +710,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// behind, and a session id from it means nothing on the device being switched to. Doing it here
     /// rather than at each of the several call sites is what keeps a newly added one from forgetting.
     @ObservationIgnored private var overviewIdentity = 0 { didSet { retainedTerminalScreens.removeAll() } }
-    /// The in-flight overview fetch, tagged with the identity it serves. `refresh()` joins it when
-    /// the identity still matches, and re-fetches after it completes when the identity moved on.
-    @ObservationIgnored private var refreshInFlight: (identity: Int, task: Task<Void, Never>)?
+    /// The in-flight overview fetch, tagged with the connection identity, the channel generation, and the
+    /// mutation generation it was issued under. `refresh()` joins it only while all three still match, and
+    /// re-fetches after it completes when any of them moved on.
+    @ObservationIgnored private var refreshInFlight: (identity: Int, channelGeneration: Int, mutationGeneration: Int, task: Task<Void, Never>)?
+    /// Monotonic generation of the shared command channel's connection, bumped every time
+    /// `resetActiveConnectionEndpointAndWait` closes it. The connection identity does not move there (the
+    /// device is the same one), but the close aborts whatever request was on that connection, so a fetch
+    /// issued before it cannot answer for a caller asking after it: joining one would return without ever
+    /// having reached the device, which is the whole point of the read a foreground resume asks for.
+    @ObservationIgnored private var connectionChannelGeneration = 0
     /// Bumped every time a mutation's result is applied. A poll's overview is a snapshot of the moment its
     /// fetch was issued, so one that started before a mutation and lands after it carries pre-mutation
     /// state: publishing it would put a deleted workspace, or a stopped process, back on screen as an
@@ -1345,20 +1411,29 @@ private enum SpacesMobileMutationTimeoutRecovery {
         identity == overviewIdentity && mutationGeneration == fetchGeneration
     }
 
-    /// Fetches and publishes the active device's overview. Reentrant: a call while a fetch for the
-    /// same connection is in flight joins that fetch instead of silently dropping (a deep link
-    /// arriving mid-poll still resolves), and a call made after the connection identity changed
-    /// waits out the stale fetch — whose result is discarded — and then fetches fresh, so every
-    /// awaited `refresh()` returns having attempted an overview for the current connection.
+    /// Fetches and publishes the active device's overview. Reentrant: a call joins the fetch already in
+    /// flight only while the connection (`overviewIdentity`), its channel (`connectionChannelGeneration`),
+    /// and the mutation generation are all unchanged, so a deep link arriving mid-poll still resolves
+    /// instead of dropping silently. A fetch issued before any of those moved describes a device this app
+    /// has since left, a connection that was closed out from under it, or a device state a mutation has
+    /// already replaced, and its result is discarded or its request aborted, so a caller is never answered
+    /// by one: it waits the stale fetch out and then fetches fresh. Every awaited `refresh()` therefore
+    /// returns having attempted an overview that was issued after the caller asked for one.
     func refresh() async {
         while let inFlight = refreshInFlight {
             let identity = overviewIdentity
+            let channelGeneration = connectionChannelGeneration
+            let generation = mutationGeneration
             await inFlight.task.value
-            if inFlight.identity == identity, overviewIdentity == identity { return }
+            if inFlight.identity == identity, inFlight.channelGeneration == channelGeneration, inFlight.mutationGeneration == generation,
+                overviewIdentity == identity, connectionChannelGeneration == channelGeneration, mutationGeneration == generation
+            {
+                return
+            }
         }
         let identity = overviewIdentity
         let task = Task { await self.performRefresh(identity: identity) }
-        refreshInFlight = (identity: identity, task: task)
+        refreshInFlight = (identity: identity, channelGeneration: connectionChannelGeneration, mutationGeneration: mutationGeneration, task: task)
         await task.value
     }
 
@@ -1785,6 +1860,235 @@ private enum SpacesMobileMutationTimeoutRecovery {
         stagedApplyDidNotLandAttempts = stagedApplyDidNotLandAttempts.filter { $0.deviceID != deviceID }
     }
 
+    // MARK: - Restoring coding agents whose work was cut short
+
+    /// Re-derives what the active device is offering to bring back. Called from every assignment of the
+    /// two things the offer is made of: the daemon status that carries the record, and the overview that
+    /// names its workspaces.
+    ///
+    /// Assigns only on a change, because both setters fire on every poll while the steady state of this
+    /// property is nil: an unconditional write would invalidate every view observing the model twice a
+    /// second for a question nobody asked.
+    private func updateSessionRestoreOffer() {
+        // The answer in flight owns the sheet until the device has answered it, and the answer's own
+        // completion re-derives this. See `isAnsweringSessionRestore`.
+        guard !isAnsweringSessionRestore else { return }
+        // What raises a question and what takes one away are different rules: a status this app cannot
+        // read, or cannot answer across, raises nothing but is no reason to withdraw a question the user
+        // is already looking at. See `retainedPresentedOffer`.
+        let offer = currentSessionRestoreOffer() ?? retainedPresentedOffer()
+        guard offer != sessionRestoreOffer else { return }
+        sessionRestoreOffer = offer
+    }
+
+    /// The question already on screen, when nothing about the device's current status is a reason to take
+    /// it away, or nil when it is.
+    ///
+    /// Raising an offer is gated on a device this app can read and answer; withdrawing one must not be,
+    /// or a failed status fetch and a daemon updated mid-question would each dismiss the sheet with no
+    /// answer given and nothing said, and the version gap would lose the one surface that reports it (the
+    /// answer path states it inline). What does take the question away is the device saying the record is
+    /// gone, this client having settled it, or the user having switched to another device, since an offer
+    /// is about the device it was made for and cannot be answered on a different one.
+    private func retainedPresentedOffer() -> SessionRestoreOffer? {
+        guard let presented = sessionRestoreOffer, presented.deviceID == activeDeviceID,
+            !hasSettledSessionRestoreRecord(deviceID: presented.deviceID, generation: presented.generation),
+            SessionRestoreOffer.retainsPresentedOffer(presented: presented, status: activeDeviceDaemonStatus)
+        else { return nil }
+        return presented
+    }
+
+    /// Whether this client has already dealt with the record `generation` names on `deviceID`: it
+    /// answered it and the device accepted (remembered across launches), or the question was retired
+    /// without an accepted answer (remembered for this run, see `retiredSessionRestoreGenerations`). A
+    /// settled record is never raised, and never kept on screen.
+    private func hasSettledSessionRestoreRecord(deviceID: String, generation: String) -> Bool {
+        SessionRestoreAnsweredGenerationsStore.generation(deviceID: deviceID) == generation
+            || retiredSessionRestoreGenerations[deviceID] == generation
+    }
+
+    /// What the active device is offering right now, or nil when it is offering nothing this app has not
+    /// already answered.
+    ///
+    /// The short circuit on an empty record comes before everything else: this runs on every poll, and
+    /// the steady state is that the device is offering nothing.
+    ///
+    /// A device with no paired record of its own is offered nothing, because its id is the key the
+    /// answer is remembered under, and an offer this app could not remember answering would be raised
+    /// again on every refresh for as long as the record stood.
+    private func currentSessionRestoreOffer() -> SessionRestoreOffer? {
+        guard let daemonStatus = activeDeviceDaemonStatus, !daemonStatus.restorableSessions.isEmpty, let activeDeviceID else { return nil }
+        // The answered generation is the rule the pure decision carries; the check below adds the record a
+        // device refused an answer to, which is settled for this run the same way.
+        guard
+            let offer = SessionRestoreOffer.make(
+                deviceID: activeDeviceID, deviceName: connectionSummary, status: daemonStatus,
+                workspaceNamesByID: Dictionary((overview?.workspaces ?? []).map { ($0.id, $0.displayName) }, uniquingKeysWith: { first, _ in first }),
+                answeredGeneration: SessionRestoreAnsweredGenerationsStore.generation(deviceID: activeDeviceID)),
+            !hasSettledSessionRestoreRecord(deviceID: activeDeviceID, generation: offer.generation)
+        else { return nil }
+        return offer
+    }
+
+    /// Answers the offer on screen and reports what the sheet should do: nil closes it, a message keeps
+    /// it open so the user can try again or skip instead.
+    ///
+    /// Every answer is preceded by a fresh daemon-status read of the device it is for, the rule the Mac's
+    /// `SessionRestoreController.probedDaemonStatus` follows: the offer was built from a status the
+    /// device may have replaced since, because a daemon can be updated or restarted while the sheet is
+    /// up, and the status this app holds can be minutes old or missing after a failed fetch. Answering on
+    /// that would let a device on another wire version relaunch the agents and clear its record while
+    /// this app cannot decode what came back or report which relaunches failed. Only a compatible probe
+    /// lets the answer go out; a probe that fails is not permission either, and reports the device as
+    /// unreachable with the record left standing.
+    ///
+    /// Rows the device accepted but could not relaunch are reported separately
+    /// (`sessionRestoreFailureReport`), because the answer itself landed: the sheet closes and the app
+    /// shell says which agents are not coming back.
+    func answerSessionRestoreOffer(_ answer: SessionRestoreAnswer, offer: SessionRestoreOffer) async -> String? {
+        isAnsweringSessionRestore = true
+        let identity = overviewIdentity
+        // Sent on a dedicated command channel rather than the shared one the overview poll also uses, for
+        // the reason `performDeleteWorkspace` uses one: a restore relaunches one agent per row under the
+        // daemon's long-running request timeout, far longer than the 8s the poll allows itself, and the
+        // transport does not serialize whole round trips on a connection (issue #248), so the poll timing
+        // out would close this request's connection out from under it while the device restores regardless.
+        // The poll itself is not shielded: the daemon serves the overview and the restore on the same
+        // serial lane, so a restore that outlasts the poll's timeout makes that poll fail and, past the alert
+        // delay, show a connection error while the agents are still being relaunched. Accepted: it takes
+        // dozens of agents to hold the lane that long, the message is factual about the request that
+        // failed, and the first poll after the answer clears it.
+        let answerChannel = bridgeClient.makeCommandChannel()
+        let client = bridgeClient
+        // The version check rides that same channel, so the poll cannot close the connection out from
+        // under the check either, and the answer that follows reuses the connection the check just proved.
+        let probe: Result<TerminalServiceDaemonStatus, any Error>
+        do { probe = .success(try await client.fetchDaemonStatus(commandChannel: answerChannel)) } catch { probe = .failure(error) }
+        // The active device changed while the check was in flight, so there is no sheet left to report to
+        // and this model now describes a different device.
+        guard identity == overviewIdentity else {
+            await endAnswerAttempt(channel: answerChannel)
+            updateSessionRestoreOffer()
+            return nil
+        }
+        switch probe {
+        case .failure(let error):
+            await endAnswerAttempt(channel: answerChannel)
+            // A check the device would not authenticate is the same refusal the answer's own outcome
+            // carries, and it ends the same way: the sheet comes down so the re-pair surface it covers is
+            // reachable, and the record, which this app never reached, is offered again once paired.
+            if let recoveryMessage = SpacesDeviceAPIAuthentication.recoveryMessage(for: error) {
+                retireOfferForFailedAuthentication(offer: offer, recoveryMessage: recoveryMessage)
+                return nil
+            }
+            updateSessionRestoreOffer()
+            return Self.deviceUnreachableAnswerFailure(deviceName: connectionSummary)
+        case .success(let probedStatus):
+            // The check is the freshest word this app has about the device, and every restore decision
+            // reads the published status, so it is installed rather than read once and dropped: what the
+            // offer is derived from next is what the answer was allowed on. Nothing moves on screen while
+            // this call owns the sheet (see `isAnsweringSessionRestore`).
+            applyCompatibility(probedStatus)
+            if let blocked = DaemonCompatibilityCopy.actionBlockedBody(
+                deviceName: connectionSummary, verdict: SpacesWireCompatibility.evaluate(daemonStatus: probedStatus))
+            {
+                await endAnswerAttempt(channel: answerChannel)
+                updateSessionRestoreOffer()
+                return blocked
+            }
+        }
+        let outcome = await SessionRestoreAnswering.perform(
+            answer, generation: offer.generation, restore: { try await client.restoreSessions(generation: $0, commandChannel: answerChannel) },
+            discard: { try await client.discardRestorableSessions(generation: $0, commandChannel: answerChannel) })
+        await endAnswerAttempt(channel: answerChannel)
+        // The active device changed while the answer was in flight. It was answered on the device it was
+        // made about, so nothing here is wrong; there is simply no sheet left to report to, and this
+        // model now describes a different device.
+        guard identity == overviewIdentity else {
+            updateSessionRestoreOffer()
+            return nil
+        }
+        let disposition = SessionRestoreAnswering.disposition(for: outcome)
+        if let failureMessage = disposition.failureMessage {
+            // The record stays unanswered and the offer stays on screen: the agents are still on the
+            // device, and the user can try the same answer again or skip instead.
+            updateSessionRestoreOffer()
+            return failureMessage
+        }
+        if disposition.recordsGeneration { SessionRestoreAnsweredGenerationsStore.record(generation: offer.generation, deviceID: offer.deviceID) }
+        if case .unauthenticated(let recoveryMessage) = outcome {
+            // The device did not recognize this app, so the answer never reached the record: it stands,
+            // and the device offers it again once the user has paired. The sheet has to come down first:
+            // it cannot be swiped away, and what it covers (Devices, and the re-pair the notice asks for)
+            // is the only way through. The generation is held only until that pairing lands, which is
+            // what brings the question back.
+            retireOfferForFailedAuthentication(offer: offer, recoveryMessage: recoveryMessage)
+            return nil
+        }
+        if case .superseded = outcome {
+            // The device replaced the record while the question was on screen. Retire the question with it
+            // rather than leaving the sheet up on a record its own device has disowned, and ask for a fresh
+            // status at once: the record that replaced it is one the user has not been asked about, and
+            // nothing else raises it until this app's next poll, which a screen that polls nothing (the
+            // Settings tab, an open terminal) leaves indefinitely far away.
+            retiredSessionRestoreGenerations[offer.deviceID] = offer.generation
+            updateSessionRestoreOffer()
+            // The refusal is the device reporting a record this app has never seen, which every overview
+            // fetch issued before it describes without. Bumped like any other device-changing call so one
+            // of those in flight is discarded rather than published, and so the read below issues its own
+            // request instead of being answered by it.
+            mutationGeneration &+= 1
+            await refresh()
+            return nil
+        }
+        // The other two outcomes have returned by here, so this is the device accepting the answer.
+        guard case .answered(let restored) = outcome else { return nil }
+        let failureReport = SessionRestoreAnswering.failureReport(restored.failures, offer: offer)
+        // Only a Restore changes what this app shows: the relaunched agents are sessions the overview does
+        // not carry yet, and the restore response answers with their ids alone. A Skip leaves every list
+        // exactly as it was, and bumps nothing, so a poll in flight across it still publishes.
+        if answer == .restore {
+            // The device has relaunched the agents, so every overview fetch issued before this answer
+            // describes a device without them. Bumped like any other device-changing call so one of those
+            // in flight is discarded rather than published, and so the read below issues its own request
+            // instead of being answered by it, which is what puts the relaunched sessions in the lists.
+            mutationGeneration &+= 1
+            await refresh()
+        }
+        updateSessionRestoreOffer()
+        // Raised last, once the answered record has retired the offer and taken its sheet down with it: an
+        // alert asked for while that sheet is still on screen is an alert over a view that is dismissing.
+        // Nothing is lost by the wait, since only a Restore can report failures and a Restore always has
+        // the refresh above to wait behind.
+        if let failureReport { sessionRestoreFailureReport = failureReport }
+        return nil
+    }
+
+    /// Closes the channel one answer attempt ran on and unfreezes the derivation. Every exit from
+    /// `answerSessionRestoreOffer` past the point the channel exists goes through here, so a sheet is
+    /// never left frozen on an answer that has finished.
+    private func endAnswerAttempt(channel: SpacesDeviceAPICommandChannel) async {
+        await channel.close()
+        isAnsweringSessionRestore = false
+    }
+
+    /// The one thing this app does about a device that will not authenticate it, whether the refusal came
+    /// from the version check or from the answer itself: the question is retired for this connection so
+    /// the re-pair surface the sheet covers is reachable, and the device, whose record the answer never
+    /// reached, offers it again once the user has paired (which clears what was retired here).
+    private func retireOfferForFailedAuthentication(offer: SessionRestoreOffer, recoveryMessage: String) {
+        retiredSessionRestoreGenerations[offer.deviceID] = offer.generation
+        updateSessionRestoreOffer()
+        handleAuthenticationFailure(message: recoveryMessage)
+    }
+
+    /// What a version check that never answered tells the user, worded like the Mac's
+    /// `deviceUnreachableError` for the same refusal: the record is untouched on a device this app could
+    /// not reach, and reconnecting is what makes the answer possible.
+    private static func deviceUnreachableAnswerFailure(deviceName: String) -> String { "\(deviceName) is offline. Reconnect it and try again." }
+
+    func dismissSessionRestoreFailureReport() { sessionRestoreFailureReport = nil }
+
     /// Standalone frozen-core handshake, used only as a fallback when the overview cannot carry the
     /// inline status (an older daemon) or could not be fetched/decoded at all (incompatible/offline).
     /// Takes the caller's connection `identity` and re-checks it after the await: this fallback only
@@ -1818,6 +2122,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
             settings.isPaired
             ? SpacesMobileDeviceStore.upsert(settings: settings, name: deviceName ?? settings.primaryHost)
             : SpacesMobileDeviceStore.load(fallbackSettings: settings)
+        // Cleared before the identity moves, for the reason `selectDevice` clears it there.
+        clearActiveDeviceFacts()
         self.settings = deviceState.settings
         pairedDevices = deviceState.devices
         activeDeviceID = deviceState.activeDeviceID
@@ -1825,9 +2131,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
         SpacesMobileSettingsStore.save(deviceState.settings)
-        overview = nil
-        daemonStatus = nil
-        compatibility = nil
+        // Pairing again is what recovers a connection this device could not authenticate, so it is also
+        // what brings back a restore question that was retired because its answer could not be
+        // authenticated: the device still holds that record and offers it on the next status.
+        retiredSessionRestoreGenerations.removeAll()
         stagedApplyDidNotLandAlert = nil
         workspaceCreateOptions = nil
         connectionNotice = nil
@@ -1879,13 +2186,39 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// rather than re-preferring the LAN one. The overview poll runs every couple of seconds, so the
     /// window is real but the consequence is only staying on a path that already works, and the next
     /// foreground clears it again. Not worth generation-stamping every connect to close.
-    func resetActiveConnectionEndpoint() {
+    func resetActiveConnectionEndpoint() { Task { await resetActiveConnectionEndpointAndWait() } }
+
+    private func resetActiveConnectionEndpointAndWait() async {
         let client = bridgeClient
         let channel = commandChannel
-        Task {
-            await client.resetEndpointResolution()
-            await channel.close()
-        }
+        await client.resetEndpointResolution()
+        await channel.close()
+        // Bumped after the close, so every fetch the close could have aborted carries the older
+        // generation and no later caller can be answered by one. A fetch issued after this point is on
+        // the reconnected channel and is joinable like any other.
+        connectionChannelGeneration += 1
+    }
+
+    /// The whole of what returning to the foreground asks of the connection, in the one order that works:
+    /// re-prefer the endpoint, and only then read the device.
+    ///
+    /// Sequenced rather than started side by side because the reset closes the shared command channel,
+    /// and a close landing on the read already in flight aborts it: the app would come back to the
+    /// foreground having fetched nothing, with the next attempt a whole poll interval away on a tab that
+    /// polls, and indefinitely away on one that does not (the Settings tab, an open terminal). The reset
+    /// is also what makes the refresh below issue its own request rather than join one: the close bumps
+    /// `connectionChannelGeneration`, and a fetch from before it is never joined (see `refresh()`).
+    ///
+    /// The read is what the app misses without this: anything the device decided while the app was away,
+    /// which is exactly when a device restarts and starts offering the coding agents its restart cut
+    /// short. Paired only, matching the poller's own gate (`OverviewPollingPolicy.shouldPoll`): an
+    /// unpaired app has nothing to read and would answer with a connection error. A tab poller firing on
+    /// the same transition costs no second fetch, since `refresh()` joins a fetch already in flight for
+    /// this connection.
+    func resumeFromBackground() async {
+        await resetActiveConnectionEndpointAndWait()
+        guard settings.isPaired else { return }
+        await refresh()
     }
 
     func selectDevice(id: String) {
@@ -1895,6 +2228,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
         guard let deviceState = SpacesMobileDeviceStore.select(deviceID: id, installationID: settings.installationID) else { return }
         let previousCommandChannel = commandChannel
+        // Cleared before the identity moves, not after: what the previous device reported is read as a
+        // statement about whichever device `activeDeviceID` names, so the two must never be crossed, not
+        // even for the few assignments in between.
+        clearActiveDeviceFacts()
         settings = deviceState.settings
         pairedDevices = deviceState.devices
         activeDeviceID = deviceState.activeDeviceID
@@ -1902,9 +2239,6 @@ private enum SpacesMobileMutationTimeoutRecovery {
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
         SpacesMobileSettingsStore.save(settings)
-        overview = nil
-        daemonStatus = nil
-        compatibility = nil
         // The report names the device it was raised for, so it goes with that device rather than being
         // read as a statement about the one just switched to. Its mark survives: the device it describes
         // still has that build staged and unapplied, and switching back must not re-fire the apply.
@@ -1928,6 +2262,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
         let previousCommandChannel = commandChannel
         let deviceState = SpacesMobileDeviceStore.remove(deviceID: id, fallbackSettings: settings)
+        // Cleared before the identity moves, for the reason `selectDevice` clears it there.
+        clearActiveDeviceFacts()
         settings = deviceState.settings
         pairedDevices = deviceState.devices
         activeDeviceID = deviceState.activeDeviceID
@@ -1935,9 +2271,6 @@ private enum SpacesMobileMutationTimeoutRecovery {
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
         SpacesMobileSettingsStore.save(settings)
-        overview = nil
-        daemonStatus = nil
-        compatibility = nil
         stagedApplyDidNotLandAlert = nil
         forgetStagedApplyState(deviceID: id)
         workspaceCreateOptions = nil
@@ -1981,6 +2314,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
         parkedRealDeviceState = SpacesMobileDeviceStoreState(devices: pairedDevices, activeDeviceID: activeDeviceID, settings: settings)
         let previousCommandChannel = commandChannel
+        // Cleared before the identity moves, for the reason `selectDevice` clears it there.
+        clearActiveConnectionState()
         let demoSettings = SpacesMobileDemoDevice.settings(installationID: settings.installationID)
         settings = demoSettings
         pairedDevices = [SpacesMobileDemoDevice.record()]
@@ -1990,7 +2325,6 @@ private enum SpacesMobileMutationTimeoutRecovery {
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
         DemoModeStore.save(true)
-        clearActiveConnectionState()
         loadDismissedAlertIDsForActiveDevice()
         Task { await previousCommandChannel.close() }
     }
@@ -1999,6 +2333,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let restored = parkedRealDeviceState ?? SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileSettingsStore.load())
         parkedRealDeviceState = nil
         let previousCommandChannel = commandChannel
+        // Cleared before the identity moves, for the reason `selectDevice` clears it there.
+        clearActiveConnectionState()
         settings = restored.settings
         pairedDevices = restored.devices
         activeDeviceID = restored.activeDeviceID
@@ -2007,18 +2343,25 @@ private enum SpacesMobileMutationTimeoutRecovery {
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
         DemoModeStore.save(false)
-        clearActiveConnectionState()
         loadDismissedAlertIDsForActiveDevice()
         pruneDismissedAlertsForUnknownDevices()
         Task { await previousCommandChannel.close() }
     }
 
-    /// Clears every piece of published state tied to the previous active connection, matching what a
-    /// device switch resets so no stale overview, status, or notice bleeds across the swap.
-    private func clearActiveConnectionState() {
+    /// What the active device itself reported: the overview, the wire status, and the verdict derived
+    /// from it. Every path that points this model at a different device clears these, and clears them
+    /// before it changes `activeDeviceID`, so no derivation ever reads one device's facts as the next
+    /// device's.
+    private func clearActiveDeviceFacts() {
         overview = nil
         daemonStatus = nil
         compatibility = nil
+    }
+
+    /// Clears every piece of published state tied to the previous active connection, matching what a
+    /// device switch resets so no stale overview, status, or notice bleeds across the swap.
+    private func clearActiveConnectionState() {
+        clearActiveDeviceFacts()
         stagedApplyDidNotLandAlert = nil
         workspaceCreateOptions = nil
         connectionNotice = nil
