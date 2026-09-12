@@ -278,7 +278,9 @@ let executableTargets: [Target] = [
     ]
 #else
     let testTargets: [Target] = [
-        .testTarget(name: "spacesterminalcoreTests", dependencies: ["spacesterminalcore", "ghosttyvtshim"]),
+        // spacesdatabase and spacesclientcore are here for the QA profile seed suite, which builds both
+        // fixture databases through the product's own types so it tests against the real schema.
+        .testTarget(name: "spacesterminalcoreTests", dependencies: ["spacesterminalcore", "ghosttyvtshim", "spacesdatabase", "spacesclientcore"]),
         .testTarget(name: "spacesterminalghosttyTests", dependencies: ["spacesterminalghostty", "ghosttyvtshim"]),
         .testTarget(name: "spacesruntimecoreTests", dependencies: ["spacesruntimecore"]),
         .testTarget(name: "spacesdTests", dependencies: ["spacesd", "spacesterminalcore"]),

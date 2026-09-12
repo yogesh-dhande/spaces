@@ -27,6 +27,13 @@ public enum InstalledSpacesVersion {
         /// reading that bundle's `Info.plist`.
         static func installedAppBundleVersion(executableURL: URL? = Bundle.main.executableURL) -> String? {
             guard let executableURL, let bundleURL = enclosingAppBundleURL(of: executableURL.resolvingSymlinksInPath()) else { return nil }
+            return appBundleVersion(bundleURL: bundleURL)
+        }
+
+        /// The `CFBundleShortVersionString` of the app bundle at `bundleURL`, or `nil` when there is no
+        /// readable `Info.plist` there. Read from the bundle on disk rather than from `Bundle`, so it
+        /// answers for a bundle this process is not running from.
+        public static func appBundleVersion(bundleURL: URL) -> String? {
             let infoPlistURL = bundleURL.appendingPathComponent("Contents/Info.plist", isDirectory: false)
             guard let data = try? Data(contentsOf: infoPlistURL),
                 let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]

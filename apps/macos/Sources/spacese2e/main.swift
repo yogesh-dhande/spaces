@@ -38,7 +38,7 @@ struct SpacesE2ECommand: ParsableCommand {
             ScrollApplicationWindowCommand.self, ClickApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
             DragApplicationWindowCommand.self, AutomationCreateCommand.self, AutomationUpdateCommand.self, AutomationDeleteCommand.self,
             AutomationListCommand.self, AutomationRunsCommand.self, AutomationTriggerCommand.self, AutomationCancelCommand.self,
-            AutomationEndAgentsCommand.self, WindowStackingCommand.self,
+            AutomationEndAgentsCommand.self, WindowStackingCommand.self, QAProfileCommand.self,
         ])
 }
 
@@ -703,7 +703,7 @@ private func validatedDevelopmentProfileName(_ value: String) throws -> String {
 /// The remote device these commands act on, resolved from the repository `.env` variables that
 /// `scripts/spaces-e2e-env.sh` surfaces for every remote-device workflow. There is deliberately no second
 /// way to name a device: a caller binds that env first, exactly as the remote E2E scripts do.
-private struct RemoteDevice {
+struct RemoteDevice {
     let destination: String
     let sshPort: Int?
 
