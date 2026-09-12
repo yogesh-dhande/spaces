@@ -10,9 +10,15 @@ import Foundation
 ///
 /// The merge is "ensure desired state," never "append": on every run it strips all Spaces-owned
 /// entries (identified by the command marker) from every event, then re-adds exactly one entry per
-/// mapped event. Running twice yields byte-identical output and never duplicates a hook. The user's
-/// unrelated keys and non-Spaces hooks are preserved; only key ordering is normalized (sorted) so
-/// output is deterministic.
+/// mapped event, in the position the previous install left it. Running twice yields byte-identical
+/// output and never duplicates a hook. The user's unrelated keys and non-Spaces hooks are preserved,
+/// and so is their position, because Codex names a hook by the index of its group inside the event AND
+/// the index of the hook inside that group: the strip leaves a placeholder at each coordinate a Spaces
+/// entry held, at whichever of the two levels it held it, and the re-add writes the replacement back
+/// into that placeholder. A Spaces entry sharing a group with hooks of the user's own therefore keeps
+/// its hook index instead of moving to the end of the event and renumbering the entries that followed
+/// it, which would leave the user's trust records describing the wrong hooks. Only key ordering is
+/// normalized (sorted) so output is deterministic.
 enum AgentHookJSONWriter {
     struct MalformedConfigError: LocalizedError {
         let path: String
@@ -55,19 +61,35 @@ enum AgentHookJSONWriter {
             }
         }
 
-        // Strip every Spaces-owned entry from all events first, so a reinstall with a changed event
-        // set leaves no stale entries behind, then drop events that become empty as a result.
+        // Strip every Spaces-owned entry from all events first, so a reinstall with a changed event set
+        // leaves no stale entries behind. Each one leaves a placeholder at the coordinate it held rather
+        // than closing the array up: Codex identifies a hook by its group index and its index inside
+        // that group (`AgentHookCodexTrustState`), so putting the replacement back at both is what keeps
+        // the rewrite from renumbering the user's own hooks and sending them back through review.
+        var strippedEvents: [String: [StrippedGroup]] = [:]
         for (eventName, value) in hooks {
             guard let groups = value as? [[String: Any]] else { continue }
-            let kept = groups.compactMap(strippingSpacesOwnedEntries)
-            if kept.isEmpty { hooks.removeValue(forKey: eventName) } else { hooks[eventName] = kept }
+            strippedEvents[eventName] = groups.map(strippingSpacesOwnedEntries)
         }
 
-        // Re-add exactly one Spaces group per mapped event.
+        // Re-add exactly one Spaces entry per mapped event, in the slot the last install left. Only an
+        // event that has never carried one appends, and it appends a group of its own at the end so it
+        // claims a coordinate no hook of the user's own holds.
         for binding in bindings {
-            var groups = hooks[binding.eventName] as? [[String: Any]] ?? []
-            groups.append(spacesGroup(event: binding.event, spacesExecutablePath: spacesExecutablePath))
-            hooks[binding.eventName] = groups
+            var groups = strippedEvents[binding.eventName] ?? []
+            let entry = spacesEntry(event: binding.event, spacesExecutablePath: spacesExecutablePath)
+            if let groupIndex = groups.firstIndex(where: { $0.openSlot != nil }), let slot = groups[groupIndex].openSlot {
+                groups[groupIndex].entries[slot] = entry
+            } else {
+                groups.append(StrippedGroup(group: spacesGroup(entry: entry), entries: [entry]))
+            }
+            strippedEvents[binding.eventName] = groups
+        }
+
+        // Close up the placeholders no binding claimed, and drop an event left with no group at all.
+        for (eventName, groups) in strippedEvents {
+            let kept = groups.compactMap { $0.rebuilt() }
+            if kept.isEmpty { hooks.removeValue(forKey: eventName) } else { hooks[eventName] = kept }
         }
 
         root["hooks"] = hooks
@@ -107,27 +129,46 @@ enum AgentHookJSONWriter {
         return dictionary
     }
 
-    private static func spacesGroup(event: AgentHookLifecycleEvent, spacesExecutablePath: String) -> [String: Any] {
-        [
-            "matcher": "",
-            "hooks": [["type": "command", "command": AgentHookCommand.signalCommand(event: event, spacesExecutablePath: spacesExecutablePath)]],
-        ]
+    /// One group of an event with its Spaces-owned entries lifted out, a nil left in each hook slot one
+    /// held, so the re-add writes the replacement back at the same index.
+    private struct StrippedGroup {
+        /// The group as the file carries it. Its `hooks` value is the pre-strip one and is rewritten
+        /// only when the group is rebuilt, which is also what tells a group with no hooks array apart
+        /// from one whose entries all went.
+        let group: [String: Any]
+        var entries: [[String: Any]?]
+
+        /// The first slot a Spaces entry gave up, and so the one this event's entry belongs back in.
+        var openSlot: Int? { entries.firstIndex(where: { $0 == nil }) }
+
+        /// The group to write, or nil when nothing of it is left to write.
+        func rebuilt() -> [String: Any]? {
+            guard group["hooks"] is [[String: Any]] else { return group }
+            let kept = entries.compactMap { $0 }
+            guard !kept.isEmpty else { return nil }
+            var updated = group
+            updated["hooks"] = kept
+            return updated
+        }
     }
 
-    /// Drops Spaces-owned entries from `group`, whatever version wrote them. Matching on
+    private static func spacesEntry(event: AgentHookLifecycleEvent, spacesExecutablePath: String) -> [String: Any] {
+        ["type": "command", "command": AgentHookCommand.signalCommand(event: event, spacesExecutablePath: spacesExecutablePath)]
+    }
+
+    private static func spacesGroup(entry: [String: Any]) -> [String: Any] { ["matcher": "", "hooks": [entry]] }
+
+    /// Lifts Spaces-owned entries out of `group`, whatever version wrote them. Matching on
     /// `isSpacesOwned` rather than the current version is what lets a reinstall replace an older
     /// build's entry instead of appending a second one beside it.
-    private static func strippingSpacesOwnedEntries(from group: [String: Any]) -> [String: Any]? {
-        guard let entries = group["hooks"] as? [[String: Any]] else { return group }
-        let keptEntries = entries.filter { entry in
-            guard let command = entry["command"] as? String else { return true }
-            return !AgentHookCommand.isSpacesOwned(command)
-        }
-        guard keptEntries.count != entries.count else { return group }
-        guard !keptEntries.isEmpty else { return nil }
-        var updated = group
-        updated["hooks"] = keptEntries
-        return updated
+    private static func strippingSpacesOwnedEntries(from group: [String: Any]) -> StrippedGroup {
+        guard let entries = group["hooks"] as? [[String: Any]] else { return StrippedGroup(group: group, entries: []) }
+        return StrippedGroup(
+            group: group,
+            entries: entries.map { entry in
+                guard let command = entry["command"] as? String, AgentHookCommand.isSpacesOwned(command) else { return entry }
+                return nil
+            })
     }
 
     private static func write(root: [String: Any], to fileURL: URL, fileManager: FileManager) throws {

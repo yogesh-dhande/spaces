@@ -7,7 +7,10 @@ import Foundation
 /// the destination — which replaces the *symlink* with a regular file and silently detaches the user's
 /// managed config. Following the link chain first keeps the dotfiles repo owning the file, and keeps
 /// the write atomic with respect to the real target.
-enum AgentHookConfigFile {
+///
+/// Public because the Coding Agents rows watch the same file this resolves, and a watch that resolved
+/// a link chain differently from the writer would miss the write it exists to catch.
+public enum AgentHookConfigFile {
     /// Backstop on the hop count. Unreachable in practice — a link cycle already stops at the
     /// existence check below, because `stat` reports a cycle as nonexistent (`ELOOP`).
     private static let maximumSymlinkDepth = 8
@@ -20,7 +23,7 @@ enum AgentHookConfigFile {
     /// not cloned yet, an unmounted volume, a cycle — points at nothing worth preserving, so the write
     /// replaces the dead link itself. Following it instead would create directories at a destination
     /// the user never populated, or fail outright on an unwritable one and defer the install forever.
-    static func writeTarget(for fileURL: URL, fileManager: FileManager) -> URL {
+    public static func writeTarget(for fileURL: URL, fileManager: FileManager) -> URL {
         var target = fileURL
         for _ in 0..<maximumSymlinkDepth {
             guard let destination = try? fileManager.destinationOfSymbolicLink(atPath: target.path) else { return target }

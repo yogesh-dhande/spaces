@@ -26,6 +26,27 @@ extension WorkspaceOrchestrator {
             if builtInTerminalSessionHasConfiguredOwner(ownership) { continue }
             guard let workspace = try workspaceForBuiltInTerminalSession(sessionID: sessionID, ownership: ownership) else { continue }
             if let existingRow = try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID) {
+                // A relaunch in the terminal the last agent exited from: the row is held `.exited`, the
+                // terminal outlived its agent, and detection reports an agent in the foreground again.
+                // The agent's own SessionStart cannot be relied on to say so: codex fires it with the
+                // first turn, not at its prompt (verified against codex-cli 0.153.4, 49 s at a trusted
+                // prompt produced no hook event), so without this the row reads exited for as long as the
+                // user does not type. Detection is what already promotes a plain terminal to an agent
+                // row, so it is what reports the relaunch too. This routes through the same
+                // `registerAgentWindow` reset an `init` signal takes, and records an `init` event of its
+                // own, which is what re-arms the row for the next exit; the row keeps its signal history,
+                // so it still exits through the notify path rather than a silent demote. An automation
+                // run is left alone: its terminal is the automation's, not a user's, and nothing reuses
+                // it after its command ends.
+                if existingRow.status == .exited, ownership.launchKind != .automation,
+                    try foregroundHoldsAnAgentNewerThanTheExit(row: existingRow, runtimeState: session.runtimeState)
+                {
+                    _ = try registerAgentWindow(
+                        workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, status: existingRow.status, eventType: "init",
+                        eventSource: "foreground_relaunch")
+                    didMutate = true
+                    continue
+                }
                 // A row already finalized (its exit delivered — `.exited`, or an exit event recorded on a
                 // previous pass) is skipped so it is never re-entered and its subscribers never get a
                 // duplicate exited notice — an early-out over the chokepoint's own atomic claim, which is
@@ -555,7 +576,9 @@ extension WorkspaceOrchestrator {
         // reconnect never disturbs a live agent. But an `init` on a terminal whose previous agent
         // `.exited` means a fresh agent is reusing that terminal, so its status resets to `.idle` rather
         // than staying `.exited`. This is the single chokepoint for that restart-reuse reset, shared by
-        // the daemon and remote signal init paths (both pass the preserved `existing.status`).
+        // the daemon and remote signal init paths (both pass the preserved `existing.status`) and by the
+        // foreground reconciler's relaunch branch, which is what covers an agent whose SessionStart does
+        // not fire at its prompt (codex fires it with the first turn).
         let resolvedStatus: AgentWindowStatus = status == .exited ? .idle : status
         if let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey) {
             // The default heals a row stored without a label before materialization existed, so every
@@ -857,11 +880,18 @@ extension WorkspaceOrchestrator {
     ) throws -> Bool {
         guard let current = try store.agentWindow(id: record.id) else { return false }
         let exitedNotice = try engine.renderLine(agent: current, transition: .exited)
+        let message = agentSessionEventMessage(
+            provider: current.provider, label: current.label, terminalTrackingID: current.terminalTrackingID, sessionKey: current.sessionKey,
+            environmentKeys: environmentKeys)
+        // The foreground process this exit was observed against, carried on the event so the relaunch
+        // branch of the foreground reconciler can tell a genuinely new agent from the one that just
+        // signalled. An agent reports `SessionEnd` before it dies (codex signals roughly a second
+        // ahead of its own exit), so the next foreground sample can still show the process that just
+        // said goodbye, and treating that as a relaunch would re-arm the row for a second exit.
+        let exitedPID = liveForegroundPID(terminalSessionID: current.terminalTrackingID)
         return try store.claimAgentSessionExitEvent(
             agentSessionID: current.id, eventType: eventType, source: eventSource,
-            message: agentSessionEventMessage(
-                provider: current.provider, label: current.label, terminalTrackingID: current.terminalTrackingID, sessionKey: current.sessionKey,
-                environmentKeys: environmentKeys), createdAt: nowISO8601(),
+            message: exitedPID.map { "\(message) \(Self.exitForegroundPIDKey)=\($0)" } ?? message, createdAt: nowISO8601(),
             exitedNoticeTransition: AgentNotificationEngine.ChildTransition.exited.word, exitedNoticeMessage: exitedNotice)
     }
 
@@ -886,6 +916,42 @@ extension WorkspaceOrchestrator {
     /// prevents a "Reviewer (Reviewer)" duplication and preserves the detected-kind identity in listings.
     /// This is the detection source the kind is persisted from; it goes nil the moment the agent process
     /// ends, so no consumer reads it alone (see `resolvedAgentKind`).
+    /// Whether this terminal's foreground holds an agent other than the one whose exit the row records.
+    ///
+    /// The pid is what separates a relaunch from an echo of the exit just recorded: an agent reports
+    /// `SessionEnd` before it dies (codex about a second ahead of its own exit), so a foreground sample
+    /// taken in between still shows the departing process. Only a foreground pid that differs from the
+    /// one the exit was observed against is a new agent. An exit that recorded no pid answers false and
+    /// leaves the row to its own `init` signal, which is the path this check adds to rather than replaces.
+    func foregroundHoldsAnAgentNewerThanTheExit(row: AgentWindowRecord, runtimeState: TerminalSessionRuntimeState) throws -> Bool {
+        guard adHocDetectedForegroundAgent(from: runtimeState) != nil, try agentRowHasRecordedHookSignal(row) else { return false }
+        guard let foregroundPID = runtimeState.foregroundPID, let exitedPID = try exitForegroundPID(agentSessionID: row.id) else { return false }
+        return foregroundPID != exitedPID
+    }
+
+    /// The key the exit event's message carries its observed foreground pid under.
+    static let exitForegroundPIDKey = "foreground_pid"
+
+    /// The foreground pid of this agent row's last recorded exit, or nil when the exit recorded none
+    /// (no live runtime state to read at the time, or an exit from a release that did not record it).
+    /// Nil is what makes the relaunch reset decline: without the pid there is no way to tell the agent
+    /// that just signalled from its replacement, and the row's own `init` signal still resets it.
+    func exitForegroundPID(agentSessionID: String) throws -> Int32? {
+        guard let message = try store.lastAgentSessionExitMessage(agentSessionID: agentSessionID) else { return nil }
+        for field in message.split(separator: " ") where field.hasPrefix("\(Self.exitForegroundPIDKey)=") {
+            return Int32(field.dropFirst(Self.exitForegroundPIDKey.count + 1))
+        }
+        return nil
+    }
+
+    /// The pid of the process a terminal session currently has in the foreground.
+    func liveForegroundPID(terminalSessionID: String?) -> Int32? {
+        guard let terminalSessionID, !terminalSessionID.isEmpty, let paths = try? TerminalSessionPaths.forSession(id: terminalSessionID),
+            let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+        else { return nil }
+        return runtimeState.foregroundPID
+    }
+
     func liveDetectedAgentKind(terminalSessionID: String?) -> String? {
         guard let terminalSessionID, !terminalSessionID.isEmpty, let paths = try? TerminalSessionPaths.forSession(id: terminalSessionID),
             let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)

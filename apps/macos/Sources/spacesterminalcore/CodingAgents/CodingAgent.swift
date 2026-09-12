@@ -59,7 +59,7 @@ public enum CodingAgent: String, CaseIterable, Sendable, Codable {
     }
 
     /// The agent's config directory, relative to home.
-    func configDirectoryURL(home: URL) -> URL {
+    public func configDirectoryURL(home: URL) -> URL {
         switch self {
         case .claudeCode: home.appendingPathComponent(".claude", isDirectory: true)
         case .codex: home.appendingPathComponent(".codex", isDirectory: true)

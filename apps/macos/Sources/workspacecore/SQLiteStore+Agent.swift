@@ -229,6 +229,25 @@ extension SQLiteStore {
                 """, bindings: [UUID().uuidString, agentSessionID, eventType, source, message ?? "", createdAt])
     }
 
+    /// The `message` of this session's most recent `exit` event, or nil when it has none.
+    ///
+    /// Every source that ends a row writes the same event type, so this reads the last exit whatever
+    /// finalized it. `rowid` breaks the order rather than `created_at`, whose second resolution ties
+    /// for events written in the same pass.
+    public func lastAgentSessionExitMessage(agentSessionID: String) throws -> String? {
+        guard
+            let value = try queryRow(
+                sql: """
+                    SELECT COALESCE(message, '')
+                    FROM agent_session_events
+                    WHERE agent_session_id = ? AND event_type = 'exit'
+                    ORDER BY rowid DESC
+                    LIMIT 1
+                    """, bindings: [agentSessionID])?.first, !value.isEmpty
+        else { return nil }
+        return value
+    }
+
     public func deleteAgentWindows(workspaceID: String) throws {
         try execute(sql: "DELETE FROM agent_sessions WHERE workspace_id = ?", bindings: [workspaceID])
     }

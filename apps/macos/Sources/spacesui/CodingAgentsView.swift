@@ -2,6 +2,7 @@ import AppKit
 import spacesclientcore
 import spacesdevicecore
 import spacesterminalcore
+import workspacecore
 
 /// The shared form/database helpers `CodingAgentsView` needs from its host.
 ///
@@ -38,6 +39,19 @@ extension AppKitController: CodingAgentsHost {
     func helpTextLabel(_ text: String) -> NSTextField { spacesui.helpTextLabel(text) }
 }
 
+/// Where a change to the agent's own config can land, resolved by `CodingAgentsView`.
+///
+/// At file scope rather than nested in the view because the filesystem watcher hands its callback this
+/// value on its own queue, and a type nested in a `@MainActor` class is isolated to that actor.
+struct AgentConfigWatchTargets: Sendable {
+    /// The Codex config directory, resolved through any symlink, as FSEvents names it.
+    let configDirectory: String
+    /// The resolved path of each of the two files that is a symlink out of that directory.
+    let linkedFiles: [String]
+    /// The config directory plus each linked file's own directory: what the watcher is given.
+    let directories: [String]
+}
+
 /// Lists supported coding agents for a selected device (This Mac or a paired remote), showing whether
 /// each agent's CLI is detected and how completely its Spaces hooks are installed, with a per-agent
 /// Install / Update / Reinstall action.
@@ -55,7 +69,10 @@ extension AppKitController: CodingAgentsHost {
         /// Every detected agent on This Mac carries current hooks. False when no agent is detected at
         /// all — there is nothing to have finished installing.
         let allDetectedCurrent: Bool
-        /// Some detected agent is missing hooks or carrying an older hook version.
+        /// Some detected agent is not reporting yet: hooks missing, hooks from an older Spaces, or
+        /// hooks the agent has not been told to trust. The last of those is finished by the user inside
+        /// the agent rather than by an install, but it is still work standing between them and an agent
+        /// that reports anything, so it counts here for the same reason it keeps the setup step up.
         let hasActionableAgent: Bool
     }
 
@@ -77,11 +94,46 @@ extension AppKitController: CodingAgentsHost {
     private var installToken = 0
     /// Non-nil while an Install/Update/Reinstall request is in flight.
     private var installingKind: CodingAgent?
+    /// Watches the local Codex config directory while a row waits on something the user does outside
+    /// Spaces. Nil whenever nothing is waiting; see `updateAgentConfigWatch`.
+    private var agentConfigWatcher: FileSystemWatcher?
+    /// Whether these rows are on screen. Set when the card is built (the section opened, or the setup
+    /// step shown) and cleared when the section, the window, or the setup flow goes away. A status fetch
+    /// that started while the rows were up lands after that, and it must not rebuild a watch for rows
+    /// nothing is left to update.
+    private var isActive = false
+    /// Increments whenever the watch is dropped or replaced, so a callback already on its way when the
+    /// watcher went away is discarded. `FileSystemWatcher.stop()` makes no promise about callbacks
+    /// already in flight, and a dropped watcher is exactly the case where a reload has nowhere to land.
+    private var agentConfigWatchGeneration = 0
 
     init(host: any CodingAgentsHost, onLocalStatusChange: ((LocalSummary) -> Void)? = nil) {
         self.host = host
         self.onLocalStatusChange = onLocalStatusChange
     }
+
+    /// How long a burst of writes to the agent's config directory is coalesced before the rows reload.
+    /// Long enough that the several writes one review makes cost one reload, short enough that the row
+    /// has caught up by the time the user switches back to Spaces.
+    static let agentConfigWatchLatency: TimeInterval = 0.3
+
+    /// Whether the Codex row can change from under Spaces, through Codex's own config writes rather than
+    /// through this view's button.
+    ///
+    /// Every state an installed Codex row moves between is one Codex writes: approving the review,
+    /// switching the hooks off, switching them on again, and turning `features.hooks` off and on, which
+    /// moves the row between `current` and `outdated` while the entries themselves stay put. A row
+    /// sitting at `current` is the one the user is most likely to invalidate next, so watching only the
+    /// waiting states leaves it reporting green after Codex has stopped running the hooks, and dropping
+    /// the watch at `outdated` strands the row there until the section is reopened. `notInstalled` is
+    /// the one state no Codex write reaches: an install is what leaves it, and this view reloads after
+    /// its own install. Only Codex is asked about, because the watch covers Codex's config directory.
+    static func needsAgentConfigWatch(status: [AgentHookStatus]) -> Bool {
+        status.contains { $0.kind == .codex && $0.available && Self.agentConfigWatchStates.contains($0.installState) }
+    }
+
+    /// The install states Codex's own config writes reach and leave.
+    static let agentConfigWatchStates: Set<AgentHookInstallState> = [.current, .outdated, .awaitingTrust, .disabledByAgent]
 
     /// Every detected agent's state, reduced to what a setup step needs to decide what to say.
     static func localSummary(status: [AgentHookStatus]) -> LocalSummary {
@@ -93,6 +145,7 @@ extension AppKitController: CodingAgentsHost {
 
     /// Builds the card and starts a status reload for the selected device.
     func makeCard(subtitle: String = "Install Spaces lifecycle hooks on this machine's coding agents.") -> NSView {
+        isActive = true  // the rows are going on screen, so a change made outside Spaces has somewhere to land
         let devices = self.devices()
         if !devices.contains(where: { $0.record.id == deviceID }) { deviceID = devices.first?.record.id ?? SpacesPairedDeviceRecord.localDeviceID }
 
@@ -146,6 +199,7 @@ extension AppKitController: CodingAgentsHost {
         status = []
         failures = [:]
         installingKind = nil
+        dropAgentConfigWatch()  // the rows are about to describe a different machine's files
         reload()
     }
 
@@ -168,7 +222,8 @@ extension AppKitController: CodingAgentsHost {
     }
 
     private func applyStatusFetch(_ result: Result<[AgentHookStatus], any Error>, token: Int) {
-        guard token == reloadToken else { return }  // a newer reload superseded this fetch
+        // A newer reload superseded this fetch, or the rows went away while it was in flight.
+        guard isActive, token == reloadToken else { return }
         switch result {
         case .success(let fetched):
             status = fetched
@@ -177,6 +232,7 @@ extension AppKitController: CodingAgentsHost {
             status = []
             renderRows(message: "Could not reach this device: \(error.localizedDescription)", isLoading: false)
         }
+        updateAgentConfigWatch()
         emitLocalStatusChangeIfLocal()
     }
 
@@ -184,6 +240,125 @@ extension AppKitController: CodingAgentsHost {
         guard isLocalDeviceSelected else { return }
         onLocalStatusChange?(Self.localSummary(status: status))
     }
+
+    // MARK: - Watching the agent's own config
+
+    /// Approving a hook review, switching a hook off, and switching it back on all happen in a terminal
+    /// while this view is on screen and Spaces is not involved. Without a watch the row goes on
+    /// reporting the task it asked the user to do after they have done it, reports green after Codex has
+    /// stopped running the hooks, and the launch setup step never reaches Done.
+    ///
+    /// Armed only for This Mac, and only while a row is installed at all: a remote device's files are
+    /// not on this machine, and a row that is not installed yet changes only through this view's own
+    /// button, which reloads after itself.
+    ///
+    /// The watch covers directories rather than the two files themselves, which is what makes the write
+    /// it exists to catch visible at all: Codex replaces `config.toml` by renaming a new file over it
+    /// (verified against codex-cli 0.153.4 by comparing the inode across a config write), so a watch
+    /// held on the file itself would be left holding the file that was replaced. `FileSystemWatcher`
+    /// coalesces the burst, so the several writes of one review cost one reload.
+    private func updateAgentConfigWatch() {
+        guard isActive, isLocalDeviceSelected, Self.needsAgentConfigWatch(status: status) else {
+            dropAgentConfigWatch()
+            return
+        }
+        guard agentConfigWatcher == nil else { return }  // already covered; restarting would only re-probe
+        let directory = CodingAgent.codex.configDirectoryURL(home: AgentHookInstaller.defaultHome()).path
+        // Resolved once, here: a link the user makes later is picked up by the next watch, which the
+        // reload after any install and reopening the section both arm.
+        let targets = Self.agentConfigWatchTargets(configDirectory: directory, fileManager: .default)
+        let generation = agentConfigWatchGeneration
+        let watcher = FileSystemWatcher(paths: targets.directories, latency: Self.agentConfigWatchLatency) { [weak self] paths, mustRescan in
+            guard Self.isRelevantConfigChange(paths: paths, mustRescan: mustRescan, targets: targets) else { return }
+            Task { @MainActor in
+                guard let self, self.isActive, generation == self.agentConfigWatchGeneration else { return }
+                self.reload()
+            }
+        }
+        agentConfigWatcher = watcher
+        // A watch that cannot start costs the user only the reload reopening the section already gives
+        // them, so it is not worth a message of its own on a row that already explains itself.
+        Task { try? await watcher.start() }
+    }
+
+    /// The names of the two files in the Codex config directory these rows read.
+    nonisolated static let agentConfigFileNames = ["config.toml", "hooks.json"]
+
+    /// Resolves where a write to either file lands.
+    ///
+    /// Either file is commonly a symlink into a dotfiles repository, and every writer, Spaces' own
+    /// included (`AgentHookConfigFile`), follows that chain and replaces the file at the end of it, so
+    /// the write lands in the repository's directory and leaves `~/.codex` untouched. Watching the
+    /// resolved directory as well is what makes that write visible, and resolving it the same way the
+    /// writer does is what keeps the watch on the file the writer actually replaces. A file that is not
+    /// a link resolves to itself and adds nothing, because the config directory already covers it.
+    nonisolated static func agentConfigWatchTargets(configDirectory: String, fileManager: FileManager) -> AgentConfigWatchTargets {
+        let directoryURL = URL(fileURLWithPath: configDirectory)
+        var directories = [resolvedPath(directoryURL.path)]
+        var linkedFiles: [String] = []
+        for name in agentConfigFileNames {
+            let fileURL = directoryURL.appendingPathComponent(name)
+            let target = AgentHookConfigFile.writeTarget(for: fileURL, fileManager: fileManager)
+            guard target.path != fileURL.path else { continue }  // not a link: the config directory covers it
+            let resolved = resolvedPath(target.path)
+            linkedFiles.append(resolved)
+            let parent = (resolved as NSString).deletingLastPathComponent
+            if !directories.contains(parent) { directories.append(parent) }
+        }
+        return AgentConfigWatchTargets(configDirectory: directories[0], linkedFiles: linkedFiles, directories: directories)
+    }
+
+    /// One normalization for both sides of every path comparison. FSEvents reports a path with every
+    /// symlink already resolved, and `~/.codex` or an ancestor of it is often a link, so the two sides
+    /// agree only if this side resolves the same way. `FilesystemPaths.realPath` is what does, and it
+    /// is the same normalization the Codex trust keys are built with.
+    nonisolated private static func resolvedPath(_ path: String) -> String { FilesystemPaths.realPath(path) }
+
+    /// Whether a batch of filesystem events is one of the two files this view reads, rather than one of
+    /// the many other things a running Codex writes.
+    ///
+    /// The watch is on the config directory and FSEvents reports every path under it, so an unfiltered
+    /// callback fires for the session transcripts, SQLite journals, and lock files Codex writes while it
+    /// works, and each one costs a full reload: the rows empty, the Device API is queried again, and the
+    /// codex feature probe runs again. The watcher asks for file-level events, so the reported paths are
+    /// precise enough to name the file that changed. A `config.toml` arriving by rename is reported at
+    /// its own path, and the directory's own path is accepted too so a rename reported at directory
+    /// granularity still counts. A batch flagged `mustRescan` carries paths the watcher itself says not
+    /// to trust, so it counts as relevant and the reload decides from the files.
+    ///
+    /// A linked file is named exactly, at its own path and at the directory it sits in, because that
+    /// directory belongs to a dotfiles repository whose own churn is nothing these rows read.
+    ///
+    /// `nonisolated` because the watcher calls it on its own queue, before any hop to the main actor.
+    nonisolated static func isRelevantConfigChange(paths: [String], mustRescan: Bool, targets: AgentConfigWatchTargets) -> Bool {
+        if mustRescan { return true }
+        let linked = Set(targets.linkedFiles)
+        let linkedDirectories = Set(linked.map { ($0 as NSString).deletingLastPathComponent })
+        return paths.contains { path in
+            let resolved = resolvedPath(path)
+            if resolved == targets.configDirectory { return true }
+            if linked.contains(resolved) || linkedDirectories.contains(resolved) { return true }
+            guard (resolved as NSString).deletingLastPathComponent == targets.configDirectory else { return false }
+            return agentConfigFileNames.contains((resolved as NSString).lastPathComponent)
+        }
+    }
+
+    /// Drops the watch and marks the rows off screen, so neither a late filesystem callback nor a status
+    /// fetch still in flight rebuilds it. Nothing on screen changes; building the card arms it again.
+    func stopAgentConfigWatch() {
+        isActive = false
+        dropAgentConfigWatch()
+    }
+
+    /// Drops the watch while leaving the rows on screen, for a change of device: the watch is rebuilt by
+    /// the reload that follows if the newly selected device still needs one.
+    private func dropAgentConfigWatch() {
+        agentConfigWatchGeneration += 1
+        agentConfigWatcher = nil
+    }
+
+    /// Whether a change to the agent's own config currently reaches these rows.
+    var isWatchingAgentConfig: Bool { agentConfigWatcher != nil }
 
     // MARK: - Rows
 
@@ -226,12 +401,17 @@ extension AppKitController: CodingAgentsHost {
         caption.textColor = (failureMessage != nil && !isLoading) ? .systemRed : .secondaryLabelColor
         caption.lineBreakMode = .byWordWrapping
         caption.maximumNumberOfLines = 3
+        // A caption's single-line intrinsic width is otherwise a hard floor, so the long awaiting-review
+        // sentence widens the settings window instead of wrapping inside the row, and the window keeps
+        // that width afterwards. Let it compress and wrap, as the help text under the card does.
+        caption.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let labelStack = NSStackView(views: [name, caption])
         labelStack.orientation = .vertical
         labelStack.alignment = .leading
         labelStack.spacing = 2
         labelStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        labelStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         var rowViews: [NSView] = [
             RowPrimitives.statusSlot(RowPrimitives.statusDot(statusDotKind(available: available, installState: installState))), tile, labelStack,
@@ -258,19 +438,25 @@ extension AppKitController: CodingAgentsHost {
         return row
     }
 
-    /// `outdated` reads as "needs attention" exactly like a missing install, because the same click
-    /// fixes both; the caption is what tells them apart.
+    /// Every state short of `current` reads as "needs attention" exactly like a missing install,
+    /// because they all mean the hooks are not reporting yet; the caption is what tells them apart and
+    /// says who has to act.
     private func statusDotKind(available: Bool, installState: AgentHookInstallState) -> RowPrimitives.StatusKind {
         switch installState {
         case .current: .running
-        case .outdated: .waiting
+        case .awaitingTrust, .disabledByAgent, .outdated: .waiting
         case .notInstalled: available ? .waiting : .idle
         }
     }
 
+    /// `awaitingTrust` and `disabledByAgent` read "Reinstall" rather than Install or Update: the
+    /// entries are already the ones this build writes, so nothing is missing or out of date, and the
+    /// click is the same one that repoints hooks at a moved Spaces CLI. It does not finish either
+    /// state, but it costs the user nothing and is the only way to reach a reinstall while one is
+    /// outstanding.
     private func installActionTitle(_ installState: AgentHookInstallState) -> String {
         switch installState {
-        case .current: "Reinstall"
+        case .awaitingTrust, .disabledByAgent, .current: "Reinstall"
         case .outdated: "Update"
         case .notInstalled: "Install"
         }
@@ -283,10 +469,19 @@ extension AppKitController: CodingAgentsHost {
         let hooks =
             switch status.installState {
             case .current: "hooks installed"
+            case .awaitingTrust: "hooks awaiting \(status.displayName) trust review"
+            case .disabledByAgent: "hooks switched off in \(status.displayName)"
             case .outdated: "hooks out of date"
             case .notInstalled: "hooks not installed"
             }
-        return "\(status.available ? "Detected" : "Not detected"), \(hooks)"
+        let summary = "\(status.available ? "Detected" : "Not detected"), \(hooks)"
+        // The row's button finishes neither of these, so the caption carries the step that does, and
+        // the two differ: one sends the user to a review prompt, the other to a switch they turned off.
+        switch status.installState {
+        case .awaitingTrust: return summary + ". Open \(status.displayName) in a terminal and approve the hooks it reports need review."
+        case .disabledByAgent: return summary + ". Re-enable them in \(status.displayName) to restore agent status."
+        default: return summary
+        }
     }
 
     // MARK: - Install
@@ -323,6 +518,7 @@ extension AppKitController: CodingAgentsHost {
             renderRows(message: outcome.failures.first.map { "Install failed: \($0.message)" }, isLoading: false)
         case .failure(let error): renderRows(message: "Install failed: \(error.localizedDescription)", isLoading: false)
         }
+        updateAgentConfigWatch()
         emitLocalStatusChangeIfLocal()
     }
 }

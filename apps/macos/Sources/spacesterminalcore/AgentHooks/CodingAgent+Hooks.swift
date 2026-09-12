@@ -20,10 +20,10 @@ extension CodingAgent {
     /// one that fails or is interrupted fires `PostToolUseFailure` **instead**. Both must map to
     /// `working` or an approved command that exits non-zero — the common case, since a risky command is
     /// exactly what gets gated — would leave the row blocked. Codex has no failure variant in its hook
-    /// registry (PreToolUse/PostToolUse/PermissionRequest/Pre+PostCompact/SessionStart/SessionEnd/
-    /// UserPromptSubmit/SubagentStart/SubagentStop/Stop) and its single `PostToolUse` is verified to fire
-    /// for a non-zero exit, so it needs no second binding and a name it does not know would only add an
-    /// inert entry.
+    /// registry (PreToolUse/PermissionRequest/PostToolUse/Pre+PostCompact/SessionStart/SessionEnd/
+    /// UserPromptSubmit/SubagentStart/SubagentStop/Stop/Interrupt, read from codex-cli 0.153.4) and its
+    /// single `PostToolUse` is verified to fire for a non-zero exit, so it needs no second binding and a
+    /// name it does not know would only add an inert entry.
     ///
     /// **Denying a prompt is silent.** Both denial paths in Claude Code — `Esc` to cancel and the "No"
     /// option — end the turn without firing any hook at all, `PermissionDenied` and `Stop` included
@@ -55,13 +55,20 @@ extension CodingAgent {
                 .init(eventName: "Stop", event: .done), .init(eventName: "SessionEnd", event: .exit),
             ]
         case .codex:
-            // Codex has no session-end event, so no `exit` binding. Its hooks feature accepts the
-            // Claude-compatible event set including PreToolUse and PostToolUse (verified against
-            // codex-cli 0.146).
+            // Codex's hooks feature accepts the Claude-compatible event set including PreToolUse and
+            // PostToolUse, and registers `SessionEnd` ("right before a session ends") alongside them
+            // (verified against codex-cli 0.153.4's hook registry). Binding it is what lets a codex
+            // agent report its own exit instead of waiting for the daemon's coarser exited-session
+            // sweep to notice.
+            //
+            // The binding needs no version probe: codex's hook registry has carried `SessionEnd` since
+            // codex-cli 0.145.0 (openai/codex #33895, 2026-07-17), and 0.146 is the earliest release
+            // this integration is verified against, so no supported codex lacks the event.
             [
                 .init(eventName: "SessionStart", event: .initialize), .init(eventName: "UserPromptSubmit", event: .working),
                 .init(eventName: "PreToolUse", event: .working), .init(eventName: "PostToolUse", event: .working),
                 .init(eventName: "PermissionRequest", event: .blocked), .init(eventName: "Stop", event: .done),
+                .init(eventName: "SessionEnd", event: .exit),
             ]
         case .opencode: []
         }
@@ -77,10 +84,18 @@ extension CodingAgent {
                 spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
         case .codex:
             let codexDir = configDirectoryURL(home: home)
+            let hooksFileURL = codexDir.appendingPathComponent("hooks.json")
             try AgentHookJSONWriter.install(
-                fileURL: codexDir.appendingPathComponent("hooks.json"), bindings: jsonEventBindings, spacesExecutablePath: spacesExecutablePath,
-                fileManager: fileManager)
-            try AgentHookCodexFeatureToggle.ensureEnabled(executablePath: agentExecutablePath, codexHome: codexDir)
+                fileURL: hooksFileURL, bindings: jsonEventBindings, spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
+            // The clear runs after the toggle, because the Codex CLI rewrites `config.toml` on its way
+            // through, and it runs whether or not the toggle succeeds: the entries are already on disk
+            // by this point, so their trust records describe text that no longer exists. Leaving them
+            // behind after a failed toggle is what would let a later read report `current` for hooks
+            // Codex will not run, so the toggle's error is held and rethrown after the clear.
+            let toggle = Result { try AgentHookCodexFeatureToggle.ensureEnabled(executablePath: agentExecutablePath, codexHome: codexDir) }
+            try AgentHookCodexTrustState.clearTrustRecords(
+                hooksFileURL: hooksFileURL, configURL: codexDir.appendingPathComponent("config.toml"), fileManager: fileManager)
+            try toggle.get()
         case .opencode:
             try AgentHookOpencodePluginWriter.install(
                 pluginURL: opencodePluginURL(home: home), spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
@@ -94,16 +109,27 @@ extension CodingAgent {
                 fileURL: configDirectoryURL(home: home).appendingPathComponent("settings.json"), bindings: jsonEventBindings, fileManager: fileManager
             )
         case .codex:
-            // Codex needs both halves: the hook entries, and `features.hooks = true` to run them.
-            // Current entries with the flag off are `.outdated`, not `.current` — the hooks exist but
-            // cannot fire — and reinstalling sets the flag.
+            // Codex needs three things to run a Spaces hook: the hook entries, `features.hooks = true`,
+            // and its own record that the user reviewed and trusted those entries. The states are
+            // ordered by what fixes them. Entries an older Spaces wrote, or the feature flag being off,
+            // are `.outdated` because reinstalling fixes both, and reinstalling first is what makes the
+            // trust question worth asking, since it is the entries this build writes that the user is
+            // being asked to trust. Past that, Codex's own record decides: entries it was told to stop
+            // running are `.disabledByAgent` and entries it has never been asked about are
+            // `.awaitingTrust`. Both exist and cannot fire, and each sends the user somewhere
+            // different inside Codex, which is why they are not one state.
             let codexDir = configDirectoryURL(home: home)
-            let json = AgentHookJSONWriter.installState(
-                fileURL: codexDir.appendingPathComponent("hooks.json"), bindings: jsonEventBindings, fileManager: fileManager)
+            let hooksFileURL = codexDir.appendingPathComponent("hooks.json")
+            let json = AgentHookJSONWriter.installState(fileURL: hooksFileURL, bindings: jsonEventBindings, fileManager: fileManager)
             guard json != .notInstalled else { return .notInstalled }
             guard let agentExecutablePath else { return .outdated }
             let enabled = AgentHookCodexFeatureToggle.isEnabled(executablePath: agentExecutablePath, codexHome: codexDir)
-            return json == .current && enabled ? .current : .outdated
+            guard json == .current, enabled else { return .outdated }
+            switch AgentHookCodexTrustState.verdict(hooksFileURL: hooksFileURL, configURL: codexDir.appendingPathComponent("config.toml")) {
+            case .trusted: return .current
+            case .switchedOff: return .disabledByAgent
+            case .awaitingReview: return .awaitingTrust
+            }
         case .opencode: return AgentHookOpencodePluginWriter.installState(pluginURL: opencodePluginURL(home: home))
         }
     }
