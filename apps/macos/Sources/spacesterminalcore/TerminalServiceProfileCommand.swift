@@ -503,7 +503,7 @@ public enum TerminalServiceProfileCommand: Sendable, Equatable {
     case workspaceList(TerminalServiceWorkspaceListPayload)
     case workspaceCreate(TerminalServiceWorkspaceCreatePayload)
     case workspaceStart(TerminalServiceWorkspaceLifecyclePayload)
-    case workspaceStop(workspaceID: String)
+    case workspaceStop(TerminalServiceWorkspaceLifecyclePayload)
     case workspaceRestart(TerminalServiceWorkspaceLifecyclePayload)
     case agentSignal(TerminalServiceProfileAgentSignalPayload)
     case agentList(TerminalServiceAgentListPayload)
@@ -520,6 +520,8 @@ public enum TerminalServiceProfileCommand: Sendable, Equatable {
     case terminalSend(TerminalServiceTerminalSendPayload)
     case terminalTail(TerminalServiceTerminalTailPayload)
     case terminalCommand(TerminalServiceTerminalCommandPayload)
+    /// Ends one terminal session the way the GUI's Stop on its runtime target does (`spaces terminal stop`).
+    case terminalStop(sessionID: String)
     case automationCreate(TerminalServiceAutomationFields)
     case automationUpdate(TerminalServiceAutomationUpdatePayload)
     case automationSetNextRun(TerminalServiceAutomationNextRunPayload)
@@ -551,6 +553,7 @@ extension TerminalServiceProfileCommand: Codable {
         case terminalSend
         case terminalTail
         case terminalCommand
+        case terminalStop
         case automationCreate
         case automationUpdate
         case automationSetNextRun
@@ -578,7 +581,7 @@ extension TerminalServiceProfileCommand: Codable {
         case .workspaceList: self = .workspaceList(try container.decode(TerminalServiceWorkspaceListPayload.self, forKey: key))
         case .workspaceCreate: self = .workspaceCreate(try container.decode(TerminalServiceWorkspaceCreatePayload.self, forKey: key))
         case .workspaceStart: self = .workspaceStart(try container.decode(TerminalServiceWorkspaceLifecyclePayload.self, forKey: key))
-        case .workspaceStop: self = .workspaceStop(workspaceID: try container.decodeRequiredNonEmpty(forKey: key))
+        case .workspaceStop: self = .workspaceStop(try container.decode(TerminalServiceWorkspaceLifecyclePayload.self, forKey: key))
         case .workspaceRestart: self = .workspaceRestart(try container.decode(TerminalServiceWorkspaceLifecyclePayload.self, forKey: key))
         case .agentSignal: self = .agentSignal(try container.decode(TerminalServiceProfileAgentSignalPayload.self, forKey: key))
         case .agentList: self = .agentList(try container.decode(TerminalServiceAgentListPayload.self, forKey: key))
@@ -592,6 +595,7 @@ extension TerminalServiceProfileCommand: Codable {
         case .terminalSend: self = .terminalSend(try container.decode(TerminalServiceTerminalSendPayload.self, forKey: key))
         case .terminalTail: self = .terminalTail(try container.decode(TerminalServiceTerminalTailPayload.self, forKey: key))
         case .terminalCommand: self = .terminalCommand(try container.decode(TerminalServiceTerminalCommandPayload.self, forKey: key))
+        case .terminalStop: self = .terminalStop(sessionID: try container.decodeRequiredNonEmpty(forKey: key))
         case .automationCreate: self = .automationCreate(try container.decode(TerminalServiceAutomationFields.self, forKey: key))
         case .automationUpdate: self = .automationUpdate(try container.decode(TerminalServiceAutomationUpdatePayload.self, forKey: key))
         case .automationSetNextRun: self = .automationSetNextRun(try container.decode(TerminalServiceAutomationNextRunPayload.self, forKey: key))
@@ -614,7 +618,7 @@ extension TerminalServiceProfileCommand: Codable {
         case .workspaceList(let payload): try container.encode(payload, forKey: .workspaceList)
         case .workspaceCreate(let payload): try container.encode(payload, forKey: .workspaceCreate)
         case .workspaceStart(let payload): try container.encode(payload, forKey: .workspaceStart)
-        case .workspaceStop(let workspaceID): try container.encode(workspaceID, forKey: .workspaceStop)
+        case .workspaceStop(let payload): try container.encode(payload, forKey: .workspaceStop)
         case .workspaceRestart(let payload): try container.encode(payload, forKey: .workspaceRestart)
         case .agentSignal(let payload): try container.encode(payload, forKey: .agentSignal)
         case .agentList(let payload): try container.encode(payload, forKey: .agentList)
@@ -628,6 +632,7 @@ extension TerminalServiceProfileCommand: Codable {
         case .terminalSend(let payload): try container.encode(payload, forKey: .terminalSend)
         case .terminalTail(let payload): try container.encode(payload, forKey: .terminalTail)
         case .terminalCommand(let payload): try container.encode(payload, forKey: .terminalCommand)
+        case .terminalStop(let sessionID): try container.encode(sessionID, forKey: .terminalStop)
         case .automationCreate(let payload): try container.encode(payload, forKey: .automationCreate)
         case .automationUpdate(let payload): try container.encode(payload, forKey: .automationUpdate)
         case .automationSetNextRun(let payload): try container.encode(payload, forKey: .automationSetNextRun)

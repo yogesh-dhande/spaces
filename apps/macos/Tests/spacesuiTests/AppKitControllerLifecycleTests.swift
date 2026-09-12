@@ -68,7 +68,7 @@ import workspacecore
             return TerminalServiceProfileCommandResponse(message: "Workspace stopped.")
         }
 
-        #expect(sent == .workspaceStop(workspaceID: "workspace-automation"))
+        #expect(sent == .workspaceStop(.init(cwd: FileManager.default.currentDirectoryPath, workspaceID: "workspace-automation")))
     }
 
     @Test func stopAllQuitCleanupMappingFailureRequiresFailureChoice() {

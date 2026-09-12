@@ -200,7 +200,7 @@ enum SpacesDaemonProfileCommandRouting {
         // `.terminalList` reaches `listSessionsOffMain`, which merges in-memory core summaries via
         // `TerminalEngineActor.runSynchronously`, so it belongs in this group too.
         case .terminalSend, .terminalCommand, .agentSpawn, .workspaceStart, .workspaceStop, .workspaceRestart, .agentKill, .agentSignal,
-            .terminalList:
+            .terminalStop, .terminalList:
             true
         // Every automation command is peeled off main for two reasons. First, trigger/cancel/end-agents/delete
         // reach the automation executor's launcher/terminator call graph directly (starting or tearing down a
@@ -377,13 +377,8 @@ enum SpacesDaemonErrorClassification {
         // command drives the exact scheduler state a local profile command would — the "one implementation,
         // two transports" seam. Both closures run on the Device API connection queue (never main), and the
         // service serializes internally, so calling it directly is deadlock-safe (the one-way rule).
-        automationOperations: Self.makeAutomationOperations { [weak self] in
-            guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
-            guard let service = self.automationServiceBox.get() else {
-                throw SpacesRuntimeError.invalidArgument(message: "Automations are unavailable on this daemon.")
-            }
-            return service
-        }, onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } },
+        automationOperations: daemonAutomationOperations(),
+        onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } },
         // Same queue guarantee as the closures above (the Device API's own connection-handling queue, never
         // main), so the engine hop is deadlock-safe. Lets a Device API `.state` read — one per pane attach —
         // be answered from the live core instead of dialing that core's own subscription socket.
@@ -974,8 +969,9 @@ enum SpacesDaemonErrorClassification {
         // the main actor (the one-way rule). `SpacesDaemonProfileCommandRouting.requiresOffMainExecution`
         // is the single source of truth for this classification; `profileCommandOffMain` asserts against it.
         case .profileCommand(.workspaceStart(let payload)): return workspaceStartOffMain(payload: payload, restartIfRunning: false)
-        case .profileCommand(.workspaceStop(let workspaceID)): return workspaceStopOffMain(workspaceID: workspaceID)
+        case .profileCommand(.workspaceStop(let payload)): return workspaceStopOffMain(payload: payload)
         case .profileCommand(.workspaceRestart(let payload)): return workspaceStartOffMain(payload: payload, restartIfRunning: true)
+        case .profileCommand(.terminalStop(let sessionID)): return terminalStopOffMain(sessionID: sessionID)
         case .profileCommand(.agentKill(let payload)): return agentKillOffMain(payload)
         case .profileCommand(.agentSignal(let payload)): return agentSignalOffMain(payload)
         // The whole automation command family is peeled off main: trigger/cancel/end-agents/delete reach the
@@ -1825,6 +1821,7 @@ enum SpacesDaemonErrorClassification {
         // Kept in the switch for exhaustiveness and to fail loudly if that peeling ever regresses.
         case .workspaceStart: preconditionFailure("`.workspaceStart` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .workspaceStop: preconditionFailure("`.workspaceStop` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        case .terminalStop: preconditionFailure("`.terminalStop` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .workspaceRestart: preconditionFailure("`.workspaceRestart` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .agentSignal: preconditionFailure("`.agentSignal` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .agentList(let payload):
@@ -2076,15 +2073,57 @@ enum SpacesDaemonErrorClassification {
 
     /// RPC `.profileCommand(.workspaceStop)` handler. Stop reaches automation cancellation and terminal
     /// termination, both daemon-owned and potentially engine-touching, so the synchronous profile route
-    /// stays off the main actor just like workspace start/restart.
-    private nonisolated func workspaceStopOffMain(workspaceID: String) -> TerminalServiceResponse {
+    /// stays off the main actor just like workspace start/restart. It resolves its workspace through the
+    /// same daemon-owned rule as start/restart, so `spaces workspace stop` defaults to the workspace
+    /// containing the caller's directory exactly as those verbs do.
+    private nonisolated func workspaceStopOffMain(payload: TerminalServiceWorkspaceLifecyclePayload) -> TerminalServiceResponse {
         if let rejection = livenessState.teardownRejection() { return rejection }
         do {
             let orchestrator = try makeProfileOrchestrator()
+            let workspaceID = try orchestrator.resolveWorkspaceID(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
             _ = try orchestrator.stopWorkspace(workspaceID: workspaceID)
             let workspace = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
             let profile = TerminalServiceProfileCommandResponse(message: "Workspace stopped.", workspace: profileWorkspaceRecord(workspace))
             return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
+        } catch { return Self.failureResponse(error) }
+    }
+
+    /// RPC `.profileCommand(.terminalStop)` handler. `spaces terminal stop` is the CLI's spelling of the
+    /// sidebar's Stop on a runtime target, so it drives the shared decision
+    /// (`WorkspaceOrchestrator.stopLiveWorkspaceTerminalSession`, the shared ladder gated on the session
+    /// still being live) with the same daemon dependencies the Device API hands it, and a live session is
+    /// torn down identically from either surface.
+    ///
+    /// Off main for the same reason as agent kill: the stop chokepoint and the ad hoc terminator both enter
+    /// the terminal engine actor via `TerminalEngineActor.runSynchronously`, which traps on the main actor.
+    /// Handoff is admitted before any teardown runs, matching `agentSessionKiller` and the other off-main
+    /// handlers.
+    ///
+    /// A session nothing was left to stop is a loud refusal here, unlike the Device API's quiet
+    /// "was already stopped" success: a sidebar row that lost its session is a race the GUI absorbs, while
+    /// a session id typed at the CLI names an instruction that did not happen.
+    private nonisolated func terminalStopOffMain(sessionID: String) -> TerminalServiceResponse {
+        if let rejection = livenessState.teardownRejection() { return rejection }
+        do {
+            guard !handoffInProgress else { throw WorkspaceError.daemonHandoffInProgress }
+            let orchestrator = try makeProfileOrchestrator()
+            guard let workspaceID = try orchestrator.workspaceIDForTerminalSession(sessionID) else {
+                throw SpacesRuntimeError.invalidArgument(
+                    message: "No Spaces terminal session '\(sessionID)'. It has already ended, or it is not tracked by a workspace.")
+            }
+            let outcome = try orchestrator.stopLiveWorkspaceTerminalSession(
+                workspaceID: workspaceID, sessionID: sessionID, automationOperations: daemonAutomationOperations(),
+                killAgentSession: { try orchestrator.killAgentSession(terminalSessionID: $0) })
+            let message: String
+            switch outcome {
+            case .canceledAutomationRun: message = "Canceled the automation run owning terminal session \(sessionID)."
+            case .stopped: message = "Stopped terminal session \(sessionID)."
+            case .alreadyStopped: throw SpacesRuntimeError.invalidArgument(message: "Terminal session '\(sessionID)' has already ended.")
+            }
+            let profile = TerminalServiceProfileCommandResponse(message: message)
+            return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
+        } catch WorkspaceTerminalStopUnavailable.automations {
+            return Self.failureResponse(SpacesRuntimeError.invalidArgument(message: "Automations are unavailable on this daemon."))
         } catch { return Self.failureResponse(error) }
     }
 
@@ -2250,13 +2289,27 @@ enum SpacesDaemonErrorClassification {
         NSError(domain: "spacesd", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
-    /// Wraps the live automation scheduler as a Device API `AutomationOperations` bundle: each op resolves the
+    /// This daemon's `AutomationOperations` bundle, resolving the live scheduler from the lock-guarded
+    /// service box on whatever thread calls it (never the main actor). Handed to the Device API supervisor
+    /// and driven directly by the profile socket's terminal stop, so both surfaces reach the one live
+    /// `AutomationService` instead of minting their own resolvers.
+    private nonisolated func daemonAutomationOperations() -> AutomationOperations {
+        Self.makeAutomationOperations { [weak self] in
+            guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+            guard let service = self.automationServiceBox.get() else {
+                throw SpacesRuntimeError.invalidArgument(message: "Automations are unavailable on this daemon.")
+            }
+            return service
+        }
+    }
+
+    /// Wraps the live automation scheduler as an `AutomationOperations` bundle: each op resolves the
     /// same queue-confined `AutomationService` the profile-command handlers use and calls it directly, so both
     /// transports share one scheduler. `service` resolves that instance from the off-main box (throwing during
     /// shutdown). No main-actor hop: the Device API connection queue is never main and the service serializes
     /// internally, so entering it directly is deadlock-safe (a main-actor caller blocking on it could deadlock
     /// behind an engine→main tick hop — the one-way rule).
-    private static func makeAutomationOperations(_ service: @escaping @Sendable () throws -> AutomationService) -> AutomationOperations {
+    private nonisolated static func makeAutomationOperations(_ service: @escaping @Sendable () throws -> AutomationService) -> AutomationOperations {
         AutomationOperations(
             create: { draft in try service().createAutomation(draft) }, update: { id, draft in try service().updateAutomation(id: id, draft: draft) },
             setNextRun: { id, nextRunTime in try service().setAutomationNextRunTime(id: id, nextRunTime: automationNextRunDate(from: nextRunTime)) },

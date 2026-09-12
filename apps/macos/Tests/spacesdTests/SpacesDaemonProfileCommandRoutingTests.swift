@@ -15,15 +15,15 @@ import XCTest
     /// `.agentSignal` previously were) would abort the daemon in the field. This locks the contract down.
     final class SpacesDaemonProfileCommandRoutingTests: XCTestCase {
         /// Every command that can reach the launcher (session create/send, workspace start/restart) or the
-        /// terminator (workspace stop, agent kill's stop chokepoint, an agent-signal `exit`'s terminal teardown) must run
-        /// off the main actor.
+        /// terminator (workspace stop, terminal stop, agent kill's stop chokepoint, an agent-signal `exit`'s
+        /// terminal teardown) must run off the main actor.
         func testEngineTouchingCommandsRequireOffMainExecution() {
             let offMain: [TerminalServiceProfileCommand] = [
                 .terminalSend(TerminalServiceTerminalSendPayload(sessionID: "s", input: .text("hi"))),
                 .terminalCommand(TerminalServiceTerminalCommandPayload(cwd: "/tmp")),
                 .agentSpawn(TerminalServiceAgentSpawnPayload(cwd: "/tmp", command: "claude")), .workspaceStart(.init(cwd: "/tmp", workspaceID: "w")),
-                .workspaceStop(workspaceID: "w"), .workspaceRestart(.init(cwd: "/tmp", workspaceID: "w")),
-                .agentKill(TerminalServiceAgentKillPayload(sessionID: "s")),
+                .workspaceStop(.init(cwd: "/tmp", workspaceID: "w")), .workspaceRestart(.init(cwd: "/tmp", workspaceID: "w")),
+                .terminalStop(sessionID: "s"), .agentKill(TerminalServiceAgentKillPayload(sessionID: "s")),
                 .agentSignal(TerminalServiceProfileAgentSignalPayload(workspaceID: "w", terminalSessionID: "s", event: "exit")),
                 // Listing merges live cores' in-memory summaries via an engine hop (write-behind lifecycle
                 // rows can lag a fresh session), so it is engine-touching even though it mutates nothing.

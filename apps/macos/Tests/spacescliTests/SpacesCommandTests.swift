@@ -18,6 +18,7 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(try WorkspaceListCommand.parse(["--device", "phone"]).device, "phone")
         XCTAssertEqual(try WorkspaceCreateCommand.parse(["--project", "project-1", "--branch", "feature/a", "--device", "phone"]).device, "phone")
         XCTAssertEqual(try WorkspaceStartCommand.parse(["--workspace", "workspace-1", "--device", "phone"]).device, "phone")
+        XCTAssertEqual(try WorkspaceStopCommand.parse(["--workspace", "workspace-1", "--device", "phone"]).device, "phone")
         XCTAssertEqual(try WorkspaceRestartCommand.parse(["--workspace", "workspace-1", "--device", "phone"]).device, "phone")
     }
 
@@ -81,9 +82,22 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(command.workspace, "workspace-1")
     }
 
-    func testWorkspaceStartAndRestartParseWithoutWorkspaceID() throws {
+    func testWorkspaceStopParsesWorkspaceID() throws {
+        let command = try WorkspaceStopCommand.parse(["--workspace", "workspace-1"])
+
+        XCTAssertEqual(command.workspace, "workspace-1")
+    }
+
+    func testWorkspaceStartStopAndRestartParseWithoutWorkspaceID() throws {
         XCTAssertNil(try WorkspaceStartCommand.parse([]).workspace)
+        XCTAssertNil(try WorkspaceStopCommand.parse([]).workspace)
         XCTAssertNil(try WorkspaceRestartCommand.parse([]).workspace)
+    }
+
+    /// `terminal stop` names its session positionally, like every other terminal verb that addresses one.
+    func testTerminalStopParsesSessionID() throws {
+        XCTAssertEqual(try TerminalStopCommand.parse(["session-1"]).sessionID, "session-1")
+        XCTAssertThrowsError(try TerminalStopCommand.parse([]))
     }
 
     func testRemoteWorkspaceLifecycleRequiresExplicitWorkspaceBeforeDeviceLookup() throws {
@@ -96,6 +110,8 @@ final class SpacesCommandTests: XCTestCase {
 
         let start = try WorkspaceStartCommand.parse(["--device", "missing-device"])
         XCTAssertThrowsError(try start.run()) { error in XCTAssertTrue("\(error)".contains("--workspace is required with --device")) }
+        let stop = try WorkspaceStopCommand.parse(["--device", "missing-device"])
+        XCTAssertThrowsError(try stop.run()) { error in XCTAssertTrue("\(error)".contains("--workspace is required with --device")) }
         let restart = try WorkspaceRestartCommand.parse(["--device", "missing-device"])
         XCTAssertThrowsError(try restart.run()) { error in XCTAssertTrue("\(error)".contains("--workspace is required with --device")) }
     }
@@ -377,7 +393,11 @@ final class SpacesCommandTests: XCTestCase {
     func testTerminalPublicSubcommands() {
         let subcommands = TerminalCommand.configuration.subcommands.map { String(describing: $0) }
         XCTAssertEqual(
-            subcommands, ["TerminalListCommand", "TerminalCreateCommand", "TerminalSendCommand", "TerminalTailCommand", "TerminalShowCommand"])
+            subcommands,
+            [
+                "TerminalListCommand", "TerminalCreateCommand", "TerminalSendCommand", "TerminalTailCommand", "TerminalShowCommand",
+                "TerminalStopCommand",
+            ])
     }
 
     func testRemovedTerminalCommandsAndFormsAreUnavailable() {

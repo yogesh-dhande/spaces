@@ -702,6 +702,12 @@ extension WorkspaceOrchestrator {
     public func stopWorkspaceProcess(workspaceID: String, processID: String) throws {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
             guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
+            // The mutation-boundary handoff veto workspace stop and agent finalization take, held here under
+            // the lifecycle lock so a handoff that began after a caller's own entry check cannot split this
+            // stop: during a handoff the session terminator no-ops (sessions are quiesced and carried across
+            // the exec), so deleting this process and its window rows would hand the successor daemon a live
+            // terminal with no records naming it.
+            guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
             try stopRunningProcess(process, workspaceID: workspaceID)
         }
     }

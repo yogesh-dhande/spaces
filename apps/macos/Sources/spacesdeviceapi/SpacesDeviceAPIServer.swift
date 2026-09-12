@@ -6015,42 +6015,32 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             launchedTerminalSession: try launchedTerminalSessionSummary(session, workspaceID: request.workspaceID))
     }
 
+    /// The sidebar's explicit Stop on a runtime target. The decision itself (automation run, coding agent,
+    /// ad hoc terminal) belongs to `WorkspaceOrchestrator.stopWorkspaceTerminalSession`, which the profile
+    /// socket's `spaces terminal stop` drives too; this handler only supplies the daemon's dependencies and
+    /// phrases the outcome for the Device API. A missing dependency is the daemon's own defect, so it keeps
+    /// its `internalError` classification rather than reaching the generic failure mapping.
     private func handleStopWorkspaceTerminalRequest(_ request: SpacesDeviceWorkspaceTerminalRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
         let workspaceID = request.workspaceID
-        let sessionID = request.sessionID
-        let orchestrator = try context.orchestrator()
-        if let runID = try context.store().automationRunID(terminalSessionID: sessionID), let run = try context.store().automationRun(id: runID) {
-            guard let automationOperations else {
-                return SpacesDeviceAPIResponse(ok: false, message: "Automations are unavailable on this daemon.", errorCode: .internalError)
-            }
-            // Only a cancellation that actually won while the run was active owns Stop outright. The
-            // service can serialize behind a completion: its returned terminal status then leaves a live
-            // agent session for the normal agent/session path below.
-            let wasActiveBeforeCancel = !run.status.isTerminal
-            let canceledRun = try automationOperations.cancelRun(runID)
-            if wasActiveBeforeCancel, canceledRun.status == .canceled {
-                return try refreshedMutationResponse(context: context, message: "Canceled automation run.", workspaceID: workspaceID)
-            }
+        let outcome: WorkspaceTerminalStopOutcome
+        do {
+            outcome = try context.orchestrator().stopWorkspaceTerminalSession(
+                workspaceID: workspaceID, sessionID: request.sessionID, automationOperations: automationOperations,
+                killAgentSession: agentSessionKiller)
+        } catch WorkspaceTerminalStopUnavailable.automations {
+            return SpacesDeviceAPIResponse(ok: false, message: "Automations are unavailable on this daemon.", errorCode: .internalError)
+        } catch WorkspaceTerminalStopUnavailable.agentStop {
+            return SpacesDeviceAPIResponse(ok: false, message: "Agent stop is unavailable on this daemon.", errorCode: .internalError)
         }
-        // A hook-registered agent can run inside a configured process terminal. Its launch kind stays
-        // `.process`, so resolve the persisted agent row before the `.agent` launch-kind check reserved for
-        // pre-signal sessions.
-        let isRegisteredAgent = try context.store().agentWindowByTerminalSession(terminalSessionID: sessionID) != nil
-        if isRegisteredAgent || orchestrator.workspaceTerminalSessionIsSpawnedAgent(workspaceID: workspaceID, sessionID: sessionID) {
-            guard let agentSessionKiller else {
-                return SpacesDeviceAPIResponse(ok: false, message: "Agent stop is unavailable on this daemon.", errorCode: .internalError)
-            }
-            guard try agentSessionKiller(sessionID) else {
-                return try refreshedMutationResponse(context: context, message: "Workspace terminal was already stopped.", workspaceID: workspaceID)
-            }
-            return try refreshedMutationResponse(context: context, message: "Stopped workspace terminal.", workspaceID: workspaceID)
-        }
-        guard try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID) else {
+        switch outcome {
+        case .canceledAutomationRun:
+            return try refreshedMutationResponse(context: context, message: "Canceled automation run.", workspaceID: workspaceID)
+        case .stopped: return try refreshedMutationResponse(context: context, message: "Stopped workspace terminal.", workspaceID: workspaceID)
+        case .alreadyStopped:
             return try refreshedMutationResponse(context: context, message: "Workspace terminal was already stopped.", workspaceID: workspaceID)
         }
-        return try refreshedMutationResponse(context: context, message: "Stopped workspace terminal.", workspaceID: workspaceID)
     }
 
     /// Serves the close of the pane that owned an ad hoc terminal: the daemon decides whether the

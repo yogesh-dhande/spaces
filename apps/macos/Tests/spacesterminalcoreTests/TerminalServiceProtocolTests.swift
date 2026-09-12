@@ -181,7 +181,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
             .projectList, .terminalList, .workspaceList(.init(projectID: "project-1")), .workspaceList(.init()),
             .workspaceCreate(.init(projectID: "project-1", branch: "feature", baseBranch: "main", existingBranch: true)),
             .workspaceCreate(.init(projectID: "project-1", branch: "feature")), .workspaceStart(.init(cwd: "/tmp", workspaceID: "workspace-1")),
-            .workspaceStart(.init(cwd: "/tmp")), .workspaceStop(workspaceID: "workspace-1"),
+            .workspaceStart(.init(cwd: "/tmp")), .workspaceStop(.init(cwd: "/tmp", workspaceID: "workspace-1")), .workspaceStop(.init(cwd: "/tmp")),
             .workspaceRestart(.init(cwd: "/tmp", workspaceID: "workspace-1")),
             .agentSignal(.init(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "blocked")),
             .agentSignal(.init(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "working", agentSessionKey: "thread-9")),
@@ -196,7 +196,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
             .terminalSend(.init(sessionID: "session-1", input: .bytes(Data([0, 10, 255])))),
             .terminalTail(.init(sessionID: "session-1", lineCount: 40)), .terminalTail(.init(sessionID: "session-1")),
             .terminalCommand(.init(cwd: "/tmp/work", workspaceID: "workspace-1", command: "ls", title: "list")),
-            .terminalCommand(.init(cwd: "/tmp/work")),
+            .terminalCommand(.init(cwd: "/tmp/work")), .terminalStop(sessionID: "session-1"),
         ]
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
