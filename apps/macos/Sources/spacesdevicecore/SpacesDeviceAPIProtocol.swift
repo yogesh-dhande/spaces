@@ -2330,14 +2330,39 @@ public struct SpacesDeviceRestorableSessionsRequest: Codable, Sendable, Equatabl
     public init(generation: String) { self.generation = generation }
 }
 
+/// A captured row a Restore could not bring back, so the client can say which agents are not coming and
+/// why instead of letting them disappear behind an answer that reported success.
+public struct SpacesDeviceRestoredSessionFailure: Codable, Sendable, Equatable {
+    /// Which captured row failed. The client reports the failure under the label it showed that row
+    /// under, which it finds by this id: two sessions of the same agent kind in one workspace are told
+    /// apart by their titles, and only the client knows how the row was worded in the list.
+    public let sessionID: String
+    /// The captured session's title, for a client that cannot find the row (the record was answered from
+    /// a surface built on an earlier capture).
+    public let title: String
+    /// Why the relaunch failed, in the daemon's own words (the workspace is gone, the command is
+    /// invalid), which is the part a user can act on.
+    public let message: String
+
+    public init(sessionID: String, title: String, message: String) {
+        self.sessionID = sessionID
+        self.title = title
+        self.message = message
+    }
+}
+
 /// What `restoreSessions` brought back: each captured session id mapped to the id of the session now
-/// running in its place. A client uses it to move a restored agent back into the pane its predecessor
-/// occupied; a row that could not be relaunched is absent.
+/// running in its place, plus the rows that could not be relaunched at all.
+///
+/// The record is cleared either way, so the failures are reported here or nowhere: a row whose workspace
+/// is gone fails the same way on every attempt, and keeping it in the record would offer it forever.
 public struct SpacesDeviceRestoredSessionsResult: Codable, Sendable, Equatable {
     public let newSessionIDsByCapturedSessionID: [String: String]
+    public let failures: [SpacesDeviceRestoredSessionFailure]
 
-    public init(newSessionIDsByCapturedSessionID: [String: String]) {
+    public init(newSessionIDsByCapturedSessionID: [String: String], failures: [SpacesDeviceRestoredSessionFailure] = []) {
         self.newSessionIDsByCapturedSessionID = newSessionIDsByCapturedSessionID
+        self.failures = failures
     }
 }
 
@@ -3299,6 +3324,11 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     /// The captured-to-new session id map a `restoreSessions` answer carries.
     public var restoredSessions: [String: String]? {
         if case .restoredSessions(let payload) = result { payload.newSessionIDsByCapturedSessionID } else { nil }
+    }
+
+    /// Everything a `restoreSessions` answer reports: what came back, and what could not.
+    public var restoredSessionsResult: SpacesDeviceRestoredSessionsResult? {
+        if case .restoredSessions(let payload) = result { payload } else { nil }
     }
 }
 

@@ -197,6 +197,49 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         XCTAssertEqual(recorder.delivered.count, 2, "exactly one notice per life, none re-delivered")
     }
 
+    /// The startup sweep's pane contract. A daemon that came back from an unclean exit has already
+    /// recorded the agents it stranded as restorable, and this sweep is what finalizes their rows moments
+    /// later. Telling the client to close those panes would take away the very seats the restored agents
+    /// come back to, so the offer would be answered into fresh tabs instead of the panes the user left.
+    /// The session itself is still ended: only the pane is left standing, for the answer to settle.
+    func testStrandedAgentOfferedForRestoreKeepsItsPaneWhileTheSessionStillEnds() throws {
+        let store = try makeTemporaryStore()
+        let closeCapture = TerminalCloseCapture()
+        let terminateCapture = TerminalTerminateCapture()
+        let orchestrator = makeTestOrchestrator(
+            store: store,
+            builtInTerminalWindowCloser: { sessionID, disposition in
+                closeCapture.sessionIDs.append(sessionID)
+                closeCapture.dispositions.append(disposition)
+            }, builtInTerminalSessionTerminator: { terminateCapture.sessionIDs.append($0) })
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        let offeredSessionID = UUID().uuidString
+        let unofferedSessionID = UUID().uuidString
+        for sessionID in [offeredSessionID, unofferedSessionID] {
+            try writeEndedTerminalSession(sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .agent)
+            _ = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: sessionID, status: .spinning)
+        }
+        try store.replaceRestorableSessions(
+            generation: "gen-1", capturedAt: "2026-06-06T00:00:02Z",
+            captures: [
+                RestorableSessionCapture(
+                    sessionID: offeredSessionID, workspaceID: workspace.id, agentKind: .codex, agentSessionKey: "conversation-1",
+                    launchCommand: "codex", workingDirectory: workspace.dir, title: "Codex")
+            ])
+
+        _ = try orchestrator.reconcileExitedSessionBackedAgentRows(index: orchestrator.builtInTerminalOwnershipIndex(), excludingLiveSessionIDs: [])
+
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty, "both ended agents are finalized either way")
+        XCTAssertEqual(
+            closeCapture.sessionIDs, [unofferedSessionID],
+            "only the agent nobody is being offered back has its pane closed; the offered one keeps the seat its restore claims")
+        XCTAssertEqual(
+            terminateCapture.sessionIDs.sorted(), [offeredSessionID, unofferedSessionID].sorted(),
+            "keeping the pane keeps nothing else: the ended session is torn down either way")
+    }
+
     // MARK: - Fixtures
 
     private func makeProjectAndWorkspace(store: SQLiteStore) throws -> (ProjectRecord, WorkspaceRecord) {

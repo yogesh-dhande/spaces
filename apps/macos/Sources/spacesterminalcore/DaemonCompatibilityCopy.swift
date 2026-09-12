@@ -53,4 +53,17 @@ public enum DaemonCompatibilityCopy {
     public static func stagedUpdateNotLandedBody(deviceName: String) -> String {
         "Its daemon didn't pick the update up, and nothing running on \(deviceName) was interrupted."
     }
+
+    // MARK: - An action refused because the device is on a different wire version
+
+    /// Why a surface cannot send a device a command right now, or nil while the versions match. Same two
+    /// facts the connection block states (which side is behind, and which build has to move), in one line
+    /// for a surface that is already on screen and has to report a refusal in place.
+    public static func actionBlockedBody(deviceName: String, verdict: SpacesWireCompatibility) -> String? {
+        switch verdict {
+        case .compatible: nil
+        case .clientTooOld: "\(deviceName) speaks a newer connection protocol than this app, so update this app to reconnect to it."
+        case .daemonTooOld: "\(deviceName) speaks an older connection protocol than this app, so update Spaces there to reconnect to it."
+        }
+    }
 }

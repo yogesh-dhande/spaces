@@ -9,44 +9,59 @@ import systembridge
 /// done, then handing back to the workspace UI through `onComplete`. A launch with no pending step
 /// completes immediately and is never seen.
 ///
-/// Two steps exist. Chrome Automation blocks: Spaces focuses browser sessions by scripting Chrome and
+/// Three steps exist. Chrome Automation blocks: Spaces focuses browser sessions by scripting Chrome and
 /// cannot work without it. Coding-agent hooks do not: they make agents report their state, but Spaces
-/// runs without them, and Spaces never writes a coding agent's config without the user asking — so
-/// hooks are offered here and in Settings → Coding Agents rather than installed silently.
+/// runs without them, and Spaces never writes a coding agent's config without the user asking, so
+/// hooks are offered here and in Settings → Coding Agents rather than installed silently. Restore
+/// sessions asks what to do with the coding agents the local daemon is offering to bring back; it is
+/// last because its answer has to land immediately before the workspace UI restores its pane layouts,
+/// which is what puts each restored agent back in the pane its predecessor held.
 @MainActor final class SetupFlowController {
     /// Called once every pending step has been completed or skipped.
     var onComplete: (() -> Void)?
 
-    /// How long launch waits for the local daemon to report agent status before giving up on the
-    /// coding-agents step for this launch.
+    /// How long a launch waits on the local daemon in total before giving up on the steps that read it
+    /// (coding agents, and the restore offer) for this launch.
     ///
-    /// This must stay larger than the Device API's own request timeout, or the probe is abandoned
-    /// before the request it is waiting on can succeed or fail — which silently drops the step on
+    /// This must stay larger than the Device API's own request timeout, or a probe is abandoned
+    /// before the request it is waiting on can succeed or fail, which silently drops the step on
     /// exactly the cold-daemon launch where it is most needed. The daemon also resolves agent
     /// availability by asking the user's login shell for its `PATH`, sourcing their whole rc chain,
     /// which is slow the first time and cached afterwards.
     ///
-    /// The probe starts when the flow begins and runs while the Chrome Automation step is on screen,
-    /// so a user who has that step to complete never waits on it at all. A daemon that is wedged must
-    /// not hold the app on a spinner forever; giving up costs the user nothing, because the step is
-    /// left undismissed and reappears next launch.
-    static let localAgentStatusTimeout: Duration = .seconds(25)
+    /// It is a budget for the whole flow, not per step: the probes start when the flow begins and run
+    /// while the Chrome Automation step is on screen, so a user who has that step to complete never
+    /// waits on them at all, and a wedged daemon costs one timeout however many steps read it. Giving
+    /// up costs the user nothing, because the steps are left undismissed and reappear next launch.
+    static let localProbeTimeout: Duration = .seconds(25)
 
     private unowned let host: any CodingAgentsHost
     private let database: SpacesClientDatabase?
+    private let sessionRestore: SessionRestoreController
     private let container = NSView()
     private var chromeSetup: ChromeAutomationSetupController?
     /// Retained for the lifetime of the step: it is the target of the per-agent install buttons, and
-    /// `NSControl.target` does not hold its target.
-    private var codingAgents: CodingAgentsView?
+    /// `NSControl.target` does not hold its target. Released by `stopCodingAgentsStep` as the step is
+    /// left, whichever way it is left.
+    private(set) var codingAgents: CodingAgentsView?
     private var continueButton: NSButton?
-    /// Started when the flow begins so it overlaps the Chrome Automation step. Nil when the step is
-    /// already dismissed for this hook version, in which case no daemon call is made at all.
-    private var localAgentStatusTask: Task<[AgentHookStatus]?, Never>?
+    /// Retained for the lifetime of the restore step, for the same reason as `codingAgents`.
+    private var restoreOffer: SessionRestoreOfferView?
+    /// The local daemon's status, whose `restorableSessions` decide the restore step. Started when the
+    /// flow begins so it overlaps the Chrome Automation step.
+    private var daemonStatusWait: LaunchProbeWait<TerminalServiceDaemonStatus>?
+    /// The local agent hook status that decides the coding-agents step, or nil when that step is already
+    /// dismissed for this hook version and nothing is asked.
+    ///
+    /// Waited on separately from the daemon status even though both come from the same daemon: this read
+    /// is the slow one (it resolves the user's login shell `PATH`), and a launch where it hangs or fails
+    /// must still be able to offer the restore step off the status that did come back.
+    private var agentStatusWait: LaunchProbeWait<[AgentHookStatus]>?
 
-    init(host: any CodingAgentsHost, database: SpacesClientDatabase?) {
+    init(host: any CodingAgentsHost, database: SpacesClientDatabase?, sessionRestore: SessionRestoreController) {
         self.host = host
         self.database = database
+        self.sessionRestore = sessionRestore
         container.translatesAutoresizingMaskIntoConstraints = false
     }
 
@@ -88,11 +103,26 @@ import systembridge
     /// Enters the first pending step. Completes immediately through `onComplete` — before returning —
     /// when no step is pending.
     func begin() {
-        // Start the probe before the first step renders, so a cold `spacesd` warms up while the user
+        // Start the probes before the first step renders, so a cold `spacesd` warms up while the user
         // works through the Chrome Automation screen instead of after it.
+        let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()
+        let deadline = ContinuousClock.now.advanced(by: Self.localProbeTimeout)
+        // One bootstrap for both reads: a launch must start `spacesd` once, not twice. The agent probe
+        // waits on the context this one produces, and its failure or hang stays its own.
+        let connection = Task.detached(priority: .userInitiated) { Self.bootstrapLocalDaemon(profile: profile) }
+        daemonStatusWait = LaunchProbeWait(
+            description: "the launch restore step", deadline: deadline,
+            task: Task.detached(priority: .userInitiated) {
+                guard let context = await connection.value else { return nil }
+                return Self.probe("the daemon status") { try SpacesDeviceClient.daemonStatus(context: context) }
+            })
         if Self.shouldProbeLocalAgents(dismissedHookVersion: dismissedHookVersion(), currentHookVersion: AgentHookCommand.hookVersion) {
-            let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()
-            localAgentStatusTask = Task.detached(priority: .userInitiated) { Self.localAgentStatus(profile: profile) }
+            agentStatusWait = LaunchProbeWait(
+                description: "the launch coding-agents step", deadline: deadline,
+                task: Task.detached(priority: .userInitiated) {
+                    guard let context = await connection.value else { return nil }
+                    return Self.probe("the coding agent hook status") { try SpacesDeviceClient.agentHooksStatus(context: context) }
+                })
         }
         if AppKitController.requiresChromeAutomationSetup(ChromeAutomationPermission.status()) {
             enterChromeAutomationStep()
@@ -104,7 +134,17 @@ import systembridge
     func stop() {
         chromeSetup?.stop()
         chromeSetup = nil
+        stopCodingAgentsStep()
+    }
+
+    /// Tears the coding-agents step down as it is left. `finish()` reaches this through `stop()`, but the
+    /// step is also left for the restore step, which does not finish the flow: without this, the removed
+    /// view stays retained behind the restore prompt with its agent-config file watcher and its reload
+    /// callbacks still live.
+    private func stopCodingAgentsStep() {
         codingAgents?.stopAgentConfigWatch()
+        codingAgents = nil
+        continueButton = nil
     }
 
     private func finish() {
@@ -138,29 +178,29 @@ import systembridge
     private func enterCodingAgentsStepIfNeeded() {
         let currentVersion = AgentHookCommand.hookVersion
         guard Self.shouldProbeLocalAgents(dismissedHookVersion: dismissedHookVersion(), currentHookVersion: currentVersion) else {
-            finish()
+            enterRestoreSessionsStepIfNeeded()
             return
         }
-        setContent(probingPlaceholder())
+        setContent(probingPlaceholder(message: "Checking your coding agents..."))
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let localAgents = await localAgentStatusWithinTimeout()
+            let agents = await agentStatusWait?.value()
             guard
-                Self.requiresCodingAgentsSetup(
-                    localAgents: localAgents, dismissedHookVersion: dismissedHookVersion(), currentHookVersion: currentVersion)
+                Self.requiresCodingAgentsSetup(localAgents: agents, dismissedHookVersion: dismissedHookVersion(), currentHookVersion: currentVersion)
             else {
-                // Nothing to install right now — either no detected agent needs hooks, or the daemon
+                // Nothing to install right now: either no detected agent needs hooks, or the daemon
                 // never answered. Do not record a dismissal: the user has not seen the step, and
                 // "nothing to do today" is not "never ask again". Recording one here would retire the
                 // step for good the moment it first ran on a machine with no coding agent installed.
-                finish()
+                enterRestoreSessionsStepIfNeeded()
                 return
             }
             showCodingAgentsStep()
         }
     }
 
-    private func showCodingAgentsStep() {
+    /// Internal rather than private so a test can enter this step without a daemon to probe.
+    func showCodingAgentsStep() {
         let agents = CodingAgentsView(host: host)
         agents.onLocalStatusChange = { [weak self] summary in self?.continueButton?.title = summary.allDetectedCurrent ? "Done" : "Continue" }
         codingAgents = agents
@@ -216,65 +256,85 @@ import systembridge
     /// A later Spaces release that changes the hooks bumps `hookVersion` and asks once more.
     @objc private func dismissCodingAgentsStep() {
         recordDismissedHookVersion()
-        finish()
+        stopCodingAgentsStep()
+        enterRestoreSessionsStepIfNeeded()
     }
 
-    // MARK: - Local agent status
+    // MARK: - Restore sessions step
 
-    /// Awaits the probe started in `begin()`, or nil when it has not answered within
-    /// `localAgentStatusTimeout`. The probe is a blocking Device API call, so it cannot be cancelled;
-    /// the timeout stops *waiting* on it rather than stopping it, and the orphaned request is harmless
-    /// because it is read-only. A probe that started during the Chrome step has usually already
-    /// finished, in which case this returns at once.
-    private func localAgentStatusWithinTimeout() async -> [AgentHookStatus]? {
-        guard let localAgentStatusTask else { return nil }
-        return await withCheckedContinuation { continuation in
-            let hasResumed = ResumeOnce()
-            Task {
-                let status = await localAgentStatusTask.value
-                if hasResumed.claim() { continuation.resume(returning: status) }
+    /// Offers the coding-agent sessions the local daemon captured when Spaces last stopped, then hands
+    /// off to the workspace UI. Skipped in one breath when the daemon is offering nothing, or when this
+    /// client has already answered the record it is offering.
+    private func enterRestoreSessionsStepIfNeeded() {
+        // Only show the spinner when there is actually something to wait for. The status usually landed
+        // while an earlier step was on screen, in which case this resolves without a frame of
+        // placeholder.
+        if daemonStatusWait?.isSettled == false { setContent(probingPlaceholder(message: "Checking for unfinished sessions...")) }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let daemonStatus = await daemonStatusWait?.value()
+            guard let offer = sessionRestore.launchOffer(localDaemonStatus: daemonStatus) else {
+                finish()
+                return
             }
-            Task {
-                try? await Task.sleep(for: Self.localAgentStatusTimeout)
-                if hasResumed.claim() {
-                    NSLog("Spaces: coding-agents setup step skipped, local daemon did not report agent status in time")
-                    continuation.resume(returning: nil)
-                }
-            }
+            showRestoreSessionsStep(offer: offer)
         }
     }
 
-    private nonisolated static func localAgentStatus(profile: SpacesProfile?) -> [AgentHookStatus]? {
-        do {
-            // Bootstrap rather than read the stored paired-device record. This is the launch's first
-            // daemon call, and only bootstrapping starts `spacesd`: a plain request re-bootstraps just
-            // to recover a *missing* auth token, so with a token already on disk it dials the record's
-            // endpoint and waits out its whole timeout against a daemon nobody started. Bootstrapping
-            // also returns the daemon's current host, port, and certificate fingerprint, which a record
-            // persisted before the last restart can no longer be trusted to carry (a dev profile binds
-            // an ephemeral Device API port; installed builds keep the fixed default).
-            let local = try SpacesDeviceClient.bootstrapLocalDevice(clientApp: SpacesDeviceClient.macOSClientApp(), profile: profile)
-            return try SpacesDeviceClient.agentHooksStatus(context: DeviceRequestContext(device: local, profile: profile))
-        } catch {
-            // The step is skipped for this launch and left undismissed, so it is offered again once
-            // the daemon answers. Logged because a probe that always failed would otherwise present as
-            // a setup step that silently never appears.
-            NSLog("Spaces: coding-agents setup step skipped, agent hook status unavailable: \(error.localizedDescription)")
+    private func showRestoreSessionsStep(offer: SessionRestoreOffer) {
+        let view = SessionRestoreOfferView(offer: offer, host: host) { [weak self] answer in self?.answerRestoreOffer(answer, offer: offer) }
+        restoreOffer = view
+        setContent(view.view)
+    }
+
+    /// Answers the offer and continues. The wait is deliberate: Restore relaunches the agents on the
+    /// daemon and hands back where each one landed, and the pane retarget it drives has to be recorded
+    /// before `onComplete` lets the workspace UI restore its layouts.
+    ///
+    /// An answer that never landed keeps the step on screen with the reason, rather than walking into the
+    /// workspace UI as though the question had been settled: the agents are still on the device, nothing
+    /// is recorded as answered, and the user can try again or Skip.
+    private func answerRestoreOffer(_ answer: SessionRestoreAnswer, offer: SessionRestoreOffer) {
+        restoreOffer?.showAnswerInProgress(answer == .restore ? "Restoring your sessions..." : "Discarding...")
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if case .failed(let message) = await sessionRestore.answer(answer, offer: offer, panePlacement: .persistedLayouts) {
+                restoreOffer?.showAnswerFailed(message)
+                return
+            }
+            finish()
+        }
+    }
+
+    // MARK: - Local daemon probe
+
+    /// Opens this launch's one connection to the local daemon, or nil when it cannot be reached.
+    ///
+    /// Bootstraps rather than reading the stored paired-device record. This is the launch's first
+    /// daemon call, and only bootstrapping starts `spacesd`: a plain request re-bootstraps just to
+    /// recover a *missing* auth token, so with a token already on disk it dials the record's endpoint
+    /// and waits out its whole timeout against a daemon nobody started. Bootstrapping also returns the
+    /// daemon's current host, port, and certificate fingerprint, which a record persisted before the
+    /// last restart can no longer be trusted to carry (a dev profile binds an ephemeral Device API
+    /// port; installed builds keep the fixed default).
+    private nonisolated static func bootstrapLocalDaemon(profile: SpacesProfile?) -> DeviceRequestContext? {
+        probe("the local daemon connection") {
+            DeviceRequestContext(
+                device: try SpacesDeviceClient.bootstrapLocalDevice(clientApp: SpacesDeviceClient.macOSClientApp(), profile: profile),
+                profile: profile)
+        }
+    }
+
+    /// Runs one probe read, reporting a failure as nil. Each read fails on its own: the steps decide
+    /// independently, and every one of them treats a missing answer as "omit this step", so a read that
+    /// fails costs the user only the step that needed it. Nothing is dismissed or answered either way,
+    /// so both are offered again once the daemon answers: the hooks step next launch, and the restore
+    /// offer as a sheet as soon as the daemon reports its record to the running app. Logged because a
+    /// probe that always failed would otherwise present as setup steps that silently never appear.
+    private nonisolated static func probe<Value>(_ description: String, _ read: () throws -> Value) -> Value? {
+        do { return try read() } catch {
+            NSLog("Spaces: launch setup could not read \(description): \(error.localizedDescription)")
             return nil
-        }
-    }
-
-    /// Guards a `CheckedContinuation` that two racing tasks may reach; only the first claim resumes it.
-    private final class ResumeOnce: @unchecked Sendable {
-        private let lock = NSLock()
-        private var claimed = false
-
-        func claim() -> Bool {
-            lock.lock()
-            defer { lock.unlock() }
-            if claimed { return false }
-            claimed = true
-            return true
         }
     }
 
@@ -295,13 +355,13 @@ import systembridge
 
     // MARK: - Layout
 
-    private func probingPlaceholder() -> NSView {
+    private func probingPlaceholder(message: String) -> NSView {
         let spinner = NSProgressIndicator()
         spinner.style = .spinning
         spinner.controlSize = .regular
         spinner.startAnimation(nil)
 
-        let label = NSTextField(labelWithString: "Checking your coding agents...")
+        let label = NSTextField(labelWithString: message)
         label.font = Typography.body
         label.textColor = .secondaryLabelColor
 

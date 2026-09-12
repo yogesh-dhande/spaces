@@ -54,6 +54,21 @@ import spacesterminalcore
     /// otherwise drop them before the replacement arrives.
     var sessionIDsHeldForReplacement: Set<String> { panesHeldForReplacement }
 
+    /// Sessions some outstanding restore offer is about, whose panes must survive pruning until that
+    /// offer is settled: they ended with the daemon that ran them, so no device lists them any more and
+    /// the very refresh that reports the record would otherwise close the panes the question is about.
+    ///
+    /// Derived, never accumulated: `SessionRestoreController` recomputes the whole set from what the
+    /// devices report and what this client has answered, and assigns it. A record another client answered
+    /// or the device replaced simply stops being part of the set, with nothing to remember to release.
+    private var panesHeldForRestoreOffer: Set<String> = []
+
+    /// Every session a pane is being kept open for beyond what the catalogs name: a restart's replacement
+    /// that has not arrived, and a restore offer that has not been settled.
+    var sessionIDsHeldOpen: Set<String> { panesHeldForReplacement.union(panesHeldForRestoreOffer) }
+
+    func setPanesHeldForRestoreOffer(_ sessionIDs: Set<String>) { panesHeldForRestoreOffer = sessionIDs }
+
     /// Sessions whose release arrived before their hold did.
     ///
     /// The two messages are independent IPCs, so a replacement's open can be processed before the close
@@ -347,9 +362,8 @@ import spacesterminalcore
     /// close the window entirely is not worth the coupling.
     func pruneOpenPanes(deviceID: String, catalogSessionIDs: Set<String>) {
         let sessionIDs = OpenPanePruning.sessionsToClose(openPanes: openPanes(), deviceID: deviceID, catalogSessionIDs: catalogSessionIDs)
-        for sessionID in sessionIDs where !panesHeldForReplacement.contains(sessionID) {
-            closePane(forSessionID: sessionID, sessionIsTerminating: true)
-        }
+        let heldOpen = sessionIDsHeldOpen
+        for sessionID in sessionIDs where !heldOpen.contains(sessionID) { closePane(forSessionID: sessionID, sessionIsTerminating: true) }
     }
 
     private func scopeSortKey(_ scope: PanelScope) -> String {

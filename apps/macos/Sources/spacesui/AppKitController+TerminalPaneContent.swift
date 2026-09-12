@@ -1,6 +1,7 @@
 import AppKit
 import spacesclientcore
 import spacesdevicecore
+import spacesterminalcore
 import workspacecore
 
 /// Host hooks for the panel coordinator that don't need `AppKitController.swift`'s
@@ -120,7 +121,7 @@ extension AppKitController {
         else { return nil }
         let retainedSessionIDs = OpenPanePruning.restorationKeepSet(
             overview: overview(forWorkspaceID: workspaceID),
-            heldForReplacementSessionIDs: panelCoordinator.sessionIDsHeldForReplacement.union(additionalKeepSessionIDs))
+            heldOpenSessionIDs: panelCoordinator.sessionIDsHeldOpen.union(additionalKeepSessionIDs))
         return PanelLayoutEngine.prunedLayout(layout, keepingSessionIDs: retainedSessionIDs, keepingWorkspaceKeys: [])
     }
 }
@@ -202,20 +203,57 @@ extension AppKitController {
     func retargetPendingPanelWindowPane(replacing oldSessionID: String, with content: PaneContentDescriptor) -> Bool {
         if pendingPanelWindowRestores == nil { pendingPanelWindowRestores = (try? clientDatabase().panelWindows()) ?? [] }
         guard let pending = pendingPanelWindowRestores else { return false }
-        let decoder = JSONDecoder()
         for (index, record) in pending.enumerated() {
-            guard let layout = try? decoder.decode(PanelLayout.self, from: Data(record.layoutJSON.utf8)),
-                let paneID = PanelLayoutEngine.allPanes(in: layout).first(where: { $0.content.terminalSessionID == oldSessionID })?.id
-            else { continue }
-            let retargeted = PanelLayoutEngine.retargetPane(paneID: paneID, to: content, in: layout)
-            guard let json = try? JSONEncoder().encode(retargeted) else { return false }
-            let updated = SpacesClientDatabase.PanelWindowRecord(
-                id: record.id, layoutJSON: String(decoding: json, as: UTF8.self), frame: record.frame)
+            guard let layoutJSON = Self.retargetedLayoutJSON(record.layoutJSON, replacing: oldSessionID, with: content) else { continue }
+            let updated = SpacesClientDatabase.PanelWindowRecord(id: record.id, layoutJSON: layoutJSON, frame: record.frame)
             pendingPanelWindowRestores?[index] = updated
             try? clientDatabase().upsertPanelWindow(updated)
             return true
         }
         return false
+    }
+
+    /// Points the pane a stored layout gives `oldSessionID` at `content`, and hands back the rewritten
+    /// layout. Nil when the layout holds no such pane, or cannot be read or written at all: in both cases
+    /// there is nothing this stored layout can contribute and the caller moves on to its next home.
+    nonisolated static func retargetedLayoutJSON(_ layoutJSON: String, replacing oldSessionID: String, with content: PaneContentDescriptor) -> String?
+    {
+        guard let layout = try? JSONDecoder().decode(PanelLayout.self, from: Data(layoutJSON.utf8)), layout.version == PanelLayout.currentVersion,
+            let paneID = PanelLayoutEngine.allPanes(in: layout).first(where: { $0.content.terminalSessionID == oldSessionID })?.id,
+            let data = try? JSONEncoder().encode(PanelLayoutEngine.retargetPane(paneID: paneID, to: content, in: layout))
+        else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Points a workspace panel's *persisted* pane at a replacement session, without materializing the
+    /// panel. The sibling of `retargetPendingPanelWindowPane` for the other place a pane is stored.
+    /// Answers false when this workspace's stored layout holds no pane for that session.
+    func retargetPersistedWorkspacePanelLayoutPane(
+        deviceID: String, workspaceID: String, replacing oldSessionID: String, with content: PaneContentDescriptor
+    ) -> Bool {
+        guard let database = try? clientDatabase(), let stored = try? database.workspacePanelLayout(deviceID: deviceID, workspaceID: workspaceID),
+            let layoutJSON = Self.retargetedLayoutJSON(stored, replacing: oldSessionID, with: content)
+        else { return false }
+        try? database.writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: workspaceID, layoutJSON: layoutJSON)
+        return true
+    }
+
+    /// Puts restored sessions back in their predecessors' panes at launch, while those panes exist only
+    /// as persisted rows. The setup step answers the offer before `presentMainWorkspaceUI` builds
+    /// anything, so rewriting the stored layouts here is what makes each restored agent appear in its old
+    /// slot when the workspace UI restores them moments later. A row whose pane was never persisted has
+    /// no slot to return to and opens wherever the daemon's runtime target would put it.
+    func retargetPersistedPanesForRestoredSessions(device: SessionRestoreOffer.DeviceOffer, restoredSessionIDsByCapturedSessionID: [String: String]) {
+        for row in device.rows {
+            guard let restoredSessionID = restoredSessionIDsByCapturedSessionID[row.sessionID] else { continue }
+            let content = PaneContentDescriptor.terminalSession(deviceID: device.deviceID, sessionID: restoredSessionID)
+            if retargetPersistedWorkspacePanelLayoutPane(
+                deviceID: device.deviceID, workspaceID: row.workspaceID, replacing: row.sessionID, with: content)
+            {
+                continue
+            }
+            _ = retargetPendingPanelWindowPane(replacing: row.sessionID, with: content)
+        }
     }
 
     func reopenPersistedPanelWindowsIfPossible() {
@@ -224,7 +262,7 @@ extension AppKitController {
         let readySections = deviceModel.deviceSections.filter { $0.loadState == .loaded && $0.overview != nil }
         let loadedDeviceIDs = Set(readySections.map(\.deviceID))
         let retainedSessionIDs = OpenPanePruning.restorationKeepSet(
-            overviews: readySections.map(\.overview), heldForReplacementSessionIDs: panelCoordinator.sessionIDsHeldForReplacement)
+            overviews: readySections.map(\.overview), heldOpenSessionIDs: panelCoordinator.sessionIDsHeldOpen)
         // Hidden workspaces stay listed in their device's overview with `isHidden` set, so this is a
         // deletion-only keep-set exactly like the live overview-driven code-pane prune
         // (`PanelCoordinator.pruneOpenCodePanes`).
