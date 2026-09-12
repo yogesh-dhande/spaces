@@ -348,7 +348,9 @@ private struct DeviceSyncState {
             guard let (project, workspace) = findWorkspace(id: selectedWorkspaceID) else { return false }
             return SidebarVisibility.isVisibleWorkspace(workspace, inProject: project)
         }
-        if let selectedProjectID = host.selectedProjectID { return host.deviceModel.projects.contains(where: { $0.id == selectedProjectID && !$0.isHidden }) }
+        if let selectedProjectID = host.selectedProjectID {
+            return host.deviceModel.projects.contains(where: { $0.id == selectedProjectID && !$0.isHidden })
+        }
         if let blockDeviceID = host.visibleCompatibilityBlockDeviceID {
             return host.deviceCompatibility(forDeviceID: blockDeviceID)?.isCompatible == false
         }
@@ -446,9 +448,7 @@ private struct DeviceSyncState {
     }
 
     func applyLocalDeviceSidebarSnapshot(_ snapshot: LocalDeviceSidebarSnapshot, preserveDetailPane: Bool = false) {
-        if let capturedGeneration = capturedLocalOverviewInstallGeneration,
-            capturedGeneration != host.deviceModel.localOverviewInstallGeneration
-        {
+        if let capturedGeneration = capturedLocalOverviewInstallGeneration, capturedGeneration != host.deviceModel.localOverviewInstallGeneration {
             DeviceLinkTrace.log(
                 deviceID: snapshot.localDeviceID, event: "local_snapshot_superseded",
                 detail: "captured_generation=\(capturedGeneration) current_generation=\(host.deviceModel.localOverviewInstallGeneration)")
@@ -518,6 +518,10 @@ private struct DeviceSyncState {
             deviceSectionsByID = nil
         }
         host.daemonUpdate.maybeRequestSilentDaemonHandoff(deviceID: snapshot.localDeviceID, status: snapshot.localDaemonStatus)
+        // The local daemon can start reporting a restorable record while the app is running: it crashed
+        // and came back, and derived one from the sessions it stranded. The offer is put up as a sheet
+        // here rather than waiting for the next launch.
+        host.sessionRestore.maybePresentOfferSheet()
         host.deviceModel.localDeviceID = snapshot.localDeviceID
         host.deviceModel.localDeviceName = snapshot.localDeviceName
         host.deviceModel.localPairedDevice = snapshot.localPairedDevice
@@ -537,8 +541,7 @@ private struct DeviceSyncState {
         // of a real overview is never evidence a session's product row was removed.
         if AppKitController.localSnapshotAuthorizesPanePrune(loadState: localLoadState, compatibility: snapshot.localCompatibility) {
             host.removeCodePaneRecoveryStateForDeletedWorkspaces(
-                deviceID: snapshot.localDeviceID,
-                liveWorkspaceIDs: Set(snapshot.localDeviceOverview.workspaces.map(\.id)),
+                deviceID: snapshot.localDeviceID, liveWorkspaceIDs: Set(snapshot.localDeviceOverview.workspaces.map(\.id)),
                 previousWorkspaceIDs: Set(previousLocalSection?.overview?.workspaces.map(\.id) ?? []))
             // Hand over the panes whose runtime target merely swapped sessions before pruning could close
             // them: a start or restart replaces the session a row names, and the predecessor is exactly
@@ -1291,10 +1294,16 @@ private struct DeviceSyncState {
             // updates a remote daemon), so the unchanged-check must include them or the badge/block
             // would keep showing the stale verdict until an unrelated overview change.
             let statusUnchanged =
-                host.deviceModel.deviceSections[index].compatibility == load.compatibility && host.deviceModel.deviceSections[index].daemonStatus == load.daemonStatus
+                host.deviceModel.deviceSections[index].compatibility == load.compatibility
+                && host.deviceModel.deviceSections[index].daemonStatus == load.daemonStatus
             host.deviceModel.deviceSections[index].daemonStatus = load.daemonStatus
             host.deviceModel.deviceSections[index].compatibility = load.compatibility
             host.daemonUpdate.maybeRequestSilentDaemonHandoff(deviceID: deviceID, status: load.daemonStatus)
+            // Holds first, before this apply's prune can close the panes of an outstanding record, and
+            // before the offer itself is raised: presentation waits until the overview below is installed,
+            // because the offer reads its workspace names from it and would otherwise list the names (or
+            // the bare directories) of the overview this response replaces.
+            host.sessionRestore.updateHeldPanes()
             // If this device's block was showing, reconcile it against the fresh verdict/status — drop it
             // if now compatible, re-render it if the remedy changed (e.g. a staged update appeared while
             // still incompatible), otherwise leave it.
@@ -1331,10 +1340,16 @@ private struct DeviceSyncState {
             // resolver a narrower candidate list than the one just learned.
             host.deviceModel.deviceSections[index].device = overview.device
             host.removeCodePaneRecoveryStateForDeletedWorkspaces(
-                deviceID: deviceID,
-                liveWorkspaceIDs: Set(overview.overview.workspaces.map(\.id)),
+                deviceID: deviceID, liveWorkspaceIDs: Set(overview.overview.workspaces.map(\.id)),
                 previousWorkspaceIDs: Set(host.deviceModel.deviceSections[index].overview?.workspaces.map(\.id) ?? []))
             if wasLoaded, statusUnchanged, host.deviceModel.deviceSections[index].overview == overview.overview {
+                // Ahead of the return, because "unchanged" is exactly the shape a restore answer produces:
+                // the overview that first carried the restored sessions may have landed before the answer
+                // registered what it was waiting for, and the refresh it then asks for comes back
+                // identical. The claim is what hands each restored agent its predecessor's pane.
+                host.sessionRestore.claimPanesForReportedSessions(deviceID: deviceID, overview: overview.overview)
+                // The installed overview is this response's overview, so the offer reads current names.
+                host.sessionRestore.maybePresentOfferSheet()
                 updateAlertsSidebarBadge()
                 return
             }
@@ -1362,6 +1377,12 @@ private struct DeviceSyncState {
             // returns early, so this only fires when the remote section actually changed.
             host.commandPalette.invalidateCommandPaletteCache()
             host.deviceModel.deviceSections[index].loadState = .loaded
+            // A paired device that rebooted or whose daemon crashed reports its record the moment it is
+            // reachable again, and the offer for it is the same sheet This Mac's record gets. Raised here
+            // rather than beside the status above so it lists this response's own workspace names, and
+            // still ahead of the prune below, which the holds this recomputes protect the offered panes
+            // from.
+            host.sessionRestore.maybePresentOfferSheet()
             host.browserSessions.reconcileRemoteBrowserForwards(device: overview.device, overview: overview.overview)
             // Authoritative overview for this remote device: close any open pane whose session it no
             // longer retains so the pane cannot outlive the remote daemon's transcript garbage-collection.
@@ -1721,16 +1742,16 @@ private struct DeviceSyncState {
         return host.deviceModel.projects[index]
     }
 
-    func deviceRecord(forDeviceID deviceID: String) -> SpacesPairedDeviceRecord? {
-        deviceSection(id: deviceID)?.device
-    }
+    func deviceRecord(forDeviceID deviceID: String) -> SpacesPairedDeviceRecord? { deviceSection(id: deviceID)?.device }
 
     /// Resolves a device section by id through `deviceSectionsByID`, rebuilding that position index on
     /// first use after an invalidation. The single lookup every other device-section-by-id site in this
     /// file now goes through.
     func deviceSection(id deviceID: String) -> DeviceSection? {
         if deviceSectionsByID == nil {
-            deviceSectionsByID = host.deviceModel.deviceSections.enumerated().reduce(into: [:]) { index, entry in index[entry.element.deviceID] = entry.offset }
+            deviceSectionsByID = host.deviceModel.deviceSections.enumerated().reduce(into: [:]) { index, entry in
+                index[entry.element.deviceID] = entry.offset
+            }
         }
         guard let index = deviceSectionsByID?[deviceID] else { return nil }
         return host.deviceModel.deviceSections[index]
@@ -1748,11 +1769,11 @@ private struct DeviceSyncState {
     func visibleWorkspaces(projectID: String) -> [WorkspaceSummary] {
         if let cached = visibleWorkspacesCache[projectID] { return cached }
         let project = project(id: projectID)
-        let result = (host.deviceModel.workspacesByProject[projectID] ?? []).filter { SidebarVisibility.isVisibleWorkspace($0, inProject: project) }.sorted {
-            lhs, rhs in
-            if lhs.isDefault != rhs.isDefault { return lhs.isDefault }
-            return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
-        }
+        let result = (host.deviceModel.workspacesByProject[projectID] ?? []).filter { SidebarVisibility.isVisibleWorkspace($0, inProject: project) }
+            .sorted { lhs, rhs in
+                if lhs.isDefault != rhs.isDefault { return lhs.isDefault }
+                return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
+            }
         visibleWorkspacesCache[projectID] = result
         return result
     }
@@ -1764,7 +1785,8 @@ private struct DeviceSyncState {
     /// lose the header the button it was clicked in lives on). A single loaded device stays a flat list.
     var showsDeviceHeaders: Bool {
         AppKitController.sidebarShowsDeviceHeaders(
-            deviceCount: host.deviceModel.deviceSections.count, hasUnloadedSection: host.deviceModel.deviceSections.contains { $0.loadState != .loaded })
+            deviceCount: host.deviceModel.deviceSections.count,
+            hasUnloadedSection: host.deviceModel.deviceSections.contains { $0.loadState != .loaded })
     }
 
     func deviceProjects(deviceID: String) -> [ProjectSummary] {
@@ -1814,7 +1836,8 @@ private struct DeviceSyncState {
 
     private func rootChildRef(index: Int) -> OutlineItemRef {
         if showsDeviceHeaders {
-            let deviceID = (index >= 0 && index < host.deviceModel.deviceSections.count) ? host.deviceModel.deviceSections[index].deviceID : singleDeviceID
+            let deviceID =
+                (index >= 0 && index < host.deviceModel.deviceSections.count) ? host.deviceModel.deviceSections[index].deviceID : singleDeviceID
             return outlineItemRef(for: .device(deviceID))
         }
         let deviceProjects = deviceProjects(deviceID: singleDeviceID)
@@ -1988,9 +2011,7 @@ private struct DeviceSyncState {
         return cell
     }
 
-    private func deviceSectionName(deviceID: String) -> String {
-        deviceSection(id: deviceID)?.displayName ?? deviceID
-    }
+    private func deviceSectionName(deviceID: String) -> String { deviceSection(id: deviceID)?.displayName ?? deviceID }
 
     /// Gathers this device's section facts and resolves what its header's caption area shows. The
     /// retry-availability read is the same one the button's action consults, so a visible recovery button
@@ -2837,9 +2858,8 @@ private struct DeviceSyncState {
     /// section returns to `.loading` so the click has visible feedback, and the attempt moves it on to
     /// loaded, or back to offline carrying the reason it failed with this time.
     private func retryDeviceConnection(deviceID: String) {
-        guard deviceSectionOffersRetry(deviceID: deviceID), let index = host.deviceModel.deviceSections.firstIndex(where: { $0.deviceID == deviceID }) else {
-            return
-        }
+        guard deviceSectionOffersRetry(deviceID: deviceID), let index = host.deviceModel.deviceSections.firstIndex(where: { $0.deviceID == deviceID })
+        else { return }
         if host.deviceModel.deviceSections[index].isLocal {
             markDeviceSectionRetrying(deviceID: deviceID, index: index)
             // The local device has no subscription to reopen. Re-running the snapshot is what re-probes

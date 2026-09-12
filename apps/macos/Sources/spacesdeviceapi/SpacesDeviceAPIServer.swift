@@ -6312,22 +6312,31 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         if let rejection = Self.restorableGenerationRejection(records: records, requestedGeneration: payload.generation) { return rejection }
         let orchestrator = try context.orchestrator()
         var newSessionIDsByCapturedSessionID: [String: String] = [:]
-        var failures: [String] = []
+        // Named per row rather than collapsed into the message: a client shows the user which agents are
+        // not coming back, and "the workspace is gone" is only actionable when it says which agent it was.
+        // The row is named by session id, so the client reports it under the label it listed it under.
+        var failures: [SpacesDeviceRestoredSessionFailure] = []
         for record in records {
             let command = CodingAgent.resumeCommand(launchCommand: record.launchCommand, sessionKey: record.agentSessionKey)
             do {
                 let session = try orchestrator.createWorkspaceAgentSession(
                     workspaceID: record.workspaceID, command: command, title: record.title, recordedLaunchCommand: record.launchCommand)
                 newSessionIDsByCapturedSessionID[record.sessionID] = session.id
-            } catch { failures.append(Self.failureResponse(for: error).message) }
+            } catch {
+                failures.append(
+                    SpacesDeviceRestoredSessionFailure(
+                        sessionID: record.sessionID, title: record.title, message: Self.failureResponse(for: error).message))
+            }
         }
         try store.clearRestorableSessions(generation: payload.generation)
         let message =
             failures.isEmpty
             ? "Restored \(newSessionIDsByCapturedSessionID.count) coding agent session(s)."
-            : "Restored \(newSessionIDsByCapturedSessionID.count) of \(records.count) coding agent session(s): \(failures.joined(separator: "; "))"
+            : "Restored \(newSessionIDsByCapturedSessionID.count) of \(records.count) coding agent session(s): "
+                + failures.map(\.message).joined(separator: "; ")
         return SpacesDeviceAPIResponse(
-            ok: true, message: message, result: .restoredSessions(.init(newSessionIDsByCapturedSessionID: newSessionIDsByCapturedSessionID)))
+            ok: true, message: message,
+            result: .restoredSessions(.init(newSessionIDsByCapturedSessionID: newSessionIDsByCapturedSessionID, failures: failures)))
     }
 
     /// Discards the outstanding restorable record. The other answer to the same offer, and the reason the
@@ -6346,13 +6355,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// offer the daemon already replaced (a second unclean exit) or at one another client just answered,
     /// and acting on either would restore or discard a set the user never saw.
     private static func restorableGenerationRejection(records: [RestorableSessionRecord], requestedGeneration: String) -> SpacesDeviceAPIResponse? {
+        // `.conflict` rather than `.invalidArgument` in both refusals: the request is well formed and the
+        // client's view of the record is what is stale, which is the distinction a client needs to tell
+        // "this offer has been replaced, show the current one" from "the answer did not land, try again".
         guard let generation = records.first?.generation else {
-            return SpacesDeviceAPIResponse(
-                ok: false, message: "This device has no sessions to restore.", errorCode: .invalidArgument)
+            return SpacesDeviceAPIResponse(ok: false, message: "This device has no sessions to restore.", errorCode: .conflict)
         }
         guard generation == requestedGeneration else {
             return SpacesDeviceAPIResponse(
-                ok: false, message: "These sessions have been replaced by a newer record; reload and answer that one.", errorCode: .invalidArgument)
+                ok: false, message: "These sessions have been replaced by a newer record; reload and answer that one.", errorCode: .conflict)
         }
         return nil
     }

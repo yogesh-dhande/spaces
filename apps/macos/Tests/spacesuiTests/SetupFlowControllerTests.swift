@@ -19,7 +19,7 @@ import Testing
     }
 
     @Test func launchWaitExceedsTheAgentStatusRequestTimeout() {
-        #expect(SetupFlowController.localAgentStatusTimeout > .seconds(SpacesDeviceClient.agentHooksStatusRequestTimeoutSeconds))
+        #expect(SetupFlowController.localProbeTimeout > .seconds(SpacesDeviceClient.agentHooksStatusRequestTimeoutSeconds))
     }
 
     @Test func stepIsOfferedWhenADetectedAgentNeedsHooks() {

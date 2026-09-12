@@ -17,7 +17,7 @@ import Testing
         // Stands in for the overview after the stop: it no longer references the predecessor.
         let overviewKeepSet = OpenPanePruning.restorationKeepSet(overview: nil)
 
-        let keepSet = OpenPanePruning.restorationKeepSet(overview: nil, heldForReplacementSessionIDs: ["predecessor"])
+        let keepSet = OpenPanePruning.restorationKeepSet(overview: nil, heldOpenSessionIDs: ["predecessor"])
 
         #expect(!overviewKeepSet.contains("predecessor"))
         #expect(keepSet.contains("predecessor"))
@@ -33,10 +33,10 @@ import Testing
             tabID: "tab-2", pane: Pane(id: "b", content: .terminalSession(deviceID: "local", sessionID: "other")), to: layout)
 
         let withoutHold = PanelLayoutEngine.prunedLayout(
-            layout, keepingSessionIDs: OpenPanePruning.restorationKeepSet(overview: nil, heldForReplacementSessionIDs: []).union(["other"]))
+            layout, keepingSessionIDs: OpenPanePruning.restorationKeepSet(overview: nil, heldOpenSessionIDs: []).union(["other"]))
         let withHold = PanelLayoutEngine.prunedLayout(
             layout,
-            keepingSessionIDs: OpenPanePruning.restorationKeepSet(overview: nil, heldForReplacementSessionIDs: ["predecessor"]).union(["other"]))
+            keepingSessionIDs: OpenPanePruning.restorationKeepSet(overview: nil, heldOpenSessionIDs: ["predecessor"]).union(["other"]))
 
         #expect(PanelLayoutEngine.orderedTerminalSessionIDs(in: withoutHold) == ["other"])
         #expect(withHold.tabs.map(\.id) == ["tab-1", "tab-2"])
@@ -50,7 +50,7 @@ import Testing
     @Test func globalWindowRestorationKeepsAPaneHeldForAReplacement() {
         let overviewsOnly = OpenPanePruning.restorationKeepSet(overviews: [nil, nil])
 
-        let keepSet = OpenPanePruning.restorationKeepSet(overviews: [nil, nil], heldForReplacementSessionIDs: ["predecessor"])
+        let keepSet = OpenPanePruning.restorationKeepSet(overviews: [nil, nil], heldOpenSessionIDs: ["predecessor"])
 
         #expect(!overviewsOnly.contains("predecessor"))
         #expect(keepSet.contains("predecessor"))

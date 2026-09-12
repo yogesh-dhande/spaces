@@ -1,5 +1,6 @@
 import AppKit
 import Testing
+import spacesclientcore
 import spacesdevicecore
 import spacesterminalcore
 
@@ -173,8 +174,8 @@ extension ProcessProfileEnvironmentSuites {
         /// restoration keep-set for the life of the app.
         @Test func aFallbackInstallReleasesTheHoldItNeverClaimed() {
             #expect(
-                TerminalPaneService.heldPredecessorSessionToRelease(replacesSessionID: "predecessor", openAction: .installUnselectedTab) == "predecessor"
-            )
+                TerminalPaneService.heldPredecessorSessionToRelease(replacesSessionID: "predecessor", openAction: .installUnselectedTab)
+                    == "predecessor")
             #expect(TerminalPaneService.heldPredecessorSessionToRelease(replacesSessionID: "predecessor", openAction: .claimReplacedPane) == nil)
             #expect(TerminalPaneService.heldPredecessorSessionToRelease(replacesSessionID: "predecessor", openAction: nil) == "predecessor")
             #expect(TerminalPaneService.heldPredecessorSessionToRelease(replacesSessionID: nil, openAction: .installUnselectedTab) == nil)
@@ -230,7 +231,9 @@ extension ProcessProfileEnvironmentSuites {
                 tabID: "tab-2", pane: Pane(id: "b", content: .terminalSession(deviceID: deviceID, sessionID: "other")), to: layout)
             let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
             try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
-            controller.deviceModel.deviceSections = [section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement", "other"])]
+            controller.deviceModel.deviceSections = [
+                section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement", "other"])
+            ]
             controller.rebuildFlatSidebarData()
             controller.terminalPanes.closeTerminalSessionPane(sessionID: "predecessor", sessionIsTerminating: true, disposition: .awaitReplacement)
 
@@ -292,7 +295,9 @@ extension ProcessProfileEnvironmentSuites {
                 tabID: "tab-2", pane: Pane(id: "b", content: .terminalSession(deviceID: deviceID, sessionID: "other")), to: layout)
             let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
             try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
-            controller.deviceModel.deviceSections = [section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement", "other"])]
+            controller.deviceModel.deviceSections = [
+                section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement", "other"])
+            ]
             controller.rebuildFlatSidebarData()
             #expect(controller.panelCoordinator.sessionIDsHeldForReplacement.isEmpty, "precondition: no close ever recorded a hold")
             #expect(controller.panelCoordinator.placement(forSessionID: "predecessor") == nil, "precondition: nothing is materialized yet")
@@ -335,7 +340,9 @@ extension ProcessProfileEnvironmentSuites {
                 tabID: "tab-2", pane: Pane(id: "b", content: .terminalSession(deviceID: deviceID, sessionID: "other")), to: layout)
             let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
             try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
-            controller.deviceModel.deviceSections = [section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement", "other"])]
+            controller.deviceModel.deviceSections = [
+                section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement", "other"])
+            ]
             controller.rebuildFlatSidebarData()
             let epochBeforeRetarget = controller.panelCoordinator.paneReplacementEpoch
 
@@ -392,6 +399,38 @@ extension ProcessProfileEnvironmentSuites {
                 workspacesByProject: mapped.workspacesByProject, workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, overview: overview)
         }
 
+        /// The same device section, reporting one stranded coding-agent session on its daemon status, which
+        /// is how a record reaches this client.
+        private func sectionReporting(_ capturedSessionID: String, deviceID: String, processSessionID: String, retained: [String])
+            -> AppKitController.DeviceSection
+        {
+            var reporting = section(deviceID: deviceID, processSessionID: processSessionID, retained: retained)
+            reporting.daemonStatus = TerminalServiceDaemonStatus(
+                version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+                restorableSessions: [
+                    RestorableSessionSummary(
+                        sessionID: capturedSessionID, workspaceID: "workspace-1", agentKind: .claudeCode, title: "Agent",
+                        workingDirectory: "/tmp/workspace-1", hasResumeKey: true, generation: "gen-1")
+                ])
+            return reporting
+        }
+
+        /// The offer a device reporting one stranded coding-agent session puts in front of the user.
+        private func restoreOffer(deviceID: String, capturedSessionID: String) throws -> SessionRestoreOffer {
+            try #require(
+                SessionRestoreOffer.make(devices: [
+                    .init(
+                        deviceID: deviceID, deviceName: "This Mac",
+                        status: TerminalServiceDaemonStatus(
+                            version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+                            restorableSessions: [
+                                RestorableSessionSummary(
+                                    sessionID: capturedSessionID, workspaceID: "workspace-1", agentKind: .claudeCode, title: "Agent",
+                                    workingDirectory: "/tmp/workspace-1", hasResumeKey: true, generation: "gen-1")
+                            ]), answeredGeneration: nil)
+                ]))
+        }
+
         /// An ordinary teardown close of a session with no materialized pane records nothing, so a plain
         /// stop cannot leave a hold behind that would protect a pane forever.
         @Test func anOrdinaryCloseRecordsNoHold() {
@@ -412,5 +451,287 @@ extension ProcessProfileEnvironmentSuites {
 
             #expect(coordinator.sessionIDsHeldForReplacement.isEmpty)
         }
+
+        /// The claim a Restore answer makes on its predecessor's pane, which cannot run when the answer
+        /// returns: `restoreSessions` reports the new session ids as soon as the daemon has launched them,
+        /// and the device's overview does not carry them yet. A pane opened from the offer row alone would
+        /// have no shell and no command and would degrade into an "unavailable" pane that never retries, so
+        /// the claim waits for the summary that carries the launch configuration.
+        @Test func aRestoredSessionClaimsItsPredecessorsPaneOnceTheDeviceReportsIt() throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "stranded")), to: PanelLayout())
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            let beforeRestore = section(deviceID: deviceID, processSessionID: "other", retained: ["other"])
+            controller.deviceModel.deviceSections = [beforeRestore]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            controller.panelCoordinator.setPanesHeldForRestoreOffer(["stranded"])
+            controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
+
+            let pending = SessionRestoreController.PendingRetarget(
+                deviceID: deviceID, workspaceID: "workspace-1", capturedSessionID: "stranded", restoredSessionID: "restored")
+            #expect(
+                SessionRestoreController.retargetsReadyToClaim([pending], deviceID: deviceID, overview: try #require(beforeRestore.overview)).isEmpty,
+                "the device has not reported the restored session yet, so there is nothing to build a pane from")
+
+            let afterRestore = section(deviceID: deviceID, processSessionID: "restored", retained: ["restored"], createdAt: "2026-01-01T00:01:00Z")
+            let reported = try #require(afterRestore.overview)
+            #expect(SessionRestoreController.retargetsReadyToClaim([pending], deviceID: deviceID, overview: reported) == [pending])
+            let request = try #require(
+                AppKitController.deviceTerminalOpenRequest(workspaceID: "workspace-1", sessionID: "restored", overview: reported))
+            #expect(request.shell != nil && request.command != nil, "the summary is what carries the launch configuration the pane needs")
+        }
+
+        /// The wiring of that wait: the pane is held through every prune until the device reports the
+        /// restored session, and the first overview that carries it hands the pane over in place, so the
+        /// restored agent keeps the tab, split, and window its predecessor had.
+        @Test func aPaneWaitingForARestoredSessionIsHandedOverByTheOverviewThatReportsIt() throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "stranded")), to: PanelLayout())
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            let beforeRestore = section(deviceID: deviceID, processSessionID: "other", retained: ["other"])
+            controller.deviceModel.deviceSections = [beforeRestore]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            controller.panelCoordinator.setPanesHeldForRestoreOffer(["stranded"])
+            controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
+
+            let offered = try restoreOffer(deviceID: deviceID, capturedSessionID: "stranded")
+            controller.sessionRestore.awaitReportedSessions(
+                device: offered.devices[0], restoredSessionIDsByCapturedSessionID: ["stranded": "restored"])
+            controller.panelCoordinator.pruneOpenPanes(deviceID: deviceID, catalogSessionIDs: ["other"])
+            #expect(
+                PanelLayoutEngine.orderedTerminalSessionIDs(in: controller.panelCoordinator.layout(for: scope)) == ["stranded"],
+                "the pane waits for the restored session rather than being pruned before it is reported")
+
+            let afterRestore = section(deviceID: deviceID, processSessionID: "restored", retained: ["restored"], createdAt: "2026-01-01T00:01:00Z")
+            controller.deviceModel.deviceSections = [afterRestore]
+            controller.rebuildFlatSidebarData()
+            controller.retargetReplacedTerminalPanes(
+                previousOverview: beforeRestore.overview, overview: try #require(afterRestore.overview), deviceID: deviceID)
+
+            #expect(PanelLayoutEngine.orderedTerminalSessionIDs(in: controller.panelCoordinator.layout(for: scope)) == ["restored"])
+            #expect(controller.panelCoordinator.sessionIDsHeldOpen.isEmpty, "the claim settles the hold, so the pane prunes normally from here")
+        }
+
+        /// The restore offer's hold, which exists for the same reason and is derived rather than recorded:
+        /// a crashed daemon's sessions are gone from every catalog the moment it reconnects, so the
+        /// reconnect that reports the record would prune their panes out from under the question, leaving
+        /// Restore nothing to claim and each restored agent landing as a fresh tab. The set is recomputed
+        /// from what the devices report on every status, so a record is held from the moment it is seen
+        /// (whether or not the sheet can be shown yet) and stops being held the moment it is gone.
+        @Test func panesOfferedForRestoreAreHeldWhileTheRecordStandsAndNoLonger() async throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            var layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "stranded")), to: PanelLayout())
+            layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-2", pane: Pane(id: "b", content: .terminalSession(deviceID: deviceID, sessionID: "other")), to: layout)
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            // The reconnected daemon knows nothing of the stranded session: it died with the old process.
+            // It reports it as restorable instead, which is the record the user is about to be asked about.
+            controller.deviceModel.deviceSections = [sectionReporting("stranded", deviceID: deviceID, processSessionID: "other", retained: ["other"])]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+
+            // This fixture has no main window content, so the sheet cannot go up: exactly the case the
+            // holds must not depend on. Another sheet owning the window, or an earlier offer still on
+            // screen, blocks presentation the same way.
+            controller.sessionRestore.maybePresentOfferSheet()
+            #expect(controller.panelCoordinator.sessionIDsHeldOpen == ["stranded"], "the record is held from the moment it is seen")
+            controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
+            controller.panelCoordinator.pruneOpenPanes(deviceID: deviceID, catalogSessionIDs: ["other"])
+            #expect(
+                PanelLayoutEngine.orderedTerminalSessionIDs(in: controller.panelCoordinator.layout(for: scope)) == ["stranded", "other"],
+                "the offered pane is still there for the restored session to take over")
+
+            // An answer that never reaches its device settles nothing: the fixture has no pairing record for
+            // it, which is the shape of an unreachable device, so the question stays open and its record
+            // keeps holding the pane. Every answer asks for a refresh either way, which is what carries the
+            // prune for whatever it does settle.
+            var reloads = 0
+            controller.sidebar.loadSnapshotOverrideForTesting = {
+                reloads += 1
+                return .failure(ReloadProbeStop())
+            }
+            let completion = await controller.sessionRestore.answer(
+                .skip, offer: try restoreOffer(deviceID: deviceID, capturedSessionID: "stranded"), panePlacement: .livePanes)
+            await controller.sidebar.drainSidebarRefreshForTesting()
+            controller.panelCoordinator.pruneOpenPanes(deviceID: deviceID, catalogSessionIDs: ["other"])
+
+            #expect(completion != .complete, "an answer that could not be delivered is not an answer")
+            #expect(reloads == 1, "the answer asks for the overview that prunes whatever it releases")
+            #expect(
+                PanelLayoutEngine.orderedTerminalSessionIDs(in: controller.panelCoordinator.layout(for: scope)) == ["stranded", "other"],
+                "the pane the user may still ask to restore is kept")
+
+            // The record settled: a Skip that landed, or another client answering, or the device capturing
+            // again. Whichever it was, the device stops reporting this record and the pane stops being
+            // held, so the next prune closes it like any other pane whose session is gone.
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, processSessionID: "other", retained: ["other"])]
+            controller.rebuildFlatSidebarData()
+            controller.sessionRestore.maybePresentOfferSheet()
+            controller.panelCoordinator.pruneOpenPanes(deviceID: deviceID, catalogSessionIDs: ["other"])
+
+            #expect(controller.panelCoordinator.sessionIDsHeldOpen.isEmpty, "a record that is no longer outstanding holds nothing")
+            #expect(PanelLayoutEngine.orderedTerminalSessionIDs(in: controller.panelCoordinator.layout(for: scope)) == ["other"])
+        }
+
+        /// The other end of the wait: an overview carrying the restored sessions can land before the answer
+        /// gets to register what it is waiting for (a partial-failure dialog is long enough), and the
+        /// refresh the answer then asks for comes back byte-identical and is dropped as unchanged. The
+        /// claim runs against the overview the app already holds, so the pane is handed over at once
+        /// instead of timing out thirty seconds later.
+        @Test func aRestoredSessionAlreadyInTheInstalledOverviewIsClaimedAtOnce() throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "stranded")), to: PanelLayout())
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            // The overview already on screen carries the session the restore just created.
+            controller.deviceModel.deviceSections = [
+                section(deviceID: deviceID, processSessionID: "restored", retained: ["restored"], createdAt: "2026-01-01T00:01:00Z")
+            ]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            controller.panelCoordinator.setPanesHeldForRestoreOffer(["stranded"])
+            controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
+
+            controller.sessionRestore.awaitReportedSessions(
+                device: try restoreOffer(deviceID: deviceID, capturedSessionID: "stranded").devices[0],
+                restoredSessionIDsByCapturedSessionID: ["stranded": "restored"])
+
+            #expect(
+                PanelLayoutEngine.orderedTerminalSessionIDs(in: controller.panelCoordinator.layout(for: scope)) == ["restored"],
+                "no overview is coming that this one has not already said, so the claim runs against it")
+            #expect(controller.panelCoordinator.sessionIDsHeldOpen.isEmpty, "nothing is left waiting, so nothing is left held")
+        }
+
+        /// What closes the pane when the restored session never turns up. The wait times out precisely when
+        /// a device has gone quiet, so no further overview is coming to carry the prune, and the pane would
+        /// otherwise sit there forever showing a session that ended. Giving up runs the prune itself,
+        /// against the overview the app already holds.
+        @Test func aPaneWaitingForASessionThatIsNeverReportedIsClosedWhenTheWaitExpires() throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "stranded")), to: PanelLayout())
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, processSessionID: "other", retained: ["other"])]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            controller.panelCoordinator.setPanesHeldForRestoreOffer(["stranded"])
+            controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
+            controller.sessionRestore.awaitReportedSessions(
+                device: try restoreOffer(deviceID: deviceID, capturedSessionID: "stranded").devices[0],
+                restoredSessionIDsByCapturedSessionID: ["stranded": "restored"])
+            #expect(
+                PanelLayoutEngine.orderedTerminalSessionIDs(in: controller.panelCoordinator.layout(for: scope)) == ["stranded"],
+                "the pane is waiting for a session the device has not reported")
+
+            controller.sessionRestore.stopAwaitingReportedSessions(restoredSessionIDs: ["restored"])
+
+            #expect(controller.panelCoordinator.sessionIDsHeldOpen.isEmpty)
+            #expect(
+                PanelLayoutEngine.orderedTerminalSessionIDs(in: controller.panelCoordinator.layout(for: scope)).isEmpty,
+                "giving up closes the pane without waiting for an overview that is not coming")
+        }
+
+        /// An offer can outlive the status it was built from: the sheet stays up, or the launch step does,
+        /// while that device's daemon is updated underneath it. Answering across the skew is what must not
+        /// happen, because the device may relaunch every agent and clear its record while this client
+        /// cannot read the reply. The answer is refused on the status the app holds at the moment of the
+        /// click, so nothing is recorded and the record is offered again once the versions match.
+        @Test func aDeviceThatDoesNotAnswerTheStatusReadIsNotAnswered() async throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            let offer = try restoreOffer(deviceID: deviceID, capturedSessionID: "stranded")
+            controller.deviceModel.deviceSections = [sectionReporting("stranded", deviceID: deviceID, processSessionID: "other", retained: ["other"])]
+            controller.rebuildFlatSidebarData()
+            controller.sidebar.loadSnapshotOverrideForTesting = { .failure(ReloadProbeStop()) }
+            // The device does not answer the read: it dropped off, or it is mid-restart. The cached status
+            // the sidebar is still showing says nothing about whether the answer can be delivered now.
+            controller.sessionRestore.daemonStatusProbeOverrideForTesting = { _ in nil }
+
+            let completion = await controller.sessionRestore.answer(.restore, offer: offer, panePlacement: .livePanes)
+
+            #expect(
+                completion == .failed(message: AppKitController.deviceUnreachableError(deviceName: "This Mac", isLocal: true).localizedDescription))
+            #expect(
+                try controller.clientDatabase().setting(key: ClientSettingsKey.sessionRestoreAnsweredGenerations) == nil,
+                "the answer never went out, so the record stands and is offered again")
+        }
+
+        /// The same refusal from the launch step, which is where it matters most: a Mac that has just
+        /// updated Spaces is exactly the Mac whose daemon was restarted under it, and the launch flow runs
+        /// before any device section exists, so the status has to be read fresh rather than taken from a
+        /// model that is still empty.
+        @Test func aLaunchAnswerAgainstADaemonThatIsNoLongerCompatibleIsRefused() async throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            let offer = try restoreOffer(deviceID: deviceID, capturedSessionID: "stranded")
+            #expect(controller.deviceModel.deviceSections.isEmpty, "the launch flow answers before the sidebar has built any section")
+            controller.sessionRestore.daemonStatusProbeOverrideForTesting = { _ in
+                TerminalServiceDaemonStatus(
+                    version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+                    protocolVersion: SpacesWireProtocol.version - 1)
+            }
+
+            let completion = await controller.sessionRestore.answer(.restore, offer: offer, panePlacement: .persistedLayouts)
+
+            #expect(
+                completion
+                    == .failed(message: try #require(DaemonCompatibilityCopy.actionBlockedBody(deviceName: "This Mac", verdict: .daemonTooOld))))
+            #expect(
+                try controller.clientDatabase().setting(key: ClientSettingsKey.sessionRestoreAnsweredGenerations) == nil,
+                "nothing was answered, so the launch step keeps the question and the record stands")
+        }
+
+        /// The sheet comes down by itself once nobody is offering what it asks about: another client
+        /// answered the record, or the device captured again. Nothing is recorded, exactly as when the
+        /// device refuses a stale answer, and the sheet's own close raises whatever is outstanding by then.
+        @Test func aSheetWhoseRecordLeavesTheStatusesIsTakenDown() throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            controller.deviceModel.deviceSections = [sectionReporting("stranded", deviceID: deviceID, processSessionID: "other", retained: ["other"])]
+            controller.rebuildFlatSidebarData()
+            controller.sessionRestore.presentSheet(offer: try restoreOffer(deviceID: deviceID, capturedSessionID: "stranded"))
+            #expect(controller.sessionRestore.offerOnScreen != nil, "the question is on screen")
+
+            // A device that has simply gone quiet has not answered anything, and the question it was asked
+            // is still the one it holds.
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, processSessionID: "other", retained: ["other"])]
+            controller.rebuildFlatSidebarData()
+            controller.sessionRestore.maybePresentOfferSheet()
+            #expect(controller.sessionRestore.offerOnScreen != nil, "silence from the device is not an answer")
+
+            // The device answers and holds nothing: another client took the question, or it captured again.
+            var settled = section(deviceID: deviceID, processSessionID: "other", retained: ["other"])
+            settled.daemonStatus = TerminalServiceDaemonStatus(
+                version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0)
+            controller.deviceModel.deviceSections = [settled]
+            controller.rebuildFlatSidebarData()
+            controller.sessionRestore.maybePresentOfferSheet()
+
+            #expect(controller.sessionRestore.offerOnScreen == nil, "the sheet does not wait for a click to discover its record is gone")
+            #expect(
+                try controller.clientDatabase().setting(key: ClientSettingsKey.sessionRestoreAnsweredGenerations) == nil,
+                "the record was settled elsewhere, so this client recorded no answer of its own")
+        }
     }
 }
+
+/// Stops a test's sidebar reload at the load step: the assertions are about the request being made, not
+/// about what a snapshot would apply.
+private struct ReloadProbeStop: Error {}

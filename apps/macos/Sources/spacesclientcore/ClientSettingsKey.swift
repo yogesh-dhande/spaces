@@ -52,4 +52,9 @@ public enum ClientSettingsKey {
     /// for, as a decimal string. The step reappears only when a Spaces release bumps the hook version,
     /// so skipping it is respected until the hooks Spaces wants to write actually change.
     public static let agentHooksSetupDismissedVersion = "agent_hooks_setup_dismissed_version"
+    /// The restorable-session record this client has already answered on each device, as a JSON object
+    /// mapping device id to the record's generation. A device keeps its record until some client answers
+    /// Restore or Skip and re-reports it on every status refresh, so this is what makes the offer appear
+    /// once per record instead of once per refresh.
+    public static let sessionRestoreAnsweredGenerations = "session_restore_answered_generations"
 }

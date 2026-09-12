@@ -1001,8 +1001,11 @@ public enum SpacesDeviceClient {
     /// Restores a device's outstanding record of coding-agent sessions, returning each captured session id
     /// mapped to the session now running in its place. `generation` is the record the caller is answering;
     /// the daemon refuses one it has already replaced.
-    @discardableResult public static func restoreSessions(generation: String, context: DeviceRequestContext) throws -> [String: String] {
-        try request(.init(command: .restoreSessions(.init(generation: generation))), context: context).restoredSessions ?? [:]
+    @discardableResult public static func restoreSessions(generation: String, context: DeviceRequestContext) throws
+        -> SpacesDeviceRestoredSessionsResult
+    {
+        try request(.init(command: .restoreSessions(.init(generation: generation))), context: context).restoredSessionsResult
+            ?? .init(newSessionIDsByCapturedSessionID: [:])
     }
 
     /// Discards a device's outstanding record of coding-agent sessions without relaunching any of them.

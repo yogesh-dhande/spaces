@@ -157,6 +157,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         host: self, pairedDevices: { [unowned self] in self.macPairedDevices() }, database: { [unowned self] in try self.clientDatabase() })
     lazy var daemonUpdate = DaemonUpdateController(
         host: self, requestSidebarReload: { [unowned self] in self.requestSidebarReload(forceRemoteRefresh: true) })
+    lazy var sessionRestore = SessionRestoreController(host: self)
     lazy var workspaceDeletion = WorkspaceDeletionCoordinator(host: self)
     lazy var browserSessions = BrowserSessionCoordinator(host: self)
     lazy var terminalPanes = TerminalPaneService(host: self)
@@ -3132,7 +3133,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func enterSetupFlow() {
         logStartupProfile("setup_flow_started")
         setupFlowController?.stop()
-        let controller = SetupFlowController(host: self, database: try? clientDatabase())
+        let controller = SetupFlowController(host: self, database: try? clientDatabase(), sessionRestore: sessionRestore)
         setupFlowController = controller
         // Capture `controller` weakly: it owns `onComplete`, so a strong capture would retain the
         // controller (and its view hierarchy) past the point where `presentMainWorkspaceUI` clears
@@ -3428,6 +3429,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// authoritative overview, from all three of its call sites, since a restart on one client has to move
     /// the pane on every other client watching that device.
     func retargetReplacedTerminalPanes(previousOverview: SpacesDeviceOverviewPayload?, overview: SpacesDeviceOverviewPayload, deviceID: String) {
+        // A restored session's pairing comes from the answer the user gave rather than from this diff (its
+        // predecessor died with the daemon and is in neither overview), but it waits on the same event:
+        // the overview that first carries the new session's summary.
+        sessionRestore.claimPanesForReportedSessions(deviceID: deviceID, overview: overview)
         for replacement in TerminalSessionReplacementDiff.replacements(previous: previousOverview, current: overview) {
             // An overview is authoritative only for its own device. A workspace the sidebar attributes
             // elsewhere is one this overview has no standing to move panes for.

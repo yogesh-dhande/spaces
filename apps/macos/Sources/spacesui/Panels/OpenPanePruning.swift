@@ -76,8 +76,9 @@ enum OpenPanePruning {
         return referencedTerminalSessionIDs(overview: overview)
     }
 
-    /// The restoration keep-set plus the sessions whose panes are being held for a restart's
-    /// replacement.
+    /// The restoration keep-set plus the sessions whose panes are held open although the overview does
+    /// not list them: a restart's replacement is on its way to claim them, or a restore offer is asking
+    /// the user about them.
     ///
     /// A held session is deliberately absent from the overview: the restart's stop deleted its row, which
     /// is exactly what makes the keep-set drop it. Restoring a workspace panel between the stop and the
@@ -86,8 +87,8 @@ enum OpenPanePruning {
     /// strip. That window is the normal case rather than a narrow race: a programmatic restart usually
     /// targets a workspace the user is not viewing, whose panel is first materialized by the
     /// replacement's own open.
-    static func restorationKeepSet(overview: SpacesDeviceOverviewPayload?, heldForReplacementSessionIDs: Set<String>) -> Set<String> {
-        restorationKeepSet(overview: overview).union(heldForReplacementSessionIDs)
+    static func restorationKeepSet(overview: SpacesDeviceOverviewPayload?, heldOpenSessionIDs: Set<String>) -> Set<String> {
+        restorationKeepSet(overview: overview).union(heldOpenSessionIDs)
     }
 
     /// The restoration keep-set unioned across several devices' overviews, for a global panel window
@@ -101,7 +102,7 @@ enum OpenPanePruning {
     /// can reference more than one device. A pending window is exactly where a hold has to outlive the
     /// longest: the window waits for every device it references, so a restart during that wait would
     /// otherwise have its pane pruned the moment the offline device returns.
-    static func restorationKeepSet(overviews: some Sequence<SpacesDeviceOverviewPayload?>, heldForReplacementSessionIDs: Set<String>) -> Set<String> {
-        restorationKeepSet(overviews: overviews).union(heldForReplacementSessionIDs)
+    static func restorationKeepSet(overviews: some Sequence<SpacesDeviceOverviewPayload?>, heldOpenSessionIDs: Set<String>) -> Set<String> {
+        restorationKeepSet(overviews: overviews).union(heldOpenSessionIDs)
     }
 }

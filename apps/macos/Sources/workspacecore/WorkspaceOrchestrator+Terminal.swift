@@ -591,9 +591,24 @@ extension WorkspaceOrchestrator {
         return try? TerminalSessionPersistence.readRuntimeState(paths: paths)
     }
 
+    /// Ends a built-in terminal session and tells this device's client to close the pane showing it.
+    ///
+    /// The close is withheld for a session the device has recorded as restorable, because that pane is the
+    /// seat its restored agent comes back to and the device is about to offer the session back. Both
+    /// writers of the record run immediately before a teardown that reaches here: a daemon start captures
+    /// what an unclean exit stranded and then finalizes those agent rows, and Stop All and Quit parks the
+    /// live agents before stopping their workspaces. Closing the pane at either moment would take the seat
+    /// away before the user was ever asked, leaving Restore nothing to claim in a running app and nothing
+    /// in the stored layout to rewrite at the next launch. The answer settles the pane instead:
+    /// Restore hands it to the relaunched agent, and Skip leaves it to the client's ordinary pruning, like
+    /// any other pane whose session is gone.
+    ///
+    /// A record that cannot be read closes the pane, which is what every close did before the record
+    /// existed: an unreadable record is also one no client can be offered, so nothing would settle a pane
+    /// kept on its behalf.
     func terminateBuiltInTerminalSession(_ sessionID: String?, closeDisposition: TerminalPaneCloseDisposition = .teardown) {
         guard let sessionID = sessionID?.trimmingCharacters(in: .whitespacesAndNewlines), !sessionID.isEmpty else { return }
-        builtInTerminalWindowCloser(sessionID, closeDisposition)
+        if (try? store.holdsRestorableSession(sessionID: sessionID)) != true { builtInTerminalWindowCloser(sessionID, closeDisposition) }
         builtInTerminalSessionTerminator(sessionID)
     }
 

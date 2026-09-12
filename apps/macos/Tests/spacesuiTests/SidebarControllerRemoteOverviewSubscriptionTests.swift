@@ -747,6 +747,46 @@ extension ProcessProfileEnvironmentSuites {
         /// replacement just claimed; skipping the retarget/prune block for a stale epoch is what protects
         /// it, so the claimed pane stays placed even though this overview retains nothing under the
         /// device.
+        /// The offer a remote device's record produces is listed under that device's workspace names, and
+        /// those names come from the overview this very response carries. Raising the offer before the
+        /// overview is installed would list the names of the response it replaces, which on a first load or
+        /// a reconnect means bare directory paths: exactly the moment a reconnecting device reports its
+        /// record.
+        @Test func aRemoteRecordIsOfferedUnderTheWorkspaceNamesItsOwnResponseCarries() throws {
+            let controller = makeController()
+            controller.deviceModel.deviceSections = [section(processSessionID: "api-session")]
+            controller.rebuildFlatSidebarData()
+            var considered: [SessionRestoreOffer?] = []
+            controller.sessionRestore.offerConsideredForTesting = { considered.append($0) }
+
+            var renamed = overview(processSessionID: "api-session", createdAt: "2026-01-01T00:01:00Z", retained: ["api-session"])
+            renamed = SpacesDeviceOverviewPayload(
+                projects: renamed.projects,
+                workspaces: renamed.workspaces.map { workspace in
+                    SpacesDeviceWorkspaceSummary(
+                        id: workspace.id, projectID: workspace.projectID, projectName: workspace.projectName, branch: "renamed-branch",
+                        baseBranch: workspace.baseBranch, dir: workspace.dir, isRunning: workspace.isRunning, isHidden: workspace.isHidden,
+                        isDefault: workspace.isDefault, sessionCount: workspace.sessionCount, processRows: workspace.processRows)
+                }, sessions: renamed.sessions, retainedTerminalSessionIDs: renamed.retainedTerminalSessionIDs)
+            let status = TerminalServiceDaemonStatus(
+                version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+                restorableSessions: [
+                    RestorableSessionSummary(
+                        sessionID: "stranded", workspaceID: "workspace-1", agentKind: .claudeCode, title: "Agent",
+                        workingDirectory: "/tmp/workspace-1", hasResumeKey: true, generation: "gen-1")
+                ])
+
+            controller.sidebar.applyRemoteDeviceSection(
+                deviceID: deviceID,
+                result: .success(
+                    SidebarController.RemoteDeviceLoad(
+                        overview: SpacesDeviceOverview(device: device(), overview: renamed), daemonStatus: status, compatibility: .compatible)),
+                epoch: controller.panelCoordinator.paneReplacementEpoch)
+
+            let offer = try #require(considered.compactMap { $0 }.last, "the device's record is offered on the apply that reports it")
+            #expect(offer.devices.first?.groups.first?.heading == "renamed-branch", "the offer lists the names this response installed")
+        }
+
         @Test func aStaleEpochLeavesAnAlreadyClaimedPaneAlone() throws {
             let (controller, epochBeforeClaim) = try makeControllerWithAClaimedReplacement()
 
@@ -818,8 +858,7 @@ extension ProcessProfileEnvironmentSuites {
         @Test func aRemoteAuthoritativeWorkspaceDeletionErasesItsEditorRecoveryDocument() throws {
             let controller = makeController()
             controller.deviceModel.deviceSections = [section(processSessionID: "predecessor")]
-            try controller.clientDatabase().writeCodePaneWorkspaceState(
-                deviceID: deviceID, workspaceID: "workspace-1", stateJSON: "{\"dirty\":true}")
+            try controller.clientDatabase().writeCodePaneWorkspaceState(deviceID: deviceID, workspaceID: "workspace-1", stateJSON: "{\"dirty\":true}")
 
             let deletedOverview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [], retainedTerminalSessionIDs: [])
             controller.sidebar.applyRemoteDeviceSection(

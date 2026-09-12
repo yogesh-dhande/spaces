@@ -144,13 +144,17 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
 
     func testRestoredSessionsResultRoundTripsThroughResponse() throws {
         let mapping = ["session-1": "session-1-new", "session-2": "session-2-new"]
+        // A partly restored record: the rows that came back and the one that could not, which the client
+        // reports to the user because the daemon clears the record either way.
+        let failure = SpacesDeviceRestoredSessionFailure(sessionID: "session-3", title: "Fix the parser", message: "That workspace no longer exists.")
         let response = SpacesDeviceAPIResponse(
-            ok: true, message: "Restored sessions.", result: .restoredSessions(.init(newSessionIDsByCapturedSessionID: mapping)))
+            ok: true, message: "Restored sessions.", result: .restoredSessions(.init(newSessionIDsByCapturedSessionID: mapping, failures: [failure])))
 
         let decoded = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))
 
         XCTAssertEqual(decoded, response)
         XCTAssertEqual(decoded.restoredSessions, mapping)
+        XCTAssertEqual(decoded.restoredSessionsResult?.failures, [failure])
     }
 
     func testDeviceOverviewStreamCodecRoundTripsPayload() throws {

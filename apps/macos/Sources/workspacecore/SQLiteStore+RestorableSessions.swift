@@ -128,6 +128,14 @@ extension SQLiteStore {
         return rows.compactMap(Self.decodeRestorableSession(row:))
     }
 
+    /// Whether the outstanding record names this terminal session.
+    ///
+    /// Read by the one place a device would otherwise tell a client to close that session's pane: a pane
+    /// showing a session on the record is the seat its restored agent comes back to.
+    public func holdsRestorableSession(sessionID: String) throws -> Bool {
+        try !queryRows(sql: "SELECT 1 FROM restorable_sessions WHERE session_id = ? LIMIT 1", bindings: [sessionID]).isEmpty
+    }
+
     /// Drops the record `generation` names. Both answers to the offer end here: Restore clears it once the
     /// relaunches are done, Skip clears it instead of restoring.
     ///
@@ -185,8 +193,8 @@ extension SQLiteStore {
         let launchCommand = row[4]
         let agentSessionKey = row[3].isEmpty || CodingAgent.launchIsOneShotCodexExec(launchCommand: launchCommand) ? nil : row[3]
         return RestorableSessionCapture(
-            sessionID: row[0], workspaceID: row[1], agentKind: TerminalDetectedAgentKind(rawValue: row[2]),
-            agentSessionKey: agentSessionKey, launchCommand: launchCommand, workingDirectory: row[5], title: row[6])
+            sessionID: row[0], workspaceID: row[1], agentKind: TerminalDetectedAgentKind(rawValue: row[2]), agentSessionKey: agentSessionKey,
+            launchCommand: launchCommand, workingDirectory: row[5], title: row[6])
     }
 
     private static func decodeRestorableSession(row: [String]) -> RestorableSessionRecord? {
