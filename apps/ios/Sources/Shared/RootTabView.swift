@@ -64,6 +64,19 @@ struct RootTabView: View {
             Button("Not Now", role: .cancel) { model.dismissStagedApplyDidNotLandAlert() }
         } message: { alert in
             Text(alert.message)
+        }
+        // The restore offer is about the device, not about whichever tab is on screen, so it lives at the
+        // shell like the staged-apply report above. Presented on the offer itself: the model raises one
+        // when a device starts reporting a record it has not answered (which is also what a return to the
+        // foreground refreshes into), and retires it once the record is answered, which is what closes
+        // this sheet.
+        .sheet(item: $model.sessionRestoreOffer) { offer in SessionRestoreOfferSheet(model: model, offer: offer) }
+        // Reported after the sheet closes rather than inside it: the answer landed, and these are the
+        // agents the device could not bring back with the rest.
+        .alert("Some sessions could not be restored", isPresented: sessionRestoreFailureBinding, presenting: model.sessionRestoreFailureReport) { _ in
+            Button("OK", role: .cancel) { model.dismissSessionRestoreFailureReport() }
+        } message: { report in
+            Text(report)
         }.onChange(of: model.isShowingConnectionSettings) { _, isShowing in if isShowing { model.selectedTab = .settings } }.onOpenURL { url in
             switch SpacesIncomingLinkRoute.route(for: url) {
             case .pairing(let url): model.preparePairingLink(url)
@@ -87,12 +100,16 @@ struct RootTabView: View {
                 // the slower tailnet path out of habit. That alone only resets the persisted store, so
                 // also reset the live client: it keeps its own in-memory resolver cache and open command
                 // connection independent of the store until something makes it fail over on its own (see
-                // `SpacesDeviceEndpointResolver`), which a `resetActiveConnectionEndpoint()` foreground
-                // reset with no open failure would otherwise never trigger. That reset deliberately
+                // `SpacesDeviceEndpointResolver`), which the foreground reset inside
+                // `resumeFromBackground()` triggers. That reset deliberately
                 // leaves any open terminal viewer's own stream alone — see its doc comment.
                 SpacesMobileDeviceStore.clearActiveHosts()
-                model.resetActiveConnectionEndpoint()
                 model.resumeTerminalWatch()
+                // The endpoint reset and the one read of the device the shell does on this transition,
+                // in that order and in a single task: see `resumeFromBackground`. The read is here at the
+                // shell because several screens poll nothing at all (the Settings tab, an open terminal or
+                // browser detail) and a returning tab's own first poll can be a whole interval away.
+                Task { await model.resumeFromBackground() }
             case .background:
                 model.browserProxyStop()
                 model.noteConnectionMonitoringPaused()
@@ -127,6 +144,10 @@ struct RootTabView: View {
 
     private var stagedApplyDidNotLandBinding: Binding<Bool> {
         Binding(get: { model.stagedApplyDidNotLandAlert != nil }, set: { if !$0 { model.dismissStagedApplyDidNotLandAlert() } })
+    }
+
+    private var sessionRestoreFailureBinding: Binding<Bool> {
+        Binding(get: { model.sessionRestoreFailureReport != nil }, set: { if !$0 { model.dismissSessionRestoreFailureReport() } })
     }
 
     private var deletedWorkspaceNoticeBinding: Binding<Bool> {
