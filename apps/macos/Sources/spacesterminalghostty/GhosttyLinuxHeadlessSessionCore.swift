@@ -803,6 +803,7 @@
             case "clearScreen": handling = TerminalControlHandling(response: clearScreen(request))
             case "resize": handling = TerminalControlHandling(response: resize(request))
             case "scroll": handling = TerminalControlHandling(response: scroll(request))
+            case "scrollToBottom": handling = TerminalControlHandling(response: scrollToBottom(request))
             case "mouseButton": handling = TerminalControlHandling(response: mouseButton(request))
             case "setAppearance": handling = TerminalControlHandling(response: setAppearance(request))
             case "setSelection": handling = TerminalControlHandling(response: setSelection(request))
@@ -1130,6 +1131,37 @@
             var beforeScrollbar = SpacesGhosttyVtScrollbar()
             var afterScrollbar = SpacesGhosttyVtScrollbar()
             guard spaces_ghostty_vt_session_scroll_viewport_with_info(vtSession, deltaRows, &beforeScrollbar, &afterScrollbar) else {
+                return TerminalControlResponse(ok: false, message: "Unable to scroll terminal.")
+            }
+            attributes["scrollbar_before"] = "\(beforeScrollbar.offset)/\(beforeScrollbar.total)"
+            attributes["scrollbar_after"] = "\(afterScrollbar.offset)/\(afterScrollbar.total)"
+            guard beforeScrollbar.offset != afterScrollbar.offset else {
+                logMobileTakeoverPerformance(
+                    name: "scroll_native_end", elapsedMS: TerminalPerformance.elapsedMS(since: nativeStartedAt), attributes: attributes)
+                return TerminalControlResponse(ok: true, message: "Already at scroll boundary.")
+            }
+            logMobileTakeoverPerformance(
+                name: "scroll_native_end", elapsedMS: TerminalPerformance.elapsedMS(since: nativeStartedAt), attributes: attributes)
+            screenStateRevision &+= 1
+            let broadcastStartedAt = Date()
+            broadcastCurrentState(reason: .scroll)
+            logMobileTakeoverPerformance(
+                name: "scroll_broadcast_end", elapsedMS: TerminalPerformance.elapsedMS(since: broadcastStartedAt), attributes: attributes)
+            return TerminalControlResponse(ok: true, message: "Scrolled terminal.")
+        }
+
+        private func scrollToBottom(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard ownerRequestIsCurrent(request) else {
+                return TerminalControlResponse(ok: false, message: "Only the active owner can scroll the terminal.", errorCode: .ownershipRejected)
+            }
+            guard let vtSession else { return TerminalControlResponse(ok: false, message: "Terminal renderer is unavailable.") }
+            var attributes = [
+                "action": request.command, "client_id": request.clientID ?? "nil", "owner_epoch": request.ownerEpoch.map(String.init) ?? "nil",
+            ]
+            let nativeStartedAt = Date()
+            var beforeScrollbar = SpacesGhosttyVtScrollbar()
+            var afterScrollbar = SpacesGhosttyVtScrollbar()
+            guard spaces_ghostty_vt_session_scroll_viewport_to_bottom_with_info(vtSession, &beforeScrollbar, &afterScrollbar) else {
                 return TerminalControlResponse(ok: false, message: "Unable to scroll terminal.")
             }
             attributes["scrollbar_before"] = "\(beforeScrollbar.offset)/\(beforeScrollbar.total)"

@@ -228,6 +228,9 @@
 
         @discardableResult public func clearScreenAndScrollback() -> Bool { clearScreenAndScrollbackAction() }
 
+        /// `scroll_to_bottom` is Ghostty's own binding action (`Surface.zig`), the same mechanism `clear_screen` already rides.
+        @discardableResult public func scrollViewportToBottom() -> Bool { sessionDriver.performBindingAction("scroll_to_bottom") }
+
         @discardableResult public func setSelectionAbsolute(startColumn: UInt16, startRow: UInt32, endColumn: UInt16, endRow: UInt32, rectangle: Bool)
             -> Bool
         {
@@ -1357,6 +1360,7 @@
                 case .takeover: controlResponseForTakeoverRequest(request)
                 case .resize: controlResponseForResizeRequest(request)
                 case .scroll: controlResponseForScrollRequest(request)
+                case .scrollToBottom: controlResponseForScrollToBottomRequest(request)
                 case .mouseButton: controlResponseForMouseButtonRequest(request)
                 case .setAppearance: controlResponseForSetAppearanceRequest(request)
                 case .setSelection: controlResponseForSetSelectionRequest(request)
@@ -1871,6 +1875,31 @@
             let response = scrollControlResponse(scrolled: scrolled, beforeScreenState: beforeScreenState)
             TerminalPerformance.logMetric(
                 "terminal_control_scroll", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: scrolled)
+            return response
+        }
+
+        private func controlResponseForScrollToBottomRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            let startedAt = Date()
+            guard isRuntimeInteractiveForControl() else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
+            touchClientLease(request.clientID)
+            if let rejection = ownerRequestRejection(for: request, commandName: "scrollToBottom", startedAt: startedAt) { return rejection }
+            if let ownerClient = activeOwnerClient() {
+                logMobileTakeoverPerformance(
+                    name: "owner_input_activity",
+                    attributes: ["owner_kind": ownerClient.kind.rawValue, "interactive": "1", "input_kind": "scroll_to_bottom"])
+            }
+            // Same before/after bracket as `controlResponseForScrollRequest`: whether the viewport actually
+            // moved is only visible by comparing the scrollbar offset around the call, not from the call's
+            // own return value.
+            let beforeScreenState = captureLiveSessionScreenState()
+            let scrolled = rendererHostStorage.scrollViewportToBottom()
+            renderUpdateProducer.foldScrollRects(beforeScreenState.scrollRects, overflowed: beforeScreenState.scrollRectsOverflowed)
+            let response = scrollControlResponse(scrolled: scrolled, beforeScreenState: beforeScreenState)
+            TerminalPerformance.logMetric(
+                "terminal_control_scroll_to_bottom", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: scrolled)
             return response
         }

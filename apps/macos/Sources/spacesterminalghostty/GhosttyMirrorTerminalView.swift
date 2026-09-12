@@ -71,6 +71,7 @@
         private let searchUpButton = NSButton()
         private let searchDownButton = NSButton()
         private let searchCloseButton = NSButton()
+        private let jumpToBottomControl = TerminalJumpToBottomControl()
         /// `nonisolated(unsafe)` so `deinit` can read the pointer it has to free: a `deinit` is nonisolated
         /// and cannot touch a non-`Sendable` isolated property. It has exclusive access to `self` by then,
         /// and every other access to the mirror stays on the main actor.
@@ -92,6 +93,11 @@
         private var lastAppliedRenderFrameIdentity: AppliedRenderFrameIdentity?
         private var frameApplyRetry: FrameApplyRetry?
         private var lastReportedViewportSize: (columns: Int, rows: Int)?
+        /// Whether the latest frame this view was handed (applied or not) shows the viewport above the
+        /// live bottom. Recomputed per frame in `update(frame:renderStateKey:)`, from the frame's own
+        /// scrollbar state, and combined with `acceptsTerminalInput` to drive the jump-to-bottom control:
+        /// see `updateJumpToBottomControlVisibility`.
+        private var isScrolledIntoScrollback = false
         private var pendingSurfacePresentationTask: Task<Void, Never>?
         private var pendingFrameApplyRetryTask: Task<Void, Never>?
         private var pendingFirstResponderRestoreTask: Task<Void, Never>?
@@ -136,6 +142,9 @@
         /// painted its applied frame from one that only applied it.
         private(set) var debugSurfacePresentationCount = 0
         var debugOpenURLHandler: (@MainActor (URL) -> Bool)?
+        /// Whether the jump-to-bottom control is currently shown, asked of the control itself rather than
+        /// `isScrolledIntoScrollback` alone, so a test also covers the `acceptsTerminalInput` gate.
+        var debugJumpToBottomControlIsVisible: Bool { jumpToBottomControl.debugIsVisible }
 
         /// Per-pane link router installed by `RemoteGhosttySessionHost`. When set it fully replaces the
         /// legacy local-only `GhosttyTerminalLinkOpener.open` path for `.openURL` action events, so the
@@ -149,12 +158,23 @@
         /// What `onDisplayStateChanged` last reported, so a display update that changes nothing (AppKit
         /// sends several per structural change) costs nothing.
         private var lastReportedDisplayState: Bool?
-        var acceptsTerminalInput = false { didSet { restoreFirstResponderIfWindowReady() } }
+        // A viewer (or an ended session's replay) cannot move the shared viewport at all (the same
+        // condition `RemoteGhosttySessionHost.sendRemoteScroll` gates a forwarded scroll on), so the
+        // control must hide the moment a pane is demoted, rather than sit on screen as a dead button.
+        var acceptsTerminalInput = false {
+            didSet {
+                restoreFirstResponderIfWindowReady()
+                updateJumpToBottomControlVisibility()
+            }
+        }
         var onSendText: SendTextHandler?
         var onSendKey: SendKeyHandler?
         var onSendScroll: SendScrollHandler?
         var onSendMouseButton: SendMouseButtonHandler?
         var onViewportSizeChanged: ViewportSizeHandler?
+        /// Called when the user activates the jump-to-bottom control. `RemoteGhosttySessionHost` wires
+        /// this to a `scrollToBottom` control request.
+        var onJumpToBottom: (@MainActor () -> Void)?
         /// Clears the terminal's one shared selection. Not owner-gated: any attached client's plain
         /// click clears it, matching the daemon's `clearSelection` command.
         var onClearSelection: (@MainActor () -> Void)?
@@ -174,6 +194,7 @@
             layer?.backgroundColor = NSColor.activeTheme(\.terminal.background).cgColor
             installSurfaceHostView()
             installSearchOverlay()
+            installJumpToBottomControl()
         }
 
         @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -456,6 +477,11 @@
             if let frame, frame != latestFrame { scrollRectCarryBuffer.append(rects: frame.scrollRects, overflowed: frame.scrollRectsOverflowed) }
             self.renderStateKey = renderStateKey
             latestFrame = frame
+            // Read off the frame handed in here, not inside the surface-apply path below: the daemon
+            // owns the viewport and the frame is what says where it sits, so a frame the surface goes on
+            // to refuse must still move the control rather than leave it describing a stale position.
+            isScrolledIntoScrollback = TerminalScrollbackPosition.position(of: frame?.snapshot).isScrolledIntoScrollback
+            updateJumpToBottomControlVisibility()
             ensureMirrorIfNeeded()
             applyLatestFrameIfPossible()
             restoreFirstResponderIfWindowReady()
@@ -771,6 +797,24 @@
                 stackView.bottomAnchor.constraint(equalTo: searchOverlay.bottomAnchor, constant: -6),
                 searchField.widthAnchor.constraint(equalToConstant: 180),
             ])
+        }
+
+        private func installJumpToBottomControl() {
+            jumpToBottomControl.onActivate = { [weak self] in self?.onJumpToBottom?() }
+            addSubview(jumpToBottomControl)
+            NSLayoutConstraint.activate([
+                jumpToBottomControl.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
+                jumpToBottomControl.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            ])
+        }
+
+        /// The control is offered only when both are true: the latest frame shows the viewport above the
+        /// live bottom, and this pane can actually move it (`acceptsTerminalInput`, the same condition
+        /// `RemoteGhosttySessionHost` requires before forwarding a scroll). Either flipping alone must
+        /// update it: a frame arriving mid-attach, or an attach mode changing under an already-scrolled
+        /// pane.
+        private func updateJumpToBottomControlVisibility() {
+            jumpToBottomControl.setScrolledIntoScrollback(isScrolledIntoScrollback && acceptsTerminalInput)
         }
 
         private func configureSearchButton(_ button: NSButton, symbolName: String, action: Selector, tooltip: String) {

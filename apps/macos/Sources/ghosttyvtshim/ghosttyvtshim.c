@@ -1659,6 +1659,33 @@ bool spaces_ghostty_vt_session_scroll_viewport_with_info(
     return true;
 }
 
+// Jumps the viewport to the live bottom row (the GHOSTTY_SCROLL_VIEWPORT_BOTTOM tag libghostty-vt
+// already exposes) rather than stepping by rows.
+bool spaces_ghostty_vt_session_scroll_viewport_to_bottom_with_info(
+    SpacesGhosttyVtSession *session,
+    SpacesGhosttyVtScrollbar *out_before,
+    SpacesGhosttyVtScrollbar *out_after
+) {
+    if (session == NULL || session->terminal == NULL) return false;
+
+    GhosttyTerminalScrollbar before = {0};
+    GhosttyTerminalScrollbar after = {0};
+    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &before) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+
+    GhosttyTerminalScrollViewport behavior = {0};
+    behavior.tag = GHOSTTY_SCROLL_VIEWPORT_BOTTOM;
+    session->symbols.terminal_scroll_viewport(session->terminal, behavior);
+
+    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &after) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+    if (out_before != NULL) *out_before = spaces_ghostty_vt_scrollbar_from_ghostty(before);
+    if (out_after != NULL) *out_after = spaces_ghostty_vt_scrollbar_from_ghostty(after);
+    return true;
+}
+
 bool spaces_ghostty_vt_session_scrollbar(SpacesGhosttyVtSession *session, SpacesGhosttyVtScrollbar *out) {
     if (out == NULL) return false;
     memset(out, 0, sizeof(*out));

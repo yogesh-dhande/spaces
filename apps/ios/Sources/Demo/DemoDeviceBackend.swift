@@ -129,12 +129,12 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
         return SpacesDeviceAPIResponse(ok: true, message: "Loaded terminal state.", result: .terminalState(payload))
     }
 
-    /// Terminal control in Demo Mode is view-only: attach/detach/scroll/appearance are accepted no-ops,
+    /// Terminal control in Demo Mode is view-only: attach/detach/scroll/scrollToBottom/appearance are accepted no-ops,
     /// resize records the requested viewport so subsequent frames report it, and anything that would
     /// write to the pty (send/key/takeover/mouseButton) is refused with the demo-input notice.
     private func serveTerminalControl(_ request: SpacesDeviceTerminalControlRequest) -> SpacesDeviceAPIResponse {
         switch request.action {
-        case .attach, .detach, .heartbeat, .scroll, .clearScreen, .setAppearance: return ok()
+        case .attach, .detach, .heartbeat, .scroll, .scrollToBottom, .clearScreen, .setAppearance: return ok()
         case .resize:
             if let columns = request.columns, let rows = request.rows {
                 requestedGridBySession[request.sessionID] = DemoRecordingGrid(columns: columns, rows: rows)

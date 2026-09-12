@@ -614,8 +614,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 let now = DispatchTime.now().uptimeNanoseconds
                 guard
                     SpacesDeviceAPIServer.terminalStreamKeepaliveIsDue(
-                        nowUptimeNanoseconds: now, lastWriteUptimeNanoseconds: lastWriteUptimeNanoseconds,
-                        intervalNanoseconds: intervalNanoseconds)
+                        nowUptimeNanoseconds: now, lastWriteUptimeNanoseconds: lastWriteUptimeNanoseconds, intervalNanoseconds: intervalNanoseconds)
                 else { return }
                 lastWriteUptimeNanoseconds = now
                 body()
@@ -2072,9 +2071,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// byte-identical to one whose transport has silently died and the client keeps rendering a frozen
     /// screen (see `TerminalStreamLiveness`). Extracted free of relay state so the cadence is testable
     /// without a TLS harness or a live session. Both the Darwin and the Linux relay ask this question.
-    static func terminalStreamKeepaliveIsDue(
-        nowUptimeNanoseconds: UInt64, lastWriteUptimeNanoseconds: UInt64, intervalNanoseconds: UInt64
-    ) -> Bool {
+    static func terminalStreamKeepaliveIsDue(nowUptimeNanoseconds: UInt64, lastWriteUptimeNanoseconds: UInt64, intervalNanoseconds: UInt64) -> Bool {
         // Uptime clocks are monotonic, so `now` can only be behind a recorded write if a write was stamped
         // by a caller that read the clock slightly later; treat that as "just wrote".
         guard nowUptimeNanoseconds >= lastWriteUptimeNanoseconds else { return false }
@@ -3748,8 +3745,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // because `DeviceTerminalSessionStateModel.apply` orders every payload by `emittedAt`, so a
         // frameless acknowledgment that outran that broadcast would make the pane discard the broadcast as
         // older and leave it with no frame for the new owner epoch.
-        let stateRead: TerminalOneShotStateRead =
-            payload.includesRenderUpdate ? .screen(heldFrame: payload.heldFrameIdentity) : .metadataOnly
+        let stateRead: TerminalOneShotStateRead = payload.includesRenderUpdate ? .screen(heldFrame: payload.heldFrameIdentity) : .metadataOnly
         let sessionState = response.ok && includesSessionState ? try? loadCurrentState(sessionID: sessionID, read: stateRead) : nil
         responseAttributes["include_session_state"] = sessionState == nil ? "0" : "1"
         logDeviceAPIPerformance(
@@ -3778,6 +3774,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     asPaste: payload.asPaste))
         case .key: .key(TerminalControlKeyPayload(key: payload.key, clientID: clientID, ownerEpoch: payload.ownerEpoch))
         case .clearScreen: .clearScreen(TerminalControlOwnerPayload(clientID: clientID, ownerEpoch: payload.ownerEpoch))
+        case .scrollToBottom: .scrollToBottom(TerminalControlOwnerPayload(clientID: clientID, ownerEpoch: payload.ownerEpoch))
         case .resize:
             .resize(
                 TerminalControlResizePayload(
@@ -3994,8 +3991,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
         }
         let liveTerminals = ((try? liveTerminalSessions()) ?? []).count
-        return makeDaemonStatus(
-            activeSessionCount: liveTerminals, impact: impact, restorableSessions: try store.restorableSessions().map(\.summary))
+        return makeDaemonStatus(activeSessionCount: liveTerminals, impact: impact, restorableSessions: try store.restorableSessions().map(\.summary))
     }
 
     /// Restart-impact tallies a daemon restart would destroy. Shared by the standalone frozen-core
@@ -4034,9 +4030,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     // Instance method (not static) so it can read `self.host`: the daemon status this server reports
     // must advertise the same addresses a pairing link opened from this server would offer, derived
     // from the identical `pairingLinkHosts(boundHost:)` call.
-    private func makeDaemonStatus(
-        activeSessionCount: Int, impact: RestartImpactCounts, restorableSessions: [RestorableSessionSummary]
-    ) -> TerminalServiceDaemonStatus {
+    private func makeDaemonStatus(activeSessionCount: Int, impact: RestartImpactCounts, restorableSessions: [RestorableSessionSummary])
+        -> TerminalServiceDaemonStatus
+    {
         TerminalServiceDaemonStatus(
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: nil,
             activeSessionCount: activeSessionCount, protocolVersion: SpacesWireProtocol.version, runningProcesses: impact.runningProcesses,
@@ -4889,8 +4885,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     return SpacesDeviceAPIResponse(ok: false, message: "Comparison file is not a regular file.", errorCode: .invalidArgument)
                 case .regularBlob:
                     comparisonOldData = try workspaceGitClient.runGitAndCaptureData(
-                        ["-C", repoDir, "cat-file", "--filters", "\(parent):./\(oldPath)"], timeout: 10,
-                        maxOutputBytes: Self.workspaceFileMaxBytes)
+                        ["-C", repoDir, "cat-file", "--filters", "\(parent):./\(oldPath)"], timeout: 10, maxOutputBytes: Self.workspaceFileMaxBytes)
                 }
             } catch SpacesRuntimeError.outputExceededCap {
                 return SpacesDeviceAPIResponse(ok: false, message: "File exceeds the 10 MiB read limit.", errorCode: .payloadTooLarge)
@@ -4939,8 +4934,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         /// pair that straddles a submodule boundary is a malformed request rather than a state to serve.
         func repoRelativeCompanion(_ path: String) -> String? {
             let components = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-            guard components.count > submoduleComponents.count, Array(components.prefix(submoduleComponents.count)) == submoduleComponents
-            else { return nil }
+            guard components.count > submoduleComponents.count, Array(components.prefix(submoduleComponents.count)) == submoduleComponents else {
+                return nil
+            }
             return components.dropFirst(submoduleComponents.count).joined(separator: "/")
         }
     }
@@ -5055,9 +5051,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             guard
                 let newPointer = try SpacesDeviceWorkspaceDiffEngine.recordedGitlinkCommit(
                     repoDir: repoDir, treeish: newTreeish, repoRelativePath: gitlink, gitClient: workspaceGitClient, timeout: 10)
-            else {
-                return .revisionNotInLastCommit
-            }
+            else { return .revisionNotInLastCommit }
             // Accepted: the old side is looked up by the submodule's CURRENT path, so a commit that both
             // renamed a submodule and moved its pointer finds no gitlink at that path in `HEAD^` and the
             // level reads as newly added. An inline edit opened under such a submodule in Last Commit then
@@ -6781,9 +6775,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 timer.schedule(deadline: .now() + checkInterval, repeating: checkInterval)
                 timer.setEventHandler {
                     gate.writeKeepaliveIfDue(intervalNanoseconds: Self.terminalStreamKeepaliveIntervalNanoseconds) {
-                        do {
-                            try LinuxServer.writeTLSResponse(TerminalStreamLiveness.keepaliveFrame, ssl: ssl)
-                        } catch {
+                        do { try LinuxServer.writeTLSResponse(TerminalStreamLiveness.keepaliveFrame, ssl: ssl) } catch {
                             Self.shutdownSocket(relaySocketFD, how: Self.shutdownReadWrite)
                         }
                     }

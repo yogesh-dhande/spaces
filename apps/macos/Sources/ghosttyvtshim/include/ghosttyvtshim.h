@@ -321,6 +321,14 @@ bool spaces_ghostty_vt_session_scroll_viewport_with_info(
     SpacesGhosttyVtScrollbar *out_after
 );
 
+// Jumps the viewport to the live bottom row (the GHOSTTY_SCROLL_VIEWPORT_BOTTOM tag libghostty-vt
+// already exposes) rather than stepping by rows.
+bool spaces_ghostty_vt_session_scroll_viewport_to_bottom_with_info(
+    SpacesGhosttyVtSession *session,
+    SpacesGhosttyVtScrollbar *out_before,
+    SpacesGhosttyVtScrollbar *out_after
+);
+
 // Reads the current scrollbar (total row count, viewport offset, viewport row count) without
 // scrolling. Unlike `spaces_ghostty_vt_session_scroll_viewport_with_info`, which only reports the
 // scrollbar as a side effect of an actual delta, this is a pure query: a per-frame snapshot exporter
