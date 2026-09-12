@@ -998,6 +998,18 @@ public enum SpacesDeviceClient {
         -> [TerminalServiceAutomationRunSummary]
     { try request(.init(command: .endAutomationAgents(.init(runID: runID))), context: context).automationRuns ?? [] }
 
+    /// Restores a device's outstanding record of coding-agent sessions, returning each captured session id
+    /// mapped to the session now running in its place. `generation` is the record the caller is answering;
+    /// the daemon refuses one it has already replaced.
+    @discardableResult public static func restoreSessions(generation: String, context: DeviceRequestContext) throws -> [String: String] {
+        try request(.init(command: .restoreSessions(.init(generation: generation))), context: context).restoredSessions ?? [:]
+    }
+
+    /// Discards a device's outstanding record of coding-agent sessions without relaunching any of them.
+    public static func discardRestorableSessions(generation: String, context: DeviceRequestContext) throws {
+        _ = try request(.init(command: .discardRestorableSessions(.init(generation: generation))), context: context)
+    }
+
     /// Terminal sessions on a paired device, read from the overview (`spaces terminal list --device`).
     public static func terminalSessions(context: DeviceRequestContext) throws -> [SpacesDeviceTerminalSessionSummary] {
         try overview(context: context).overview.sessions

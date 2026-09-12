@@ -429,6 +429,11 @@
         /// `recoverStaleSessions` keeps skipping it because the pid is unchanged).
         public func drainPersistenceForShutdown() async { await persistence.drainAsync() }
 
+        /// Blocking drain that fences a restorable-session capture, matching the embedded core: the session
+        /// and runtime rows the capture reads are written write-behind on this queue, so the capture waits
+        /// them out rather than reading a table that has not heard about a launch or an exit yet.
+        public func drainPersistenceForCapture() { persistence.drain() }
+
         /// Blocks until all enqueued durable writes have committed. Test-only fence for the off-engine
         /// persistence queue so assertions can read the durable mirror.
         func debugDrainPersistenceQueue() { persistence.drain() }

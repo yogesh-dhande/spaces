@@ -199,8 +199,11 @@ enum SpacesDaemonProfileCommandRouting {
         // agent-signal `exit` whose `finalizeAgentRow`/`handleAgentExit` terminates the backing terminal.
         // `.terminalList` reaches `listSessionsOffMain`, which merges in-memory core summaries via
         // `TerminalEngineActor.runSynchronously`, so it belongs in this group too.
+        // The two restorable-record commands join them for the same reason as `.terminalList`: each reads
+        // what is live through the session tables, and both are fenced behind a drain of the write-behind
+        // persistence queues, which is an engine hop.
         case .terminalSend, .terminalCommand, .agentSpawn, .workspaceStart, .workspaceStop, .workspaceRestart, .agentKill, .agentSignal,
-            .terminalStop, .terminalList:
+            .terminalStop, .terminalList, .parkAgentSessionsForRestore, .reconcileParkedAgentSessions:
             true
         // Every automation command is peeled off main for two reasons. First, trigger/cancel/end-agents/delete
         // reach the automation executor's launcher/terminator call graph directly (starting or tearing down a
@@ -306,6 +309,9 @@ enum SpacesDaemonErrorClassification {
     /// move there too, off the main actor. The `didSet` mirror into `livenessState` still runs on the
     /// engine — `DaemonLivenessState` is `@unchecked Sendable` and lock-guarded, so a cross-actor write
     /// into it is safe without a hop.
+    /// Cores that have left `sessionCores` but whose queued end-of-session writes have not committed yet.
+    /// See `retainUntilPersistenceDrains(_:)`: entries remove themselves as each queue empties.
+    @TerminalEngineActor private var coresDrainingPersistence: [ObjectIdentifier: GhosttyEmbeddedSessionCore] = [:]
     @TerminalEngineActor private var sessionCores: [String: GhosttyEmbeddedSessionCore] = [:] {
         didSet { livenessState.storeSessionCount(sessionCores.count) }
     }
@@ -752,6 +758,8 @@ enum SpacesDaemonErrorClassification {
         // engine queue) and is refused instead of leaking a child `exit(0)` never reaps. Monotonic: the
         // process exits, so it is never cleared.
         shutdownInProgress = true
+        await drainLiveSessionPersistenceForCapture()
+        captureRestorableSessionsForShutdown()
         await stopSharedServices()
         // `terminateAllSessions` is engine-isolated (it drives `terminateSession`/Ghostty per core). Hop
         // with the ASYNC `run` — a main-actor context must never sync-wait on the engine (the one-way
@@ -924,6 +932,40 @@ enum SpacesDaemonErrorClassification {
 
     @TerminalEngineActor private func terminateAllSessions() { for sessionID in Array(sessionCores.keys) { _ = terminateSession(id: sessionID) } }
 
+    /// Waits out the write-behind persistence queue of every core whose writes can still land, so a
+    /// restorable capture taken right after reads a table that matches what the engine is actually running.
+    /// Every command that reads live sessions runs this first: the park a Stop All and Quit sends, the
+    /// reconcile a cancelled quit sends, and the daemon's own shutdown. Without it the capture is a race
+    /// against the queue, and either way round it is wrong: an agent launched a moment ago is missing from
+    /// the record and is torn down with nothing to bring it back, and one that just ended is offered back
+    /// as if it were still running.
+    ///
+    /// `coresDrainingPersistence` is drained alongside the live ones because a core leaves `sessionCores`
+    /// the instant it is terminated or closes itself, while the `.exited` write that says so is still
+    /// queued behind it. Those are exactly the sessions a capture must not offer, so a fence that only
+    /// reached live cores would miss the agent a user just killed.
+    ///
+    /// Blocking the engine here is the documented, deadlock-free direction: a persistence closure only ever
+    /// hops back to the engine asynchronously, so a blocked engine cannot cycle with the queue. It is the
+    /// same fence `terminate()` already relies on, and every capture site is a cold path.
+    @TerminalEngineActor private func drainLiveSessionPersistenceForCapture() {
+        for core in sessionCores.values { core.drainPersistenceForCapture() }
+        for core in coresDrainingPersistence.values { core.drainPersistenceForCapture() }
+    }
+
+    /// Holds a core that has left `sessionCores` until its persistence queue has emptied, so the writes
+    /// that end a session (the `.exited` runtime state above all) stay reachable by the capture fence for
+    /// the moment they are in flight. The core releases itself when its own drain returns, so this holds
+    /// nothing longer than the queue takes and never grows with session count.
+    @TerminalEngineActor private func retainUntilPersistenceDrains(_ core: GhosttyEmbeddedSessionCore) {
+        let key = ObjectIdentifier(core)
+        coresDrainingPersistence[key] = core
+        Task { @TerminalEngineActor [weak self] in
+            await core.drainPersistenceForShutdown()
+            self?.coresDrainingPersistence.removeValue(forKey: key)
+        }
+    }
+
     /// Off-main request classifier, run on `serverQueue` (the transport thread), not the main actor.
     /// The unbounded/blocking request classes — arbitrary shell exec, git-driven workspace prep, session
     /// create's git prep, and the socket-fallback state/control/terminal-send reads — run their blocking
@@ -947,6 +989,11 @@ enum SpacesDaemonErrorClassification {
         // the same reason as `.list` above rather than falling through to `handleProfileCommand`'s on-main
         // bulk, which would trap `listSessionsOffMain`'s engine hop.
         case .profileCommand(.terminalList): return terminalListOffMain()
+        // Both restorable-record commands read what is live, so each is fenced behind an engine hop (see
+        // `captureFencedProfileCommandOffMain`) and peeled off main for the same reason as the listing above.
+        case .profileCommand(.parkAgentSessionsForRestore): return captureFencedProfileCommandOffMain(.parkAgentSessionsForRestore)
+        case .profileCommand(.reconcileParkedAgentSessions(let generation)):
+            return captureFencedProfileCommandOffMain(.reconcileParkedAgentSessions(generation: generation))
         case .control(let payload): return handleTerminalControlOffMain(payload)
         // `.terminate` now touches the engine-isolated `sessionCores` cluster (Step 1), so it is peeled
         // off main here too — mirroring `.create` — rather than falling through to `handle`'s on-main
@@ -1065,6 +1112,9 @@ enum SpacesDaemonErrorClassification {
         }
     }
 
+    /// The profile socket's own status. It reports no restorable sessions: this status and the liveness
+    /// ping are built without touching the database (the point of the off-actor fast path), and the
+    /// restore offer reaches clients on the Device API status that a device overview already carries.
     private func daemonStatus() -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: daemonIdentityFingerprint,
@@ -1668,6 +1718,29 @@ enum SpacesDaemonErrorClassification {
         return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
     }
 
+    /// Handler for the two restorable-record commands, peeled off main by `dispatch(_:)`. Each decides what
+    /// to record or drop from the session tables, so each is fenced behind
+    /// `drainLiveSessionPersistenceForCapture()`, a synchronous engine hop that traps from the main actor
+    /// (the one-way rule). The store work itself is engine-free, so it runs on the main actor through
+    /// `handleProfileCommand` exactly like every other profile command.
+    private nonisolated func captureFencedProfileCommandOffMain(_ command: TerminalServiceProfileCommand) -> TerminalServiceResponse {
+        // Peeled handlers do not pass through `handle`'s teardown gate, so this one re-checks it first.
+        if let rejection = livenessState.teardownRejection() { return rejection }
+        TerminalEngineActor.runSynchronously { self.drainLiveSessionPersistenceForCapture() }
+        // The fence ends here and the tables are read one actor hop later, so a session that starts or ends
+        // inside that hop is outside it. That window is accepted rather than closed: holding the engine
+        // across the store work would mean blocking every terminal on this device for the length of a
+        // SQLite read, and the window only matters for an agent launched or killed in the instant a quit or
+        // a shutdown is already under way. Such an agent lands on one side or the other of the same
+        // teardown: it is either in the record, or in the stops that follow it. The worst case is one agent
+        // parked that the user then also watches stop, which the offer answers with a relaunch of an agent
+        // they had just ended, and Skip drops.
+        return Self.runOnMainActorSynchronously { [weak self] in
+            guard let self else { return TerminalServiceResponse(ok: false, message: "spacesd is shutting down.", errorCode: .shuttingDown) }
+            return self.handleProfileCommand(command)
+        }
+    }
+
     /// RPC `.state` handler. A live in-process core's state read is a narrow main hop
     /// (`loadCurrentStateOffMain`); when the session is not live, the unix-socket connect+read (2s timeout)
     /// and the disk reads run off the main actor on the transport thread.
@@ -1886,6 +1959,30 @@ enum SpacesDaemonErrorClassification {
             preconditionFailure("`.automationRunCancel` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .automationEndAgents:
             preconditionFailure("`.automationEndAgents` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        case .parkAgentSessionsForRestore:
+            // Writer one of the restorable record: a clean Stop All and Quit, captured while the sessions
+            // are still live because the stops that follow are what make them restorable. Reached only
+            // through `captureFencedProfileCommandOffMain`, which fences this capture behind the cores'
+            // persistence drain before bridging the store work back onto the main actor.
+            let orchestrator = try makeProfileOrchestrator()
+            let generation = UUID().uuidString
+            let parked = try orchestrator.store.captureLiveAgentSessionsForRestore(generation: generation, capturedAt: nowISO8601())
+            return TerminalServiceProfileCommandResponse(
+                message: parked == 0 ? "No live coding agents to park." : "Parked \(parked) coding agent session(s) for restore.",
+                parkedRestoreGeneration: parked == 0 ? nil : generation)
+        case .reconcileParkedAgentSessions(let generation):
+            // The cancelled quit's answer, reached through the same fence as the park: the record keeps the
+            // agents whose sessions ended and loses the ones still running, which need no offer. Scoped to
+            // the record the caller parked, because a capture written since (another quit, an unclean exit
+            // derived at startup) is a newer offer that this answer says nothing about.
+            let orchestrator = try makeProfileOrchestrator()
+            let parked = try orchestrator.store.restorableSessions()
+            guard parked.first?.generation == generation else {
+                return TerminalServiceProfileCommandResponse(message: "No parked coding agent sessions under that record.")
+            }
+            let remaining = try orchestrator.store.reconcileRestorableSessionsWithLiveSessions(generation: generation)
+            return TerminalServiceProfileCommandResponse(
+                message: "Dropped \(parked.count - remaining) still-running coding agent session(s) from the parked record; \(remaining) remain.")
         }
     }
 
@@ -2787,6 +2884,10 @@ enum SpacesDaemonErrorClassification {
         do {
             if let sessionCore = sessionCores.removeValue(forKey: sessionID) {
                 sessionCore.terminate()
+                // The writes `terminate()` just enqueued, the `.exited` state among them, are what a capture
+                // reads to tell a killed agent from a live one, so the core stays reachable by the capture
+                // fence until they commit.
+                retainUntilPersistenceDrains(sessionCore)
                 // The exited-state write is asynchronous on the core's persistence queue, so this
                 // best-effort summary can still read `.running` for a moment after terminate(). `ok` and the
                 // message are the authoritative stop acknowledgment; consumers of durable state converge via
@@ -2833,6 +2934,9 @@ enum SpacesDaemonErrorClassification {
                 let sessionID = closedCore.launchConfiguration.sessionID
                 guard self?.sessionCores[sessionID] === closedCore else { return }
                 self?.sessionCores.removeValue(forKey: sessionID)
+                // Same reason as the terminate path: a session that ended on its own writes its `.exited`
+                // state write-behind, and a capture taken before it lands would offer the agent back.
+                self?.retainUntilPersistenceDrains(closedCore)
             })
         sessionCores[launchConfiguration.sessionID] = created
         return created
@@ -3173,6 +3277,56 @@ enum SpacesDaemonErrorClassification {
         // prior live state; it heals at the next daemon restart via the dead-pid branch. Log it so the
         // strand is observable rather than silent.
         for sessionID in result.unrepaired { writeStandardError("spacesd stale_session_repair_failed session=\(sessionID)\n") }
+        captureRestorableSessions(strandedSessionIDs: result.sessionsStrandedByUncleanExit)
+    }
+
+    /// Writer two of the restorable record: the coding agents an unclean exit stranded, named by the
+    /// stale-recovery pass that just repaired their rows. Which of them is a coding agent, and what it
+    /// would take to relaunch one, is the store's answer (`agentSessionCaptures(sessionIDs:)`), which also
+    /// drops every shell, automation, and configured process.
+    ///
+    /// This runs before `startSharedServices`, and therefore before the foreground agent reconciler
+    /// deletes the agent rows of exited sessions: the conversation id to resume lives on those rows, so
+    /// reading them later would read them gone. A pass that captures nothing leaves the outstanding
+    /// record alone, so a clean Stop All and Quit's record survives the restart it was written for.
+    ///
+    /// A failure is logged rather than thrown: this runs inside daemon startup, and the record is an offer
+    /// to the user, not something a device needs in order to serve its sessions.
+    private func captureRestorableSessions(strandedSessionIDs: [String]) {
+        guard !strandedSessionIDs.isEmpty else { return }
+        do {
+            let store = try SQLiteStore(path: try DatabaseLocator.defaultPath())
+            let captures = try store.agentSessionCaptures(sessionIDs: strandedSessionIDs)
+            guard !captures.isEmpty else { return }
+            try store.replaceRestorableSessions(generation: UUID().uuidString, capturedAt: nowISO8601(), captures: captures)
+            writeStandardError("spacesd restorable_sessions_captured count=\(captures.count)\n")
+        } catch { writeStandardError("spacesd restorable_sessions_capture_failed error=\(Self.errorMessage(error))\n") }
+    }
+
+    /// Writer three of the restorable record: a daemon that is going away for good. A reboot, a logout, a
+    /// `launchctl stop`, and Quit all deliver a termination this path serves, and each one ends every live
+    /// coding agent, so the agents are captured here while their rows are still live to read: the teardown
+    /// below finalizes them as `.exited`, which is a deliberate end everywhere else and so is never derived
+    /// as stranded at the next start.
+    ///
+    /// Only this path, never the exec-in-place handoff: a handoff hands its live sessions to the successor
+    /// image, which keeps running them, so there is nothing to offer back. `shutdownOnce()` waits out an
+    /// in-flight handoff before reaching `shutdown()`, so the two cannot interleave.
+    ///
+    /// Fenced by `drainLiveSessionPersistenceForCapture()` in `shutdown()`, for the reason that helper
+    /// gives: the rows this reads are written write-behind, and a shutdown lands on them at their least
+    /// settled, right after whatever the user was doing when they quit or rebooted.
+    ///
+    /// A capture that finds no live agents leaves an outstanding record alone, so a record parked by Stop
+    /// All and Quit survives the daemon shutdown that follows it. Failures are logged rather than thrown,
+    /// for the reason `captureRestorableSessions(strandedSessionIDs:)` gives: the record is an offer to the
+    /// user, not part of the teardown the user asked for.
+    private func captureRestorableSessionsForShutdown() {
+        do {
+            let store = try SQLiteStore(path: try DatabaseLocator.defaultPath())
+            let captured = try store.captureLiveAgentSessionsForRestore(generation: UUID().uuidString, capturedAt: nowISO8601())
+            if captured > 0 { writeStandardError("spacesd restorable_sessions_captured count=\(captured)\n") }
+        } catch { writeStandardError("spacesd restorable_sessions_capture_failed error=\(Self.errorMessage(error))\n") }
     }
 
     private nonisolated static func isProcessAlive(pid: Int) -> Bool {

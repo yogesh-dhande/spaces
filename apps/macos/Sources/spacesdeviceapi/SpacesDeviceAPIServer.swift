@@ -3239,6 +3239,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .triggerAutomation(let payload): return try handleTriggerAutomationRequest(payload, context: context)
         case .cancelAutomationRun(let payload): return try handleCancelAutomationRunRequest(payload, context: context)
         case .endAutomationAgents(let payload): return try handleEndAutomationAgentsRequest(payload, context: context)
+        case .restoreSessions(let payload): return try handleRestoreSessionsRequest(payload, context: context)
+        case .discardRestorableSessions(let payload): return try handleDiscardRestorableSessionsRequest(payload, context: context)
         }
     }
 
@@ -3992,7 +3994,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
         }
         let liveTerminals = ((try? liveTerminalSessions()) ?? []).count
-        return makeDaemonStatus(activeSessionCount: liveTerminals, impact: impact)
+        return makeDaemonStatus(
+            activeSessionCount: liveTerminals, impact: impact, restorableSessions: try store.restorableSessions().map(\.summary))
     }
 
     /// Restart-impact tallies a daemon restart would destroy. Shared by the standalone frozen-core
@@ -4031,13 +4034,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     // Instance method (not static) so it can read `self.host`: the daemon status this server reports
     // must advertise the same addresses a pairing link opened from this server would offer, derived
     // from the identical `pairingLinkHosts(boundHost:)` call.
-    private func makeDaemonStatus(activeSessionCount: Int, impact: RestartImpactCounts) -> TerminalServiceDaemonStatus {
+    private func makeDaemonStatus(
+        activeSessionCount: Int, impact: RestartImpactCounts, restorableSessions: [RestorableSessionSummary]
+    ) -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: nil,
             activeSessionCount: activeSessionCount, protocolVersion: SpacesWireProtocol.version, runningProcesses: impact.runningProcesses,
             activeAgents: impact.activeAgents, waitingAgents: impact.waitingAgents,
             timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier,
-            deviceAPIAddresses: SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: host))
+            deviceAPIAddresses: SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: host), restorableSessions: restorableSessions)
     }
 
     /// Builds the device overview. Request handlers pass their shared per-request `store` so a
@@ -4100,7 +4105,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // handshake costs no extra store work on the refresh hot path.
         var impact = RestartImpactCounts()
         for descriptor in workspaces { impact.accumulate(runningProcesses: descriptor.runningProcesses, agentWindows: descriptor.agentWindows) }
-        let daemonStatus = makeDaemonStatus(activeSessionCount: localSessions.count, impact: impact)
+        let daemonStatus = makeDaemonStatus(
+            activeSessionCount: localSessions.count, impact: impact, restorableSessions: try store.restorableSessions().map(\.summary))
         let (automationSummaries, automationRunSummaries) = try loadAutomationOverview(store: store, liveSessions: localSessions)
         return SpacesDeviceOverviewBuilder.build(
             projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions,
@@ -6281,6 +6287,74 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         guard let automationOperations else { return automationsUnavailableResponse() }
         let run = try automationOperations.endAgents(payload.runID)
         return try automationRunsResponse([run], context: context, message: "Ended automation run agents.")
+    }
+
+    // MARK: - Session restore
+
+    /// Relaunches the outstanding restorable record and clears it.
+    ///
+    /// Each row relaunches through `createWorkspaceAgentSession`, the same path a spawn takes, with the
+    /// captured command rewritten to resume the agent's own conversation when it reported one. That path
+    /// starts a session in a stopped workspace and marks the workspace running itself, so restoring never
+    /// starts a workspace on its own terms. The answered generation is cleared afterwards whatever the
+    /// relaunches did: the offer has been answered, and a second attempt would spawn duplicates of whatever
+    /// did come back. Only that generation, because a quit parking its agents over the profile socket can
+    /// write a newer record while the relaunches run, and that record is a different offer nobody has seen.
+    ///
+    /// The relaunched session records the captured command rather than the resume command it runs, so an
+    /// agent restored twice resumes its newest conversation from the original command instead of carrying
+    /// the previous restore's selector as well.
+    private func handleRestoreSessionsRequest(_ payload: SpacesDeviceRestorableSessionsRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let store = try context.store()
+        let records = try store.restorableSessions()
+        if let rejection = Self.restorableGenerationRejection(records: records, requestedGeneration: payload.generation) { return rejection }
+        let orchestrator = try context.orchestrator()
+        var newSessionIDsByCapturedSessionID: [String: String] = [:]
+        var failures: [String] = []
+        for record in records {
+            let command = CodingAgent.resumeCommand(launchCommand: record.launchCommand, sessionKey: record.agentSessionKey)
+            do {
+                let session = try orchestrator.createWorkspaceAgentSession(
+                    workspaceID: record.workspaceID, command: command, title: record.title, recordedLaunchCommand: record.launchCommand)
+                newSessionIDsByCapturedSessionID[record.sessionID] = session.id
+            } catch { failures.append(Self.failureResponse(for: error).message) }
+        }
+        try store.clearRestorableSessions(generation: payload.generation)
+        let message =
+            failures.isEmpty
+            ? "Restored \(newSessionIDsByCapturedSessionID.count) coding agent session(s)."
+            : "Restored \(newSessionIDsByCapturedSessionID.count) of \(records.count) coding agent session(s): \(failures.joined(separator: "; "))"
+        return SpacesDeviceAPIResponse(
+            ok: true, message: message, result: .restoredSessions(.init(newSessionIDsByCapturedSessionID: newSessionIDsByCapturedSessionID)))
+    }
+
+    /// Discards the outstanding restorable record. The other answer to the same offer, and the reason the
+    /// record has a lifetime at all: a user who skips is saying those agents should stay gone.
+    private func handleDiscardRestorableSessionsRequest(_ payload: SpacesDeviceRestorableSessionsRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let store = try context.store()
+        let records = try store.restorableSessions()
+        if let rejection = Self.restorableGenerationRejection(records: records, requestedGeneration: payload.generation) { return rejection }
+        try store.clearRestorableSessions(generation: payload.generation)
+        return try refreshedMutationResponse(context: context, message: "Discarded \(records.count) restorable coding agent session(s).")
+    }
+
+    /// Refuses an answer that names a record this device no longer holds. A client can be looking at an
+    /// offer the daemon already replaced (a second unclean exit) or at one another client just answered,
+    /// and acting on either would restore or discard a set the user never saw.
+    private static func restorableGenerationRejection(records: [RestorableSessionRecord], requestedGeneration: String) -> SpacesDeviceAPIResponse? {
+        guard let generation = records.first?.generation else {
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "This device has no sessions to restore.", errorCode: .invalidArgument)
+        }
+        guard generation == requestedGeneration else {
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "These sessions have been replaced by a newer record; reload and answer that one.", errorCode: .invalidArgument)
+        }
+        return nil
     }
 
     private func automationsUnavailableResponse() -> SpacesDeviceAPIResponse {

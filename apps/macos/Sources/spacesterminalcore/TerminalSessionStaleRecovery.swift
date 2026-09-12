@@ -81,6 +81,16 @@ public enum TerminalSessionStaleRecovery {
             self.finalized = finalized
             self.unrepaired = unrepaired
         }
+
+        /// The sessions this pass found stranded by an unclean exit, in the order they were repaired.
+        ///
+        /// `.failed` is written by exactly one branch of the repair matrix: a foreign `service_pid` that
+        /// is no longer alive, i.e. the owning daemon vanished without finalizing the row. It is therefore the
+        /// pass's own record of "this run was cut short". `.exited` is the other repair, and it names a
+        /// session a predecessor image deliberately terminated. Callers that want to act on interrupted
+        /// work (the daemon captures those sessions' coding agents as restorable) read this rather than
+        /// re-deriving the rule from the state enum.
+        public var sessionsStrandedByUncleanExit: [String] { finalized.filter { $0.state == .failed }.map(\.sessionID) }
     }
 
     /// Runs one reconciliation pass over every known session and reports the sessions it finalized and

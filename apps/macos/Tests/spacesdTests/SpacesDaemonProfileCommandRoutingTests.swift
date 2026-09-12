@@ -28,6 +28,9 @@ import XCTest
                 // Listing merges live cores' in-memory summaries via an engine hop (write-behind lifecycle
                 // rows can lag a fresh session), so it is engine-touching even though it mutates nothing.
                 .terminalList,
+                // Both restorable-record commands read the same write-behind rows, and each is fenced
+                // behind an engine hop that drains the cores' persistence queues first.
+                .parkAgentSessionsForRestore, .reconcileParkedAgentSessions(generation: "generation-1"),
             ]
             for command in offMain {
                 XCTAssertTrue(

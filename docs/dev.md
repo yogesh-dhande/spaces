@@ -388,6 +388,16 @@ apps/macos/Tests/e2e.sh terminal --scenario daemon-signal-shutdown
 
 `e2e_daemon_signal_shutdown.sh` launches a directly-supervised `spacesd`, starts a long-lived session, and sends `SIGTERM` to the daemon pid directly rather than going through the control socket. It proves the daemon logs the signal, exits, and — the discriminating check — the session's `terminal_runtime_states` row is finalized to `exited` rather than left stuck at `running`, which is only true if the signal ran the same graceful teardown (transcript flush, attachment finalization, durable runtime-state write) as the `.shutdown` command.
 
+For restoring coding agents after a daemon dies unexpectedly:
+
+```bash
+apps/macos/Tests/e2e.sh terminal --scenario session-restore
+# or directly:
+apps/macos/Tests/e2e_session_restore.sh
+```
+
+`e2e_session_restore.sh` runs entirely on a throwaway profile under a temporary `HOME`, with its own directly-launched `spacesd` on an ephemeral Device API port, so it can stop the daemon it owns any way it likes without touching any other profile. It spawns a fixture coding agent (a `/bin/zsh` symlink named `opencode`, which is what the spawn gate and the foreground classifier match on) that reports a conversation id of its own through `spaces agent signal --agent-session` the way a real agent's hooks do, and drives all three teardowns in one run. It kills the daemon outright and asserts, as a paired Device API client, that `daemonStatus` offers the stranded agent (right workspace, agent kind, and a resumable conversation), that an answer naming a record the device no longer holds is refused, and that `restoreSessions` returns a replacement that runs the agent's `-s <key>` resume argument, records the original command, and leaves the offer cleared. It then stops the daemon with `SIGTERM` while that restored agent is running (the teardown a restart, a logout, and a `launchctl stop` deliver) and restores it a second time, checking that the replacement carries exactly one resume selector naming the newest conversation. Finally it drives an exec-in-place update through `spaces daemon apply-update` and checks that the handoff keeps the agent running and records nothing to restore.
+
 For the coding-agent orchestration surface (`spaces agent` list/status/annotate/subscribe/kill and notification injection):
 
 ```bash

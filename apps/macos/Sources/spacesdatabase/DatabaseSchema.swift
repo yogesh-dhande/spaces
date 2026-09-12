@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 20
+    public static let currentVersion = 21
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -672,6 +672,59 @@ public enum DatabaseSchema {
                     WHERE payload_json LIKE '%"kind":"localWindow"%' OR payload_json LIKE '%"kind":"remoteViewer"%';
                     """)
         },
+        // Session restore after a daemon exit. `terminal_sessions.command` is the wrapped launch line
+        // (login shell plus the baked environment prefix) and cannot be relaunched, so the raw command a
+        // caller passed is kept alongside it in `launch_command`; it stays NULL on every row that predates
+        // this step, which is exactly right: an agent whose raw command was never recorded has nothing to
+        // relaunch and is therefore never captured as restorable. `restorable_sessions` holds the captured
+        // record itself, one generation at a time.
+        //
+        // The frozen pre-v21 shape is created first for the same reason the v13→v14 and v17→v18 steps
+        // create theirs: a database old enough to predate the terminal tables carries none of them, and
+        // the ALTER needs a table to alter; on a database that already has the table the CREATE is a
+        // no-op and its rows keep every value they hold.
+        DatabaseMigrationStep(fromVersion: 20, toVersion: 21, description: "Add restorable agent sessions", requiresBackup: true) { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS terminal_sessions (
+                      session_id TEXT PRIMARY KEY,
+                      root_directory TEXT NOT NULL UNIQUE,
+                      backend TEXT NOT NULL,
+                      lifetime_policy TEXT NOT NULL,
+                      workspace_id TEXT,
+                      kind TEXT NOT NULL DEFAULT 'shell',
+                      title TEXT NOT NULL,
+                      user_title TEXT,
+                      working_directory TEXT NOT NULL,
+                      shell TEXT NOT NULL,
+                      command TEXT,
+                      created_at TEXT NOT NULL,
+                      automation_run_id TEXT
+                    );
+                    """)
+            if !(try migrationColumnExists(handle, table: "terminal_sessions", column: "launch_command")) {
+                try migrationExecuteBatch(handle, sql: "ALTER TABLE terminal_sessions ADD COLUMN launch_command TEXT;")
+            }
+            // The frozen v21 shape, written out here rather than shared with `restorableSessionsSQL`,
+            // matching how every other step in this file keeps its own historical snapshot.
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS restorable_sessions (
+                      session_id TEXT PRIMARY KEY,
+                      generation TEXT NOT NULL,
+                      workspace_id TEXT NOT NULL,
+                      agent_kind TEXT,
+                      agent_session_key TEXT,
+                      launch_command TEXT NOT NULL,
+                      working_directory TEXT NOT NULL,
+                      title TEXT NOT NULL,
+                      captured_at TEXT NOT NULL,
+                      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+                    );
+                    """)
+        },
     ]
 
     /// The persisted final-render state of a session, one row per session. `has_final_render` stores
@@ -707,10 +760,42 @@ public enum DatabaseSchema {
             ON terminal_agent_signal_events(session_id, acknowledged_at, created_at);
         """
 
+    /// The agent sessions a client may offer to bring back, written by the daemon as one generation at a
+    /// time: a clean Stop All and Quit parks every live agent session before the stops run, and a daemon
+    /// that starts up to find agent sessions stranded by an unclean exit derives them from those rows.
+    /// Writing a generation replaces the whole table, so exactly one offer is ever outstanding and the
+    /// newest record wins; Restore and Skip both clear it.
+    ///
+    /// `session_id` is the terminal session the agent ran in before it ended, kept as the key so a second
+    /// capture of the same session cannot produce two rows. `launch_command` is the raw command that
+    /// started the agent (`terminal_sessions.launch_command`), and `agent_session_key` the agent's own
+    /// conversation id (`agent_sessions.session_key`) when its hooks reported one; without a key the
+    /// relaunch starts a new conversation. The workspace foreign key cascades, because a restorable row
+    /// for a deleted workspace names a worktree that no longer exists.
+    static let restorableSessionsSQL = """
+            CREATE TABLE IF NOT EXISTS restorable_sessions (
+              session_id TEXT PRIMARY KEY,
+              generation TEXT NOT NULL,
+              workspace_id TEXT NOT NULL,
+              agent_kind TEXT,
+              agent_session_key TEXT,
+              launch_command TEXT NOT NULL,
+              working_directory TEXT NOT NULL,
+              title TEXT NOT NULL,
+              captured_at TEXT NOT NULL,
+              FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+            );
+        """
+
     /// The `terminal_sessions` table. `workspace_id` is nullable for generic session persistence, while
     /// automation sessions always carry their selected workspace and `automation_run_id` attribution.
     /// The unique `root_directory` constraint keeps one live session per session directory. Named
     /// separately so the fresh-schema SQL and the v13→v14 rebuild step share one column shape.
+    ///
+    /// `command` holds the wrapped launch line the PTY runs (the login shell plus the baked environment
+    /// prefix), which cannot be relaunched as-is by a later daemon. `launch_command` holds the raw command
+    /// the caller passed instead (the agent argv for `spaces agent spawn`), and is NULL for every other
+    /// session, so a restorable agent is relaunched from what the user actually asked for.
     static let terminalSessionsTableSQL = """
             CREATE TABLE IF NOT EXISTS terminal_sessions (
               session_id TEXT PRIMARY KEY,
@@ -725,7 +810,8 @@ public enum DatabaseSchema {
               shell TEXT NOT NULL,
               command TEXT,
               created_at TEXT NOT NULL,
-              automation_run_id TEXT
+              automation_run_id TEXT,
+              launch_command TEXT
             );
         """
 
@@ -1011,6 +1097,8 @@ public enum DatabaseSchema {
             \(automationsSQL)
 
             \(automationRunsSQL)
+
+            \(restorableSessionsSQL)
 
             CREATE TABLE IF NOT EXISTS migration_state (
               current_version INTEGER NOT NULL

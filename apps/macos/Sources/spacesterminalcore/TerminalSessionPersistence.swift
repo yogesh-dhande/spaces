@@ -20,11 +20,16 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
     /// The automation execution this session was spawned for, or nil for a normal session. Present only
     /// on `.automation`-kind sessions; it attributes the workspace-bound session back to its run row.
     public let automationRunID: String?
+    /// The raw command the caller asked to run, before it was wrapped in a login shell and prefixed with
+    /// the workspace environment (`command` holds that wrapped form, which no later process can relaunch).
+    /// Set for a spawned coding agent, nil for every other session, and read when an agent session is
+    /// captured as restorable so the relaunch runs what the user actually asked for.
+    public let launchCommand: String?
 
     public init(
         sessionID: String, backend: TerminalSessionBackendKind = .ghosttyEmbedded, lifetimePolicy: TerminalSessionLifetimePolicy = .persistent,
         title: String, workingDirectory: String, shell: String, command: String?, createdAt: String, workspaceID: String?, kind: TerminalSessionKind,
-        userTitle: String? = nil, automationRunID: String? = nil
+        userTitle: String? = nil, automationRunID: String? = nil, launchCommand: String? = nil
     ) {
         self.sessionID = sessionID
         self.backend = backend
@@ -38,6 +43,7 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
         self.command = command
         self.createdAt = createdAt
         self.automationRunID = automationRunID
+        self.launchCommand = launchCommand
     }
 
     enum CodingKeys: String, CodingKey {
@@ -53,6 +59,7 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
         case command
         case createdAt
         case automationRunID
+        case launchCommand
     }
 
     public init(from decoder: any Decoder) throws {
@@ -69,6 +76,7 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
         command = try container.decodeIfPresent(String.self, forKey: .command)
         createdAt = try container.decode(String.self, forKey: .createdAt)
         automationRunID = try container.decodeIfPresent(String.self, forKey: .automationRunID)
+        launchCommand = try container.decodeIfPresent(String.self, forKey: .launchCommand)
     }
 }
 
@@ -287,9 +295,9 @@ public enum TerminalSessionPersistence {
                 sql: """
                     INSERT INTO terminal_sessions(
                       session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, working_directory, shell, command,
-                      created_at, automation_run_id
+                      created_at, automation_run_id, launch_command
                     )
-                    VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''))
+                    VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''))
                     ON CONFLICT(session_id) DO UPDATE SET
                       root_directory = excluded.root_directory,
                       backend = excluded.backend,
@@ -301,12 +309,14 @@ public enum TerminalSessionPersistence {
                       shell = excluded.shell,
                       command = excluded.command,
                       created_at = excluded.created_at,
-                      automation_run_id = excluded.automation_run_id
+                      automation_run_id = excluded.automation_run_id,
+                      launch_command = excluded.launch_command
                     """,
                 bindings: [
                     configuration.sessionID, root, configuration.backend.rawValue, configuration.lifetimePolicy.rawValue,
                     configuration.workspaceID ?? "", configuration.kind.rawValue, configuration.title, configuration.workingDirectory,
                     configuration.shell, configuration.command ?? "", configuration.createdAt, configuration.automationRunID ?? "",
+                    configuration.launchCommand ?? "",
                 ])
         }
     }
@@ -461,7 +471,8 @@ public enum TerminalSessionPersistence {
             try database.queryRow(
                 sql: """
                     SELECT session_id, backend, lifetime_policy, COALESCE(workspace_id, ''), kind, title, working_directory, shell,
-                           COALESCE(command, ''), created_at, COALESCE(user_title, ''), COALESCE(automation_run_id, '')
+                           COALESCE(command, ''), created_at, COALESCE(user_title, ''), COALESCE(automation_run_id, ''),
+                           COALESCE(launch_command, '')
                     FROM terminal_sessions
                     WHERE root_directory = ?
                     """, bindings: [root])
@@ -1111,17 +1122,18 @@ public enum TerminalSessionPersistence {
             try database.queryRows(
                 sql: """
                     SELECT session_id, backend, lifetime_policy, COALESCE(workspace_id, ''), kind, title, working_directory, shell,
-                           COALESCE(command, ''), created_at, COALESCE(user_title, ''), COALESCE(automation_run_id, ''), root_directory
+                           COALESCE(command, ''), created_at, COALESCE(user_title, ''), COALESCE(automation_run_id, ''),
+                           COALESCE(launch_command, ''), root_directory
                     FROM terminal_sessions
                     ORDER BY created_at, session_id
                     """)
         }
         return try rows.map { row in
-            guard row.count >= 13 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
+            guard row.count >= 14 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
             let launchConfiguration = try decodeLaunchConfiguration(row: row)
             return KnownTerminalSession(
                 launchConfiguration: launchConfiguration,
-                paths: try TerminalSessionPaths.forStoredSession(id: launchConfiguration.sessionID, rootDirectory: row[12]))
+                paths: try TerminalSessionPaths.forStoredSession(id: launchConfiguration.sessionID, rootDirectory: row[13]))
         }
     }
 
@@ -1154,7 +1166,8 @@ public enum TerminalSessionPersistence {
             try database.queryRows(
                 sql: """
                     SELECT s.session_id, s.backend, s.lifetime_policy, s.workspace_id, s.kind, s.title, s.working_directory, s.shell,
-                           COALESCE(s.command, ''), s.created_at, COALESCE(s.user_title, ''), COALESCE(s.automation_run_id, ''), s.root_directory,
+                           COALESCE(s.command, ''), s.created_at, COALESCE(s.user_title, ''), COALESCE(s.automation_run_id, ''),
+                           COALESCE(s.launch_command, ''), s.root_directory,
                            r.session_id, r.backend, r.service_pid, COALESCE(r.child_pid, ''), COALESCE(r.title, ''),
                            COALESCE(r.working_directory, ''), COALESCE(r.columns, ''), COALESCE(r.rows, ''), r.state, r.updated_at,
                            COALESCE(r.exited_at, ''), COALESCE(r.foreground_pid, ''), COALESCE(r.foreground_executable_path, ''),
@@ -1168,10 +1181,10 @@ public enum TerminalSessionPersistence {
                     """, bindings: interactiveStates)
         }
         return try rows.compactMap { row in
-            guard row.count >= 33 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
-            let launchConfiguration = try decodeLaunchConfiguration(row: Array(row[0..<12]))
-            guard let runtimeState = try? decodeRuntimeState(row: Array(row[13...])) else { return nil }
-            return KnownTerminalSessionRuntime(launchConfiguration: launchConfiguration, rootDirectory: row[12], runtimeState: runtimeState)
+            guard row.count >= 34 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
+            let launchConfiguration = try decodeLaunchConfiguration(row: Array(row[0..<13]))
+            guard let runtimeState = try? decodeRuntimeState(row: Array(row[14...])) else { return nil }
+            return KnownTerminalSessionRuntime(launchConfiguration: launchConfiguration, rootDirectory: row[13], runtimeState: runtimeState)
         }
     }
 
@@ -1200,7 +1213,8 @@ public enum TerminalSessionPersistence {
             try database.queryRows(
                 sql: """
                     SELECT s.session_id, s.backend, s.lifetime_policy, s.workspace_id, s.kind, s.title, s.working_directory, s.shell,
-                           COALESCE(s.command, ''), s.created_at, COALESCE(s.user_title, ''), COALESCE(s.automation_run_id, ''), s.root_directory,
+                           COALESCE(s.command, ''), s.created_at, COALESCE(s.user_title, ''), COALESCE(s.automation_run_id, ''),
+                           COALESCE(s.launch_command, ''), s.root_directory,
                            r.session_id, r.backend, r.service_pid, COALESCE(r.child_pid, ''), COALESCE(r.title, ''),
                            COALESCE(r.working_directory, ''), COALESCE(r.columns, ''), COALESCE(r.rows, ''), r.state, r.updated_at,
                            COALESCE(r.exited_at, ''), COALESCE(r.foreground_pid, ''), COALESCE(r.foreground_executable_path, ''),
@@ -1214,10 +1228,10 @@ public enum TerminalSessionPersistence {
                     """, bindings: sessionIDList + interactiveStates)
         }
         return try rows.compactMap { row in
-            guard row.count >= 33 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
-            let launchConfiguration = try decodeLaunchConfiguration(row: Array(row[0..<12]))
-            guard let runtimeState = try? decodeRuntimeState(row: Array(row[13...])) else { return nil }
-            return KnownTerminalSessionRuntime(launchConfiguration: launchConfiguration, rootDirectory: row[12], runtimeState: runtimeState)
+            guard row.count >= 34 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
+            let launchConfiguration = try decodeLaunchConfiguration(row: Array(row[0..<13]))
+            guard let runtimeState = try? decodeRuntimeState(row: Array(row[14...])) else { return nil }
+            return KnownTerminalSessionRuntime(launchConfiguration: launchConfiguration, rootDirectory: row[13], runtimeState: runtimeState)
         }
     }
 
@@ -1307,7 +1321,8 @@ public enum TerminalSessionPersistence {
         return TerminalSessionLaunchConfiguration(
             sessionID: row[0], backend: backend, lifetimePolicy: lifetimePolicy, title: row[5], workingDirectory: row[6], shell: row[7],
             command: row[8].isEmpty ? nil : row[8], createdAt: row[9], workspaceID: row[3].isEmpty ? nil : row[3], kind: kind,
-            userTitle: row.count > 10 && !row[10].isEmpty ? row[10] : nil, automationRunID: row.count > 11 && !row[11].isEmpty ? row[11] : nil)
+            userTitle: row.count > 10 && !row[10].isEmpty ? row[10] : nil, automationRunID: row.count > 11 && !row[11].isEmpty ? row[11] : nil,
+            launchCommand: row.count > 12 && !row[12].isEmpty ? row[12] : nil)
     }
 
     private static func encodeForegroundArgv(_ argv: [String]?) throws -> String? {

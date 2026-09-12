@@ -1768,9 +1768,14 @@ public final class WorkspaceOrchestrator {
     /// basename when no supported agent matches — spawn's hook gate has already ensured one does).
     /// The command runs through the interactive login shell, so a spawned agent resolves the same
     /// binaries the user's own terminal does (`claude` in `~/.local/bin`, an fnm-managed `codex`).
-    @discardableResult public func createWorkspaceAgentSession(workspaceID: String, command: String, title: String?, automationRunID: String? = nil)
-        throws -> TerminalServiceSessionSummary
-    {
+    ///
+    /// `recordedLaunchCommand` is what a later restore relaunches this session from, for the one caller
+    /// where that differs from the command being run: restoring an agent runs a resume command but records
+    /// the original, so the next capture rewrites the original again instead of stacking a second resume
+    /// selector onto the first. Every other caller records the command it runs.
+    @discardableResult public func createWorkspaceAgentSession(
+        workspaceID: String, command: String, title: String?, automationRunID: String? = nil, recordedLaunchCommand: String? = nil
+    ) throws -> TerminalServiceSessionSummary {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
             let (project, workspace) = try resolveWorkspace(id: workspaceID)
             let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1780,7 +1785,8 @@ public final class WorkspaceOrchestrator {
                 ?? (CodingAgent.executableToken(inCommand: command).map { ($0 as NSString).lastPathComponent } ?? "Agent")
             return try launchWorkspaceCommandSession(
                 project: project, workspace: workspace, title: title, shellCommand: interactiveLoginShellCommand(command), kind: .agent,
-                defaultTitle: defaultTitle, automationRunID: automationRunID)
+                defaultTitle: defaultTitle, automationRunID: automationRunID,
+                launchCommand: recordedLaunchCommand?.trimmingCharacters(in: .whitespacesAndNewlines) ?? trimmedCommand)
         }
     }
 
@@ -1803,12 +1809,17 @@ public final class WorkspaceOrchestrator {
     /// terminal window, and marks the workspace running. The only per-caller differences are the launch
     /// `kind` and the fallback title.
     ///
+    /// `launchCommand` is the raw command the caller passed, recorded alongside the wrapped one so a later
+    /// daemon can relaunch it. Only a spawned coding agent carries one: it is the single session kind a
+    /// restore offer brings back, and an ad-hoc shell's command is the user's own typing in a session they
+    /// closed deliberately.
+    ///
     /// Both callers hold the workspace's lifecycle gate and resolve `workspace` inside it — creating
     /// runtime is a lifecycle action, and a session started while a teardown was between its row snapshot
     /// and its record delete would survive as a live terminal in a directory that no longer exists.
     @discardableResult private func launchWorkspaceCommandSession(
         project: ProjectRecord, workspace: WorkspaceRecord, title: String?, shellCommand: String, kind: TerminalSessionKind, defaultTitle: String,
-        automationRunID: String? = nil
+        automationRunID: String? = nil, launchCommand: String? = nil
     ) throws -> TerminalServiceSessionSummary {
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
         let sessionID = UUID().uuidString
@@ -1823,14 +1834,14 @@ public final class WorkspaceOrchestrator {
         if let automationRunID { baseEnvironment[Self.automationRunIDEnvVar] = automationRunID }
         let env = terminalLaunchEnvironment(base: baseEnvironment, includeInheritedPath: false, includeProfileEnvironment: true)
         let shellPath = terminalShellPathOverride() ?? "/bin/zsh"
-        let launchCommand = commandPrefixedWithShellEnvironment(shellCommand, env: env)
+        let environmentPrefixedCommand = commandPrefixedWithShellEnvironment(shellCommand, env: env)
         // Fractional precision (not `nowISO8601()`'s whole seconds) so a rapid restart's replacement
         // session never stamps the same createdAt as the one it replaces: the client-side replacement
         // diff (TerminalSessionReplacementDiff) orders same-second pairings by this field.
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: sessionTitle, workingDirectory: workspace.dir,
-            shell: shellPath, command: launchCommand, createdAt: TerminalSessionTimestamp.fractionalString(from: Date()), workspaceID: workspace.id,
-            kind: kind, automationRunID: automationRunID)
+            shell: shellPath, command: environmentPrefixedCommand, createdAt: TerminalSessionTimestamp.fractionalString(from: Date()),
+            workspaceID: workspace.id, kind: kind, automationRunID: automationRunID, launchCommand: launchCommand)
 
         // The same pre-spawn release a configured process gets, for the same reason: this environment
         // carries the workspace's `$SPACES_<NAME>_PORT` values, and the command behind it can bind one the

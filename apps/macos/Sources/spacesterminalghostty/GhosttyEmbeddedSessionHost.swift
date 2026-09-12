@@ -807,6 +807,13 @@
         /// (and, across `execv`, `recoverStaleSessions` keeps skipping it because the pid is unchanged).
         public func drainPersistenceForShutdown() async { await drainPersistenceQueueAsync() }
 
+        /// Blocking drain that fences a restorable-session capture. The capture reads `terminal_sessions`
+        /// and `terminal_runtime_states`, both of which this core writes write-behind, so a capture taken
+        /// without this fence reads a table that can still be missing an agent launched moments ago and can
+        /// still show one that just ended. The daemon runs it across every live core, from the engine, right
+        /// before the capture query.
+        public func drainPersistenceForCapture() { drainPersistenceQueue() }
+
         /// Enqueues the durable runtime-state write off the engine. Coalesced latest-wins, so a burst of
         /// persists (or an exited state superseding a still-queued running state) collapses to the newest.
         /// On a successful write the durable marker is advanced back on the engine (finding-13 semantics:

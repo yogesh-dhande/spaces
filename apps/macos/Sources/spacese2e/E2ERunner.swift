@@ -168,6 +168,9 @@ private struct E2EScenarioDescriptor: Sendable {
         E2EScenarioDescriptor(
             name: "agent-orchestration",
             kind: .script(scriptName: "e2e_agent_orchestration.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
+        E2EScenarioDescriptor(
+            name: "session-restore",
+            kind: .script(scriptName: "e2e_session_restore.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
         E2EScenarioDescriptor(name: "mac-input-latency", kind: .terminalLatency),
         E2EScenarioDescriptor(name: "mac-scrollback-latency", kind: .terminalLatency),
         E2EScenarioDescriptor(name: "mac-scrollback-partial-latency", kind: .terminalLatency),

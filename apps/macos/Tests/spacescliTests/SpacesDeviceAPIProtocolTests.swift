@@ -125,6 +125,34 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(decoded.agentSessions?.first?.lastSignalAt, "2026-07-14T00:00:01Z")
     }
 
+    func testRestoreSessionsRequestRoundTripsAndIsNotReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(command: .restoreSessions(.init(generation: "generation-1")), authToken: "SECRET")
+
+        XCTAssertEqual(request.commandName, "restoreSessions")
+        // Restoring relaunches agents; a replay after an ambiguous failure could relaunch them twice.
+        XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testDiscardRestorableSessionsRequestRoundTripsAndIsNotReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(command: .discardRestorableSessions(.init(generation: "generation-1")), authToken: "SECRET")
+
+        XCTAssertEqual(request.commandName, "discardRestorableSessions")
+        XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testRestoredSessionsResultRoundTripsThroughResponse() throws {
+        let mapping = ["session-1": "session-1-new", "session-2": "session-2-new"]
+        let response = SpacesDeviceAPIResponse(
+            ok: true, message: "Restored sessions.", result: .restoredSessions(.init(newSessionIDsByCapturedSessionID: mapping)))
+
+        let decoded = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))
+
+        XCTAssertEqual(decoded, response)
+        XCTAssertEqual(decoded.restoredSessions, mapping)
+    }
+
     func testDeviceOverviewStreamCodecRoundTripsPayload() throws {
         let payload = SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
         let line = try SpacesDeviceOverviewStreamCodec.encodeLine(payload)

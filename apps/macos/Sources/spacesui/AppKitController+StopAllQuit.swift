@@ -31,6 +31,9 @@ extension AppKitController {
         let rawTerminationFailures: [StopAllQuitSessionTerminationFailure]
         let remainingSessionIDs: [String]
         let preparationError: Error?
+        /// The record the park wrote, when it wrote one. Carried so a quit that ends up not happening can
+        /// drop that record by name.
+        var parkedRestoreGeneration: String? = nil
 
         var succeeded: Bool { preparationError == nil && stopFailures.isEmpty && rawTerminationFailures.isEmpty && remainingSessionIDs.isEmpty }
     }
@@ -65,11 +68,18 @@ extension AppKitController {
         return StopAllQuitWorkspaceSelection(workspaceIDs: workspaceIDs, associatedLiveSessionIDs: associatedLiveSessionIDs)
     }
 
+    /// `parkAgentSessionsForRestore` runs once, in the one window where the record is both complete and
+    /// committed: after every step that can still abandon the quit (a preparation failure hands the user a
+    /// Cancel Quit choice, and a record parked before it would offer agents that are still running back),
+    /// and before the first stop, while the agent rows the record is read from are still live. It is the
+    /// whole-app quit that is restorable (stopping one workspace, or one agent, is a deliberate end to that
+    /// work), which is why the call sits here rather than inside the per-workspace stop.
     nonisolated static func performStopAllQuitCleanup(
-        liveSessions: [TerminalServiceSessionSummary], runningWorkspaces: () throws -> [WorkspaceRecord],
-        workspaceForLiveSession: (String) throws -> WorkspaceRecord?, stopWorkspace: (String) throws -> Void,
-        terminateSession: (String) throws -> Void, listLiveSessions: () throws -> [TerminalServiceSessionSummary],
-        browserSessionTargetURLs: (String) throws -> [String], closeBrowserSessions: (String, [String]) -> Void
+        liveSessions: [TerminalServiceSessionSummary], parkAgentSessionsForRestore: () -> String?,
+        runningWorkspaces: () throws -> [WorkspaceRecord], workspaceForLiveSession: (String) throws -> WorkspaceRecord?,
+        stopWorkspace: (String) throws -> Void, terminateSession: (String) throws -> Void,
+        listLiveSessions: () throws -> [TerminalServiceSessionSummary], browserSessionTargetURLs: (String) throws -> [String],
+        closeBrowserSessions: (String, [String]) -> Void
     ) -> StopAllQuitCleanupResult {
         let originalLiveSessionIDs = Set(liveSessions.map(\.id))
         let selection: StopAllQuitWorkspaceSelection
@@ -95,6 +105,7 @@ extension AppKitController {
                 rawTerminationFailures: [], remainingSessionIDs: uniqueSessionIDs(liveSessions.map(\.id)), preparationError: error)
         }
 
+        let parkedRestoreGeneration = parkAgentSessionsForRestore()
         var stoppedWorkspaceIDs: [String] = []
         var stopFailures: [StopAllQuitWorkspaceStopFailure] = []
         for workspaceID in selection.workspaceIDs {
@@ -124,7 +135,28 @@ extension AppKitController {
             associatedLiveSessionIDs: selection.associatedLiveSessionIDs,
             browserSessionTargetURLsByWorkspaceID: browserSessionTargetURLsByWorkspaceID, stopFailures: stopFailures,
             rawTerminatedSessionIDs: rawTerminatedSessionIDs, rawTerminationFailures: rawTerminationFailures,
-            remainingSessionIDs: remainingSessionIDs, preparationError: nil)
+            remainingSessionIDs: remainingSessionIDs, preparationError: nil, parkedRestoreGeneration: parkedRestoreGeneration)
+    }
+
+    /// Asks the daemon to record this profile's live coding agents as restorable, so the next launch can
+    /// offer them back. Best effort by design: the record is an offer, not part of the teardown, so a
+    /// daemon that cannot answer must not stand between the user and the quit they asked for. Nothing is
+    /// recorded then, and the quit proceeds.
+    nonisolated static func parkAgentSessionsForStopAllQuit() -> String? {
+        do { return try TerminalService.sendProfileCommand(.parkAgentSessionsForRestore).parkedRestoreGeneration } catch {
+            fputs("spaces: could not record coding agents for restore before quitting: \(error)\n", stderr)
+            return nil
+        }
+    }
+
+    /// Reconciles the record `parkAgentSessionsForStopAllQuit` wrote against what is still running, for a
+    /// quit that does not happen. The daemon keeps the rows whose sessions ended and drops the ones still
+    /// live. Best effort for the same reason the park is: the app stays open either way, and a daemon that
+    /// cannot answer leaves a record the user can still answer with Skip.
+    nonisolated static func reconcileParkedAgentSessionsAfterStopAllQuit(generation: String) {
+        do { _ = try TerminalService.sendProfileCommand(.reconcileParkedAgentSessions(generation: generation)) } catch {
+            fputs("spaces: could not reconcile the parked coding agents after the quit was canceled: \(error)\n", stderr)
+        }
     }
 
     /// Stop All runs in the app process, while active automation cancellation is serialized by the daemon's
@@ -156,15 +188,33 @@ extension AppKitController {
     }
 
     nonisolated static func stopAllQuitFailureTerminateReply(
-        result: StopAllQuitCleanupResult, choice: StopAllQuitCleanupFailureChoice, terminateSession: (String) throws -> Void,
-        closeBrowserSessions: (String, [String]) -> Void
+        result: StopAllQuitCleanupResult, choice: StopAllQuitCleanupFailureChoice, parkAgentSessionsForRestore: () -> String?,
+        terminateSession: (String) throws -> Void, closeBrowserSessions: (String, [String]) -> Void, reconcileParkedAgentSessions: (String) -> Void
     ) -> NSApplication.TerminateReply {
+        let reply: NSApplication.TerminateReply
+        let parkedRestoreGeneration: String?
         switch choice {
         case .forceQuit:
-            return forceStopAllQuitAfterCleanupFailure(result: result, terminateSession: terminateSession, closeBrowserSessions: closeBrowserSessions)
+            // Cleanup that fails before its own park (workspace inspection or browser-target preparation)
+            // leaves nothing recorded, and a force quit from there terminates every remaining session, which
+            // the daemon reads as a deliberate end. So the park happens here, immediately before the
+            // termination, on the same terms as the one in the cleanup: last thing before the sessions go.
+            parkedRestoreGeneration = result.parkedRestoreGeneration ?? parkAgentSessionsForRestore()
+            reply =
+                forceStopAllQuitAfterCleanupFailure(result: result, terminateSession: terminateSession, closeBrowserSessions: closeBrowserSessions)
                 ? .terminateNow : .terminateCancel
-        case .cancelQuit: return .terminateCancel
+        case .cancelQuit:
+            // Nothing is parked here: the app stays open with its agents running, so there is nothing to
+            // offer back and nothing a cleanup that never parked needs to record.
+            parkedRestoreGeneration = result.parkedRestoreGeneration
+            reply = .terminateCancel
         }
+        // A quit that does not happen can still have stopped workspaces before it was cancelled, so the
+        // record it parked is reconciled rather than dropped: an agent still running needs no offer (it
+        // would come back as a second copy of itself), while an agent whose workspace did stop is gone, and
+        // this record is the only way back to it.
+        if reply == .terminateCancel, let generation = parkedRestoreGeneration { reconcileParkedAgentSessions(generation) }
+        return reply
     }
 
     nonisolated static func runningLocalWorkspacesForStopAllQuit(store: SQLiteStore) throws -> [WorkspaceRecord] {
@@ -178,7 +228,8 @@ extension AppKitController {
             let store = try SQLiteStore(path: try DatabaseLocator.defaultPath())
             let orchestrator = WorkspaceOrchestrator(store: store)
             return Self.performStopAllQuitCleanup(
-                liveSessions: liveSessions, runningWorkspaces: { try Self.runningLocalWorkspacesForStopAllQuit(store: store) },
+                liveSessions: liveSessions, parkAgentSessionsForRestore: Self.parkAgentSessionsForStopAllQuit,
+                runningWorkspaces: { try Self.runningLocalWorkspacesForStopAllQuit(store: store) },
                 workspaceForLiveSession: { sessionID in
                     guard let workspaceID = try store.workspaceIDForTerminalSession(sessionID) else { return nil }
                     return try store.workspace(id: workspaceID)
@@ -219,11 +270,12 @@ extension AppKitController {
     func handleStopAllQuitCleanupFailure(_ result: StopAllQuitCleanupResult) -> NSApplication.TerminateReply {
         let choice = presentStopAllQuitCleanupFailureDialog(result)
         let reply = Self.stopAllQuitFailureTerminateReply(
-            result: result, choice: choice, terminateSession: { sessionID in try TerminalService.terminateSession(id: sessionID) },
+            result: result, choice: choice, parkAgentSessionsForRestore: Self.parkAgentSessionsForStopAllQuit,
+            terminateSession: { sessionID in try TerminalService.terminateSession(id: sessionID) },
             closeBrowserSessions: { workspaceID, configuredBrowserSessionTargetURLs in
                 BrowserSessionCoordinator.closeLocalBrowserSessionWindowsSynchronously(
                     workspaceID: workspaceID, configuredBrowserSessionTargetURLs: configuredBrowserSessionTargetURLs)
-            })
+            }, reconcileParkedAgentSessions: Self.reconcileParkedAgentSessionsAfterStopAllQuit(generation:))
         if choice == .forceQuit, reply == .terminateCancel {
             showError(WorkspaceError.invalidArgument(message: "Unable to force-stop all terminal sessions before quitting."))
         }
