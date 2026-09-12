@@ -95,14 +95,14 @@
             try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
                 try "committed bytes".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
                 try runGit(["add", "README.md"], cwd: repo.path)
-                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "pin revision bytes"], cwd: repo.path)
+                try runGit(
+                    ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "pin revision bytes"], cwd: repo.path)
                 let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
                 try "worktree bytes".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
 
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceRevisionFileRead(
-                            .init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "README.md")),
                         authToken: authToken, clientApp: clientApp))
 
                 XCTAssertTrue(response.ok, response.message)
@@ -116,7 +116,8 @@
                 try "README.md text eol=crlf\n".write(to: repo.appendingPathComponent(".gitattributes"), atomically: true, encoding: .utf8)
                 try "line one\nline two\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
                 try runGit(["add", ".gitattributes", "README.md"], cwd: repo.path)
-                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "checkout eol transform"], cwd: repo.path)
+                try runGit(
+                    ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "checkout eol transform"], cwd: repo.path)
                 let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
                 try FileManager.default.removeItem(at: repo.appendingPathComponent("README.md"))
                 try runGit(["checkout", "--", "README.md"], cwd: repo.path)
@@ -220,7 +221,8 @@
                 try FileManager.default.createDirectory(at: trackedDirectory, withIntermediateDirectories: true)
                 try "same nested content\n".write(to: trackedDirectory.appendingPathComponent("file.txt"), atomically: true, encoding: .utf8)
                 try runGit(["add", "tracked/file.txt"], cwd: repo.path)
-                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "tracked nested file"], cwd: repo.path)
+                try runGit(
+                    ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "tracked nested file"], cwd: repo.path)
                 let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
                 let redirectedDirectory = repo.appendingPathComponent("redirected", isDirectory: true)
                 try FileManager.default.createDirectory(at: redirectedDirectory, withIntermediateDirectories: true)
@@ -260,7 +262,8 @@
 
                 try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: repo.appendingPathComponent("README.md").path)
                 try runGit(["add", "README.md"], cwd: repo.path)
-                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "make readme executable"], cwd: repo.path)
+                try runGit(
+                    ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "make readme executable"], cwd: repo.path)
                 let executableRevision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
                 XCTAssertTrue(try read(executableRevision).isWorktreeEquivalentToRevision)
                 try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: repo.appendingPathComponent("README.md").path)
@@ -292,7 +295,8 @@
                 XCTAssertTrue(response.ok, response.message)
                 let result = try XCTUnwrap(response.workspaceRevisionFileRead)
                 XCTAssertTrue(result.isWorktreeEquivalentToRevision)
-                XCTAssertEqual(String(data: try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(result.comparisonOldBase64Data))), encoding: .utf8), "old SMUDGE\n")
+                XCTAssertEqual(
+                    String(data: try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(result.comparisonOldBase64Data))), encoding: .utf8), "old SMUDGE\n")
             }
         }
 
@@ -303,14 +307,14 @@
                 try "filtered.txt filter=spaces\n".write(to: repo.appendingPathComponent(".gitattributes"), atomically: true, encoding: .utf8)
                 try "old SMUDGE\n".write(to: repo.appendingPathComponent("filtered.txt"), atomically: true, encoding: .utf8)
                 try runGit(["add", ".gitattributes", "filtered.txt"], cwd: repo.path)
-                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "filtered comparison base"], cwd: repo.path)
+                try runGit(
+                    ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "filtered comparison base"], cwd: repo.path)
                 let base = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
                 try "new SMUDGE\n".write(to: repo.appendingPathComponent("filtered.txt"), atomically: true, encoding: .utf8)
 
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceFileRead(
-                            .init(workspaceID: workspaceID, relativePath: "filtered.txt", comparisonBaseRevision: base)),
+                        command: .workspaceFileRead(.init(workspaceID: workspaceID, relativePath: "filtered.txt", comparisonBaseRevision: base)),
                         authToken: authToken, clientApp: clientApp))
                 XCTAssertTrue(response.ok, response.message)
                 let old = try XCTUnwrap(response.workspaceFileRead?.comparisonOldBase64Data)
@@ -324,7 +328,8 @@
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: root) }
             let scriptURL = root.appendingPathComponent("localized-missing-cat-file.sh")
-            try "#!/bin/sh\ncase \"$*\" in *\"cat-file\"*\":./missing-before.txt\"*) echo 'Datei nicht gefunden' >&2; exit 19 ;; esac\nexec /usr/bin/git \"$@\"\n"
+            try
+                "#!/bin/sh\ncase \"$*\" in *\"cat-file\"*\":./missing-before.txt\"*) echo 'Datei nicht gefunden' >&2; exit 19 ;; esac\nexec /usr/bin/git \"$@\"\n"
                 .write(to: scriptURL, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
 
@@ -333,8 +338,9 @@
                 let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceFileRead(.init(
-                            workspaceID: workspaceID, relativePath: "README.md", comparisonBaseRevision: revision, oldPath: "missing-before.txt")),
+                        command: .workspaceFileRead(
+                            .init(
+                                workspaceID: workspaceID, relativePath: "README.md", comparisonBaseRevision: revision, oldPath: "missing-before.txt")),
                         authToken: authToken, clientApp: clientApp))
 
                 // `ls-tree -z` returns structured absence, so the localized cat-file failure must
@@ -350,8 +356,8 @@
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: root) }
             let scriptURL = root.appendingPathComponent("fail-comparison-ls-tree.sh")
-            try "#!/bin/sh\ncase \"$*\" in *\"ls-tree\"*) echo 'beschädigter Baum' >&2; exit 2 ;; esac\nexec /usr/bin/git \"$@\"\n"
-                .write(to: scriptURL, atomically: true, encoding: .utf8)
+            try "#!/bin/sh\ncase \"$*\" in *\"ls-tree\"*) echo 'beschädigter Baum' >&2; exit 2 ;; esac\nexec /usr/bin/git \"$@\"\n".write(
+                to: scriptURL, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
 
             try withWorkspaceFixture(workspaceGitClient: RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)) {
@@ -359,8 +365,7 @@
                 let revision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceFileRead(.init(
-                            workspaceID: workspaceID, relativePath: "README.md", comparisonBaseRevision: revision)),
+                        command: .workspaceFileRead(.init(workspaceID: workspaceID, relativePath: "README.md", comparisonBaseRevision: revision)),
                         authToken: authToken, clientApp: clientApp))
 
                 XCTAssertFalse(response.ok)
@@ -376,8 +381,7 @@
 
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceRevisionFileRead(
-                            .init(workspaceID: workspaceID, revision: revision, relativePath: "Renamed.md")),
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "Renamed.md")),
                         authToken: authToken, clientApp: clientApp))
 
                 XCTAssertTrue(response.ok, response.message)
@@ -391,7 +395,8 @@
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: root) }
             let scriptURL = root.appendingPathComponent("localized-parent-cat-file.sh")
-            try "#!/bin/sh\ncase \"$*\" in *\"cat-file\"*\":./ADDED.md\"*) echo 'Datei nicht gefunden' >&2; exit 19 ;; esac\nexec /usr/bin/git \"$@\"\n"
+            try
+                "#!/bin/sh\ncase \"$*\" in *\"cat-file\"*\":./ADDED.md\"*) echo 'Datei nicht gefunden' >&2; exit 19 ;; esac\nexec /usr/bin/git \"$@\"\n"
                 .write(to: scriptURL, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
 
@@ -421,8 +426,7 @@
 
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceRevisionFileRead(
-                            .init(workspaceID: workspaceID, revision: revision, relativePath: "binary.dat")),
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: "binary.dat")),
                         authToken: authToken, clientApp: clientApp))
 
                 XCTAssertTrue(response.ok, response.message)
@@ -435,7 +439,8 @@
             try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
                 try Data(count: SpacesDeviceAPIServer.workspaceFileMaxBytes + 1).write(to: repo.appendingPathComponent("huge.dat"))
                 try runGit(["add", "huge.dat"], cwd: repo.path)
-                try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "oversized comparison side"], cwd: repo.path)
+                try runGit(
+                    ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "oversized comparison side"], cwd: repo.path)
                 try "small target\n".write(to: repo.appendingPathComponent("huge.dat"), atomically: true, encoding: .utf8)
                 try runGit(["add", "huge.dat"], cwd: repo.path)
                 try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "small target"], cwd: repo.path)
@@ -457,7 +462,8 @@
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: root) }
             let scriptURL = root.appendingPathComponent("mutate-on-filter.sh")
-            try "#!/bin/sh\ncase \" $* \" in *\" hash-object \"*) printf 'churned after baseline\\n' > \"$2/README.md\" ;; esac\nexec /usr/bin/git \"$@\"\n"
+            try
+                "#!/bin/sh\ncase \" $* \" in *\" hash-object \"*) printf 'churned after baseline\\n' > \"$2/README.md\" ;; esac\nexec /usr/bin/git \"$@\"\n"
                 .write(to: scriptURL, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
 
@@ -475,8 +481,7 @@
                 // baseline. Checkout churn after that read must not make it inspect a different
                 // worktree snapshot; a later write's SHA CAS protects this changed checkout.
                 XCTAssertTrue(result.isWorktreeEquivalentToRevision)
-                XCTAssertEqual(
-                    String(data: try XCTUnwrap(Data(base64Encoded: result.worktreeFile.base64Data)), encoding: .utf8), "initial")
+                XCTAssertEqual(String(data: try XCTUnwrap(Data(base64Encoded: result.worktreeFile.base64Data)), encoding: .utf8), "initial")
                 XCTAssertEqual(try String(contentsOf: repo.appendingPathComponent("README.md")), "churned after baseline\n")
             }
         }
@@ -501,8 +506,8 @@
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: root) }
             let scriptURL = root.appendingPathComponent("fail-ls-tree.sh")
-            try "#!/bin/sh\ncase \"$*\" in *ls-tree*) echo injected-tree-lookup-failure >&2; exit 2 ;; esac\nexec /usr/bin/git \"$@\"\n"
-                .write(to: scriptURL, atomically: true, encoding: .utf8)
+            try "#!/bin/sh\ncase \"$*\" in *ls-tree*) echo injected-tree-lookup-failure >&2; exit 2 ;; esac\nexec /usr/bin/git \"$@\"\n".write(
+                to: scriptURL, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
             let gitClient = RemoteWorkspaceGitClient(gitExecutable: scriptURL.path)
 
@@ -520,7 +525,9 @@
 
         func testWorkspaceRevisionFileReadRejectsMutableOrInvalidRevisionAndEscapingPath() throws {
             try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
-                for (revision, path) in [("HEAD", "README.md"), (String(repeating: "z", count: 40), "README.md"), (String(repeating: "a", count: 40), "../README.md")] {
+                for (revision, path) in [
+                    ("HEAD", "README.md"), (String(repeating: "z", count: 40), "README.md"), (String(repeating: "a", count: 40), "../README.md"),
+                ] {
                     let response = try requestClient.send(
                         SpacesDeviceAPIRequest(
                             command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: path)),
@@ -1204,13 +1211,13 @@
                 let target = repo.appendingPathComponent("target.md")
                 let original = Data("original target".utf8)
                 try original.write(to: target)
-                try FileManager.default.createSymbolicLink(atPath: repo.appendingPathComponent("inline-link.md").path, withDestinationPath: "target.md")
+                try FileManager.default.createSymbolicLink(
+                    atPath: repo.appendingPathComponent("inline-link.md").path, withDestinationPath: "target.md")
                 try FileManager.default.createSymbolicLink(atPath: repo.appendingPathComponent("inline-directory").path, withDestinationPath: ".")
 
                 let readResponse = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceFileRead(
-                            .init(workspaceID: workspaceID, relativePath: "inline-link.md", requiresDirectPath: true)),
+                        command: .workspaceFileRead(.init(workspaceID: workspaceID, relativePath: "inline-link.md", requiresDirectPath: true)),
                         authToken: authToken, clientApp: clientApp))
                 XCTAssertFalse(readResponse.ok)
                 XCTAssertEqual(readResponse.errorCode, .invalidArgument)
@@ -1227,9 +1234,10 @@
                     SpacesDeviceAPIRequest(
                         command: .workspaceFileWrite(
                             .init(
-                                workspaceID: workspaceID, relativePath: "inline-link.md", base64Data: Data("edited target".utf8).base64EncodedString(),
-                                expectedSHA256: SpacesDeviceWorkspaceGitHashing.sha256Hex(original), requiresDirectPath: true)),
-                        authToken: authToken, clientApp: clientApp))
+                                workspaceID: workspaceID, relativePath: "inline-link.md",
+                                base64Data: Data("edited target".utf8).base64EncodedString(),
+                                expectedSHA256: SpacesDeviceWorkspaceGitHashing.sha256Hex(original), requiresDirectPath: true)), authToken: authToken,
+                        clientApp: clientApp))
                 XCTAssertFalse(writeResponse.ok)
                 XCTAssertEqual(writeResponse.errorCode, .invalidArgument)
                 XCTAssertEqual(try Data(contentsOf: target), original, "an inline diff save must not follow the symlink into its target")
@@ -1601,9 +1609,7 @@
             let store = SpacesDeviceAPIServer.WorkspaceDiffTransferStore(ttl: 1)
             let start = Date(timeIntervalSince1970: 1_000)
             let scope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace", refName: nil)
-            let manifestID = store.createManifest(
-                scope: scope, snapshot: .init(scopeSignature: "signature", plans: []), now: start
-            ).manifestID
+            let manifestID = store.createManifest(scope: scope, snapshot: .init(scopeSignature: "signature", plans: []), now: start).manifestID
             _ = store.createPatch(
                 manifestID: manifestID, scope: scope, relativePath: "README.md", scopeSignature: "signature",
                 file: .init(path: "README.md", status: .modified), outputURL: outputURL, byteCount: 5, now: start)
@@ -1618,8 +1624,7 @@
             let clock = ManualDiffTransferClock(now: Date())
             let store = SpacesDeviceAPIServer.WorkspaceDiffTransferStore(ttl: 120, clock: { clock.now() }, reaper: ManualDiffTransferExpiryReaper())
             let targetScope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "target", refName: nil)
-            let created = store.createManifest(
-                scope: targetScope, snapshot: .init(scopeSignature: "target-signature", plans: []), now: clock.now())
+            let created = store.createManifest(scope: targetScope, snapshot: .init(scopeSignature: "target-signature", plans: []), now: clock.now())
 
             for index in 1..<16 {
                 clock.advance(by: 1)
@@ -1628,8 +1633,7 @@
             }
             clock.advance(by: 1)
             _ = store.createManifest(
-                scope: .init(workspaceID: "evictor", refName: nil), snapshot: .init(scopeSignature: "evictor", plans: []),
-                now: clock.now())
+                scope: .init(workspaceID: "evictor", refName: nil), snapshot: .init(scopeSignature: "evictor", plans: []), now: clock.now())
 
             XCTAssertEqual(created.session.scope, targetScope)
             XCTAssertEqual(created.session.snapshot.scopeSignature, "target-signature")
@@ -1649,9 +1653,7 @@
             let store = SpacesDeviceAPIServer.WorkspaceDiffTransferStore(ttl: 10, clock: { clock.now() }, reaper: reaper)
             XCTAssertNotNil(reaper.scheduledInterval, "the store must schedule autonomous expiry at construction")
             let scope = SpacesDeviceAPIServer.WorkspaceDiffScope(workspaceID: "workspace", refName: nil)
-            let manifestID = store.createManifest(
-                scope: scope, snapshot: .init(scopeSignature: "signature", plans: []), now: clock.now()
-            ).manifestID
+            let manifestID = store.createManifest(scope: scope, snapshot: .init(scopeSignature: "signature", plans: []), now: clock.now()).manifestID
             _ = store.createPatch(
                 manifestID: manifestID, scope: scope, relativePath: "README.md", scopeSignature: "signature",
                 file: .init(path: "README.md", status: .modified), outputURL: outputURL, byteCount: 5, now: clock.now())
@@ -1800,16 +1802,15 @@
 
                 let manifestResponse = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)),
-                        authToken: authToken, clientApp: clientApp))
+                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)), authToken: authToken,
+                        clientApp: clientApp))
                 let manifest = try XCTUnwrap(manifestResponse.workspaceDiffManifestChunk)
                 let fileResponse = try requestClient.send(
                     SpacesDeviceAPIRequest(
                         command: .workspaceDiffFileChunk(
                             .init(
-                                workspaceID: workspaceID, lastCommit: true, manifestID: manifest.manifestID, relativePath: "README.md",
-                                byteOffset: 0)),
-                        authToken: authToken, clientApp: clientApp))
+                                workspaceID: workspaceID, lastCommit: true, manifestID: manifest.manifestID, relativePath: "README.md", byteOffset: 0)
+                        ), authToken: authToken, clientApp: clientApp))
 
                 XCTAssertTrue(fileResponse.ok, fileResponse.message)
                 XCTAssertEqual(try XCTUnwrap(fileResponse.workspaceDiffFileChunk).file.targetRevision, headSHA)
@@ -1873,8 +1874,8 @@
 
                 let manifestResponse = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)),
-                        authToken: authToken, clientApp: clientApp))
+                        command: .workspaceDiffManifestChunk(.init(workspaceID: workspaceID, lastCommit: true, fileIndex: 0)), authToken: authToken,
+                        clientApp: clientApp))
                 XCTAssertTrue(manifestResponse.ok, manifestResponse.message)
                 let manifest = try XCTUnwrap(manifestResponse.workspaceDiffManifestChunk)
                 let subManifestFile = try XCTUnwrap(manifest.files.first { $0.path == "sub" })
@@ -1885,8 +1886,7 @@
                 let patchResponse = try requestClient.send(
                     SpacesDeviceAPIRequest(
                         command: .workspaceDiffFileChunk(
-                            .init(
-                                workspaceID: workspaceID, lastCommit: true, manifestID: manifest.manifestID, relativePath: "sub", byteOffset: 0)),
+                            .init(workspaceID: workspaceID, lastCommit: true, manifestID: manifest.manifestID, relativePath: "sub", byteOffset: 0)),
                         authToken: authToken, clientApp: clientApp))
                 XCTAssertTrue(patchResponse.ok, patchResponse.message)
                 let chunk = try XCTUnwrap(patchResponse.workspaceDiffFileChunk)
@@ -2532,7 +2532,7 @@
             // Wait for both installs' own initial (recomputeAll) compute; scope A's is now inside its
             // 3s-blocking call.
             let installDeadline = Date().addingTimeInterval(5)
-            while (aCounter.value < 1 || bCounter.value < 1), Date() < installDeadline { Thread.sleep(forTimeInterval: 0.02) }
+            while aCounter.value < 1 || bCounter.value < 1, Date() < installDeadline { Thread.sleep(forTimeInterval: 0.02) }
             XCTAssertEqual(aCounter.value, 1)
             XCTAssertEqual(bCounter.value, 1)
 
@@ -2615,9 +2615,8 @@
             let providerCallCounter = InvocationCounter()
 
             let subscription = SpacesDeviceAPIServer.WorkspaceDiffSignatureSubscription(
-                scope: scope, socketPath: socketPath,
-                streamQueue: DispatchQueue(label: "spaces.workspace-diff-signature.retry.\(scope.workspaceID)"), watch: watch,
-                signatureProvider: { _, _, _ in providerCallCounter.increment() == 1 ? nil : "recovered" },
+                scope: scope, socketPath: socketPath, streamQueue: DispatchQueue(label: "spaces.workspace-diff-signature.retry.\(scope.workspaceID)"),
+                watch: watch, signatureProvider: { _, _, _ in providerCallCounter.increment() == 1 ? nil : "recovered" },
                 unavailableRetryInterval: 0.05)
             try subscription.start()
             defer {
@@ -2966,9 +2965,8 @@
             let providerCallCounter = InvocationCounter()
 
             let subscription = SpacesDeviceAPIServer.WorkspaceDiffSignatureSubscription(
-                scope: scope, socketPath: socketPath,
-                streamQueue: DispatchQueue(label: "spaces.workspace-diff-signature.\(scope.workspaceID).retry"), watch: watch,
-                signatureProvider: { _, _, _ in "S\(providerCallCounter.increment())" })
+                scope: scope, socketPath: socketPath, streamQueue: DispatchQueue(label: "spaces.workspace-diff-signature.\(scope.workspaceID).retry"),
+                watch: watch, signatureProvider: { _, _, _ in "S\(providerCallCounter.increment())" })
             try subscription.start()
             defer {
                 subscription.stop()
@@ -3000,14 +2998,21 @@
 
             subscription.retryWatch()
 
+            // Both halves of the contract are read off the one frame the retry produced, never off the
+            // provider's call count at assertion time: the successful reinstall the retry triggers also
+            // arms the watch's own all-touched firing (`attemptInstallLocked`'s `wasRecovering` branch,
+            // which exists so every OTHER live subscription sharing this watch recomputes off its stale
+            // error), and that firing reaches this subscription's handler one debounce interval later and
+            // legitimately recomputes a third time. Whether that debounced firing lands before or after
+            // this assertion is pure timing. Since the provider numbers its calls, the signature the
+            // recovery frame carries says exactly how many computes ran up to it: "S2" is the retry's own
+            // recompute being the single additional one, "S3" or later would be the extra compute this
+            // test is guarding against.
             let recoveryDeadline = Date().addingTimeInterval(5)
-            while !collector.all.contains(where: { $0.scopeSignature == "S2" }), Date() < recoveryDeadline {
-                Thread.sleep(forTimeInterval: 0.01)
-            }
-            let recoveredFrame = collector.all.first { $0.scopeSignature == "S2" }
+            while !collector.all.contains(where: { $0.liveRefreshError == nil }), Date() < recoveryDeadline { Thread.sleep(forTimeInterval: 0.01) }
+            let recoveredFrame = collector.all.first { $0.liveRefreshError == nil }
             XCTAssertNotNil(recoveredFrame)
-            XCTAssertNil(recoveredFrame?.liveRefreshError)
-            XCTAssertEqual(providerCallCounter.value, 2, "retryWatch's own recompute must be the only additional provider call")
+            XCTAssertEqual(recoveredFrame?.scopeSignature, "S2", "retryWatch's own recompute must be the only additional provider call")
         }
 
         /// `acquireWorkspaceWatch` never evicts a workspace's watch from the server's map (see its doc
@@ -3883,8 +3888,7 @@
                 let workspaceRevision = try runGit(["rev-parse", "HEAD"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
                 let wrongRepository = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceRevisionFileRead(
-                            .init(workspaceID: workspaceID, revision: workspaceRevision, relativePath: "A/FILE.txt")),
+                        command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: workspaceRevision, relativePath: "A/FILE.txt")),
                         authToken: authToken, clientApp: clientApp))
                 XCTAssertFalse(wrongRepository.ok)
                 XCTAssertEqual(wrongRepository.errorCode, .invalidArgument)
@@ -3921,8 +3925,8 @@
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
                         command: .workspaceRevisionFileRead(
-                            .init(workspaceID: workspaceID, revision: workspaceRevision, relativePath: "plain/FILE.txt")),
-                        authToken: authToken, clientApp: clientApp))
+                            .init(workspaceID: workspaceID, revision: workspaceRevision, relativePath: "plain/FILE.txt")), authToken: authToken,
+                        clientApp: clientApp))
                 XCTAssertTrue(response.ok, response.message)
                 XCTAssertEqual(response.workspaceRevisionFileRead?.isWorktreeEquivalentToRevision, true)
             }
@@ -3992,8 +3996,7 @@
 
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .workspaceFileRead(
-                            .init(workspaceID: workspaceID, relativePath: "A/FILE.txt", comparisonBaseRevision: recorded)),
+                        command: .workspaceFileRead(.init(workspaceID: workspaceID, relativePath: "A/FILE.txt", comparisonBaseRevision: recorded)),
                         authToken: authToken, clientApp: clientApp))
                 XCTAssertTrue(response.ok, response.message)
                 let read = try XCTUnwrap(response.workspaceFileRead)
@@ -4106,8 +4109,8 @@
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
                         command: .workspaceRevisionFileRead(
-                            .init(workspaceID: workspaceID, revision: outsideRevision, relativePath: "A/OUTSIDE.txt")),
-                        authToken: authToken, clientApp: clientApp))
+                            .init(workspaceID: workspaceID, revision: outsideRevision, relativePath: "A/OUTSIDE.txt")), authToken: authToken,
+                        clientApp: clientApp))
                 // The path resolves to the workspace's own repository, which holds neither that commit nor
                 // that file, so the read is refused rather than answered from the outside repository.
                 XCTAssertFalse(response.ok)
@@ -4276,16 +4279,14 @@
 
             init(_ underlying: SpacesDeviceAPIRequestSessionClient) { self.underlying = underlying }
 
-            func send(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
-                try underlying.send(request, timeoutSeconds: 120)
-            }
+            func send(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse { try underlying.send(request, timeoutSeconds: 120) }
 
             func cancel() { underlying.cancel() }
         }
 
-        private func makeServerAndClient(
-            workspaceGitClient: RemoteWorkspaceGitClient = RemoteWorkspaceGitClient()
-        ) throws -> (SpacesDeviceAPIServer, WorkspaceGitRequestClient, SpacesDeviceClientApp, String) {
+        private func makeServerAndClient(workspaceGitClient: RemoteWorkspaceGitClient = RemoteWorkspaceGitClient()) throws -> (
+            SpacesDeviceAPIServer, WorkspaceGitRequestClient, SpacesDeviceClientApp, String
+        ) {
             let identity = try workspaceGitTestTLSIdentity()
             let pairingStore = AlwaysAuthorizedWorkspaceGitPairingStore()
             let server = SpacesDeviceAPIServer(
