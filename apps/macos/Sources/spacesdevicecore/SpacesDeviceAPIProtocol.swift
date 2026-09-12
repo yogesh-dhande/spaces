@@ -961,8 +961,7 @@ public struct SpacesDeviceWorkspaceFileReadRequest: Codable, Sendable, Equatable
     public let requiresDirectPath: Bool
 
     public init(
-        workspaceID: String, relativePath: String, comparisonBaseRevision: String? = nil, oldPath: String? = nil,
-        requiresDirectPath: Bool = false
+        workspaceID: String, relativePath: String, comparisonBaseRevision: String? = nil, oldPath: String? = nil, requiresDirectPath: Bool = false
     ) {
         self.workspaceID = workspaceID
         self.relativePath = relativePath
@@ -982,10 +981,7 @@ public struct SpacesDeviceWorkspaceFileReadResult: Codable, Sendable, Equatable 
     /// Git-filtered old comparison text only for an inline-diff baseline request.
     public let comparisonOldBase64Data: String?
 
-    public init(
-        base64Data: String, sha256: String, size: Int, isBinaryGuess: Bool,
-        comparisonOldBase64Data: String? = nil
-    ) {
+    public init(base64Data: String, sha256: String, size: Int, isBinaryGuess: Bool, comparisonOldBase64Data: String? = nil) {
         self.base64Data = base64Data
         self.sha256 = sha256
         self.size = size
@@ -1024,10 +1020,7 @@ public struct SpacesDeviceWorkspaceRevisionFileReadResult: Codable, Sendable, Eq
     public let isWorktreeEquivalentToRevision: Bool
     public let comparisonOldBase64Data: String?
 
-    public init(
-        worktreeFile: SpacesDeviceWorkspaceFileReadResult, isWorktreeEquivalentToRevision: Bool,
-        comparisonOldBase64Data: String?
-    ) {
+    public init(worktreeFile: SpacesDeviceWorkspaceFileReadResult, isWorktreeEquivalentToRevision: Bool, comparisonOldBase64Data: String?) {
         self.worktreeFile = worktreeFile
         self.isWorktreeEquivalentToRevision = isWorktreeEquivalentToRevision
         self.comparisonOldBase64Data = comparisonOldBase64Data
@@ -1155,10 +1148,7 @@ public struct SpacesDeviceWorkspaceFileWriteRequest: Codable, Sendable, Equatabl
     /// See `SpacesDeviceWorkspaceFileReadRequest.requiresDirectPath`.
     public let requiresDirectPath: Bool
 
-    public init(
-        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String? = nil,
-        requiresDirectPath: Bool = false
-    ) {
+    public init(workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String? = nil, requiresDirectPath: Bool = false) {
         self.workspaceID = workspaceID
         self.relativePath = relativePath
         self.base64Data = base64Data
@@ -1252,8 +1242,7 @@ public struct SpacesDeviceWorkspaceDiffFileMetadata: Codable, Sendable, Equatabl
 
     public init(
         path: String, oldPath: String? = nil, status: SpacesDeviceWorkspaceDiffFileStatus, isBinary: Bool = false, oldSHA: String? = nil,
-        newSHA: String? = nil, targetRevision: String? = nil, submodule: SpacesDeviceWorkspaceDiffSubmoduleChange? = nil,
-        submodulePath: String? = nil
+        newSHA: String? = nil, targetRevision: String? = nil, submodule: SpacesDeviceWorkspaceDiffSubmoduleChange? = nil, submodulePath: String? = nil
     ) {
         self.path = path
         self.oldPath = oldPath
@@ -1993,6 +1982,7 @@ public enum SpacesDeviceTerminalControlAction: String, Codable, Sendable, Equata
     case clearScreen
     case resize
     case scroll
+    case scrollToBottom
     case mouseButton
     case setAppearance
     case setSelection
@@ -2722,8 +2712,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         switch self {
         case .ping, .daemonStatus, .overview, .previewProject, .previewGitProject, .listDirectories, .workspaceCreateOptions, .state,
             .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput, .terminalTranscript, .agentHooksStatus, .listAgentSessions,
-            .listAutomations, .listAutomationRuns, .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileList, .workspaceRefList, .workspaceDiffManifestChunk,
-            .workspaceDiffManifestRelease, .workspaceDiffFileChunk, .workspaceReviewCommentList:
+            .listAutomations, .listAutomationRuns, .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileList, .workspaceRefList,
+            .workspaceDiffManifestChunk, .workspaceDiffManifestRelease, .workspaceDiffFileChunk, .workspaceReviewCommentList:
             true
         default: false
         }
@@ -3159,7 +3149,8 @@ extension SpacesDeviceAPIResult: Codable {
         case .automations: self = .automations(try container.decode(SpacesDeviceAutomationsResult.self, forKey: key))
         case .automationRuns: self = .automationRuns(try container.decode(SpacesDeviceAutomationRunsResult.self, forKey: key))
         case .workspaceFileRead: self = .workspaceFileRead(try container.decode(SpacesDeviceWorkspaceFileReadResult.self, forKey: key))
-        case .workspaceRevisionFileRead: self = .workspaceRevisionFileRead(try container.decode(SpacesDeviceWorkspaceRevisionFileReadResult.self, forKey: key))
+        case .workspaceRevisionFileRead:
+            self = .workspaceRevisionFileRead(try container.decode(SpacesDeviceWorkspaceRevisionFileReadResult.self, forKey: key))
         case .workspaceFileWrite: self = .workspaceFileWrite(try container.decode(SpacesDeviceWorkspaceFileWriteResult.self, forKey: key))
         case .workspaceFileList: self = .workspaceFileList(try container.decode(SpacesDeviceWorkspaceFileListResult.self, forKey: key))
         case .workspaceRefList: self = .workspaceRefList(try container.decode(SpacesDeviceWorkspaceRefListResult.self, forKey: key))

@@ -81,6 +81,24 @@ final class TerminalControlProtocolTests: XCTestCase {
         XCTAssertEqual(decoded.resizeSerial, 8)
     }
 
+    func testScrollToBottomRequestRoundTripsThroughCodecAndIsOwnerGated() throws {
+        let request = TerminalControlRequest(command: .scrollToBottom(TerminalControlOwnerPayload(clientID: "owner-1", ownerEpoch: 9)))
+
+        let decoded = try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request))
+
+        XCTAssertEqual(decoded.command, "scrollToBottom")
+        XCTAssertEqual(decoded.commandValue.name, "scrollToBottom")
+        // The jump moves the viewport every viewer of the session sees, so only the active owner may ask
+        // for it, exactly like a scroll.
+        XCTAssertTrue(decoded.commandValue.requiresOwnerClientID)
+        XCTAssertTrue(TerminalControlCommand.isMobileTerminalControlName("scrollToBottom"))
+        guard case .scrollToBottom(let payload) = decoded.commandValue else {
+            return XCTFail("Expected a scrollToBottom command, got '\(decoded.commandValue.name)'.")
+        }
+        XCTAssertEqual(payload.clientID, "owner-1")
+        XCTAssertEqual(payload.ownerEpoch, 9)
+    }
+
     func testMouseButtonRequestRoundTripsThroughCodec() throws {
         let request = TerminalControlRequest(
             command: .mouseButton(

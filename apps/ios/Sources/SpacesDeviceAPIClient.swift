@@ -725,6 +725,19 @@ struct SpacesDeviceAPIClient: Sendable {
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
 
+    /// Snaps the session's viewport to the live bottom row, for the jump-to-bottom control shown while a
+    /// frame reports the viewport sitting in scrollback.
+    func scrollToBottom(context: TerminalCommandContext, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil)
+        async throws
+    {
+        let request = SpacesDeviceAPIRequest(
+            command: .terminalControl(
+                .init(action: .scrollToBottom, sessionID: context.sessionID, clientID: context.clientID, ownerEpoch: context.ownerEpoch)),
+            authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
+        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+    }
+
     /// Sends one mouse button press or release, forwarded to the session's terminal when a mouse-aware
     /// application there is tracking the mouse. The pointer is normalized the same way `scroll`'s is.
     func mouseButton(

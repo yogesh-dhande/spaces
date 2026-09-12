@@ -817,6 +817,19 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard shouldRenderEndedTerminalSurface, let snapshot = latestState?.renderSnapshot else { return nil }
         return GhosttyRemoteTerminalEndedRender(id: endedRenderID(for: snapshot), snapshot: snapshot)
     }
+    /// Whether the rendered frame sits in scrollback rather than at the session's live bottom row, which
+    /// is what offers the jump-to-bottom control. The daemon owns the viewport; a frame's own
+    /// `scrollbarTotal`/`scrollbarOffset` already say where that viewport sits, so this is derived
+    /// client state and never travels on the wire (see `TerminalScrollbackPosition`).
+    ///
+    /// Also requires this viewer to be the interactive owner: a non-owner cannot scroll the session at
+    /// all (`sendScroll` gates on the same two checks), so offering a jump here would be a dead control.
+    /// An ended session's transcript replay has no live viewport to jump in either, matching how
+    /// `selectionCopyPillPlacement` excludes `endedRender`.
+    var isScrolledIntoScrollback: Bool {
+        guard isOwner, keepsTerminalInputSurfaceActive, endedRender == nil else { return false }
+        return TerminalScrollbackPosition.position(of: latestState?.renderSnapshot).isScrolledIntoScrollback
+    }
     var latestScreenStateRevision: UInt64? { latestState?.screenStateRevision }
     var snapshotText: String? { latestState?.renderText }
     var renderStateKey: String {
@@ -1785,6 +1798,20 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     func flushPendingScroll() { scrollCoalescer.flush() }
 
+    /// Snaps the session's viewport to its live bottom row, for the jump-to-bottom control offered while
+    /// `isScrolledIntoScrollback` is true. Flushes the scroll coalescer first: an in-flight scroll batch
+    /// (a fast swipe still draining) would otherwise land after the jump and drag the viewport back into
+    /// scrollback, undoing it.
+    func scrollToBottom() async {
+        guard isOwner else { return }
+        guard keepsTerminalInputSurfaceActive else { return }
+        flushPendingScroll()
+        enqueueInputSend(kind: "scroll_to_bottom", detail: "bottom") { [weak self] in
+            guard let self else { return }
+            try await self.performScrollToBottomRequest()
+        }
+    }
+
     func dismissLinkPreview() {
         invalidateLinkPreviewRequests()
         isPreparingLinkPreview = false
@@ -1957,6 +1984,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             try await bridgeClient.scroll(
                 context: context, horizontal: horizontal, vertical: vertical, scrollMods: scrollMods == 0 ? nil : scrollMods,
                 pointerPosition: pointerPosition, timeout: Self.inputRequestTimeout, commandChannel: commandChannel)
+        }
+    }
+
+    private func performScrollToBottomRequest() async throws {
+        let context = TerminalCommandContext(sessionID: session.id, clientID: remoteClient.id, ownerEpoch: currentOwnerEpoch)
+        try await performRequestUsingInputChannel { [bridgeClient, context] commandChannel in
+            try await bridgeClient.scrollToBottom(context: context, timeout: Self.inputRequestTimeout, commandChannel: commandChannel)
         }
     }
 

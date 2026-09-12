@@ -574,8 +574,7 @@
             // The dial's own start, the anchor a measurement lane needs to tell this pane's stream dial
             // apart from the catch-up request and the sidebar's own traffic on the same device: only this
             // event says a stream dial is in flight, which is the state an outage measurement times from.
-            emitPerformanceEvent(
-                name: "stream_dial_begin", attributes: ["host": device.hosts.first ?? "", "generation": String(attempt.generation)])
+            emitPerformanceEvent(name: "stream_dial_begin", attributes: ["host": device.hosts.first ?? "", "generation": String(attempt.generation)])
             let attemptGeneration = attempt.generation
             attempt.task = Task { @MainActor [weak self] in
                 await self?.establishStateStreamConnection(generation: attemptGeneration)
@@ -745,7 +744,8 @@
                 // it cannot be raced out from under this read. `stateStreamConnectOverrideForTesting`
                 // bypasses `start()` entirely, so tests drive the equivalent verdict through
                 // `lastDialExhaustedAllCandidatesForTesting` instead.
-                let allCandidatesUnreachable = usingConnectOverrideForTesting ? lastDialExhaustedAllCandidatesForTesting : client.lastDialExhaustedAllCandidates
+                let allCandidatesUnreachable =
+                    usingConnectOverrideForTesting ? lastDialExhaustedAllCandidatesForTesting : client.lastDialExhaustedAllCandidates
                 return .failed(allCandidatesUnreachable: allCandidatesUnreachable)
             }
             // A `.connected` result does not prove this client is still the current one (see the note
@@ -1021,11 +1021,7 @@
                 deadClient?.stop()
                 if !attempt.isDialInFlight { dropConnectAttempt(attempt.generation) }
             }
-            if allCandidatesUnreachable {
-                scheduleReconnect(after: .failed(allCandidatesUnreachable: true))
-            } else {
-                scheduleReconnect()
-            }
+            if allCandidatesUnreachable { scheduleReconnect(after: .failed(allCandidatesUnreachable: true)) } else { scheduleReconnect() }
         }
 
         /// Deadline for the corroboration `.ping`, deliberately shorter than both the Device API's 10s
@@ -1253,7 +1249,9 @@
             // before the payload below reaches any listener. A loser contributes nothing after this point:
             // its later payloads and its disconnect both fail the membership guard above on arrival.
             installedStreamAttemptGeneration = attempt.generation
-            for losingGeneration in Array(connectAttempts.keys) where losingGeneration != attempt.generation { retireConnectAttempt(losingGeneration) }
+            for losingGeneration in Array(connectAttempts.keys) where losingGeneration != attempt.generation {
+                retireConnectAttempt(losingGeneration)
+            }
             // A frame actually arriving over the stream is the proof the connect succeeding in
             // `openStateStream` alone is not: it is what the tracker's contract means by
             // `frameReceived()`, and what `TerminalConnectionNotice`'s banner promises the user.
@@ -1399,9 +1397,7 @@
         /// Awaits every connect attempt currently in flight, so a test can observe their outcomes
         /// deterministically instead of polling. The tasks are captured first: a winning attempt retires the
         /// others as it lands, and the live set is mutated by exactly that.
-        func drainPendingConnectForTesting() async {
-            for task in connectAttempts.values.compactMap(\.task) { await task.value }
-        }
+        func drainPendingConnectForTesting() async { for task in connectAttempts.values.compactMap(\.task) { await task.value } }
 
         /// Awaits whichever redial is armed, the stage 1 timer or the stage 2 ladder tick, through its
         /// delay, then the attempts it started, so a test can drive a real redial to completion
@@ -1466,11 +1462,7 @@
             lastReconnectDelayForTesting = resolvedDelay
             let wait = reconnectWaitForTesting
             reconnectTask = Task { @MainActor [weak self] in
-                if let wait {
-                    await wait(resolvedDelay)
-                } else {
-                    try? await Task.sleep(for: resolvedDelay)
-                }
+                if let wait { await wait(resolvedDelay) } else { try? await Task.sleep(for: resolvedDelay) }
                 // `try?` turns the sleep's `CancellationError` into a plain return from that line, not
                 // from this task: without checking `Task.isCancelled` explicitly, a caller that cancels
                 // this task (Retry, or an escalation rearming on the stage 2 ladder) would only stop the
@@ -1540,11 +1532,7 @@
             lastReconnectDelayForTesting = delay
             let wait = unreachableRedialWaitForTesting
             unreachableRedialTask = Task { @MainActor [weak self] in
-                if let wait {
-                    await wait(delay)
-                } else {
-                    try? await Task.sleep(for: delay)
-                }
+                if let wait { await wait(delay) } else { try? await Task.sleep(for: delay) }
                 guard let self, !Task.isCancelled else { return }
                 self.unreachableRedialTask = nil
                 self.startConcurrentUnreachableRedial()
@@ -1619,11 +1607,7 @@
                     let result = await fetch()
                     guard !Task.isCancelled, let outcome = self?.settleLivenessRecheck(with: result) else { break }
                     guard case .retryAfter(let retryDelay) = outcome else { break }
-                    if let wait = self?.livenessRecheckWaitForTesting {
-                        await wait(retryDelay)
-                    } else {
-                        try? await Task.sleep(for: retryDelay)
-                    }
+                    if let wait = self?.livenessRecheckWaitForTesting { await wait(retryDelay) } else { try? await Task.sleep(for: retryDelay) }
                     guard !Task.isCancelled else { break }
                     // Re-resolve a local daemon that may have moved before asking again. An idle-shut-down
                     // daemon comes back on a fresh ephemeral port, so every attempt made through the request
@@ -1715,8 +1699,7 @@
         /// observers exactly when it flips the stage or the banner's visibility, never on a call that
         /// leaves both unchanged, so a persistently down device does not wake every pane on every retry.
         /// Every mutation of the tracker goes through here so that contract cannot be missed at a call site.
-        @discardableResult
-        private func applyStageTransition<T>(_ mutate: (inout TerminalConnectionStageTracker) -> T) -> T {
+        @discardableResult private func applyStageTransition<T>(_ mutate: (inout TerminalConnectionStageTracker) -> T) -> T {
             let before = connectionStageTracker
             let result = mutate(&connectionStageTracker)
             if connectionStageTracker.stage != before.stage || connectionStageTracker.isBannerVisible != before.isBannerVisible {
@@ -1783,11 +1766,7 @@
             graceTask?.cancel()
             let wait = graceWaitForTesting
             graceTask = Task { @MainActor [weak self] in
-                if let wait {
-                    await wait()
-                } else {
-                    try? await Task.sleep(for: .seconds(TerminalConnectionNotice.bannerGraceSeconds))
-                }
+                if let wait { await wait() } else { try? await Task.sleep(for: .seconds(TerminalConnectionNotice.bannerGraceSeconds)) }
                 guard let self, !Task.isCancelled else { return }
                 self.graceTask = nil
                 self.applyStageTransition { $0.graceElapsed() }
@@ -1817,9 +1796,7 @@
         /// would actually observe (it runs on a detached task with no structured-concurrency link back to
         /// the attempt's task, so a retired attempt keeps dialing regardless), is what makes its belated
         /// completion recognizable as stale everywhere it is checked.
-        private func retireAllConnectAttempts() {
-            for generation in Array(connectAttempts.keys) { retireConnectAttempt(generation) }
-        }
+        private func retireAllConnectAttempts() { for generation in Array(connectAttempts.keys) { retireConnectAttempt(generation) } }
 
         /// User-initiated retry from the pane's Retry button, shown only in stage 2 ("Device unreachable").
         /// Resets the tracker's stage 2 ladder (`TerminalConnectionStageTracker.retryRequested()`, a no-op
@@ -1984,7 +1961,7 @@
         /// not a hot per-keystroke path either.
         private nonisolated static func isInteractiveControlCommand(_ request: TerminalControlRequest) -> Bool {
             switch TerminalControlCommand(request: request) {
-            case .send, .key, .clearScreen, .resize, .scroll, .mouseButton: true
+            case .send, .key, .clearScreen, .resize, .scroll, .scrollToBottom, .mouseButton: true
             case .attach, .detach, .heartbeat, .takeover, .setAppearance, .setSelection, .clearSelection, .readSelectionText, .unsupported: false
             }
         }
@@ -2017,8 +1994,7 @@
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
                         command: .state(SpacesDeviceTerminalSessionRequest(sessionID: payload.sessionID, includesRenderUpdate: true)),
-                        authToken: authToken, clientApp: clientApp)
-                )
+                        authToken: authToken, clientApp: clientApp))
                 return TerminalServiceResponse(ok: response.ok, message: response.message, sessionState: response.sessionState)
             case .control(let payload):
                 let deviceRequest = try TerminalPaneService.deviceTerminalControlRequest(

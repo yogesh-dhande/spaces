@@ -255,6 +255,7 @@
             terminalView.onSendScroll = { [weak self] horizontal, vertical, scrollMods, pointerPosition in
                 self?.sendRemoteScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
             }
+            terminalView.onJumpToBottom = { [weak self] in self?.sendRemoteScrollToBottom() }
             terminalView.onSendMouseButton = { [weak self] button, pressed, pointerPosition in
                 self?.sendRemoteMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
             }
@@ -1140,6 +1141,34 @@
                         TerminalControlRequest(command: .clearScreen(.init(clientID: clientID, ownerEpoch: ownerEpoch))), sessionID: sessionID,
                         socketPath: socketPath, requestSender: requestSender)
                     if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "clear_screen") } }
+                }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
+        }
+
+        /// Sends the jump-to-bottom control's request. Gated exactly like `sendRemoteScroll`: only an
+        /// owner on an interactive session can move the shared viewport, which is also the condition the
+        /// control itself is hidden behind (`GhosttyMirrorTerminalView.updateJumpToBottomControlVisibility`).
+        /// This guard is what makes that visibility gate load-bearing rather than cosmetic.
+        private func sendRemoteScrollToBottom() {
+            guard isInteractiveRuntimeStateForControl() else { return }
+            guard let client = attachedClient, attachedMode == .owner else { return }
+            // Flush first: a scroll batch already queued behind this call would otherwise land after the
+            // jump and walk the viewport back up into scrollback the instant it arrives.
+            scrollCoalescer.flush()
+            let socketPath = paths.controlSocketPath
+            let clientID = client.id
+            let ownerEpoch = latestState?.renderOwnerEpoch
+            let sessionID = launchConfiguration.sessionID
+            let requestSender = terminalServiceRequestSender
+            let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
+            let inputFailureHandler = self.inputFailureHandler
+            let queue = inputQueue
+            queue.enqueue(
+                priority: .userInitiated,
+                operation: {
+                    _ = try Self.sendControlRequest(
+                        TerminalControlRequest(command: .scrollToBottom(.init(clientID: clientID, ownerEpoch: ownerEpoch))), sessionID: sessionID,
+                        socketPath: socketPath, requestSender: requestSender)
+                    if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "scroll_to_bottom") } }
                 }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 

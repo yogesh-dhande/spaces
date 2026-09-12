@@ -538,6 +538,81 @@
             XCTAssertEqual(model.visibleText, "This terminal session ended before a final render was available.")
         }
 
+        /// #716: the floating jump-to-bottom control is offered exactly while the owner's rendered frame
+        /// sits above the session's live bottom row, derived from the frame's own scrollbar state.
+        func testIsScrolledIntoScrollbackTrueWhenTheFrameSitsAboveTheLiveBottomRow() async throws {
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
+            defer { model.stop() }
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+
+            await model.applyLatestState(
+                try Self.framedState(
+                    text: "scrolled", sessionRevision: 1, ownerEpoch: 1, emittedAt: "2026-06-04T14:23:45Z", scrollbarTotal: 50, scrollbarOffset: 10),
+                isOutOfBand: false)
+
+            XCTAssertTrue(
+                model.isScrolledIntoScrollback, "a frame whose viewport sits above the live bottom row must offer the jump-to-bottom control")
+        }
+
+        func testIsScrolledIntoScrollbackFalseAtTheLiveBottomRow() async throws {
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
+            defer { model.stop() }
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+
+            await model.applyLatestState(
+                try Self.framedState(
+                    text: "bottom", sessionRevision: 1, ownerEpoch: 1, emittedAt: "2026-06-04T14:23:45Z", scrollbarTotal: 50, scrollbarOffset: 49),
+                isOutOfBand: false)
+
+            XCTAssertFalse(
+                model.isScrolledIntoScrollback, "a frame already showing the session's live bottom row must not offer the jump-to-bottom control")
+        }
+
+        /// Typed input snaps a scrolled-back pane to the bottom on its own; the frame reporting that has
+        /// to retract the control, or it would linger over a viewport that already moved.
+        func testIsScrolledIntoScrollbackClearsWhenALaterFrameArrivesAtTheLiveBottom() async throws {
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
+            defer { model.stop() }
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+
+            await model.applyLatestState(
+                try Self.framedState(
+                    text: "scrolled", sessionRevision: 1, ownerEpoch: 1, emittedAt: "2026-06-04T14:23:45Z", scrollbarTotal: 50, scrollbarOffset: 10),
+                isOutOfBand: false)
+            XCTAssertTrue(model.isScrolledIntoScrollback, "setup: the first frame must start scrolled back")
+
+            await model.applyLatestState(
+                try Self.framedState(
+                    text: "typed", sessionRevision: 2, ownerEpoch: 1, emittedAt: "2026-06-04T14:23:46Z", scrollbarTotal: 51, scrollbarOffset: 50),
+                isOutOfBand: false)
+
+            XCTAssertFalse(
+                model.isScrolledIntoScrollback,
+                "a later frame reporting the live bottom row must hide the jump-to-bottom control an earlier scrolled frame showed")
+        }
+
+        /// A non-owner viewer cannot scroll the session at all (`sendScroll` refuses the same way), so the
+        /// jump-to-bottom control must never be offered to one even if its rendered frame is itself
+        /// scrolled back: offering it would be a dead control nobody can activate.
+        func testIsScrolledIntoScrollbackFalseWhenThisViewerDoesNotOwnTheSession() async throws {
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
+            defer { model.stop() }
+
+            await model.applyLatestState(
+                try Self.framedState(
+                    text: "scrolled", sessionRevision: 1, ownerEpoch: 1, emittedAt: "2026-06-04T14:23:45Z", scrollbarTotal: 50, scrollbarOffset: 10),
+                isOutOfBand: false)
+
+            XCTAssertFalse(model.isOwner, "setup: this viewer must not hold ownership")
+            XCTAssertFalse(
+                model.isScrolledIntoScrollback,
+                "a non-owner viewer cannot drive the viewport, so it must never be offered a jump-to-bottom control it cannot use")
+        }
+
         func testStartingSessionShowsPreparingAndDoesNotOfferTakeOver() {
             let model = TerminalViewerModel(
                 session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
@@ -9474,9 +9549,12 @@
         /// A payload carrying a full frame, the shape a session exports whenever it includes screen state.
         /// `sessionRevision` and `ownerEpoch` are what the reducer orders an out-of-band response by.
         private nonisolated static func framedState(
-            text: String, sessionRevision: UInt64, ownerEpoch: UInt64, emittedAt: String, attachmentSnapshot: TerminalSessionAttachmentSnapshot? = nil
+            text: String, sessionRevision: UInt64, ownerEpoch: UInt64, emittedAt: String,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot? = nil, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0
         ) throws -> GhosttyRemoteSessionStatePayload {
-            let frame = GhosttyRenderFrame(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot(text: text))
+            let frame = GhosttyRenderFrame(
+                sessionRevision: sessionRevision, ownerEpoch: ownerEpoch,
+                snapshot: snapshot(text: text, scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset))
             return GhosttyRemoteSessionStatePayload(
                 sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: emittedAt,
                 sessionStateRevision: sessionRevision, sessionStateFlags: 1, screenStateRevision: sessionRevision, runtimeState: nil,
@@ -9499,13 +9577,15 @@
                 renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.delta(delta)))
         }
 
-        private nonisolated static func snapshot(text: String) -> GhosttyTerminalSnapshot {
+        /// `scrollbarTotal`/`scrollbarOffset` default to 0, which `TerminalScrollbackPosition` reads as "no
+        /// scrollback at all" (i.e. at the live bottom), matching every existing call site's frame.
+        private nonisolated static func snapshot(text: String, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0) -> GhosttyTerminalSnapshot {
             let cells = text.unicodeScalars.map { scalar in
                 GhosttyTerminalSnapshot.Cell(codepoint: scalar.value, foregroundRGB: 0xFFFFFF, backgroundRGB: 0x000000, flags: 0)
             }
             return GhosttyTerminalSnapshot(
                 columns: cells.count, rows: 1, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
-                defaultBackgroundRGB: 0x000000, cells: cells)
+                defaultBackgroundRGB: 0x000000, cells: cells, scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset)
         }
 
         /// A payload carrying runtime state and nothing else, which is what the reducer orders one run

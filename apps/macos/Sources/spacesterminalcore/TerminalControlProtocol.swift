@@ -45,8 +45,8 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         scrollMods: Int32? = nil, scrollPointerX: Double? = nil, scrollPointerY: Double? = nil, scrollPointerMods: UInt32? = nil,
         mouseButton: UInt8? = nil, mousePressed: Bool? = nil, mousePointerX: Double? = nil, mousePointerY: Double? = nil,
         mousePointerMods: UInt32? = nil, appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil,
-        selectionStartColumn: UInt16? = nil, selectionStartRow: UInt32? = nil, selectionEndColumn: UInt16? = nil,
-        selectionEndRow: UInt32? = nil, selectionRectangle: Bool? = nil
+        selectionStartColumn: UInt16? = nil, selectionStartRow: UInt32? = nil, selectionEndColumn: UInt16? = nil, selectionEndRow: UInt32? = nil,
+        selectionRectangle: Bool? = nil
     ) {
         self.command = command
         self.authToken = authToken
@@ -97,6 +97,8 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         case .key(let payload):
             self.init(command: command.name, authToken: authToken, key: payload.key, clientID: payload.clientID, ownerEpoch: payload.ownerEpoch)
         case .clearScreen(let payload):
+            self.init(command: command.name, authToken: authToken, clientID: payload.clientID, ownerEpoch: payload.ownerEpoch)
+        case .scrollToBottom(let payload):
             self.init(command: command.name, authToken: authToken, clientID: payload.clientID, ownerEpoch: payload.ownerEpoch)
         case .resize(let payload):
             self.init(
@@ -411,6 +413,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
     case clearScreen(TerminalControlOwnerPayload)
     case resize(TerminalControlResizePayload)
     case scroll(TerminalControlScrollPayload)
+    case scrollToBottom(TerminalControlOwnerPayload)
     case mouseButton(TerminalControlMouseButtonPayload)
     case setAppearance(TerminalControlSetAppearancePayload)
     case setSelection(TerminalControlSetSelectionPayload)
@@ -444,6 +447,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
                     clientID: request.clientID, ownerEpoch: request.ownerEpoch, scrollHorizontal: request.scrollHorizontal,
                     scrollVertical: request.scrollVertical, scrollMods: request.scrollMods, scrollPointerX: request.scrollPointerX,
                     scrollPointerY: request.scrollPointerY, scrollPointerMods: request.scrollPointerMods))
+        case "scrollToBottom": self = .scrollToBottom(TerminalControlOwnerPayload(clientID: request.clientID, ownerEpoch: request.ownerEpoch))
         case "mouseButton":
             self = .mouseButton(
                 TerminalControlMouseButtonPayload(
@@ -472,6 +476,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
         case .clearScreen: "clearScreen"
         case .resize: "resize"
         case .scroll: "scroll"
+        case .scrollToBottom: "scrollToBottom"
         case .mouseButton: "mouseButton"
         case .setAppearance: "setAppearance"
         case .setSelection: "setSelection"
@@ -483,7 +488,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
 
     public var requiresOwnerClientID: Bool {
         switch self {
-        case .send, .key, .clearScreen, .resize, .scroll, .mouseButton: true
+        case .send, .key, .clearScreen, .resize, .scroll, .scrollToBottom, .mouseButton: true
         // setAppearance is a per-client view preference, not an ownership-gated mutation. Selection
         // is not gated either, but for a different reason: scroll and mouse input are exclusive
         // because two viewers driving them at once would fight (each frame reflects only the last
@@ -501,7 +506,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
     public var includesSessionStateOnSuccess: Bool {
         switch self {
         case .attach, .detach, .takeover: true
-        case .heartbeat, .send, .key, .clearScreen, .resize, .scroll, .mouseButton, .setAppearance, .setSelection, .clearSelection,
+        case .heartbeat, .send, .key, .clearScreen, .resize, .scroll, .scrollToBottom, .mouseButton, .setAppearance, .setSelection, .clearSelection,
             .readSelectionText, .unsupported:
             false
         }
@@ -530,14 +535,14 @@ public enum TerminalControlCommand: Sendable, Equatable {
             } else {
                 nil
             }
-        case .clearScreen, .scroll, .clearSelection, .readSelectionText, .unsupported: nil
+        case .clearScreen, .scroll, .scrollToBottom, .clearSelection, .readSelectionText, .unsupported: nil
         }
     }
 
     public static func isMobileTerminalControlName(_ name: String) -> Bool {
         switch name {
-        case "attach", "detach", "heartbeat", "takeover", "send", "key", "clearScreen", "resize", "scroll", "mouseButton", "setAppearance",
-            "setSelection", "clearSelection", "readSelectionText":
+        case "attach", "detach", "heartbeat", "takeover", "send", "key", "clearScreen", "resize", "scroll", "scrollToBottom", "mouseButton",
+            "setAppearance", "setSelection", "clearSelection", "readSelectionText":
             true
         default: false
         }

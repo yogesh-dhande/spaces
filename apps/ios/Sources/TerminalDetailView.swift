@@ -10,6 +10,13 @@ struct TerminalDetailView: View {
     /// Gap between the Copy pill and the highlight's edge, on whichever side it sits: enough that the
     /// pill never touches (let alone covers) the selected text.
     private static let selectionCopyPillGap: CGFloat = 6
+    /// Inset between the jump-to-bottom button and the trailing/bottom edges of the rendered grid.
+    private static let jumpToBottomGap: CGFloat = 12
+    /// `TerminalJumpToBottomButton`'s visible circle and the 44pt tap-target box it widens itself to.
+    /// The placement math below positions the box, so it has to add back the padding the box puts
+    /// around the circle to inset the circle itself by `jumpToBottomGap`.
+    private static let jumpToBottomDiameter: CGFloat = 30
+    private static let jumpToBottomTapTargetSize: CGFloat = 44
 
     let session: SpacesDeviceTerminalSessionSummary
     let settings: SpacesMobileConnectionSettings
@@ -124,7 +131,11 @@ struct TerminalDetailView: View {
                         if !model.shouldPresentLiveSurface { statusShell.onAppear { renderedText = "" } }
 
                         selectionCopyPillOverlay
-                    }
+                        jumpToBottomOverlay
+                        // The fade belongs to the stack rather than to the button: a transition runs off
+                        // the transaction that inserts or removes the view, and a modifier written on the
+                        // button itself leaves with it.
+                    }.animation(accessibilityReduceMotion ? nil : .easeInOut(duration: 0.12), value: model.isScrolledIntoScrollback)
                 } else {
                     statusShell.onAppear { renderedText = "" }
                 }
@@ -142,9 +153,9 @@ struct TerminalDetailView: View {
             if scenePhase != .active { model.prepareForBackgrounding() }
             model.start()
             if scenePhase == .active { model.resumeAfterBackgrounding() }
-        }.task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }.task(
-            id: e2eCommandRequestPath
-        ) { await consumeE2ECommandRequestsIfNeeded() }.onChange(of: model.showsTerminalSurface) { showsTerminalSurface in
+        }.task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }.task(id: e2eCommandRequestPath) { await consumeE2ECommandRequestsIfNeeded() }.onChange(
+            of: model.showsTerminalSurface
+        ) { showsTerminalSurface in
             if showsTerminalSurface { hasMountedTerminalSurface = true }
             if !showsTerminalSurface { renderedText = "" }
         }.onChange(of: model.shouldPresentLiveSurface) { shouldPresentLiveSurface in
@@ -204,8 +215,9 @@ struct TerminalDetailView: View {
     /// same pass-through rule).
     @ViewBuilder private var connectionBannerOverlay: some View {
         if model.isConnectionBannerVisible {
-            connectionBanner.padding(.top, 8).padding(.trailing, 8).transition(.opacity)
-                .onChange(of: model.connectionBannerPulseCount) { _ in pulseConnectionBanner() }
+            connectionBanner.padding(.top, 8).padding(.trailing, 8).transition(.opacity).onChange(of: model.connectionBannerPulseCount) { _ in
+                pulseConnectionBanner()
+            }
         }
     }
 
@@ -220,15 +232,15 @@ struct TerminalDetailView: View {
         let isUnreachable = model.connectionStage == .unreachable
         return HStack(spacing: 6) {
             if isUnreachable {
-                Text(TerminalConnectionNotice.unreachableText).font(.footnote).foregroundStyle(.white.opacity(0.92)).lineLimit(1)
-                    .allowsHitTesting(false)
+                Text(TerminalConnectionNotice.unreachableText).font(.footnote).foregroundStyle(.white.opacity(0.92)).lineLimit(1).allowsHitTesting(
+                    false)
                 Button(TerminalConnectionNotice.retryActionTitle) { model.retryConnection() }.font(.footnote.weight(.semibold)).foregroundStyle(
                     Theme.accent
                 ).accessibilityIdentifier("terminal.connectionBanner.retry")
             } else {
                 ProgressView().controlSize(.mini).tint(.white.opacity(0.9)).allowsHitTesting(false)
-                Text(TerminalConnectionNotice.reconnectingText).font(.footnote).foregroundStyle(.white.opacity(0.92)).lineLimit(1)
-                    .allowsHitTesting(false)
+                Text(TerminalConnectionNotice.reconnectingText).font(.footnote).foregroundStyle(.white.opacity(0.92)).lineLimit(1).allowsHitTesting(
+                    false)
             }
         }.padding(.horizontal, 12).padding(.vertical, 6).background(
             Capsule().fill(.black.opacity(0.28)).overlay(
@@ -297,6 +309,40 @@ struct TerminalDetailView: View {
         else { return nil }
         let gridSize = CGSize(width: CGFloat(window.columns) * metrics.width, height: CGFloat(window.rows) * metrics.height)
         return SelectionCopyPillPlacement(anchor: anchor, contentOrigin: contentOrigin, gridSize: gridSize)
+    }
+
+    /// Absent whenever `model.isScrolledIntoScrollback` is false: like `selectionCopyPillOverlay`, the
+    /// button is not hidden-but-present, it is not built at all, so it never intercepts a tap meant for
+    /// the terminal underneath.
+    @ViewBuilder private var jumpToBottomOverlay: some View {
+        if model.isScrolledIntoScrollback, let origin = jumpToBottomOrigin {
+            TerminalJumpToBottomButton { performJumpToBottom() }.offset(x: origin.x, y: origin.y).frame(
+                maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading
+            ).transition(.opacity)
+        }
+    }
+
+    /// Top-leading origin for the button's 44pt tap-target box, in the terminal view's own coordinate
+    /// space (the same space `selectionCopyPillPlacement` computes in, via the same `.offset` +
+    /// `.frame(topLeading)` technique). `model.renderedViewportWindow` plus the surface's own cell metrics
+    /// give the rendered grid's trailing and bottom edges; that grid already excludes whatever rows the
+    /// keyboard accessory and the keyboard itself are cropping (see
+    /// `GhosttyRemoteTerminalHostView.visibleRenderBounds()`), so insetting from the grid's own bottom
+    /// edge is enough to clear both without a separate keyboard-height calculation.
+    private var jumpToBottomOrigin: CGPoint? {
+        guard let window = model.renderedViewportWindow else { return nil }
+        let metrics = GhosttyRemoteTerminalViewport.cellMetrics(fontSize: terminalFontSize)
+        let contentOrigin = CGPoint(x: GhosttyRemoteTerminalViewport.contentInsets.left, y: GhosttyRemoteTerminalViewport.contentInsets.top)
+        let gridRight = contentOrigin.x + CGFloat(window.columns) * metrics.width
+        let gridBottom = contentOrigin.y + CGFloat(window.rows) * metrics.height
+        let tapTargetPadding = (Self.jumpToBottomTapTargetSize - Self.jumpToBottomDiameter) / 2
+        let inset = Self.jumpToBottomGap + Self.jumpToBottomDiameter + tapTargetPadding
+        return CGPoint(x: gridRight - inset, y: gridBottom - inset)
+    }
+
+    private func performJumpToBottom() {
+        writeE2EEventIfNeeded(kind: "jump_to_bottom", detail: nil)
+        Task { await model.scrollToBottom() }
     }
 
     /// A plain tap on the terminal while a selection is present clears it for every viewer (see
