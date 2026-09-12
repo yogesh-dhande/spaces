@@ -191,6 +191,45 @@ import Testing
         #expect(repliedLine?.contains("signal(\"working\", sessionID)") == true)
     }
 
+    // MARK: - Reporting an exit
+
+    /// A codex session that ends reports it itself. Without the binding, a codex agent row only stops
+    /// being live when the daemon's exited-session sweep notices, which is coarser and later.
+    @Test func everyAgentWithASessionEndEventReportsItsOwnExit() throws {
+        for agent in [CodingAgent.claudeCode, .codex] {
+            #expect(agent.jsonEventBindings.contains { $0.eventName == "SessionEnd" && $0.event == .exit })
+            #expect(agent.jsonEventBindings.filter { $0.event == .exit }.count == 1)
+        }
+
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("hooks.json")
+        try AgentHookJSONWriter.install(fileURL: file, bindings: CodingAgent.codex.jsonEventBindings, spacesExecutablePath: "/usr/local/bin/spaces")
+        let sessionEnd = try readCommands(file, eventName: "SessionEnd")
+        #expect(sessionEnd.count == 1)
+        #expect(sessionEnd[0].contains("agent signal exit"))
+
+        // The writer writes what the agent binds and nothing else: an event set without a session-end
+        // event produces no entry for one.
+        let other = directory.appendingPathComponent("settings.json")
+        try AgentHookJSONWriter.install(fileURL: other, bindings: bindings, spacesExecutablePath: "/usr/local/bin/spaces")
+        #expect(try readCommands(other, eventName: "SessionEnd").isEmpty)
+    }
+
+    /// Bumping the hook version is what re-offers the update to a user carrying the previous release's
+    /// hooks. Pinned against the literal previous version rather than `hookVersion - 1`, so a bump that
+    /// forgets what it invalidates cannot pass by arithmetic.
+    @Test func hooksWrittenByThePreviousReleaseReadAsOutdated() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("settings.json")
+        try writeHooks(
+            ["SessionStart": [group(command(event: .initialize, version: 4))], "Stop": [group(command(event: .done, version: 4))]], to: file)
+
+        #expect(AgentHookCommand.hookVersion == 5)
+        #expect(AgentHookJSONWriter.installState(fileURL: file, bindings: bindings) == .outdated)
+    }
+
     // MARK: - opencode plugin
 
     /// opencode hands its plugin a JavaScript event rather than a payload on stdin, so the id of the
@@ -222,7 +261,50 @@ import Testing
         #expect(AgentHookOpencodePluginWriter.installState(pluginURL: plugin) == .outdated)
     }
 
-    // MARK: - Codex composes two files
+    // MARK: - Codex composes three things
+
+    /// The state names Codex gives the Spaces entries of a freshly written `hooks.json`: one group per
+    /// event, one hook inside it, so both indices are 0. Spelled out rather than derived, so the key
+    /// shape is pinned independently of the code that builds it.
+    private static let codexStateKeyEvents = [
+        "session_start", "user_prompt_submit", "pre_tool_use", "post_tool_use", "permission_request", "stop", "session_end",
+    ]
+
+    /// The canonical path of `url`, as `realpath(3)` reports it and as Codex records it in a state table
+    /// name: `/private/var/...` for a temporary directory, not the `/var/...` alias Foundation's own
+    /// symlink resolution returns to. Spelled out here rather than taken from the product, so the two
+    /// have to agree.
+    private func realPath(_ url: URL) -> String {
+        guard let resolved = realpath(url.path, nil) else { return url.path }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
+    /// The name Codex gives `hooksFileURL`: its home canonicalized, with the file name appended.
+    private func codexKeyPath(_ hooksFileURL: URL) -> String {
+        (realPath(hooksFileURL.deletingLastPathComponent()) as NSString).appendingPathComponent(hooksFileURL.lastPathComponent)
+    }
+
+    /// The `config.toml` tables Codex writes once the user approves the hooks, for the Spaces entry of
+    /// every bound event. `enabled` is written only when given, matching Codex, which omits it for an
+    /// entry nobody has switched off.
+    ///
+    /// `keyPath` defaults to the name Codex gives the file: its home canonicalized, with the file name
+    /// appended; a caller passes it explicitly to write a table under some other name.
+    private func codexTrustTables(hooksFileURL: URL, keyPath: String? = nil, enabled: Bool? = nil, skipping skippedEvent: String? = nil) -> String {
+        let path = keyPath ?? codexKeyPath(hooksFileURL)
+        return Self.codexStateKeyEvents.filter { $0 != skippedEvent }.map { event in
+            var table = "\n[hooks.state.\"\(path):\(event):0:0\"]\n"
+            if let enabled { table += "enabled = \(enabled)\n" }
+            return table + "trusted_hash = \"sha256:0f0f\"\n"
+        }.joined()
+    }
+
+    private func writeCodexHooksOfVersion(_ version: Int, to url: URL) throws {
+        var hooks: [String: Any] = [:]
+        for binding in CodingAgent.codex.jsonEventBindings { hooks[binding.eventName] = [group(command(event: binding.event, version: version))] }
+        try writeHooks(hooks, to: url)
+    }
 
     /// Codex will not run `hooks.json` until `features.hooks = true`. Current entries with the flag
     /// off are `.outdated` — the hooks exist but cannot fire, and reinstalling sets the flag.
@@ -231,14 +313,142 @@ import Testing
         defer { try? FileManager.default.removeItem(at: home) }
         let codexDirectory = home.appendingPathComponent(".codex", isDirectory: true)
         try FileManager.default.createDirectory(at: codexDirectory, withIntermediateDirectories: true)
+        let hooksFileURL = codexDirectory.appendingPathComponent("hooks.json")
         try AgentHookJSONWriter.install(
-            fileURL: codexDirectory.appendingPathComponent("hooks.json"), bindings: CodingAgent.codex.jsonEventBindings,
-            spacesExecutablePath: "/usr/local/bin/spaces")
+            fileURL: hooksFileURL, bindings: CodingAgent.codex.jsonEventBindings, spacesExecutablePath: "/usr/local/bin/spaces")
+        try codexTrustTables(hooksFileURL: hooksFileURL).write(
+            to: codexDirectory.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
 
         let disabledCodex = try makeCodexFeatureListExecutable(in: home, enabled: false)
         #expect(CodingAgent.codex.installState(home: home, fileManager: .default, agentExecutablePath: disabledCodex) == .outdated)
 
         let enabledCodex = try makeCodexFeatureListExecutable(in: home, enabled: true)
         #expect(CodingAgent.codex.installState(home: home, fileManager: .default, agentExecutablePath: enabledCodex) == .current)
+    }
+
+    /// Codex runs no hook it has not been told to trust, so hooks that are present, current, and
+    /// enabled still report nothing until the user approves them in Codex. The rungs, in the order
+    /// their remedies apply: nothing installed, entries an older Spaces wrote (reinstall), entries
+    /// reviewed and then switched off in Codex, entries this build wrote that were never reviewed,
+    /// entries trusted.
+    @Test func codexRunsThroughTheWholeStateLadderFromNotInstalledToTrusted() throws {
+        let home = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let codexDirectory = home.appendingPathComponent(".codex", isDirectory: true)
+        try FileManager.default.createDirectory(at: codexDirectory, withIntermediateDirectories: true)
+        let hooksFileURL = codexDirectory.appendingPathComponent("hooks.json")
+        let configURL = codexDirectory.appendingPathComponent("config.toml")
+        let codex = try makeCodexFeatureListExecutable(in: home, enabled: true)
+        func state() -> AgentHookInstallState { CodingAgent.codex.installState(home: home, fileManager: .default, agentExecutablePath: codex) }
+
+        #expect(Self.codexStateKeyEvents.count == CodingAgent.codex.jsonEventBindings.count)
+        #expect(state() == .notInstalled)
+
+        // Entries an older Spaces wrote read as out of date even where Codex already trusts them: the
+        // hooks the user approved are not the hooks this build wants to run.
+        try writeCodexHooksOfVersion(AgentHookCommand.hookVersion - 1, to: hooksFileURL)
+        try codexTrustTables(hooksFileURL: hooksFileURL).write(to: configURL, atomically: true, encoding: .utf8)
+        #expect(state() == .outdated)
+
+        try AgentHookJSONWriter.install(
+            fileURL: hooksFileURL, bindings: CodingAgent.codex.jsonEventBindings, spacesExecutablePath: "/usr/local/bin/spaces")
+        try "[features]\nhooks = true\n".write(to: configURL, atomically: true, encoding: .utf8)
+        #expect(state() == .awaitingTrust)
+
+        // One entry left unreviewed is enough: the events it covers report nothing.
+        try codexTrustTables(hooksFileURL: hooksFileURL, skipping: "session_end").write(to: configURL, atomically: true, encoding: .utf8)
+        #expect(state() == .awaitingTrust)
+
+        // Reviewed and then switched off is its own answer, not an outstanding review: Codex asks for
+        // no review of a hook it was told to stop running, so the user is sent to switch it back on.
+        try codexTrustTables(hooksFileURL: hooksFileURL, enabled: false).write(to: configURL, atomically: true, encoding: .utf8)
+        #expect(state() == .disabledByAgent)
+
+        // A switched-off entry beside an unreviewed one still reads as switched off: it stays off
+        // however the review goes, so it is the first thing to put right.
+        try (codexTrustTables(hooksFileURL: hooksFileURL, enabled: false, skipping: "session_end")).write(
+            to: configURL, atomically: true, encoding: .utf8)
+        #expect(state() == .disabledByAgent)
+
+        try codexTrustTables(hooksFileURL: hooksFileURL, enabled: true).write(to: configURL, atomically: true, encoding: .utf8)
+        #expect(state() == .current)
+    }
+
+    /// Codex canonicalizes its home before naming a hook, so a home under `/var` or `/tmp` (a link into
+    /// a temporary directory, and every home these tests build, since `NSTemporaryDirectory` sits under
+    /// `/var/folders`) is recorded under `/private`. Naming it the other way leaves every entry reading
+    /// as unreviewed forever and its records never cleared, so the canonical form is pinned here.
+    @Test func codexNamesAHookUnderTheCanonicalPathOfItsHome() throws {
+        let home = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let codexDirectory = home.appendingPathComponent(".codex", isDirectory: true)
+        try FileManager.default.createDirectory(at: codexDirectory, withIntermediateDirectories: true)
+        let hooksFileURL = codexDirectory.appendingPathComponent("hooks.json")
+
+        let keyPath = AgentHookCodexTrustState.codexKeyPath(for: hooksFileURL)
+
+        #expect(keyPath.hasPrefix("/private/"), "A temporary home is named under its canonical path")
+        #expect(keyPath.hasSuffix("/.codex/hooks.json"))
+        #expect(keyPath == codexKeyPath(hooksFileURL))
+    }
+
+    /// A codex home reached through a symlink is a supported setup, and Codex resolves its home before
+    /// naming a hook: it keys the state tables by the directory the link points at. Building the key
+    /// from the path Spaces walked instead would leave every hook in such a home reading as unreviewed
+    /// no matter how often the user approves it, and would leave its records behind on every reinstall.
+    @Test func codexTrustFollowsTheResolvedHomeWhenTheCodexDirectoryIsASymlink() throws {
+        let enclosing = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: enclosing) }
+        let resolvedHome = enclosing.appendingPathComponent("resolved", isDirectory: true)
+        let linkedHome = enclosing.appendingPathComponent("linked", isDirectory: true)
+        try FileManager.default.createDirectory(at: resolvedHome.appendingPathComponent(".codex"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: linkedHome, withDestinationURL: resolvedHome)
+
+        let hooksFileURL = linkedHome.appendingPathComponent(".codex/hooks.json")
+        let configURL = linkedHome.appendingPathComponent(".codex/config.toml")
+        try AgentHookJSONWriter.install(
+            fileURL: hooksFileURL, bindings: CodingAgent.codex.jsonEventBindings, spacesExecutablePath: "/usr/local/bin/spaces")
+        let codex = try makeCodexFeatureListExecutable(in: enclosing, enabled: true)
+        func state() -> AgentHookInstallState { CodingAgent.codex.installState(home: linkedHome, fileManager: .default, agentExecutablePath: codex) }
+
+        // Tables keyed by the path Spaces walked, which is not the name Codex gives these hooks.
+        try codexTrustTables(hooksFileURL: hooksFileURL, keyPath: hooksFileURL.path).write(to: configURL, atomically: true, encoding: .utf8)
+        #expect(state() == .awaitingTrust)
+
+        try codexTrustTables(hooksFileURL: hooksFileURL).write(to: configURL, atomically: true, encoding: .utf8)
+        #expect(state() == .current)
+
+        // And a rewrite clears exactly those records, so the reinstall leaves nothing claiming the new
+        // hooks were approved.
+        try AgentHookCodexTrustState.clearTrustRecords(hooksFileURL: hooksFileURL, configURL: configURL, fileManager: .default)
+        #expect(!(try String(contentsOf: configURL, encoding: .utf8)).contains("hooks.state"))
+        #expect(state() == .awaitingTrust)
+    }
+
+    /// Codex names a hook by where it sits in the file, so the Spaces entry of an event the user also
+    /// hooks is the second group, not the first. Reading the coordinates back out of the written file
+    /// is what keeps the two in step; assuming position 0 would report a trusted hook as untrusted for
+    /// every user who has a hook of their own on the same event.
+    @Test func codexTrustFollowsTheSpacesEntrysPositionAmongTheUsersOwnHooks() throws {
+        let home = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let codexDirectory = home.appendingPathComponent(".codex", isDirectory: true)
+        try FileManager.default.createDirectory(at: codexDirectory, withIntermediateDirectories: true)
+        let hooksFileURL = codexDirectory.appendingPathComponent("hooks.json")
+        let configURL = codexDirectory.appendingPathComponent("config.toml")
+        try writeHooks(["Stop": [group("my-own-stop-hook")]], to: hooksFileURL)
+        try AgentHookJSONWriter.install(
+            fileURL: hooksFileURL, bindings: CodingAgent.codex.jsonEventBindings, spacesExecutablePath: "/usr/local/bin/spaces")
+        let codex = try makeCodexFeatureListExecutable(in: home, enabled: true)
+        func state() -> AgentHookInstallState { CodingAgent.codex.installState(home: home, fileManager: .default, agentExecutablePath: codex) }
+
+        // Trust recorded for the user's own Stop hook, at group 0, says nothing about the Spaces entry.
+        try codexTrustTables(hooksFileURL: hooksFileURL).write(to: configURL, atomically: true, encoding: .utf8)
+        #expect(state() == .awaitingTrust)
+
+        let keyPath = codexKeyPath(hooksFileURL)
+        let spacesStopTable = "\n[hooks.state.\"\(keyPath):stop:1:0\"]\ntrusted_hash = \"sha256:0f0f\"\n"
+        try (codexTrustTables(hooksFileURL: hooksFileURL, skipping: "stop") + spacesStopTable).write(to: configURL, atomically: true, encoding: .utf8)
+        #expect(state() == .current)
     }
 }

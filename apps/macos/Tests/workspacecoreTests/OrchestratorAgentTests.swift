@@ -570,6 +570,180 @@ extension OrchestratorTests {
         }
     }
 
+    /// A codex the user restarts in the same terminal signals `init` on the row its own `SessionEnd`
+    /// just left `.exited`. That signal belongs to the new session, so the row returns to the status a
+    /// first SessionStart produces instead of reading exited until the first prompt, and it stops
+    /// counting as finalized so the restarted agent's own exit is delivered when it comes.
+    func testAgentInitAfterExitReturnsTheRestartedRowToIdle() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = makeTestOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "restarted-codex-session"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex", foregroundArgv: ["codex"],
+                    foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex", foregroundDisplayCommand: "codex"))
+            // A live terminal: the shell outlives the agent, which is what makes the exit hold the row
+            // `.exited` rather than delete it.
+            XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
+
+            let agent = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID, status: .idle, eventType: "init",
+                eventSource: "spaces_agent_signal")
+            _ = try orchestrator.updateAgentWindowStatus(
+                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, status: .done, eventType: "done",
+                eventSource: "spaces_agent_signal")
+
+            // `/exit` in codex: SessionEnd signals the exit through the finalization chokepoint.
+            let beforeExit = try XCTUnwrap(store.agentWindow(id: agent.id))
+            try orchestrator.finalizeAgentRow(
+                beforeExit, reason: .exited(eventType: "exit", eventSource: "spaces_agent_signal", environmentKeys: nil))
+            XCTAssertEqual(try store.agentWindow(id: agent.id)?.status, .exited)
+
+            // `codex` again in the same terminal: SessionStart, through the call the daemon's signal
+            // chokepoint makes, carrying the row's own stored status.
+            let stored = try XCTUnwrap(store.agentWindow(id: agent.id))
+            let restarted = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID, status: stored.status, eventType: "init",
+                eventSource: "spaces_agent_signal")
+
+            XCTAssertEqual(restarted.id, agent.id, "The restart reuses the terminal's own row.")
+            XCTAssertEqual(restarted.status, .idle, "An init on an exited row belongs to a fresh agent, so the row is idle again.")
+            XCTAssertEqual(try store.agentWindow(id: agent.id)?.status, .idle)
+            XCTAssertFalse(
+                try orchestrator.agentRowIsFinalized(restarted), "The restarted row is live again, so its own exit is still owed to watchers.")
+        }
+    }
+
+    /// Codex fires `SessionStart` with the first turn rather than at its prompt, so a codex relaunched in
+    /// the terminal the last one exited from signals nothing until the user types. Detection is what
+    /// reports it: the reconcile pass sees an agent back in the foreground of a live terminal whose row
+    /// reads `.exited` and returns the row to idle, keeping its signal history.
+    func testReconcileReturnsAnExitedRowToIdleWhenAnAgentIsDetectedInTheForegroundAgain() throws {
+        try withRelaunchFixture { orchestrator, store, workspace, sessionID, paths, agentID in
+            // The relaunched codex, running before it has signaled anything. Its pid is not the pid the
+            // exit was observed against, which is what marks it as a new process rather than the old one
+            // still winding down.
+            try TerminalSessionPersistence.writeRuntimeState(
+                Self.relaunchRuntimeState(sessionID: sessionID, workspace: workspace, foreground: .codex, foregroundPID: Self.relaunchedCodexPID),
+                paths: paths)
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+
+            let row = try XCTUnwrap(store.agentWindow(id: agentID))
+            XCTAssertEqual(row.status, .idle, "A detected relaunch returns the row to the status a first SessionStart produces.")
+            XCTAssertNotNil(try store.lastAgentSignalAt(agentSessionID: agentID), "The row keeps the signal history it earned.")
+            XCTAssertFalse(
+                try orchestrator.agentRowIsFinalized(row), "The row is live again, so the relaunched agent's own exit is still owed to watchers.")
+            XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1, "The relaunch reuses the row rather than adding one.")
+        }
+    }
+
+    /// An agent reports `SessionEnd` before it dies, so the pass that runs in between still finds the
+    /// departing process in the foreground. Same pid, same agent: the row stays exited and records no
+    /// `init`, so nothing re-arms it for a second exit when the terminal finally reverts to its shell.
+    func testReconcileLeavesAnExitedRowExitedWhileTheAgentThatSignaledItIsStillWindingDown() throws {
+        try withRelaunchFixture { orchestrator, store, workspace, sessionID, paths, agentID in
+            try TerminalSessionPersistence.writeRuntimeState(
+                Self.relaunchRuntimeState(sessionID: sessionID, workspace: workspace, foreground: .codex, foregroundPID: Self.firstCodexPID),
+                paths: paths)
+
+            XCTAssertFalse(
+                try orchestrator.reconcileTerminalForegroundAgentClassifications(), "The agent that just signaled its exit is nothing to react to.")
+
+            XCTAssertEqual(try store.agentWindow(id: agentID)?.status, .exited)
+            let initEventCount = try store.queryRows(
+                sql: "SELECT COUNT(*) FROM agent_session_events WHERE agent_session_id = ? AND event_type = 'init'", bindings: [agentID]
+            ).first?.first
+            XCTAssertEqual(initEventCount, "0", "The departing agent's own process does not read as a relaunch.")
+        }
+    }
+
+    /// The same pass on the same terminal with nothing in the foreground but the user's shell: the agent
+    /// really is gone, so the row stays exited.
+    func testReconcileLeavesAnExitedRowExitedWhileTheTerminalSitsAtItsShell() throws {
+        try withRelaunchFixture { orchestrator, store, workspace, sessionID, paths, agentID in
+            try TerminalSessionPersistence.writeRuntimeState(
+                Self.relaunchRuntimeState(sessionID: sessionID, workspace: workspace, foreground: nil), paths: paths)
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications(), "A bare shell is nothing to react to.")
+
+            XCTAssertEqual(try store.agentWindow(id: agentID)?.status, .exited)
+            XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1, "A bare shell does not promote a second row either.")
+        }
+    }
+
+    /// The codex the fixture's row is established and finalized against, and the one that replaces it.
+    private static let firstCodexPID: Int32 = 123
+    private static let relaunchedCodexPID: Int32 = 456
+
+    /// A live shell terminal whose signaled agent row has exited: the state a codex `/exit` leaves behind.
+    private func withRelaunchFixture(
+        _ body: (WorkspaceOrchestrator, SQLiteStore, WorkspaceRecord, String, TerminalSessionPaths, String) throws -> Void
+    ) throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = makeTestOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "relaunched-codex-session"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: Self.relaunchRuntimeState(sessionID: sessionID, workspace: workspace, foreground: .codex))
+            // A live terminal: the shell outlives the agent, which is what holds the row `.exited`
+            // instead of deleting it.
+            XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let promoted = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            // A hook signal lands on the detection row, so its exit goes through the notify path.
+            _ = try orchestrator.updateAgentWindowStatus(
+                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, status: .done, eventType: "done",
+                eventSource: "spaces_agent_signal")
+            // `/exit`: SessionEnd finalizes the row while the terminal stays open.
+            try orchestrator.finalizeAgentRow(
+                try XCTUnwrap(store.agentWindow(id: promoted.id)),
+                reason: .exited(eventType: "exit", eventSource: "spaces_agent_signal", environmentKeys: nil))
+            XCTAssertEqual(try store.agentWindow(id: promoted.id)?.status, .exited)
+
+            try body(orchestrator, store, workspace, sessionID, paths, promoted.id)
+        }
+    }
+
+    private static func relaunchRuntimeState(
+        sessionID: String, workspace: WorkspaceRecord, foreground: TerminalDetectedAgentKind?, foregroundPID: Int32 = OrchestratorTests.firstCodexPID
+    ) -> TerminalSessionRuntimeState {
+        let isAgent = foreground != nil
+        let executableName = isAgent ? "codex" : "zsh"
+        return TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: foregroundPID, state: .running,
+            updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: foregroundPID,
+            foregroundExecutablePath: isAgent ? "/opt/homebrew/bin/codex" : "/bin/zsh", foregroundExecutableName: executableName,
+            foregroundArgv: [executableName], foregroundDetectedAgentKind: foreground, foregroundDisplayLabel: isAgent ? "Codex" : nil,
+            foregroundDisplayCommand: isAgent ? "codex" : nil)
+    }
+
     /// The termination chokepoint's `.destroyed` reason — shared by stop, kill, workspace stop, terminal
     /// teardown, and orphan prune — must notify a watched child's subscribers it
     /// exited and drop its inbound watch edge; and a delete that bypasses the chokepoint must fail loudly

@@ -49,6 +49,7 @@ import workspacecore
         // Same handoff as a sidebar section switch: this rebuilds the window's content, and the Devices pane
         // keeps state in the views that are about to go away.
         if selectedSettingsSection == .devices { host.devicePairing.prepareDeviceSettingsForContentReplacement() }
+        if selectedSettingsSection == .codingAgents { codingAgents.stopAgentConfigWatch() }
         selectedSettingsSection = section
         host.showingSettings = true
         presentSettingsWindow()
@@ -60,6 +61,8 @@ import workspacecore
     /// host's shared `windowWillClose` delegate.
     func handleSettingsWindowClosed() {
         if selectedSettingsSection == .devices { host.devicePairing.prepareDeviceSettingsForContentReplacement() }
+        // The rows are off screen, so a change to an agent's own config has nothing left to update.
+        if selectedSettingsSection == .codingAgents { codingAgents.stopAgentConfigWatch() }
         settingsSectionContentContainer = nil
         settingsSectionRowViews.removeAll()
     }
@@ -238,6 +241,7 @@ import workspacecore
         guard section != selectedSettingsSection else { return }
         // The outgoing section's views are about to be torn down; the Devices pane keeps state in its own.
         if selectedSettingsSection == .devices { host.devicePairing.prepareDeviceSettingsForContentReplacement() }
+        if selectedSettingsSection == .codingAgents { codingAgents.stopAgentConfigWatch() }
         selectedSettingsSection = section
         for (candidate, row) in settingsSectionRowViews { row.isSelected = candidate == section }
         renderSelectedSettingsSection()

@@ -31,7 +31,10 @@ public enum AgentHookCommand {
     /// rather than restarted. The opencode plugin passes it as `--agent-session`; Claude Code's and
     /// Codex's command text is unchanged, since the CLI reads their id from the hook payload it
     /// already receives, and their entries still move to v4 so one version marks one signal behavior.
-    public static let hookVersion = 4
+    /// v5: Codex `SessionEnd` → `exit`, so a codex agent reports its own exit rather than leaving it to
+    /// the daemon's exited-session sweep, and Codex's trust states (`awaitingTrust`, `disabledByAgent`)
+    /// are read from its own config, which the rewrite this version performs re-enters.
+    public static let hookVersion = 5
 
     /// Version-less ownership token. Every Spaces-owned entry, of every version, contains it.
     ///

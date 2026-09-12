@@ -390,6 +390,247 @@
             #expect(read(plugin) == existing)
         }
 
+        // MARK: - Codex trust records
+
+        /// The name Codex gives `hooksFileURL` in a state table: its home canonicalized the way
+        /// `realpath(3)` reports it, with the file name appended. A temporary home reached through
+        /// `/var` is therefore named under `/private/var`, which is what Codex records and what
+        /// Foundation's own symlink resolution would undo.
+        private func codexKeyPath(_ hooksFileURL: URL) -> String {
+            let directory = hooksFileURL.deletingLastPathComponent().path
+            guard let resolved = realpath(directory, nil) else { return hooksFileURL.path }
+            defer { free(resolved) }
+            return (String(cString: resolved) as NSString).appendingPathComponent(hooksFileURL.lastPathComponent)
+        }
+
+        /// The `config.toml` tables Codex writes once the user approves the Spaces entries of
+        /// `hooksFileURL`, built from the file itself so the coordinates follow whatever else the user
+        /// hooks. Written independently of the product's own key derivation, so the two have to agree.
+        private func codexTrustTables(hooksFileURL: URL) throws -> String {
+            let root = try JSONSerialization.jsonObject(with: Data(contentsOf: hooksFileURL)) as! [String: Any]
+            let hooks = root["hooks"] as! [String: Any]
+            let keyPath = codexKeyPath(hooksFileURL)
+            var tables: [String] = []
+            for (eventName, value) in hooks {
+                let event = eventName.reduce(into: "") { snake, character in
+                    if character.isUppercase, !snake.isEmpty { snake.append("_") }
+                    snake.append(contentsOf: character.lowercased())
+                }
+                for (groupIndex, group) in (value as! [[String: Any]]).enumerated() {
+                    for (hookIndex, entry) in ((group["hooks"] as? [[String: Any]]) ?? []).enumerated() {
+                        guard let command = entry["command"] as? String, AgentHookCommand.isSpacesOwned(command) else { continue }
+                        tables.append("\n[hooks.state.\"\(keyPath):\(event):\(groupIndex):\(hookIndex)\"]\ntrusted_hash = \"sha256:0f0f\"\n")
+                    }
+                }
+            }
+            return tables.sorted().joined()
+        }
+
+        private func codexInstallState(home: URL) -> AgentHookInstallState? { status(home: home).first { $0.kind == .codex }?.installState }
+
+        /// The trap a `hookVersion` bump sets: Codex keeps the trust record of a hook whose text has
+        /// changed, so hooks Spaces has just rewritten would read as trusted on the strength of a record
+        /// describing text that is gone, and every Codex signal would be dead while the rows said the
+        /// hooks were installed. The rewrite clears those records, so the entries read as awaiting
+        /// review until the user actually gives it.
+        @Test func rewritingCodexHooksClearsTheTrustRecordsOfTheTextItReplaced() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.codex], home: home)
+            let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+            let hooksFileURL = codexHome.appendingPathComponent("hooks.json")
+            let configURL = codexHome.appendingPathComponent("config.toml")
+
+            // A previous Spaces release's hooks, approved in Codex and reporting normally.
+            try install([.codex], home: home)
+            let previousRelease = read(hooksFileURL).replacingOccurrences(
+                of: AgentHookCommand.versionedMarker(), with: AgentHookCommand.versionedMarker(AgentHookCommand.hookVersion - 1))
+            try previousRelease.write(to: hooksFileURL, atomically: true, encoding: .utf8)
+            try (read(configURL) + codexTrustTables(hooksFileURL: hooksFileURL)).write(to: configURL, atomically: true, encoding: .utf8)
+            #expect(codexInstallState(home: home) == .outdated)
+
+            try install([.codex], home: home)
+            #expect(codexInstallState(home: home) == .awaitingTrust)
+            #expect(!read(configURL).contains("sha256:0f0f"))
+
+            // The user approves them in Codex.
+            try (read(configURL) + codexTrustTables(hooksFileURL: hooksFileURL)).write(to: configURL, atomically: true, encoding: .utf8)
+            #expect(codexInstallState(home: home) == .current)
+        }
+
+        /// The trust records describe the text the rewrite replaced, so they go even when the feature
+        /// toggle that follows the rewrite fails. Keeping them would leave a record standing over text
+        /// that no longer exists, and the next read would report `current` for hooks Codex will not run.
+        @Test func aFailedFeatureToggleStillClearsTheTrustOfTheTextTheInstallReplaced() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.codex], home: home)
+            let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+            let hooksFileURL = codexHome.appendingPathComponent("hooks.json")
+            let configURL = codexHome.appendingPathComponent("config.toml")
+
+            // A previous Spaces release's hooks, approved in Codex.
+            try install([.codex], home: home)
+            let previousRelease = read(hooksFileURL).replacingOccurrences(
+                of: AgentHookCommand.versionedMarker(), with: AgentHookCommand.versionedMarker(AgentHookCommand.hookVersion - 1))
+            try previousRelease.write(to: hooksFileURL, atomically: true, encoding: .utf8)
+            try (read(configURL) + codexTrustTables(hooksFileURL: hooksFileURL)).write(to: configURL, atomically: true, encoding: .utf8)
+
+            // The Codex CLI stops answering: a broken install, a version-manager shim, a timeout.
+            try makeExecutable(
+                name: "codex", directory: home.appendingPathComponent(".local/bin", isDirectory: true), contents: "#!/bin/sh\nexit 1\n")
+            let outcome = try install([.codex], home: home)
+
+            #expect(outcome.failures.contains { $0.kind == .codex })
+            #expect(read(hooksFileURL).contains(AgentHookCommand.versionedMarker()))
+            #expect(!read(configURL).contains("sha256:0f0f"))
+        }
+
+        /// Codex names a hook by its position inside its event, so a rewrite that moved the Spaces group
+        /// past a hook of the user's own would leave that hook standing on the Spaces entry's record and
+        /// send the user to review a hook they never touched. The rewrite keeps the index it holds.
+        @Test func reinstallingKeepsTheSpacesGroupWhereItSitsAmongTheUsersOwnHooks() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.codex], home: home)
+            let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+            let hooksFileURL = codexHome.appendingPathComponent("hooks.json")
+            let configURL = codexHome.appendingPathComponent("config.toml")
+
+            // A previous release's install, with a hook of the user's own added to the same event after it.
+            try install([.codex], home: home)
+            var root = try JSONSerialization.jsonObject(with: Data(contentsOf: hooksFileURL)) as! [String: Any]
+            var hooks = root["hooks"] as! [String: Any]
+            var stop = hooks["Stop"] as! [[String: Any]]
+            stop.append(["matcher": "", "hooks": [["type": "command", "command": "my-own-stop-hook"]]])
+            hooks["Stop"] = stop
+            root["hooks"] = hooks
+            try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]).write(to: hooksFileURL)
+            let previousRelease = read(hooksFileURL).replacingOccurrences(
+                of: AgentHookCommand.versionedMarker(), with: AgentHookCommand.versionedMarker(AgentHookCommand.hookVersion - 1))
+            try previousRelease.write(to: hooksFileURL, atomically: true, encoding: .utf8)
+
+            // Both hooks approved in Codex: the Spaces group at index 0, the user's at index 1.
+            let keyPath = codexKeyPath(hooksFileURL)
+            let userTable = "\n[hooks.state.\"\(keyPath):stop:1:0\"]\ntrusted_hash = \"sha256:user\"\n"
+            let approved = read(configURL) + (try codexTrustTables(hooksFileURL: hooksFileURL)) + userTable
+            try approved.write(to: configURL, atomically: true, encoding: .utf8)
+
+            try install([.codex], home: home)
+
+            let rewritten = try JSONSerialization.jsonObject(with: Data(contentsOf: hooksFileURL)) as! [String: Any]
+            let groups = (rewritten["hooks"] as! [String: Any])["Stop"] as! [[String: Any]]
+            #expect(groups.count == 2)
+            let spacesCommand = (groups[0]["hooks"] as! [[String: Any]])[0]["command"] as! String
+            #expect(AgentHookCommand.isSpacesOwned(spacesCommand))
+            #expect(AgentHookCommand.isCurrent(spacesCommand))
+            #expect((groups[1]["hooks"] as! [[String: Any]])[0]["command"] as! String == "my-own-stop-hook")
+
+            // Only the rewritten entry's own record goes; the user's approval of their own hook stands.
+            let config = read(configURL)
+            #expect(!config.contains("\(keyPath):stop:0:0"))
+            #expect(config.contains("\(keyPath):stop:1:0"))
+            #expect(config.contains("sha256:user"))
+            #expect(codexInstallState(home: home) == .awaitingTrust)
+        }
+
+        /// The same rule one level down: a user who puts a hook of their own in the group Spaces wrote
+        /// gives every entry after it a hook index, so a rewrite that lifted the Spaces entry out and
+        /// appended a group of its own would renumber their later entries onto records describing other
+        /// hooks. The replacement goes back into the slot it held.
+        @Test func reinstallingKeepsTheSpacesEntryAtItsHookIndexInsideAGroupTheUserAlsoHooks() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.codex], home: home)
+            let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+            let hooksFileURL = codexHome.appendingPathComponent("hooks.json")
+            let configURL = codexHome.appendingPathComponent("config.toml")
+
+            // A previous release's install, with hooks of the user's own added either side of the Spaces
+            // entry inside the group it wrote.
+            try install([.codex], home: home)
+            var root = try JSONSerialization.jsonObject(with: Data(contentsOf: hooksFileURL)) as! [String: Any]
+            var hooks = root["hooks"] as! [String: Any]
+            var stop = hooks["Stop"] as! [[String: Any]]
+            var group = stop[0]
+            let spacesEntry = (group["hooks"] as! [[String: Any]])[0]
+            group["hooks"] = [
+                ["type": "command", "command": "my-own-first-stop-hook"], spacesEntry, ["type": "command", "command": "my-own-last-stop-hook"],
+            ]
+            stop[0] = group
+            hooks["Stop"] = stop
+            root["hooks"] = hooks
+            try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]).write(to: hooksFileURL)
+            let previousRelease = read(hooksFileURL).replacingOccurrences(
+                of: AgentHookCommand.versionedMarker(), with: AgentHookCommand.versionedMarker(AgentHookCommand.hookVersion - 1))
+            try previousRelease.write(to: hooksFileURL, atomically: true, encoding: .utf8)
+
+            // All three hooks approved in Codex, each one named by its index inside the group.
+            let keyPath = codexKeyPath(hooksFileURL)
+            let userTables = """
+
+                [hooks.state."\(keyPath):stop:0:0"]
+                trusted_hash = "sha256:userfirst"
+
+                [hooks.state."\(keyPath):stop:0:2"]
+                trusted_hash = "sha256:userlast"
+
+                """
+            let approved = read(configURL) + (try codexTrustTables(hooksFileURL: hooksFileURL)) + userTables
+            try approved.write(to: configURL, atomically: true, encoding: .utf8)
+
+            try install([.codex], home: home)
+
+            let rewritten = try JSONSerialization.jsonObject(with: Data(contentsOf: hooksFileURL)) as! [String: Any]
+            let groups = (rewritten["hooks"] as! [String: Any])["Stop"] as! [[String: Any]]
+            #expect(groups.count == 1, "The rewrite reuses the group the entry sits in rather than adding one.")
+            let commands = (groups[0]["hooks"] as! [[String: Any]]).map { $0["command"] as! String }
+            #expect(commands.count == 3)
+            #expect(commands.first == "my-own-first-stop-hook")
+            #expect(commands.last == "my-own-last-stop-hook")
+            #expect(AgentHookCommand.isSpacesOwned(commands[1]))
+            #expect(AgentHookCommand.isCurrent(commands[1]))
+
+            // Only the rewritten entry's own record goes; both of the user's approvals still name their
+            // own hooks, because neither hook moved.
+            let config = read(configURL)
+            #expect(!config.contains("\(keyPath):stop:0:1"))
+            #expect(config.contains("\(keyPath):stop:0:0"))
+            #expect(config.contains("\(keyPath):stop:0:2"))
+            #expect(config.contains("sha256:userfirst"))
+            #expect(config.contains("sha256:userlast"))
+            #expect(codexInstallState(home: home) == .awaitingTrust)
+        }
+
+        /// Clearing trust is scoped to the entries Spaces wrote. A hook of the user's own on the same
+        /// event keeps its record, so a reinstall never costs them an approval they already gave.
+        @Test func clearingTrustLeavesTheUsersOwnRecordsAlone() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.codex], home: home)
+            let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+            let hooksFileURL = codexHome.appendingPathComponent("hooks.json")
+            let configURL = codexHome.appendingPathComponent("config.toml")
+            try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
+            try "{\"hooks\":{\"Stop\":[{\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"my-own-stop-hook\"}]}]}}".write(
+                to: hooksFileURL, atomically: true, encoding: .utf8)
+
+            try install([.codex], home: home)
+            let keyPath = codexKeyPath(hooksFileURL)
+            let foreignTable = "\n[hooks.state.\"\(keyPath):stop:0:0\"]\ntrusted_hash = \"sha256:aaaa\"\n"
+            try (read(configURL) + foreignTable + codexTrustTables(hooksFileURL: hooksFileURL)).write(
+                to: configURL, atomically: true, encoding: .utf8)
+            #expect(codexInstallState(home: home) == .current)
+
+            try install([.codex], home: home)
+
+            #expect(codexInstallState(home: home) == .awaitingTrust)
+            #expect(read(configURL).contains(foreignTable.trimmingCharacters(in: .newlines)))
+            #expect(!read(configURL).contains("sha256:0f0f"))
+            // The user's hook is still the first group on Stop, which is why its record is still theirs.
+            #expect(read(hooksFileURL).contains("my-own-stop-hook"))
+        }
+
         // MARK: - Codex feature command
 
         @Test func codexInstallUsesResolvedCLIAndTargetsTheManagedCodexHome() throws {
@@ -405,7 +646,9 @@
             let invocations = read(codexHome.appendingPathComponent("invocations"))
 
             #expect(outcome.failures.isEmpty)
-            #expect(outcome.agents.first { $0.kind == .codex }?.installState == .current)
+            // A freshly written `hooks.json` is one Codex has never been asked to trust, so the install
+            // lands on `awaitingTrust` rather than `current`: the entries are there and cannot fire yet.
+            #expect(outcome.agents.first { $0.kind == .codex }?.installState == .awaitingTrust)
             #expect(invocations.contains("features enable hooks|\(codexHome.path)"))
             #expect(invocations.contains("features list|\(codexHome.path)"))
         }
@@ -590,7 +833,7 @@
             #expect(shell.invocationCount == 1)
             #expect(outcome.failures.isEmpty)
             #expect(outcome.agents.first { $0.kind == .codex }?.available == true)
-            #expect(outcome.agents.first { $0.kind == .codex }?.installState == .current)
+            #expect(outcome.agents.first { $0.kind == .codex }?.installState == .awaitingTrust)
         }
 
         /// An undetected agent is reported as a failure and writes nothing, while its detected siblings

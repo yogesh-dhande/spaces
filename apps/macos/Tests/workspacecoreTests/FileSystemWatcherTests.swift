@@ -109,6 +109,33 @@
             await fulfillment(of: [changed], timeout: 60)
         }
 
+        // A watch on the directory is what makes an atomic replace visible. Tools that rewrite a config
+        // file in place do it by renaming a new file over the old one, which leaves a watch held on the
+        // file itself pointing at the replaced inode; the Coding Agents rows depend on the directory
+        // watch reporting the replacement instead. Asserts the inode really did change, so the test
+        // cannot pass on a plain in-place write.
+        func testWatcherReportsAFileReplacedByRename() async throws {
+            try requireHealthyFSEvents()
+            let directory = try makeTempDirectory()
+            let file = directory.appendingPathComponent("config.toml")
+            try "before".write(to: file, atomically: false, encoding: .utf8)
+            let inodeBefore = try FileManager.default.attributesOfItem(atPath: file.path)[.systemFileNumber] as? NSNumber
+
+            let replaced = XCTestExpectation(description: "replacement reported")
+            let watcher = FileSystemWatcher(paths: [directory.path], latency: 0.1) { paths, _ in
+                if paths.contains(where: { $0.contains("config.toml") }) { replaced.fulfill() }
+            }
+            try await watcher.start()
+            defer { watcher.stop() }
+
+            // `atomically: true` writes a temp file and renames it over the destination.
+            try "after".write(to: file, atomically: true, encoding: .utf8)
+
+            await fulfillment(of: [replaced], timeout: 60)
+            let inodeAfter = try FileManager.default.attributesOfItem(atPath: file.path)[.systemFileNumber] as? NSNumber
+            XCTAssertNotEqual(inodeBefore, inodeAfter)
+        }
+
         // Exercises the deinit safety net: dropping the last reference to a running
         // watcher WITHOUT calling stop() must tear the FSEvents stream down cleanly. The
         // stream retains a callback box rather than `self`, so the watcher is free to

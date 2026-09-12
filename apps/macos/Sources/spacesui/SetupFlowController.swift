@@ -71,6 +71,10 @@ import systembridge
         guard let localAgents, shouldProbeLocalAgents(dismissedHookVersion: dismissedHookVersion, currentHookVersion: currentHookVersion) else {
             return false
         }
+        // Anything short of `current` keeps the step, including hooks an agent has not been told to
+        // trust. Spaces cannot finish that one itself, but the step is where the row explains what the
+        // user does about it, and the alternative is launching straight past an agent that reports
+        // nothing.
         return localAgents.contains { $0.available && $0.installState != .current }
     }
 
@@ -100,6 +104,7 @@ import systembridge
     func stop() {
         chromeSetup?.stop()
         chromeSetup = nil
+        codingAgents?.stopAgentConfigWatch()
     }
 
     private func finish() {
