@@ -23,12 +23,31 @@ Every defect worth reporting here lives in one of these blind spots. If a findin
 
 ## Ground rules
 
-1. **Target the installed build**: `/Applications/Spaces.app/Contents/MacOS/SpacesApp`, `~/.spaces/bin/spacesd`, and the app's `caddy`. Match daemons with an anchored pattern (`pgrep -f "^$HOME/.spaces/bin/spacesd"`) so other worktrees' daemons never match. Never kill them.
-2. **Establish what you are testing.** Compare the installed binary against the repo: `git log --oneline HEAD..v<version>` and `HEAD..origin/main`. The installed build can be *ahead* of your checkout, not only behind. Confirm each finding's code path still exists at `HEAD`.
-3. **Never create projects or workspaces.** `spaces workspace` exposes only list/create/start/stop/restart and `spaces project` only `list` — there is no remove, delete, or archive (`spaces terminal stop` ends a single terminal session, and `spaces workspace stop` stops a workspace, but neither removes a record). A workspace created here cannot be removed programmatically and permanently pollutes the user's list. Do lifecycle work on a disposable dev profile.
-4. **Every load generator is deadline-bound and self-terminating** — bound by volume (`head -c N`) or an internal deadline (`end=$((SECONDS+N))`). Never background an unbounded `yes`/`while true`.
-5. **Snapshot before, verify after.** Record project ids, workspace ids, `git worktree list`, and the live session list up front; `diff` each at the end and show the empty diffs.
-6. **Keep raw artifacts in the scratchpad**, and never read a full `sample` transcript into context — `grep`/`awk` it.
+1. **Target the installed build, on the QA profile**: `/Applications/Spaces.app`, plus the `spacesd` and `caddy` it bundles, run against the throwaway QA profile below rather than against `~/.spaces`. Never signal the user's installed app, its daemon, or the `dev.usespaces.spacesd` LaunchAgent job. Never match a daemon by process name either: both profiles run the same binary, and `qa-profile stop` tells them apart the only reliable way, through the QA profile's own lease and socket.
+2. **Establish what you are testing.** Compare the installed binary against the repo: `git log --oneline HEAD..v<version>` and `HEAD..origin/main`. The installed build can be *ahead* of your checkout, not only behind, and `qa-profile create` refuses to seed from one whose database schema is newer than the checkout knows, since the seed cannot strip live-state tables it has never heard of. Pull, or check out the release tag, and seed again. Confirm each finding's code path still exists at `HEAD`.
+3. **Inherited projects and workspaces are read-only.** The QA profile copies the user's records, and a copied record keeps the real `dir` it always had, so it points into the user's own repositories. Deleting an inherited workspace runs `git worktree remove --force` on a worktree the user is working in, and deleting its project can take managed directories with it. Never delete one, never start or restart one (that runs its setup script and its configured processes in that directory), and treat what is already there as material to read, open terminals in, and measure. The CLI has no remove or delete either: `spaces workspace stop` stops a workspace and `spaces terminal stop` ends one terminal session, and neither removes a record.
+4. **Destructive lifecycle testing runs on fixtures the sweep creates.** Make a scratch git repository under the scratchpad, add it as a project through the QA app, and do the create, start, restart, and delete passes there. Those records point at directories the sweep owns, so deleting them costs nothing, and the whole profile is thrown away at the end. Pairing and unpairing devices is free on the QA profile either way, since the pairings are its own.
+5. **Every load generator is deadline-bound and self-terminating**, bound by volume (`head -c N`) or an internal deadline (`end=$((SECONDS+N))`). Never background an unbounded `yes`/`while true`.
+6. **Snapshot before, verify after.** Record project ids, workspace ids, `git worktree list`, and the live session list up front; `diff` each at the end and show the empty diffs. The fixture project's own worktrees are the only entries that may differ, and they are reconciled at teardown.
+7. **Keep raw artifacts in the scratchpad**, and never read a full `sample` transcript into context; `grep`/`awk` it.
+
+## The QA profile
+
+The sweep runs the shipped build against a throwaway profile at `~/.spaces-dev/qa`, seeded from a copy of `~/.spaces` with device identity, pairings, credentials, and live runtime rows stripped, so the projects and workspaces are the user's real ones while every piece of state the sweep produces is disposable. `docs/dev.md` describes it in full.
+
+```bash
+apps/macos/.build/debug/spacese2e qa-profile create
+apps/macos/.build/debug/spacese2e qa-profile launch          # prints the app pid, its log, and the profile paths
+apps/macos/.build/debug/spacese2e qa-profile deploy-remote   # optional: the released Linux daemon in a remote `qa` profile, paired fresh
+# ... the sweep ...
+apps/macos/.build/debug/spacese2e qa-profile stop
+apps/macos/.build/debug/spacese2e qa-profile remove
+apps/macos/.build/debug/spacese2e profile remove --remote qa # only if deploy-remote ran
+```
+
+Read every path from that `launch` output rather than assuming `~/.spaces`: the database to inventory (§1), the daemon log, the inbound `device-pairings.json` (§4), and the session directories all live under `~/.spaces-dev/qa/`. The lane sets `SPACES_DB_PATH` inside the processes it launches; never export it into your own shell.
+
+Two limits are worth planning around. Desktop control (the global hotkey, window cycling) is a machine-wide lease held by one process at a time, so it reaches the QA app only while the user's installed app is not running. And the profile is disposable in a way the filesystem is not: every copied project and workspace still names the user's own directory, and a workspace created here is a real git worktree in a real repository. That is what ground rules 3 and 4 are about, and it is why automations come across disabled: enable one only when you mean to run it against the real worktree it names.
 
 ## 0. Run the e2e and latency suites first
 
@@ -70,26 +89,26 @@ Read memory with `vmmap --summary <pid>`, not `ps` RSS alone — they disagree s
 
 ## 4. Configurations e2e never runs in
 
-- **A paired device is a live overview subscriber**, and it is the most valuable probe in the sweep. With one attached and *zero* terminal sessions open, the daemon does continuous overview-rebuild work that can dominate the idle baseline. Detect it with `lsof -nP -p <daemon> | grep ESTABLISHED` on port 47847, and always state whether one was attached.
-  Scope limit: `spaces device list` shows **outbound** targets only; inbound clients live in `~/.spaces/runtime/terminal/device-pairings.json`. `--device <iphone>` does not work — the phone is a client, not a target. Test the daemon side of what it asks for; its UI is manual verification.
+- **A paired device is a live overview subscriber**, and it is the most valuable probe in the sweep. With one attached and *zero* terminal sessions open, the daemon does continuous overview-rebuild work that can dominate the idle baseline. Detect it with `lsof -nP -p <daemon> | grep ESTABLISHED` on the Device API port that profile assigned itself (its `runtime/terminal/device-api.json`; the canonical 47847 belongs to the installed profile alone), and always state whether one was attached.
+  Scope limit: `spaces device list` shows **outbound** targets only; inbound clients live in the profile's own `runtime/terminal/device-pairings.json`. `--device <iphone>` does not work, because the phone is a client, not a target. Test the daemon side of what it asks for; its UI is manual verification.
 - **Real coding agents against real models** — cost and nondeterminism keep these out of CI. As a load source, launch them in panes with output-heavy prompts; as a feature under test, run the full pass in §5. Either way use cheap models and read-only flags so an unattended run cannot modify the repo.
 - **Live Ghostty panes.** A headless daemon session exercises no render, attach, or ownership path. Open panes with `spaces terminal show` and measure cold (first surface) against warm (surface exists) separately. Note that `terminal show` on a session with no pane creates no attachment, so ownership assertions are vacuously true without one.
 - **Energy.** `powermetrics` needs a sudo password and will block an unattended run; reach for it only when the user is present. The non-sudo proxy is `psutil.Process(pid).cpu_times()` and `.num_ctx_switches()` — context switches *are* available on macOS. Report the wakeup rate next to CPU%: a low-CPU, high-wakeup process still drains battery.
 
 Two resilience checks belong here rather than in a lane, because they depend on the installed configuration and e2e runs neither under launchd nor against the real profile:
 
-- **SIGKILL the daemon.** launchd restarts it within seconds under a new pid — do not conclude it is gone without waiting. Sessions cannot survive (pty master fds die with the process); that is inherent. Assert instead that every profile-owned row moved `running` → `failed` with its dead `child_pid` retained. Rows still claiming `running` afterwards are rows the repair cannot see, which is a real finding.
+- **SIGKILL the daemon.** No launchd job supervises the QA profile's daemon, so nothing restarts it on its own; the QA app spawns it again on its next request, which is what to drive rather than waiting for a supervisor. Sessions cannot survive (pty master fds die with the process); that is inherent. Assert instead that every profile-owned row moved `running` → `failed` with its dead `child_pid` retained. Rows still claiming `running` afterwards are rows the repair cannot see, which is a real finding.
 - **Hold the DB write lock** from a separate connection. Within the 5 s busy timeout nothing is disturbed; past it, reads still succeed (WAL) but a CLI write blocks on an RPC timeout far longer and fails with an opaque "Resource temporarily unavailable".
 
-If you must validate migrations against a *real* user database, work on a copy: `.backup` it (WAL-aware; plain `cp` can miss un-checkpointed commits), step `migration_state` back **one** version, and open it under both `SPACES_DB_PATH` and `SPACES_RUNTIME_DIR` pointing at scratch. **That spawns a daemon for the scratch profile which outlives the command** — sweep it afterwards. Stepping back further than one version does not replay the chain; use a unit test against a genuinely old fixture for that.
+To validate migrations against a *real* user database, use the QA profile: it is already a WAL-safe copy of one. Step its `migration_state` back **one** version before `qa-profile launch`, and let `qa-profile stop` end the daemon that upgrade starts. Stepping back further than one version does not replay the chain; use a unit test against a genuinely old fixture for that.
 
 ## 5. Agent orchestration against the real agents
 
 Run this every sweep. It is a **full feature pass**, not a resource measurement, and it deliberately overlaps `e2e_agent_orchestration.sh`: that lane proves the mechanics on a clean dev profile, while almost every orchestration defect actually seen came from the live path it cannot reach — a hook whose absolute path points at the wrong build, a TUI that swallowed a submit, a provider that never emits the event the design assumed, an installed profile whose hooks were clobbered by a dev build's installer.
 
-Exercise all three supported agents — **Claude Code, Codex, opencode** — as a user runs them, from the installed profile.
+Exercise all three supported agents (**Claude Code, Codex, opencode**) as a user runs them, in QA-profile terminals. The globally configured hooks name the installed `spaces` CLI by absolute path, which is right here: the QA daemon forwards its own `SPACES_DB_PATH` into every session it launches, so that CLI resolves the QA profile and its signals land on the rows under test.
 
-**Cost and safety.** Cheap models and read-only flags throughout: `claude --model haiku --permission-mode plan`, `codex -m gpt-5.3-codex-spark --sandbox read-only --ask-for-approval never`, opencode on its cheapest configured model. Ground rule 3 still holds — use an **existing** workspace. Agents here create terminal sessions and agent rows, both removable; never a project or workspace. Claude Code's status line shows the configured default model even under `--model haiku`, so confirm the model with `ps` on the child, not the TUI.
+**Cost and safety.** Cheap models and read-only flags throughout: `claude --model haiku --permission-mode plan`, `codex -m gpt-5.3-codex-spark --sandbox read-only --ask-for-approval never`, opencode on its cheapest configured model. Ground rules 3 and 4 apply: a pass that creates or deletes workspaces runs in the fixture project, and an agent in an inherited workspace stays on its read-only flags. Claude Code's status line shows the configured default model even under `--model haiku`, so confirm the model with `ps` on the child, not the TUI.
 
 ### 5.1 Verify the hook chain first
 
@@ -179,8 +198,9 @@ Corollary: **anything that reduces to a deterministic pass/fail belongs in e2e, 
 3. Remove every watch edge you created (`spaces agent unsubscribe`), including cross-device ones, so no orchestrator keeps receiving lines from the sweep.
 4. Leave the user's hook configuration exactly as you found it. If the sweep repaired or reinstalled hooks, say so in the report.
 5. Sweep for stray daemons bound to scratch runtime dirs, and for leaked generators by pattern.
-6. `diff` project ids, workspace ids, and `git worktree list` against the opening snapshot; show the empty diffs.
+6. `diff` `git worktree list` against the opening snapshot and remove the worktrees the sweep created in its fixture project; the rows that pointed at them leave with the profile. Check the installed profile's project and workspace ids against the opening snapshot too: they must be untouched, and anything else is a finding about the lane itself.
 7. Re-measure the settled baseline against the starting one. Anything that did not return is either a finding or an explicit non-finding.
+8. Tear the QA profile down: `qa-profile stop`, then `qa-profile remove`, and `profile remove --remote qa` when a remote daemon was deployed.
 
 ## 12. Report
 

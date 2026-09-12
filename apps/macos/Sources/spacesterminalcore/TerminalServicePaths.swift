@@ -2,10 +2,40 @@ import Foundation
 
 public enum TerminalServicePaths {
     public static func socketPath(fileManager: FileManager = .default) throws -> String {
-        let root = try terminalRootDirectory(fileManager: fileManager)
+        try socketPath(terminalRootDirectory: try terminalRootDirectory(fileManager: fileManager))
+    }
+
+    /// The terminal-service socket path of `profile`, which need not be the profile this process resolved
+    /// for itself.
+    ///
+    /// Socket names are a hash of the profile's own terminal root under one shared per-user socket root, so
+    /// any process can name another profile's socket from that profile's runtime directory alone. Tooling
+    /// that acts on another profile's daemon uses this rather than binding a profile environment variable
+    /// it would then have to keep carrying.
+    public static func socketPath(profile: SpacesProfile) throws -> String {
+        try socketPath(terminalRootDirectory: terminalRootDirectory(runtimeDirectory: profile.runtimeDirectory))
+    }
+
+    private static func socketPath(terminalRootDirectory root: URL) throws -> String {
         let socketRoot = try SpacesSocketPaths.secureSocketRoot()
         let socketName = "service-\(socketPathComponent(for: root.path))"
         return socketRoot.appendingPathComponent("\(socketName).sock", isDirectory: false).path
+    }
+
+    /// The daemon instance-lock path of `profile`, named from that profile's own terminal root the same way
+    /// its socket is, so tooling can ask whether another profile's daemon holds its lock.
+    public static func instanceLockPath(profile: SpacesProfile) throws -> String {
+        let socketRoot = try SpacesSocketPaths.secureSocketRoot()
+        let root = terminalRootDirectory(runtimeDirectory: profile.runtimeDirectory)
+        return socketRoot.appendingPathComponent("daemon-\(socketPathComponent(for: root.path)).lock", isDirectory: false).path
+    }
+
+    /// The terminal root inside `runtimeDirectory`, normalized exactly as the no-argument
+    /// `terminalRootDirectory` normalizes this process's own, so the same profile hashes to the same socket
+    /// name whichever process computes it.
+    private static func terminalRootDirectory(runtimeDirectory: String) -> URL {
+        URL(fileURLWithPath: runtimeDirectory, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent(
+            "terminal", isDirectory: true)
     }
 
     /// Profile-scoped unix socket the daemon streams device-overview changes on.
