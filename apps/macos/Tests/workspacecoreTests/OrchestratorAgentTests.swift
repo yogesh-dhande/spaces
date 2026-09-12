@@ -66,6 +66,37 @@ extension OrchestratorTests {
             try store.agentWindows(workspaceID: workspace.id).isEmpty, "A stopped agent must stay stopped instead of reappearing as an exited row.")
     }
 
+    /// The agent's own conversation id rides its lifecycle signals, which is the only moment Spaces can
+    /// learn it: the terminal row stores the wrapped launch command, never the conversation opened inside
+    /// it. The newest id an agent reports wins, and a signal reporting none leaves the stored one alone.
+    func testAgentSignalsStoreTheLatestReportedSessionKey() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        let orchestrator = makeTestOrchestrator(store: store)
+
+        let registered = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code", terminalTrackingID: "agent-session", sessionKey: "conversation-1",
+            status: .idle, eventType: "init", eventSource: "spaces_agent_signal")
+        XCTAssertEqual(registered.sessionKey, "conversation-1")
+
+        let working = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", sessionKey: nil, label: "Claude Code",
+            status: .spinning, eventType: "working", eventSource: "spaces_agent_signal")
+        XCTAssertEqual(working.sessionKey, "conversation-1", "a signal carrying no id keeps the stored one")
+
+        // Forking a conversation gives the running agent a new id, and resuming it later must address
+        // the fork, not the conversation it was forked from.
+        let forked = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", sessionKey: "conversation-2", label: "Claude Code",
+            status: .idle, eventType: "done", eventSource: "spaces_agent_signal")
+        XCTAssertEqual(forked.sessionKey, "conversation-2")
+        XCTAssertEqual(try store.agentWindow(id: registered.id)?.sessionKey, "conversation-2")
+    }
+
     /// Stopping a watched coding agent (macOS sidebar / Device API stop) routes through the shared stop
     /// chokepoint, which must tell the child's subscribers it exited before deleting the row, and tear
     /// down the stopped terminal's OWN watch state (its outgoing edge and queued inbound line).

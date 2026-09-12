@@ -27,7 +27,11 @@ public enum AgentHookCommand {
     /// v3: post-approval `working` bindings (Claude/Codex `PostToolUse`, opencode `permission.replied`).
     /// v2's `PreToolUse` fires *before* the permission decision, so it can never end the block it
     /// precedes — the row stayed `waiting` until a *later*, different tool call, or until `Stop`.
-    public static let hookVersion = 3
+    /// v4: every signal reports the agent's own conversation id, so a conversation can be resumed
+    /// rather than restarted. The opencode plugin passes it as `--agent-session`; Claude Code's and
+    /// Codex's command text is unchanged, since the CLI reads their id from the hook payload it
+    /// already receives, and their entries still move to v4 so one version marks one signal behavior.
+    public static let hookVersion = 4
 
     /// Version-less ownership token. Every Spaces-owned entry, of every version, contains it.
     ///

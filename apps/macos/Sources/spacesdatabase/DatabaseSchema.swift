@@ -977,6 +977,8 @@ public enum DatabaseSchema {
               status TEXT NOT NULL DEFAULT 'idle',
               runtime_target_id TEXT,
               terminal_session_id TEXT,
+              -- The agent's own conversation id in its provider's store, reported by its lifecycle
+              -- hooks and used to resume that conversation rather than start a new one.
               session_key TEXT,
               note TEXT,
               detected_agent_kind TEXT,

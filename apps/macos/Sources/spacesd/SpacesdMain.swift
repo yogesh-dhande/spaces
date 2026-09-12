@@ -2357,6 +2357,12 @@ enum SpacesDaemonErrorClassification {
         }
 
         let environmentKeys = [WorkspaceOrchestrator.terminalTrackingIDEnvVar]
+        // The agent's own conversation id, when its hook payload carried one. It rides every signal that
+        // reaches the store, and the orchestrator keeps the stored value when a signal carries none, so
+        // the newest reported id wins. The duplicate-`working` suppression above can swallow one, which
+        // costs nothing: the id an agent reports is the same on every signal of a run, so the next
+        // transition stores it.
+        let agentSessionKey = payload.agentSessionKey
         let engine = makeAgentNotificationEngine(orchestrator: orchestrator)
         // Whether this signal leaves the signaling terminal's own agent row idle/done, the single
         // authority for the flush decision below. Gated on the RESULTING row status, not the event type:
@@ -2369,7 +2375,7 @@ enum SpacesDaemonErrorClassification {
         switch type {
         case .`init`:
             let registered = try orchestrator.registerAgentWindow(
-                workspaceID: workspaceID, provider: .spaces, label: signalLabel, terminalTrackingID: sessionID,
+                workspaceID: workspaceID, provider: .spaces, label: signalLabel, terminalTrackingID: sessionID, sessionKey: agentSessionKey,
                 status: existingAgent?.status ?? .idle, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys
             )
             // A restart-init on a previously exited row resets to idle (registerAgentWindow) and flushes;
@@ -2381,14 +2387,14 @@ enum SpacesDaemonErrorClassification {
             // "is blocked" line for this child before a subscriber can receive stale misinformation.
             let resumedFromBlocked = existingAgent?.status == .waiting
             let updated = try orchestrator.updateAgentWindowStatus(
-                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, label: signalLabel, status: type.status,
-                eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
+                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, sessionKey: agentSessionKey, label: signalLabel,
+                status: type.status, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
             if resumedFromBlocked { try engine.childDidResumeWorking(agentSessionID: updated.id) }
             shouldFlushQueuedNotifications = updated.status.leavesSubscriberIdle
         case .blocked, .done:
             let updated = try orchestrator.updateAgentWindowStatus(
-                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, label: signalLabel, status: type.status,
-                eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
+                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, sessionKey: agentSessionKey, label: signalLabel,
+                status: type.status, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
             if let transition = type.childNotificationTransition { try engine.childDidTransition(agent: updated, transition: transition) }
             shouldFlushQueuedNotifications = updated.status.leavesSubscriberIdle
         case .exit:

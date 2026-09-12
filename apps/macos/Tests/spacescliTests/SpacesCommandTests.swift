@@ -116,6 +116,13 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(command.type, .done)
     }
 
+    /// opencode's plugin runs inside opencode and receives a JavaScript event rather than a payload on
+    /// stdin, so it reports the agent's own conversation id as an argument instead.
+    func testAgentSignalParsesTheAgentSessionOption() throws {
+        XCTAssertEqual(try AgentSignalCommand.parse(["--agent-session", "ses_7f3", "done"]).agentSession, "ses_7f3")
+        XCTAssertNil(try AgentSignalCommand.parse(["done"]).agentSession)
+    }
+
     func testAgentSignalResolvesContextFromEnvironment() throws {
         let context = try AgentSignalCommand.resolvedSignalContext(
             workspace: nil, session: nil, environment: ["SPACES_WORKSPACE_ID": "workspace-env", "SPACES_TERMINAL_TRACKING_ID": "session-env"])
