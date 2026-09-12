@@ -11,6 +11,12 @@ import Foundation
 /// `working`, event-bus `permission.asked` → `blocked`, event-bus `permission.replied` → `working`,
 /// event-bus `session.idle` → `done`. opencode has no session-end event, so there is no `exit` signal.
 ///
+/// The plugin also reports the agent's own session id, which the CLI records so the conversation can
+/// later be resumed. opencode delivers no stdin payload the CLI could read, so the id travels as
+/// `--agent-session`: the hook inputs carry it directly (`input.sessionID`) and event-bus events carry
+/// it at `event.properties.sessionID` (verified against opencode 1.18.18). The startup `init` signal
+/// carries none, because no session exists when opencode loads its plugins.
+///
 /// opencode is the only supported agent that reports the *answer* to a permission prompt:
 /// `permission.replied` fires the moment the human allows or rejects, which is exactly when the block
 /// ends. Claude Code and Codex have no such event and can only infer the resume from the approved tool
@@ -52,23 +58,28 @@ enum AgentHookOpencodePluginWriter {
             const SPACES_CLI = \(javaScriptStringLiteral(spacesExecutablePath))
 
             export const SpacesAgentSignal = async ({ $ }) => {
-              const signal = async (event) => {
+              const signal = async (event, sessionID) => {
                 try {
-                  await $`${SPACES_CLI} agent signal ${event}`.quiet()
+                  if (typeof sessionID === "string" && sessionID.length > 0) {
+                    await $`${SPACES_CLI} agent signal ${event} --agent-session ${sessionID}`.quiet()
+                  } else {
+                    await $`${SPACES_CLI} agent signal ${event}`.quiet()
+                  }
                 } catch {}
               }
               await signal("init")
               return {
-                "chat.message": async () => {
-                  await signal("working")
+                "chat.message": async (input) => {
+                  await signal("working", input?.sessionID)
                 },
-                "tool.execute.before": async () => {
-                  await signal("working")
+                "tool.execute.before": async (input) => {
+                  await signal("working", input?.sessionID)
                 },
                 event: async ({ event }) => {
-                  if (event.type === "permission.asked") await signal("blocked")
-                  else if (event.type === "permission.replied") await signal("working")
-                  else if (event.type === "session.idle") await signal("done")
+                  const sessionID = event.properties?.sessionID
+                  if (event.type === "permission.asked") await signal("blocked", sessionID)
+                  else if (event.type === "permission.replied") await signal("working", sessionID)
+                  else if (event.type === "session.idle") await signal("done", sessionID)
                 },
               }
             }

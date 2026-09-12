@@ -32,7 +32,10 @@ extension SQLiteStore {
     /// Lifecycle-owning upsert. Hook/lifecycle writers (`registerAgentWindow`, `updateAgentWindowStatus`)
     /// hold the authoritative record they just computed, so on conflict the row's lifecycle columns take
     /// the caller's values: `status` and `session_key` are overwritten from
-    /// `excluded`. `detected_agent_kind` is the exception both upserts share: a
+    /// `excluded`. `session_key` is the agent's own conversation id, reported by its hooks, and the
+    /// caller's record carries the stored one forward whenever a signal reports none, so the newest
+    /// id an agent reports wins (Claude Code's `--fork-session` gives a running agent a new one) and a
+    /// signal that carries none never erases it. `detected_agent_kind` is the exception both upserts share: a
     /// caller that observed no kind (foreground detection has not classified the session, or already
     /// cleared its classification at exit) carries nil, and nil must never erase a kind the row already
     /// learned — the stored value is what the exit notification names.

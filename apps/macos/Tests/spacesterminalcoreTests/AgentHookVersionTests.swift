@@ -186,12 +186,24 @@ import Testing
         // opencode is the one agent that reports the answer itself, so it need not wait for the tool to
         // finish: `permission.replied` fires the moment the human allows or rejects.
         let plugin = AgentHookOpencodePluginWriter.pluginContents(spacesExecutablePath: "/usr/local/bin/spaces")
-        #expect(plugin.contains("permission.asked") && plugin.contains("signal(\"blocked\")"))
+        #expect(plugin.contains("permission.asked") && plugin.contains("signal(\"blocked\", sessionID)"))
         let repliedLine = plugin.split(separator: "\n").first { $0.contains("permission.replied") }
-        #expect(repliedLine?.contains("signal(\"working\")") == true)
+        #expect(repliedLine?.contains("signal(\"working\", sessionID)") == true)
     }
 
     // MARK: - opencode plugin
+
+    /// opencode hands its plugin a JavaScript event rather than a payload on stdin, so the id of the
+    /// conversation a signal belongs to reaches the CLI as an argument. The startup signal is the one
+    /// that reports none: opencode loads its plugins before any session exists.
+    @Test func opencodePluginReportsTheAgentsSessionIDAsAnArgument() {
+        let plugin = AgentHookOpencodePluginWriter.pluginContents(spacesExecutablePath: "/usr/local/bin/spaces")
+        #expect(plugin.contains("agent signal ${event} --agent-session ${sessionID}"))
+        #expect(plugin.contains("event.properties?.sessionID"))
+        #expect(plugin.contains("signal(\"working\", input?.sessionID)"))
+        let initLine = plugin.split(separator: "\n").first { $0.contains("signal(\"init\"") }
+        #expect(initLine?.contains("await signal(\"init\")") == true)
+    }
 
     @Test func opencodePluginStateTracksTheHeaderVersion() throws {
         let directory = try makeTemporaryDirectory()

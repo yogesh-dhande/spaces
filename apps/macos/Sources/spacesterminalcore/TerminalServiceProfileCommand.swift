@@ -116,17 +116,23 @@ public struct TerminalServiceProfileAgentSignalPayload: Codable, Sendable, Equat
     public let workspaceID: String
     public let terminalSessionID: String
     public let event: String
+    /// The signaling agent's own conversation id, read out of the hook payload by the CLI. Optional
+    /// because only some signals carry one: an agent whose hook payload has no id, or a signal raised
+    /// outside a hook, reports nothing here and leaves whatever the row already stores.
+    public let agentSessionKey: String?
 
-    public init(workspaceID: String, terminalSessionID: String, event: String) {
+    public init(workspaceID: String, terminalSessionID: String, event: String, agentSessionKey: String? = nil) {
         self.workspaceID = workspaceID
         self.terminalSessionID = terminalSessionID
         self.event = event
+        self.agentSessionKey = normalizedNonEmpty(agentSessionKey)
     }
 
     private enum CodingKeys: String, CodingKey {
         case workspaceID
         case terminalSessionID
         case event
+        case agentSessionKey
     }
 
     public init(from decoder: any Decoder) throws {
@@ -134,6 +140,7 @@ public struct TerminalServiceProfileAgentSignalPayload: Codable, Sendable, Equat
         workspaceID = try container.decodeRequiredNonEmpty(forKey: .workspaceID)
         terminalSessionID = try container.decodeRequiredNonEmpty(forKey: .terminalSessionID)
         event = try container.decodeRequiredNonEmpty(forKey: .event)
+        agentSessionKey = normalizedNonEmpty(try container.decodeIfPresent(String.self, forKey: .agentSessionKey))
     }
 }
 

@@ -6,6 +6,12 @@ import spacesdevicecore
 import spacesterminalcore
 import workspacecore
 
+#if os(Linux)
+    import Glibc
+#else
+    import Darwin
+#endif
+
 public struct SpacesCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "spaces", abstract: "Workspace registration, runtime, and coding-agent lifecycle commands for Spaces.",
@@ -513,9 +519,7 @@ private func lastSpawnedSessionOutputLines(childSessionID: String) -> [String] {
 /// agent-orchestration row exists yet. The detected-kind wire field is the kind's raw value; an
 /// unrecognized value maps to nil so the poll keeps going. A session the overview does not carry reports
 /// no state, which also leaves the poll running.
-private func remoteSpawnedSessionSnapshot(childSessionID: String, context: DeviceRequestContext) throws
-    -> AgentSpawnReadiness.SessionSnapshot
-{
+private func remoteSpawnedSessionSnapshot(childSessionID: String, context: DeviceRequestContext) throws -> AgentSpawnReadiness.SessionSnapshot {
     let summaries = try SpacesDeviceClient.terminalSessions(context: context)
     guard let summary = summaries.first(where: { $0.id == childSessionID }) else {
         return .init(detectedKind: nil, bracketedPasteActive: false, state: nil)
@@ -527,12 +531,8 @@ private func remoteSpawnedSessionSnapshot(childSessionID: String, context: Devic
 
 /// The last lines a session spawned on a paired device wrote, for the failure message. Best effort for
 /// the same reason as `lastSpawnedSessionOutputLines`.
-private func lastRemoteSpawnedSessionOutputLines(childSessionID: String, context: DeviceRequestContext)
-    -> [String]
-{
-    guard let tail = try? SpacesDeviceClient.tailTerminalOutput(sessionID: childSessionID, lines: 20, context: context) else {
-        return []
-    }
+private func lastRemoteSpawnedSessionOutputLines(childSessionID: String, context: DeviceRequestContext) -> [String] {
+    guard let tail = try? SpacesDeviceClient.tailTerminalOutput(sessionID: childSessionID, lines: 20, context: context) else { return [] }
     return AgentSpawnReadiness.lastNonBlankLines(inTail: tail)
 }
 
@@ -806,17 +806,53 @@ struct AgentSignalCommand: ParsableCommand {
 
     @Option(name: .long, help: "Workspace ID. Defaults to SPACES_WORKSPACE_ID.") var workspace: String?
     @Option(name: .long, help: "Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID.") var session: String?
+    @Option(
+        name: .long,
+        help: "The signaling agent's own conversation ID, for agents whose hooks pass it as an argument. Defaults to the ID in the hook payload.")
+    var agentSession: String?
     @Argument(
         help: ArgumentHelp("Lifecycle event to record.", discussion: "Allowed values: \(AgentEventType.allValueStrings.joined(separator: ", "))."))
     var type: AgentEventType
+
+    /// The largest hook payload read from stdin. Hook payloads are a handful of fields; the bound is
+    /// there so a signal can never be made to buffer an arbitrary amount of whatever else is piped in.
+    private static let maximumHookPayloadBytes = 64 * 1024
 
     func run() throws {
         guard let context = try Self.resolvedSignalContext(workspace: workspace, session: session, environment: ProcessInfo.processInfo.environment)
         else { return }
         let cliContext = CLIContext()
+        // An explicit `--agent-session` is how the opencode plugin reports the id, since a plugin runs
+        // inside opencode and receives a JavaScript event rather than a payload on stdin. It also means
+        // stdin holds nothing to read, so the payload is only consulted when the option is absent.
+        let agentSessionKey = normalizedNonEmpty(agentSession) ?? AgentHookSessionKey.sessionKey(inHookPayload: Self.hookPayloadFromStandardInput())
         _ = try TerminalService.sendProfileCommand(
-            .agentSignal(.init(workspaceID: context.workspaceID, terminalSessionID: context.sessionID, event: type.rawValue)))
+            .agentSignal(
+                .init(workspaceID: context.workspaceID, terminalSessionID: context.sessionID, event: type.rawValue, agentSessionKey: agentSessionKey))
+        )
         cliContext.output.emit("Agent \(type.rawValue): workspace=\(context.workspaceID)")
+    }
+
+    /// The hook payload waiting on stdin, or nil when this invocation has no payload to read.
+    ///
+    /// A terminal on stdin means a person (or a shell) ran the command rather than an agent's hook
+    /// runner, so there is nothing to read and reading would block on their keyboard. Everything else
+    /// is read to EOF, up to `maximumHookPayloadBytes`; an empty read is simply no payload.
+    private static func hookPayloadFromStandardInput() -> Data? {
+        guard isatty(FileHandle.standardInput.fileDescriptor) == 0 else { return nil }
+        var payload = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while payload.count < maximumHookPayloadBytes {
+            let wanted = min(buffer.count, maximumHookPayloadBytes - payload.count)
+            let bytesRead = buffer.withUnsafeMutableBytes { read(FileHandle.standardInput.fileDescriptor, $0.baseAddress, wanted) }
+            if bytesRead < 0 {
+                if errno == EINTR { continue }
+                break
+            }
+            if bytesRead == 0 { break }
+            payload.append(contentsOf: buffer[0..<bytesRead])
+        }
+        return payload.isEmpty ? nil : payload
     }
 
     /// Resolves the workspace and session to signal for, or `nil` when this is not a Spaces-managed

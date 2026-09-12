@@ -184,6 +184,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
             .workspaceStart(.init(cwd: "/tmp")), .workspaceStop(workspaceID: "workspace-1"),
             .workspaceRestart(.init(cwd: "/tmp", workspaceID: "workspace-1")),
             .agentSignal(.init(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "blocked")),
+            .agentSignal(.init(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "working", agentSessionKey: "thread-9")),
             .agentList(.init(workspaceID: "workspace-1", sessionID: "session-1")), .agentList(.init()),
             .agentAnnotate(.init(sessionID: "session-1", note: "review the auth flow")), .agentAnnotate(.init(sessionID: "session-1", note: "")),
             .agentSpawn(.init(cwd: "/tmp/work", workspaceID: "workspace-1", command: "claude", title: "Claude Code")),
@@ -203,6 +204,25 @@ final class TerminalServiceProtocolTests: XCTestCase {
             let decoded = try decoder.decode(TerminalServiceProfileCommand.self, from: encoder.encode(command))
             XCTAssertEqual(decoded, command)
         }
+    }
+
+    /// A signal raised outside a hook, or by an agent whose payload carries no conversation id, reports
+    /// no key, and that must not be read as "clear the stored key".
+    func testAgentSignalPayloadTreatsBlankAgentSessionKeyAsAbsent() throws {
+        let decoder = JSONDecoder()
+        XCTAssertNil(
+            try decoder.decode(
+                TerminalServiceProfileAgentSignalPayload.self,
+                from: Data(#"{"workspaceID":"workspace-1","terminalSessionID":"session-1","event":"done","agentSessionKey":"  "}"#.utf8)
+            ).agentSessionKey)
+        XCTAssertNil(
+            try decoder.decode(
+                TerminalServiceProfileAgentSignalPayload.self,
+                from: Data(#"{"workspaceID":"workspace-1","terminalSessionID":"session-1","event":"done"}"#.utf8)
+            ).agentSessionKey)
+        XCTAssertEqual(
+            TerminalServiceProfileAgentSignalPayload(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "done", agentSessionKey: "")
+                .agentSessionKey, nil)
     }
 
     func testAgentSessionRowResponseRoundTrips() throws {
