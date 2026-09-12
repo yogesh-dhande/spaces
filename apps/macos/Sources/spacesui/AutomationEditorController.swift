@@ -263,12 +263,9 @@ import workspacecore
         textView.font = Typography.body
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
         agentPromptTextView = textView
         return scrollableTextView(
-            textView, height: 72, inputBackgroundColor: host.sidebar.sidebarThemeColor(light: (235, 233, 225), dark: (10, 15, 17)),
+            textView, lines: .growingFormEditor, inputBackgroundColor: host.sidebar.sidebarThemeColor(light: (235, 233, 225), dark: (10, 15, 17)),
             borderColor: host.sidebar.sidebarCardBorderColor(isSelected: false))
     }
 
@@ -279,12 +276,9 @@ import workspacecore
         textView.font = Typography.monoBody
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
         scriptTextView = textView
         return scrollableTextView(
-            textView, height: 72, inputBackgroundColor: host.sidebar.sidebarThemeColor(light: (235, 233, 225), dark: (10, 15, 17)),
+            textView, lines: .growingFormEditor, inputBackgroundColor: host.sidebar.sidebarThemeColor(light: (235, 233, 225), dark: (10, 15, 17)),
             borderColor: host.sidebar.sidebarCardBorderColor(isSelected: false))
     }
 
@@ -562,6 +556,9 @@ import workspacecore
         let generated = AutomationsViewModel.agentEquivalentScript(
             workspaceID: workspaceID, command: command.isEmpty ? "claude" : command, prompt: agentPromptTextView?.string ?? "")
         scriptTextView?.string = generated
+        // Assigning `string` posts no change notification, so the editor is told explicitly and grows
+        // to the prefill instead of waiting for the next typed character.
+        scriptTextView?.didChangeText()
         lastGeneratedScriptPrefill = generated
     }
 

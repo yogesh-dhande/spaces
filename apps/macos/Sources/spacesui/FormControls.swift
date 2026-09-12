@@ -111,8 +111,7 @@ import systembridge
     section.addSubview(innerStack)
     section.addSubview(divider)
     NSLayoutConstraint.activate([
-        innerStack.leadingAnchor.constraint(equalTo: section.leadingAnchor),
-        innerStack.trailingAnchor.constraint(equalTo: section.trailingAnchor),
+        innerStack.leadingAnchor.constraint(equalTo: section.leadingAnchor), innerStack.trailingAnchor.constraint(equalTo: section.trailingAnchor),
         innerStack.topAnchor.constraint(equalTo: section.topAnchor, constant: 4),
 
         divider.leadingAnchor.constraint(equalTo: section.leadingAnchor), divider.trailingAnchor.constraint(equalTo: section.trailingAnchor),
@@ -261,16 +260,32 @@ import systembridge
     ])
 }
 
-/// A bordered, tinted scroll view wrapping `textView`. `inputBackgroundColor` and `borderColor`
-/// are the sidebar's theme-reactive colors, resolved by the caller (see `formSectionCard` above
-/// for why passing the resolved `NSColor` still keeps the border reactive to appearance changes).
-@MainActor func scrollableTextView(_ textView: NSTextView, height: CGFloat, inputBackgroundColor: NSColor, borderColor: NSColor) -> NSScrollView {
-    let scroll = NSScrollView()
+/// A bordered, tinted scroll view wrapping `textView`, sized by `lines` in the editor's own font.
+/// `inputBackgroundColor` and `borderColor` are the sidebar's theme-reactive colors, resolved by the
+/// caller (see `formSectionCard` above for why passing the resolved `NSColor` still keeps the border
+/// reactive to appearance changes).
+@MainActor func scrollableTextView(_ textView: NSTextView, lines: TextEditorLineBounds, inputBackgroundColor: NSColor, borderColor: NSColor)
+    -> AutoGrowingTextScrollView
+{
+    let inputBg = inputBackgroundColor
+    let textInset: CGFloat = 6
+    textView.drawsBackground = true
+    textView.backgroundColor = inputBg
+    textView.textColor = .textColor
+    textView.textContainerInset = NSSize(width: textInset, height: textInset)
+    textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+    textView.isVerticallyResizable = true
+    textView.isHorizontallyResizable = false
+    textView.autoresizingMask = [.width]
+    textView.textContainer?.widthTracksTextView = true
+
+    let rule = TextEditorHeightRule(bounds: lines, font: textView.font ?? Typography.body, verticalInset: textInset)
+    textView.minSize = NSSize(width: 0, height: rule.minimumHeight)
+    let scroll = AutoGrowingTextScrollView(editor: textView, rule: rule)
     scroll.hasVerticalScroller = true
     scroll.hasHorizontalScroller = false
     scroll.autohidesScrollers = true
     scroll.borderType = .noBorder
-    let inputBg = inputBackgroundColor
     scroll.drawsBackground = true
     scroll.backgroundColor = inputBg
     scroll.contentView.drawsBackground = true
@@ -279,19 +294,6 @@ import systembridge
     scroll.layer?.cornerRadius = UIRadius.compact
     scroll.layer?.borderWidth = 1
     bindAppearanceReactiveLayer(scroll) { view in view.layer?.borderColor = borderColor.cgColor }
-    textView.drawsBackground = true
-    textView.backgroundColor = inputBg
-    textView.textColor = .textColor
-    textView.textContainerInset = NSSize(width: 6, height: 6)
-    textView.minSize = NSSize(width: 0, height: height)
-    textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-    textView.isVerticallyResizable = true
-    textView.isHorizontallyResizable = false
-    textView.autoresizingMask = [.width]
-    textView.textContainer?.widthTracksTextView = true
-    scroll.documentView = textView
-    scroll.translatesAutoresizingMaskIntoConstraints = false
-    scroll.heightAnchor.constraint(equalToConstant: height).isActive = true
     return scroll
 }
 
