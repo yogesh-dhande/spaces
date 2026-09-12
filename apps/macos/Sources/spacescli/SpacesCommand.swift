@@ -22,10 +22,12 @@ public struct SpacesCommand: ParsableCommand {
               - Installed or non-dev builds default to ~/.spaces/spaces.db.
               - Runtime state defaults to <profile-root>/runtime unless `SPACES_RUNTIME_DIR` overrides it.
               - The running spacesd owns profile schema upgrades. If a staged helper requires a newer schema, run `spaces daemon apply-update` so the daemon updates in place without stopping its sessions.
-              - Workspace start/restart default to the deepest workspace containing the current directory; pass --workspace to override (and always for --device). Agent signal defaults workspace/session IDs from Spaces terminal environment.
-              - `project list`, `workspace list`, and `workspace create`/`start`/`restart` accept `--device <name-or-id>` to read or act on a paired device; the discovery listings read the device's overview. Omitting `--device` targets this device's spacesd daemon.
+              - Workspace start/stop/restart default to the deepest workspace containing the current directory; pass --workspace to override (and always for --device). Agent signal defaults workspace/session IDs from Spaces terminal environment.
+              - `project list`, `workspace list`, and `workspace create`/`start`/`stop`/`restart` accept `--device <name-or-id>` to read or act on a paired device; the discovery listings read the device's overview. Omitting `--device` targets this device's spacesd daemon.
               - `workspace start` waits for pending/running setup to complete and fails with the setup error if setup failed. It is convergent: it launches whichever configured processes are not already running (a never-started one launches fresh, an exited one restarts) and leaves already-running processes, ad hoc terminals, and coding-agent sessions untouched; a workspace whose configured processes are all already running succeeds as a no-op. Windows open without activating the app.
+              - `workspace stop` stops a workspace: the daemon terminates its processes and terminal sessions. A running Spaces app closes that workspace's panes and tracked browser tabs when it sees the transition, the same cleanup the app's own Stop gets; with no app running, the tracked tabs stay open.
               - `workspace restart` forces a full stop and relaunch for a workspace.
+              - `terminal stop <session>` ends one terminal session on this machine the way stopping its runtime target in the app does: the daemon tears the session down, its row disappears, and its pane closes. A session that has already ended is refused.
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for the current Spaces terminal session, or no-ops outside one.
               - `agent list`/`agent status` report coding-agent sessions with status, note, project/workspace context, and a spaces://terminal deep link. `agent annotate` sets an explicit note (empty clears it). `status`/`annotate` default the session to SPACES_TERMINAL_TRACKING_ID.
               - `agent spawn --command <cmd>` starts a supported coding agent (\(CodingAgent.commandListText)) in a new terminal and blocks until the detected agent is ready for input: its foreground kind is identified and its TUI enables bracketed paste (not until a hook signal — a promptless Codex never signals). It delivers no prompt — the orchestrator sends the prompt with `terminal send text --submit` and confirms work with `terminal tail`/`agent status`. It auto-subscribes the current terminal once the child has an agent row. `agent kill <session>` terminates the session, and `agent subscribe`/`unsubscribe <session>` record a watch edge (subscriber defaults to SPACES_TERMINAL_TRACKING_ID). Keystrokes go to a child through `terminal send`; agent status comes only from the agent's own signals, so sending input never moves it.
@@ -84,10 +86,21 @@ struct ProjectListCommand: ParsableCommand {
     }
 }
 
+/// The deadline the CLI gives a profile command whose daemon work is real work rather than a database
+/// round trip: workspace start (setup plus process launches), stop and restart (a stop script, plus waiting
+/// for terminal sessions to exit), and terminal stop (waiting for one session to exit, and for an automation
+/// session, for its run to cancel). `sendProfileCommand`'s default budget covers the round trip alone, so a
+/// command still doing that work would be reported as a timeout. The value is the deadline the Device API
+/// gives the same daemon operations, so one operation cannot end up with two deadlines that drift apart.
+private let longRunningProfileCommandTimeout = SpacesDeviceAPICommand.longRunningMutationTimeoutSeconds
+
 struct WorkspaceCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "workspace", abstract: "Manage Spaces workspaces.",
-        subcommands: [WorkspaceListCommand.self, WorkspaceCreateCommand.self, WorkspaceStartCommand.self, WorkspaceRestartCommand.self])
+        subcommands: [
+            WorkspaceListCommand.self, WorkspaceCreateCommand.self, WorkspaceStartCommand.self, WorkspaceStopCommand.self,
+            WorkspaceRestartCommand.self,
+        ])
 }
 
 struct WorkspaceListCommand: ParsableCommand {
@@ -155,8 +168,32 @@ struct WorkspaceStartCommand: ParsableCommand {
             return
         }
         let payload = TerminalServiceWorkspaceLifecyclePayload(cwd: context.currentDirectoryPath(), workspaceID: workspace)
-        let resolved = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.workspaceStart(payload)))
+        let resolved = try requireProfileWorkspace(
+            try TerminalService.sendProfileCommand(.workspaceStart(payload), timeout: longRunningProfileCommandTimeout))
         context.output.emit("Workspace is running \(resolved.id)")
+    }
+}
+
+struct WorkspaceStopCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "stop", abstract: "Stop a workspace on this or a paired device.")
+
+    @Option(name: .long, help: "Workspace ID. Defaults to the workspace containing the current directory.") var workspace: String?
+    @Option(name: .long, help: "Paired device name or ID. Defaults to this machine.") var device: String?
+
+    func run() throws {
+        let context = CLIContext()
+        if let device {
+            let workspace = try requiredRemoteWorkspaceID(workspace)
+            let record = try SpacesPairedDeviceSelection.resolve(device)
+            let response = try SpacesDeviceClient.stopWorkspace(
+                workspaceID: workspace, context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp()))
+            context.output.emit(response.message)
+            return
+        }
+        let payload = TerminalServiceWorkspaceLifecyclePayload(cwd: context.currentDirectoryPath(), workspaceID: workspace)
+        let resolved = try requireProfileWorkspace(
+            try TerminalService.sendProfileCommand(.workspaceStop(payload), timeout: longRunningProfileCommandTimeout))
+        context.output.emit("Workspace stopped \(resolved.id)")
     }
 }
 
@@ -178,7 +215,8 @@ struct WorkspaceRestartCommand: ParsableCommand {
             return
         }
         let payload = TerminalServiceWorkspaceLifecyclePayload(cwd: context.currentDirectoryPath(), workspaceID: workspace)
-        let resolved = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.workspaceRestart(payload)))
+        let resolved = try requireProfileWorkspace(
+            try TerminalService.sendProfileCommand(.workspaceRestart(payload), timeout: longRunningProfileCommandTimeout))
         context.output.emit("Workspace restarted \(resolved.id)")
     }
 }
@@ -1112,6 +1150,7 @@ struct TerminalCommand: ParsableCommand {
         commandName: "terminal", abstract: "Manage Spaces terminal sessions.",
         subcommands: [
             TerminalListCommand.self, TerminalCreateCommand.self, TerminalSendCommand.self, TerminalTailCommand.self, TerminalShowCommand.self,
+            TerminalStopCommand.self,
         ])
 }
 
@@ -1324,6 +1363,19 @@ struct TerminalShowCommand: ParsableCommand {
         #else
             throw WorkspaceError.invalidArgument(message: "Native Spaces terminal windows are only available on macOS.")
         #endif
+    }
+}
+
+struct TerminalStopCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "stop", abstract: "End a terminal session on this machine, the way stopping its runtime target does.")
+
+    @Argument(help: "Terminal session ID.") var sessionID: String
+
+    func run() throws {
+        let context = CLIContext()
+        let response = try TerminalService.sendProfileCommand(.terminalStop(sessionID: sessionID), timeout: longRunningProfileCommandTimeout)
+        context.output.emit(response.message)
     }
 }
 

@@ -31,7 +31,14 @@ extension WorkspaceOrchestrator {
 
     @discardableResult public func stopAdHocBuiltInTerminalSession(workspaceID: String, sessionID: String) throws -> Bool {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            try stopAdHocBuiltInTerminalSessionUnlocked(workspaceID: workspaceID, sessionID: sessionID)
+            // The mutation-boundary handoff veto workspace stop and agent finalization take, held here under
+            // the lifecycle lock so a handoff that began after a caller's own entry check cannot split this
+            // stop: the terminator no-ops during a handoff, so deleting this session's window and agent rows
+            // would leave the successor daemon a live terminal with nothing naming it. The bare-shell pane
+            // close reaches the unlocked body through its own quiet gate, which is deliberate, so this loud
+            // refusal belongs to the explicit stop rather than to the shared body.
+            guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
+            return try stopAdHocBuiltInTerminalSessionUnlocked(workspaceID: workspaceID, sessionID: sessionID)
         }
     }
 

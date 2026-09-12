@@ -52,21 +52,23 @@ spaces agent signal blocked`}</CodeBlock>
 
       <Section title="Workspaces">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Workspace commands list, create, start, and restart workspaces on the same-machine daemon, or on a paired device with <Cmd>--device</Cmd> so an orchestrator can discover and prepare work before spawning agents there. A remote listing reads the device overview.
+          Workspace commands list, create, start, stop, and restart workspaces on the same-machine daemon, or on a paired device with <Cmd>--device</Cmd> so an orchestrator can discover and prepare work before spawning agents there. A remote listing reads the device overview. Stop matches the app's Stop: the workspace's processes and terminal sessions end, and a running Spaces app closes their panes and tracked browser tabs. Stopping with no app running leaves the tracked tabs open, since the app is what tracks them.
         </p>
         <CodeBlock>{`spaces workspace list [--project <project-id>] [--device <name-or-id>]
 spaces workspace create --project <project-id> --branch <branch> [--base-branch <branch>] [--existing-branch] [--device <name-or-id>]
 spaces workspace start [--workspace <workspace-id>]
+spaces workspace stop [--workspace <workspace-id>]
 spaces workspace restart [--workspace <workspace-id>]
 spaces workspace start --device <name-or-id> --workspace <workspace-id>
+spaces workspace stop --device <name-or-id> --workspace <workspace-id>
 spaces workspace restart --device <name-or-id> --workspace <workspace-id>`}</CodeBlock>
         <ul className="mt-3 space-y-1">
           <Flag name="--project <id>" description="Project filter for list; project ID for workspace creation." />
           <Flag name="--branch <branch>" description="Workspace branch for creation." />
           <Flag name="--base-branch <branch>" description="Base branch. Defaults to the project default branch, then main or master." />
           <Flag name="--existing-branch" description="Uses an existing branch instead of creating one." />
-          <Flag name="--workspace <id>" description="Workspace ID for start and restart. Local commands infer the deepest workspace containing the current directory when omitted; paired-device commands require it." />
-          <Flag name="--device <name-or-id>" description="Paired device selector for list, create, start, and restart. Defaults to this machine." />
+          <Flag name="--workspace <id>" description="Workspace ID for start, stop, and restart. Local commands infer the deepest workspace containing the current directory when omitted; paired-device commands require it." />
+          <Flag name="--device <name-or-id>" description="Paired device selector for list, create, start, stop, and restart. Defaults to this machine." />
         </ul>
       </Section>
 
@@ -79,7 +81,8 @@ spaces terminal create [--workspace <workspace-id>] [--command <cmd>] [--title <
 spaces terminal send text <session-id> <text> [--submit] [--device <name-or-id>]
 spaces terminal send bytes <session-id> <byte> [<byte>...] [--device <name-or-id>]
 spaces terminal tail <session-id> [--lines <count>] [--device <name-or-id>]
-spaces terminal show <session-id>`}</CodeBlock>
+spaces terminal show <session-id>
+spaces terminal stop <session-id>`}</CodeBlock>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Tail reconstructs rendered terminal output. For identified coding-agent sessions, it omits an inline suggestion at the cursor while preserving status lines, dialogs, menus, and real input. Ordinary terminal sessions preserve faint text at the cursor.
         </p>
@@ -92,6 +95,7 @@ spaces terminal show <session-id>`}</CodeBlock>
           <Flag name="<byte>" description="Decimal byte value from 0 through 255." />
           <Flag name="--lines <count>" description="Number of lines to print. Defaults to 20." />
           <Flag name="show <session>" description="Opens a native Spaces window for the session in owner-seeking mode on macOS." />
+          <Flag name="stop <session>" description="Ends the session on this machine the way stopping its runtime target in the app does: its row disappears and its pane closes. A session that has already ended is refused." />
         </ul>
       </Section>
 

@@ -132,7 +132,11 @@ extension AppKitController {
     /// constructing an app-local orchestrator would have no daemon-installed cancellation callback.
     nonisolated static func stopWorkspaceForStopAllQuit(
         workspaceID: String, sendProfileCommand: (TerminalServiceProfileCommand) throws -> TerminalServiceProfileCommandResponse
-    ) throws { _ = try sendProfileCommand(.workspaceStop(workspaceID: workspaceID)) }
+    ) throws {
+        // Stop All names every workspace it stops, so the lifecycle payload's `cwd` is never consulted;
+        // it carries the process directory only because the shared payload always requires one.
+        _ = try sendProfileCommand(.workspaceStop(.init(cwd: FileManager.default.currentDirectoryPath, workspaceID: workspaceID)))
+    }
 
     nonisolated static func forceStopAllQuitAfterCleanupFailure(
         result: StopAllQuitCleanupResult, terminateSession: (String) throws -> Void, closeBrowserSessions: (String, [String]) -> Void

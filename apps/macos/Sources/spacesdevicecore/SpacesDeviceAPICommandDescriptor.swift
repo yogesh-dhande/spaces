@@ -54,7 +54,12 @@ public struct SpacesDeviceAPICommandDescriptor: Sendable, Equatable {
 extension SpacesDeviceAPICommand {
     /// Long-running mutations (workspace/project lifecycle, agent sessions, automations): the deadline
     /// has to cover real work, not just a database round trip.
-    private static let longRunningMutationTimeoutSeconds: TimeInterval = 60
+    ///
+    /// Public because the profile socket carries some of the same daemon operations and has no descriptor
+    /// table of its own: a local command whose daemon work is a Device API command's work takes this budget
+    /// by name (see `spaces workspace stop` and `spaces terminal stop`), so one operation cannot end up with
+    /// two deadlines that drift apart.
+    public static let longRunningMutationTimeoutSeconds: TimeInterval = 60
     /// `.agentHooksStatus` probes every configured coding agent's shell/config state, which can take
     /// longer than the default deadline but far less than a long-running mutation.
     private static let agentHooksStatusRequestTimeoutSeconds: TimeInterval = 20
