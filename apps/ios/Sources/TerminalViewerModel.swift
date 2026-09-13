@@ -341,6 +341,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// one that lands in that window (issue #709); see `waitForColdOpenToSettle` in
     /// `TerminalViewerModelTests`.
     var hasInstalledStreamForTesting: Bool { streamAttemptGeneration != nil }
+    /// Whether an automatic takeover (the open's one-shot, or a reclaim's) is still running, from the
+    /// moment `beginAutomaticTakeover` arms it through the confirmation read that settles it. Every state
+    /// that run reads applies through the same pipeline a test's own injected state does, so a test that
+    /// hands the model an ownership grant waits for this to clear first, or the run's next answer takes
+    /// the grant straight back off (issue #720); see `waitForRedialBootstrapToLand` in
+    /// `TerminalViewerModelTests`.
+    var hasAutomaticTakeoverInFlightForTesting: Bool { automaticTakeoverTask != nil }
     private var bufferedInputText = ""
     private var bufferedInputFlushTask: Task<Void, Never>?
     private let inputSendQueue = TerminalInputSerialQueue()
@@ -436,6 +443,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// A state rather than an optional, because "no identity" is two different situations and only one of
     /// them may judge a snapshot by client id alone; see `TerminalViewerAttachmentIdentity`.
     private var attachmentIdentity = TerminalViewerAttachmentIdentity.unattached
+    /// How many attaches this model has had acknowledged, bumped by `noteAttachmentAcknowledged`. Read
+    /// only to date an acknowledgement against a subscription: a `connect` records this counter as it
+    /// opens its subscription, and that subscription's initial export may settle an acknowledged
+    /// attachment (`canSettleAcknowledgedAttachment`) only while the counter still stands where it did.
+    @ObservationIgnored private var attachAcknowledgementCount: UInt64 = 0
+    /// `attachAcknowledgementCount` for a test that submits a subscription's first payload directly,
+    /// standing in for the stream (see `submitLatestState`'s `attachAcknowledgementsWhenSubscribed`).
+    var attachAcknowledgementCountForTesting: UInt64 { attachAcknowledgementCount }
     private var viewerAttachmentLifecycle: UInt64 = 0
     /// `viewerAttachmentLifecycle` at the moment `latestState` last received a payload that actually
     /// contributed a frame (`reduction.frameToApply != nil`), not every `latestState = reduction.storedPayload`
@@ -601,11 +616,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// band (see `takeOver`), and the attachment rules must still not take a command answer for the
     /// stream's word. Pruned with `stateSubmissionLifecycles`, against the same applied counter.
     @ObservationIgnored private var commandResponseSubmissions: Set<UInt64> = []
-    /// Submissions that carried the first payload of a subscription, read back in `applyReducedState` the
-    /// same way `commandResponseSubmissions` is: a subscription's first payload is the session's `initial`
-    /// export, which `ApplyMailbox.mayCollapse` never collapses, so the output that accounts for such a
-    /// submission is that payload's own.
-    @ObservationIgnored private var firstSubscriptionPayloadSubmissions: Set<UInt64> = []
+    /// Submissions that carried the first payload of a subscription, each against `attachAcknowledgementCount`
+    /// as it stood when that subscription was opened. Read back in `applyReducedState` the same way
+    /// `commandResponseSubmissions` is: a subscription's first payload is the session's `initial` export,
+    /// which `ApplyMailbox.mayCollapse` never collapses, so the output that accounts for such a submission
+    /// is that payload's own. The recorded count is what dates the export against the attachment the apply
+    /// judges it by: only while the count still stands there is the attachment one the daemon had already
+    /// applied when it built that export.
+    @ObservationIgnored private var firstSubscriptionPayloadAttachAcknowledgements: [UInt64: UInt64] = [:]
     @ObservationIgnored private var stateApplyWaiters:
         [(target: UInt64, continuation: CheckedContinuation<TerminalRemoteStateReductionOutput, Never>)] = []
     private var reportedOwnerReadyEpochID: String?
@@ -2837,6 +2855,16 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // dismissal detach (`detachForStop`, same channel) and the next attempt's own bootstrap read
             // queued behind it.
             async let bootstrapRead = readStateForConnectBootstrap(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt)
+            // The attachment this client holds as this subscription is opened. Only an acknowledgement the
+            // daemon had already applied by then can be settled by the initial export it builds for this
+            // subscriber: an attach acknowledged afterwards is genuinely missing from an export that
+            // predates it, so the first payload's silence about this client says nothing. The bootstrap
+            // read started just above is exactly what re-attaches inside that window: its own loss
+            // recovery runs on this connection while the subscription's initial export is still in flight,
+            // and reading that export's silence as a loss sends a second attach and a second takeover
+            // behind the recovery's own (#737), the second of which re-attaches as a viewer and hands the
+            // session back ownerless.
+            let attachAcknowledgementsBeforeSubscribe = attachAcknowledgementCount
             let handle = try await bridgeClient.subscribe(sessionID: session.id, clientID: clientID, initialEventTimeout: streamInitialEventTimeout) {
                 [weak self] payload in
                 guard let self else { return }
@@ -2849,7 +2877,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 // second under a streaming agent — and everything expensive about a payload (decoding the
                 // render update, applying it to the baseline, re-encoding the full frame) happens in the
                 // pipeline, off this actor.
-                submitLatestState(payload, isOutOfBand: false, isFirstSubscriptionPayload: isFirstSubscriptionPayload)
+                submitLatestState(
+                    payload, isOutOfBand: false,
+                    attachAcknowledgementsWhenSubscribed: isFirstSubscriptionPayload ? attachAcknowledgementsBeforeSubscribe : nil)
             } onDisconnect: { [weak self] disconnect in
                 Task { @MainActor [weak self] in
                     guard let self, self.isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else {
@@ -2987,6 +3017,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// do -- and the one thing the unresolved state must not do forever, since nothing else would ever
     /// resolve it.
     private func noteAttachmentAcknowledged(_ payload: GhosttyRemoteSessionStatePayload?) {
+        attachAcknowledgementCount &+= 1
         guard let entry = payload?.attachmentSnapshot?.clients.first(where: { $0.id == remoteClient.id }) else {
             // The daemon acknowledged the attach, so this client holds an attachment; it just did not name
             // it, which its own `try?` load of the post-control state allows. That is not the same as never
@@ -4462,17 +4493,21 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     ///   stream delivered. Defaulted, unlike `isOutOfBand`, because the stream and the tests that stand in
     ///   for it are the ordinary carrier; the command routes state it.
     ///
-    /// - Parameter isFirstSubscriptionPayload: True for the first payload a subscription delivers, which is
-    ///   the one payload that can report the loss of an attachment no snapshot ever confirmed; see
+    /// - Parameter attachAcknowledgementsWhenSubscribed: Non-nil for the first payload a subscription
+    ///   delivers, carrying `attachAcknowledgementCount` as it stood when that subscription was opened.
+    ///   That payload is the one that can report the loss of an attachment no snapshot ever confirmed, and
+    ///   only for an attachment the count says the daemon had already applied by then; see
     ///   `applyReducedState`.
     func submitLatestState(
-        _ payload: GhosttyRemoteSessionStatePayload, isOutOfBand: Bool, isCommandResponse: Bool = false, isFirstSubscriptionPayload: Bool = false,
-        lifecycle: UInt64? = nil
+        _ payload: GhosttyRemoteSessionStatePayload, isOutOfBand: Bool, isCommandResponse: Bool = false,
+        attachAcknowledgementsWhenSubscribed: UInt64? = nil, lifecycle: UInt64? = nil
     ) {
         submittedStateCount += 1
         stateSubmissionLifecycles[submittedStateCount] = lifecycle ?? viewerAttachmentLifecycle
         if isCommandResponse { commandResponseSubmissions.insert(submittedStateCount) }
-        if isFirstSubscriptionPayload { firstSubscriptionPayloadSubmissions.insert(submittedStateCount) }
+        if let attachAcknowledgementsWhenSubscribed {
+            firstSubscriptionPayloadAttachAcknowledgements[submittedStateCount] = attachAcknowledgementsWhenSubscribed
+        }
         statePipeline.submit(payload, isOutOfBand: isOutOfBand)
     }
 
@@ -4514,7 +4549,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let applied = appliedStateCount
         stateSubmissionLifecycles = stateSubmissionLifecycles.filter { $0.key > applied }
         commandResponseSubmissions = commandResponseSubmissions.filter { $0 > applied }
-        firstSubscriptionPayloadSubmissions = firstSubscriptionPayloadSubmissions.filter { $0 > applied }
+        firstSubscriptionPayloadAttachAcknowledgements = firstSubscriptionPayloadAttachAcknowledgements.filter { $0.key > applied }
         guard !stateApplyWaiters.isEmpty else { return }
         let released = stateApplyWaiters.filter { $0.target <= applied }
         stateApplyWaiters.removeAll { $0.target <= applied }
@@ -4542,12 +4577,26 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // about here. So the question is asked of the whole span of submissions this output accounts for.
         // The survivor answers for them: it carries the newer attachment snapshot, which is at least as
         // new as the first payload's, so reading the attachment out of it is reading the more current
-        // fact under the same causal ordering the first payload earned (the daemon opened the stream
-        // after this lifecycle's attach was acknowledged, so an omission at or after that point is a real
-        // sweep, not an unapplied attach). The mailbox itself is left alone deliberately: making the
+        // fact under the same causal ordering the first payload earned (an omission at or after the point
+        // the count below dates the export to is a real sweep, not an unapplied attach). The mailbox itself
+        // is left alone deliberately: making the
         // initial reason a barrier would keep an extra frame on the open paint path, and the pipeline is
         // shared with the macOS pane, while this accounting is the client's own.
-        let isFirstSubscriptionPayload = firstSubscriptionPayloadSubmissions.contains { $0 > appliedStateCount && $0 <= applicationSubmission }
+        // Judged here rather than when the payload was submitted, because the attachment the rule is about
+        // is the one `attachmentIdentity` names now: a re-attach acknowledged between the submission and
+        // this apply is exactly the attachment an export older than it cannot speak to.
+        // The range can hold two markers: a first payload still pending when its stream disconnected, and
+        // the replacement subscription's own first frame collapsing into the same output. The newest of
+        // them is the one that answers, for the same reason the collapse survivor answers for the span at
+        // all -- the attachment snapshot being read out is that survivor's, which the newest subscription
+        // is the one to have dated. Taking the older marker would date this export to a subscription that
+        // did not produce it, so an initial export that really does report the loss would be read as
+        // silence and the client would sit attached to nothing until the next redial. `max(by:)` on the
+        // key, never `first(where:)`: a dictionary's iteration order is unspecified.
+        let newestFirstSubscriptionPayloadInSpan = firstSubscriptionPayloadAttachAcknowledgements.filter {
+            $0.key > appliedStateCount && $0.key <= applicationSubmission
+        }.max { $0.key < $1.key }
+        let canSettleAcknowledgedAttachment = newestFirstSubscriptionPayloadInSpan?.value == attachAcknowledgementCount
         let applicationLifecycle = stateSubmissionLifecycles[applicationSubmission]
         guard applicationLifecycle == nil || applicationLifecycle == viewerAttachmentLifecycle else {
             trace("drop_state_from_stale_lifecycle submission=\(applicationSubmission)")
@@ -4619,16 +4668,19 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 // What this payload can take away is normally the attachment the stream confirmed, and
                 // nothing else: an attach the daemon acknowledged but has not broadcast yet is genuinely
                 // missing from payloads emitted before it landed. The first payload of a subscription is
-                // the exception, because it cannot be one of those: the daemon builds a subscriber's
-                // initial export on the same engine actor that applied this client's attach, and the attach
-                // was acknowledged before this stream was opened, so an initial export with no row for this
-                // client is the daemon saying the attachment is gone -- the stale-client sweep having
-                // reached an overdue lease in the gap between the acknowledgement and the export, which is
-                // exactly the window a re-attach on a redial cannot renew (the daemon applies nothing, and
-                // so touches no lease and broadcasts nothing, when a re-attach asks for the mode the
-                // attachment already has). Left unread, the client sits attached to nothing with its input
-                // refused until the next resume or redial.
-                let isAcknowledgedAttachmentThisPayloadSettles = isFirstSubscriptionPayload && attachmentIdentity.isAcknowledged
+                // the exception when the acknowledgement predates it (`canSettleAcknowledgedAttachment`),
+                // because then it cannot be one of those: the daemon builds a subscriber's initial export
+                // on the same engine actor that applied this client's attach, so an initial export with no
+                // row for this client is the daemon saying the attachment is gone -- the stale-client sweep
+                // having reached an overdue lease in the gap between the acknowledgement and the export,
+                // which is exactly the window a re-attach on a redial cannot renew (the daemon applies
+                // nothing, and so touches no lease and broadcasts nothing, when a re-attach asks for the
+                // mode the attachment already has). Left unread, the client sits attached to nothing with
+                // its input refused until the next resume or redial. An attach acknowledged after this
+                // subscription was opened is the case that ordering rules out, and it is a real one: the
+                // connect's own bootstrap read reports the loss on this same connection and re-attaches
+                // while the initial export is still in flight.
+                let isAcknowledgedAttachmentThisPayloadSettles = canSettleAcknowledgedAttachment && attachmentIdentity.isAcknowledged
                 lostAttachment = (hasSnapshotConfirmedAttachment || isAcknowledgedAttachmentThisPayloadSettles) && !isStillAttached
                 // Read before the write below, which is the payload that takes the attachment away: what
                 // the recovery reclaims is the ownership the lost attachment held, not whatever this
