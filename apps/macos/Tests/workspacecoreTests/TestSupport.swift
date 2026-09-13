@@ -81,6 +81,19 @@ extension XCTestCase {
         bindSpacesProfileForTest(databasePath: databasePath)
         return try SQLiteStore(path: databasePath)
     }
+
+    /// A second connection to the database this test is already bound to, for a thread other than the one
+    /// that owns `makeTemporaryStore()`'s connection.
+    ///
+    /// One `SQLiteStore` belongs to one execution context for its whole lifetime: it caches prepared
+    /// statements keyed by SQL text and counts open transactions, neither of them synchronized, so two
+    /// threads issuing statements on one connection corrupt that state instead of exercising the
+    /// concurrency the test means to (issue #741 crashed in the statement cache's dictionary lookup). The
+    /// product never shares one either: the Device API opens a fresh store inside each background closure
+    /// (`runWorkspaceSetupInBackground`, `finishReservedWorkspaceTerminalLaunchInBackground`) rather than
+    /// capturing the request's, so a second connection is exactly what a second thread models. Reads on it
+    /// see the other connection's committed writes, which is the concurrency the product actually has.
+    func makeSecondTestStoreConnection() throws -> SQLiteStore { try SQLiteStore(path: DatabaseLocator.defaultPath()) }
 }
 
 /// Drops this process's placeholder reservations and runtime-start holds on `ports`, so a test's ports

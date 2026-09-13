@@ -6,6 +6,12 @@ import systembridge
 
 @testable import workspacecore
 
+/// Runs one workspace's setup script on a thread of its own, the way the Device API runs a newly created
+/// workspace's deferred setup on a background queue.
+///
+/// `orchestrator` must be built on its own `SQLiteStore` (`makeSecondTestStoreConnection()`), never on the
+/// store the test thread keeps using: a connection belongs to one execution context, and the product
+/// reaches this same concurrency by opening a fresh store inside its background setup closure.
 final class WorkspaceSetupThread: Thread {
     private let orchestrator: WorkspaceOrchestrator
     private let workspaceID: String
