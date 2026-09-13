@@ -71,7 +71,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case cancel
     }
 
-
     var window: NSWindow!
     /// Test-only override that replaces `showPanelScope`'s real window-activation body. `showPanelScope`
     /// always calls `NSApp.activate(ignoringOtherApps:)`, a real AppKit call a unit test process must
@@ -241,8 +240,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     func finishNewTerminalSessionCreation(workspaceID: String) { pendingNewTerminalSessionWorkspaceIDs.remove(workspaceID) }
 
-
-
     private struct TerminalSessionWindowStateDump: Codable {
         let sessionID: String
         let requestedMode: String
@@ -272,7 +269,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let takeoverButtonEnabled: Bool?
         let takeoverMessage: String?
     }
-
 
     enum WindowFocusRequest: Sendable {
         case workspaceBrowserSession(workspaceID: String, targetURL: String)
@@ -566,7 +562,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let preferredTerminalSessionID =
                 (preferredFocusedBuiltInTerminalSessionID?.isEmpty == false)
                 ? preferredFocusedBuiltInTerminalSessionID : self.windowFocus.focusedBuiltInTerminalSessionIDForGlobalNavigation()
-            await self.windowFocus.cycleWorkspaceWindow(workspaceID: workspaceID, delta: delta, preferredTerminalSessionID: preferredTerminalSessionID)
+            await self.windowFocus.cycleWorkspaceWindow(
+                workspaceID: workspaceID, delta: delta, preferredTerminalSessionID: preferredTerminalSessionID)
         }
     }
 
@@ -590,7 +587,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         Task { @MainActor [weak self, object, workspaceID, name, requestID] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
             await self.awaitMainWindowContentBuilt()
-            await self.windowFocus.focusWorkspaceProcess(workspaceID: workspaceID, processName: name, requestID: (requestID?.isEmpty == false) ? requestID : nil)
+            await self.windowFocus.focusWorkspaceProcess(
+                workspaceID: workspaceID, processName: name, requestID: (requestID?.isEmpty == false) ? requestID : nil)
         }
     }
 
@@ -603,7 +601,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             self.windowFocus.writeFocusableWindowNames(workspaceID: workspaceID, to: outputPath)
         }
     }
-
 
     @objc private nonisolated func handleSelectWorkspaceDetailIPC(_ notification: Notification) {
         let object = notification.object as? String
@@ -640,9 +637,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             // refused as unavailable. Wait for one fresh snapshot on a miss and let the open resolve
             // again, the same miss handling the session-window open and the focus IPC paths carry;
             // a workspace still unresolved after that gets the unavailable alert from the open itself.
-            if self.deviceForWorkspaceMutation(workspaceID: workspaceID) == nil {
-                await self.sidebar.reloadAwaitingFreshSnapshot()
-            }
+            if self.deviceForWorkspaceMutation(workspaceID: workspaceID) == nil { await self.sidebar.reloadAwaitingFreshSnapshot() }
             self.openWorkspaceTerminal(workspaceID: workspaceID, route: .ipc)
         }
     }
@@ -1083,7 +1078,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // test below is on the action taken rather than on the open having worked.
         var openAction: TerminalPaneService.TerminalPaneOpenAction?
         defer {
-            if let orphaned = TerminalPaneService.heldPredecessorSessionToRelease(replacesSessionID: openIntent.replacesSessionID, openAction: openAction)
+            if let orphaned = TerminalPaneService.heldPredecessorSessionToRelease(
+                replacesSessionID: openIntent.replacesSessionID, openAction: openAction)
             {
                 panelCoordinator.releasePaneHeldForReplacement(sessionID: orphaned)
             }
@@ -1598,7 +1594,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         application.activate(options: [])
     }
 
-
     private func effectiveMainWindowVisibilityForHotkeyState() -> Bool {
         Self.effectiveMainWindowVisibilityForHotkeyState(
             rawMainWindowIsVisible: rawMainWindowVisibility(),
@@ -1664,8 +1659,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated private static func deviceOverviewFetch(device: SpacesPairedDeviceRecord) async -> SpacesDeviceOverviewPayload? {
         await Task.detached(priority: .userInitiated) {
             (try? SpacesDeviceClient.overview(
-                context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))))?
-                .overview
+                context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))))?.overview
         }.value
     }
 
@@ -1791,7 +1785,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         logStartupSnapshotProfile(
             "sidebar_snapshot_local_device_ready",
             details: "device=\(resolvedDevice.name) project_count=\(mapped.projects.count) workspace_count=\(workspaceCount)")
-        let alertsGroups = AlertsController.buildOverviewAlertsGroups(from: localOverview, deviceID: resolvedDevice.id, deviceName: resolvedDevice.name)
+        let alertsGroups = AlertsController.buildOverviewAlertsGroups(
+            from: localOverview, deviceID: resolvedDevice.id, deviceName: resolvedDevice.name)
         logStartupSnapshotProfile(
             "sidebar_snapshot_alerts_ready", details: "group_count=\(alertsGroups.count) item_count=\(alertsGroups.reduce(0) { $0 + $1.items.count })"
         )
@@ -2741,7 +2736,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.wantsLayer = true
-        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.backgroundColor = self?.sidebar.sidebarPanelBackgroundColor().cgColor }
+        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.backgroundColor = self?.sidebar.sidebarPanelBackgroundColor().cgColor
+        }
 
         let topBarRow = sidebar.makeSidebarTopBarRow()
         topBarRow.translatesAutoresizingMaskIntoConstraints = false
@@ -2752,8 +2748,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 (
                     symbol: "line.3.horizontal.decrease.circle", tooltip: "Filter workspaces",
                     action: #selector(WorkspaceVisibilityController.showWorkspaceVisibilityDialog), target: workspaceVisibility
-                ),
-                (symbol: "plus", tooltip: "New project", action: #selector(addProject), target: nil),
+                ), (symbol: "plus", tooltip: "New project", action: #selector(addProject), target: nil),
             ])
         sectionHeader.translatesAutoresizingMaskIntoConstraints = false
 
@@ -2989,11 +2984,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.wantsLayer = true
-        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.backgroundColor = self?.sidebar.sidebarPanelBackgroundColor().cgColor }
+        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.backgroundColor = self?.sidebar.sidebarPanelBackgroundColor().cgColor
+        }
 
         detailContainer.translatesAutoresizingMaskIntoConstraints = false
         detailContainer.wantsLayer = true
-        bindAppearanceReactiveLayer(detailContainer) { [weak self] view in view.layer?.backgroundColor = self?.sidebar.sidebarPanelBackgroundColor().cgColor }
+        bindAppearanceReactiveLayer(detailContainer) { [weak self] view in
+            view.layer?.backgroundColor = self?.sidebar.sidebarPanelBackgroundColor().cgColor
+        }
 
         // The right panel's own footer strip: workspace details for the selected
         // workspace (populated by the detail paths), empty otherwise.
@@ -3411,12 +3409,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func deviceProjectSummary(projectID: String) -> SpacesDeviceProjectSummary? {
         // Search every device section's overview, not just the local one, so detail
         // and config flows resolve projects that live on a remote device.
-        for section in deviceModel.deviceSections { if let project = section.overview?.projects.first(where: { $0.id == projectID }) { return project } }
+        for section in deviceModel.deviceSections {
+            if let project = section.overview?.projects.first(where: { $0.id == projectID }) { return project }
+        }
         return nil
     }
 
     func deviceWorkspaceSummary(workspaceID: String) -> SpacesDeviceWorkspaceSummary? {
-        for section in deviceModel.deviceSections { if let workspace = section.overview?.workspaces.first(where: { $0.id == workspaceID }) { return workspace } }
+        for section in deviceModel.deviceSections {
+            if let workspace = section.overview?.workspaces.first(where: { $0.id == workspaceID }) { return workspace }
+        }
         return nil
     }
 
@@ -4065,7 +4067,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         container.layer?.cornerRadius = UIRadius.compact
         container.layer?.borderWidth = 1
         container.layer?.masksToBounds = true
-        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.borderColor = self?.sidebar.sidebarCardBorderColor(isSelected: false).cgColor
+        bindAppearanceReactiveLayer(container) { [weak self] view in
+            view.layer?.borderColor = self?.sidebar.sidebarCardBorderColor(isSelected: false).cgColor
         }
 
         let captureWidth: CGFloat = 140
@@ -4224,7 +4227,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         hideWorkspacePanelTabStrip()
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
-        bindAppearanceReactiveLayer(detailContainer) { [weak self] view in view.layer?.backgroundColor = self?.sidebar.sidebarPanelBackgroundColor().cgColor }
+        bindAppearanceReactiveLayer(detailContainer) { [weak self] view in
+            view.layer?.backgroundColor = self?.sidebar.sidebarPanelBackgroundColor().cgColor
+        }
         // Every workspace-detail surface (panel, loading, setup) shares the footer
         // strip with the workspace's identity and actions.
         if let (_, workspace) = findWorkspace(id: workspaceID) {
@@ -4578,7 +4583,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             self?.workspaceNotesPopover = nil
         }
         let scrollView = scrollableTextView(
-            textView, height: 88, inputBackgroundColor: sidebar.sidebarThemeColor(light: (235, 233, 225), dark: (10, 15, 17)),
+            textView, lines: .fixed(5), inputBackgroundColor: sidebar.sidebarThemeColor(light: (235, 233, 225), dark: (10, 15, 17)),
             borderColor: sidebar.sidebarCardBorderColor(isSelected: false))
 
         let saveButton = NSButton(title: "Save (⌘↩)", target: self, action: #selector(saveWorkspaceNotesFromPopover(_:)))
@@ -4656,7 +4661,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         title.textColor = .labelColor
         stack.addArrangedSubview(title)
 
-        let workspaceDeviceName = deviceModel.deviceSections.first(where: { $0.deviceID == workspace.deviceID })?.deviceName ?? deviceModel.localDeviceName
+        let workspaceDeviceName =
+            deviceModel.deviceSections.first(where: { $0.deviceID == workspace.deviceID })?.deviceName ?? deviceModel.localDeviceName
         let detail = NSTextField(labelWithString: "Spaces is loading workspace details from \(workspaceDeviceName).")
         detail.font = Typography.rowDetail
         detail.textColor = .secondaryLabelColor
@@ -4878,7 +4884,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         textView.setAccessibilityIdentifier("workspace-setup-log-tail")
         workspaceSetupLogTextView = textView
         let scrollView = scrollableTextView(
-            textView, height: 240, inputBackgroundColor: sidebar.sidebarThemeColor(light: (235, 233, 225), dark: (10, 15, 17)),
+            textView, lines: .fixed(18), inputBackgroundColor: sidebar.sidebarThemeColor(light: (235, 233, 225), dark: (10, 15, 17)),
             borderColor: sidebar.sidebarCardBorderColor(isSelected: false))
         Task { @MainActor [weak textView] in textView?.scrollToEndOfDocument(nil) }
         return scrollView
@@ -4975,12 +4981,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// performs no process inspection and has no launch-command or shell fallback.
     nonisolated static func terminalPaletteSecondaryLabel(
         liveTitle: String?, sessionID: String?, sessionsByID: [String: SpacesDeviceTerminalSessionSummary]
-    )
-        -> String?
-    {
+    ) -> String? {
         if let liveTitle = liveTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !liveTitle.isEmpty { return liveTitle }
-        guard let sessionID,
-            let command = sessionsByID[sessionID]?.foregroundCommand?.trimmingCharacters(in: .whitespacesAndNewlines),
+        guard let sessionID, let command = sessionsByID[sessionID]?.foregroundCommand?.trimmingCharacters(in: .whitespacesAndNewlines),
             !command.isEmpty
         else { return nil }
         return command
@@ -5313,9 +5316,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     public func control(
         _ control: NSControl, textView: NSTextView, completions words: [String], forPartialWordRange charRange: NSRange,
         indexOfSelectedItem index: UnsafeMutablePointer<Int>
-    ) -> [String] {
-        projectForms.directoryPathCompletions(for: control, words: words, indexOfSelectedItem: index)
-    }
+    ) -> [String] { projectForms.directoryPathCompletions(for: control, words: words, indexOfSelectedItem: index) }
 
     public func controlTextDidChange(_ obj: Notification) {
         guard let changedField = obj.object as? NSTextField else { return }
@@ -5553,7 +5554,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 switch result {
                 case .success(let response):
                     button?.isEnabled = true
-                    self.browserSessions.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
+                    self.browserSessions.closeLocalBrowserSessionWindows(
+                        workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
                     self.closeWorkspacePanes(workspaceID: id)
                     // Install the post-delete overview first, then clear the marking: the workspace is
                     // already absent from that overview, so its row leaves the sidebar exactly once.
@@ -5630,7 +5632,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         // cleanup a direct success performs — otherwise its browser windows would outlive it
                         // indefinitely.
                         self.workspaceDeletion.endPendingWorkspaceDeletion(workspaceID: id)
-                        self.browserSessions.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
+                        self.browserSessions.closeLocalBrowserSessionWindows(
+                            workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
                         self.closeWorkspacePanes(workspaceID: id)
                         if deleteLocalBranch || deleteRemoteBranch {
                             // The delete landed, but the branch-deletion report existed only in the response
@@ -5787,8 +5790,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         } else {
             deviceModel.deviceSections.insert(
                 DeviceSection(
-                    deviceID: deviceModel.localDeviceID, deviceName: deviceModel.localDeviceName, isLocal: true, loadState: .loaded, device: storedLocalDevice, overview: nil,
-                    daemonStatus: incompatibility.status, compatibility: incompatibility.verdict), at: 0)
+                    deviceID: deviceModel.localDeviceID, deviceName: deviceModel.localDeviceName, isLocal: true, loadState: .loaded,
+                    device: storedLocalDevice, overview: nil, daemonStatus: incompatibility.status, compatibility: incompatibility.verdict), at: 0)
         }
         rebuildFlatSidebarData()
         fullReloadSidebarOutline()
@@ -5833,7 +5836,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         } else {
             targetDeviceID = selectedRowDeviceID()
         }
-        guard let targetDeviceID, let section = deviceModel.deviceSections.first(where: { $0.deviceID == targetDeviceID }), !section.isLocal else { return false }
+        guard let targetDeviceID, let section = deviceModel.deviceSections.first(where: { $0.deviceID == targetDeviceID }), !section.isLocal else {
+            return false
+        }
         showError(WorkspaceError.invalidArgument(message: Self.remoteWorkspacePathActionErrorMessage(action: action, deviceName: section.deviceName)))
         return true
     }
@@ -6373,7 +6378,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     )? {
         func candidate(_ workspaceID: String?) -> (deviceID: String, workspaceID: String)? {
             guard let workspaceID, workspaceID != goneWorkspaceID else { return nil }
-            guard let section = deviceModel.deviceSections.first(where: { $0.workspacesByProject.values.contains { $0.contains { $0.id == workspaceID } } })
+            guard
+                let section = deviceModel.deviceSections.first(where: {
+                    $0.workspacesByProject.values.contains { $0.contains { $0.id == workspaceID } }
+                })
             else { return nil }
             if let allowedWorkspaceKeys, !allowedWorkspaceKeys.contains(.init(deviceID: section.deviceID, workspaceID: workspaceID)) { return nil }
             return (section.deviceID, workspaceID)
@@ -6393,7 +6401,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         return nil
     }
-
 
     /// The macOS client's app config is just the editor preference (client-local in the client
     /// database). The port range is daemon-owned and never read by the GUI, so it carries a
@@ -6426,14 +6433,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return deviceSection(id: deviceID)?.overview
     }
 
-
     /// Internal rather than `private`: `BrowserSessionCoordinator.browserSessionTargetURLs` also needs
     /// this to look up a workspace's configured browser sessions from an overview.
-    nonisolated static func workspaceDetail(_ workspaceID: String, in overview: SpacesDeviceOverviewPayload)
-        -> SpacesDeviceWorkspaceDetailViewModel?
+    nonisolated static func workspaceDetail(_ workspaceID: String, in overview: SpacesDeviceOverviewPayload) -> SpacesDeviceWorkspaceDetailViewModel?
     { overview.workspaces.first(where: { $0.id == workspaceID }).map(SpacesDeviceWorkspaceDetailViewModel.init) }
-
-
 
     /// Runs a workspace terminal-session mutation (start a configured process / launch a
     /// coding agent) and returns the open request for the session it produced, applying the
@@ -6458,19 +6461,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-
-
     nonisolated static func effectiveMainWindowVisibilityForHotkeyState(rawMainWindowIsVisible: Bool, commandPaletteMainWindowVisibility: Bool?)
         -> Bool
     { commandPaletteMainWindowVisibility ?? rawMainWindowIsVisible }
-
 
     func logPerfMetric(_ metric: String, target: String, elapsedMS: Int, success: Bool, detail: String = "") {
         TerminalPerformance.logMetric(metric, target: target, elapsedMS: elapsedMS, success: success, detail: detail)
     }
 
     func windowShortcutElapsedMS(since start: Date) -> Int { max(Int(Date().timeIntervalSince(start) * 1000), 0) }
-
 
     /// Resolves the workspace owning a terminal session from the overview (sessions and
     /// process/agent/terminal rows all carry both the session id and workspace id),
@@ -6504,8 +6503,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             throw WorkspaceError.invalidArgument(message: "Process command is required.")
         }
     }
-
-
 
     nonisolated static func preferredWorkspaceIDForCommandPalette(
         selectedWorkspaceID: String?, focusedTerminalSessionWorkspaceID: String?, focusedWindowWorkspaceID: String?

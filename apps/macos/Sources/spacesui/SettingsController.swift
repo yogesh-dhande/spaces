@@ -316,8 +316,7 @@ import workspacecore
     }
 
     private func updatesSettingsCard() -> NSView {
-        let checkbox = NSButton(
-            checkboxWithTitle: "Receive pre-release updates", target: self, action: #selector(prereleaseUpdatesChanged(_:)))
+        let checkbox = NSButton(checkboxWithTitle: "Receive pre-release updates", target: self, action: #selector(prereleaseUpdatesChanged(_:)))
         checkbox.translatesAutoresizingMaskIntoConstraints = false
         checkbox.state = SpacesUpdaterDelegate.prereleaseUpdatesEnabled() ? .on : .off
         checkbox.setAccessibilityIdentifier("settings-prerelease-updates")
@@ -332,9 +331,7 @@ import workspacecore
     }
 
     @objc private func prereleaseUpdatesChanged(_ sender: NSButton) {
-        do {
-            try host.clientDatabase().setSetting(key: ClientSettingsKey.appPrereleaseUpdates, value: sender.state == .on ? "1" : "0")
-        } catch {
+        do { try host.clientDatabase().setSetting(key: ClientSettingsKey.appPrereleaseUpdates, value: sender.state == .on ? "1" : "0") } catch {
             // Leave the checkbox showing what is actually stored, not what the click asked for.
             sender.state = SpacesUpdaterDelegate.prereleaseUpdatesEnabled() ? .on : .off
             host.showError(error)
@@ -399,7 +396,7 @@ import workspacecore
         textView.setAccessibilityIdentifier("settings-mcp-config")
         mcpConfigTextView = textView
         let configScroll = scrollableTextView(
-            textView, height: 90, inputBackgroundColor: host.sidebar.sidebarThemeColor(light: (235, 233, 225), dark: (10, 15, 17)),
+            textView, lines: .fixed(6), inputBackgroundColor: host.sidebar.sidebarThemeColor(light: (235, 233, 225), dark: (10, 15, 17)),
             borderColor: host.sidebar.sidebarCardBorderColor(isSelected: false))
 
         let hint = host.helpTextLabel(selectedMCPClient.mcpConfigHint)
