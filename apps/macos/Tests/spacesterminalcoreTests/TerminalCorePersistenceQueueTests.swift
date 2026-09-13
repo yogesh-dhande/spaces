@@ -220,7 +220,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
     /// that failure collapsed into "no explicit database", the write would resolve the profile bound
     /// afterwards and commit there — the reassignment the enqueue-time capture exists to prevent.
     func testQueuedWriteWhoseProfileFailedToResolveIsNotReboundToALaterProfile() throws {
-        let accountHomeURL = URL(fileURLWithPath: try XCTUnwrap(SpacesProfile.accountHomeDirectoryPath()), isDirectory: true)
+        let accountHomeURL = URL(fileURLWithPath: try SpacesProfile.accountHomeDirectory(), isDirectory: true)
         let refusedRoot = accountHomeURL.appendingPathComponent(".spaces-dev/profiles/spaces/queue-\(UUID().uuidString)", isDirectory: true)
         // The refusal means this is never created; the teardown matters when the guard is deliberately
         // stubbed out to prove this test fails without it, which otherwise leaves fixtures in the
@@ -457,7 +457,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
     /// `SPACES_DB_PATH` inside the account's live profile root makes the enqueue-time resolution throw, and it
     /// does so without ever touching the filesystem, so this needs no teardown of its own.
     func testLifecycleWriteWithUnresolvedProfileReportsFailureWithoutRunningTheWrite() throws {
-        let accountHomeURL = URL(fileURLWithPath: try XCTUnwrap(SpacesProfile.accountHomeDirectoryPath()), isDirectory: true)
+        let accountHomeURL = URL(fileURLWithPath: try SpacesProfile.accountHomeDirectory(), isDirectory: true)
         let refusedDatabasePath = accountHomeURL.appendingPathComponent(".spaces/spaces.db").path
         setenv("SPACES_DB_PATH", refusedDatabasePath, 1)
 

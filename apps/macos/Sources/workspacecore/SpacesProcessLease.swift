@@ -78,14 +78,21 @@ public enum SpacesAppLaunchPreparationError: Error { case duplicateProfileOwner(
 /// Raised when the machine-wide desktop-control lease cannot be located because the password database
 /// has no readable home for this uid. There is no second-choice directory: the lease is only meaningful
 /// while every process on the machine agrees on one path for it.
+///
+/// The message carries the lookup's own reason and a command that asks the directory service for the same uid
+/// the lookup asked about, because this error stops the app before any window exists: the user's only evidence
+/// is this one line, and a condition it does not name is one neither they nor a bug report can act on. The
+/// command queries by uid through the search node, which is the question `getpwuid_r` asked; a name-based
+/// `dscl` read of the local node would answer a different one.
 public enum SpacesLeaseCoordinatorError: Error, CustomStringConvertible, LocalizedError {
-    case accountHomeUnavailable
+    case accountHomeUnavailable(reason: SpacesAccountHomeLookupFailure)
 
     public var description: String {
         switch self {
-        case .accountHomeUnavailable:
-            return "Could not read the account home directory from the password database, so the machine-wide desktop-control lease "
-                + "directory cannot be located."
+        case .accountHomeUnavailable(let reason):
+            return "Could not read the account home directory from the password database (\(reason)), so the machine-wide desktop-control "
+                + "lease directory cannot be located. Check that this account has a home directory in the directory service, with "
+                + "`dscacheutil -q user -a uid \(reason.uid)`."
         }
     }
 
@@ -231,7 +238,10 @@ public enum SpacesLeaseCoordinator {
         if let homeDirectoryURL {
             resolvedHomeDirectoryURL = homeDirectoryURL
         } else {
-            guard let accountHomePath = SpacesProfile.accountHomeDirectoryPath() else { throw SpacesLeaseCoordinatorError.accountHomeUnavailable }
+            let accountHomePath: String
+            do { accountHomePath = try SpacesProfile.accountHomeDirectory() } catch {
+                throw SpacesLeaseCoordinatorError.accountHomeUnavailable(reason: error)
+            }
             resolvedHomeDirectoryURL = URL(fileURLWithPath: accountHomePath, isDirectory: true)
         }
         return resolvedHomeDirectoryURL.appendingPathComponent(".spaces", isDirectory: true).appendingPathComponent("leases", isDirectory: true)

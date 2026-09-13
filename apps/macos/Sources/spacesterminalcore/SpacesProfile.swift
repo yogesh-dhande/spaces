@@ -286,7 +286,7 @@ public struct SpacesProfile: Sendable, Equatable {
     /// "the account home could not be identified" must never be reported as "this is not a live profile",
     /// which would drop the protection in exactly the case where nothing can vouch for the path.
     static func isLiveUserProfilePath(_ path: String) -> Bool {
-        guard let accountHomePath = accountHomeDirectoryPath() else { return true }
+        guard let accountHomePath = try? accountHomeDirectory() else { return true }
         let accountHome = URL(fileURLWithPath: accountHomePath, isDirectory: true)
         let liveProfileRoots = [
             accountHome.appendingPathComponent(".spaces", isDirectory: true),
@@ -322,21 +322,51 @@ public struct SpacesProfile: Sendable, Equatable {
     /// The account's home directory from the password database, deliberately ignoring `HOME` so a process
     /// that redirected the environment cannot disguise the account's real home as somewhere else.
     ///
-    /// `nil` when the password database has no readable entry for this uid. There is deliberately no
-    /// substitute: every Foundation home-directory API honours `HOME`, so falling back to one would
-    /// return the very value this function exists to avoid — and each caller's correct response to "the
-    /// account home is unknown" differs, so it is theirs to make rather than something to paper over here.
-    public static func accountHomeDirectoryPath() -> String? {
+    /// Throws when the password database has no readable entry for this uid, carrying which condition failed.
+    /// There is deliberately no substitute: every Foundation home-directory API honours `HOME`, so falling back
+    /// to one would return the very value this function exists to avoid, and each caller's correct response to
+    /// "the account home is unknown" differs, so it is theirs to make rather than something to paper over here.
+    public static func accountHomeDirectory() throws(SpacesAccountHomeLookupFailure) -> String {
+        // `sysconf` reports -1 when no size for a password record is defined; 16 KiB starts well above any
+        // ordinary entry, and the `ERANGE` growth below covers an entry that still does not fit.
+        let hintedSize = sysconf(Int32(_SC_GETPW_R_SIZE_MAX))
+        return try accountHomeDirectory(initialBufferSize: hintedSize > 0 ? Int(hintedSize) : 16_384)
+    }
+
+    /// Ceiling on the record buffer. A password database that keeps answering `ERANGE` must not be able to drive
+    /// an unbounded allocation, and a record orders of magnitude larger than any real one is a condition to
+    /// report rather than one to keep retrying.
+    private static let accountHomeMaxBufferSize = 1 << 20
+
+    /// `getpwuid_r` writes the entry's strings into a caller-supplied buffer and answers `ERANGE` when that
+    /// buffer is too small; retrying with a larger one is its documented contract, not a fallback. The size an
+    /// entry needs is a property of what the directory service returns for this account, so the
+    /// `_SC_GETPW_R_SIZE_MAX` hint the public entry point starts from is a starting guess rather than a bound
+    /// and can be short for an account whose record carries long attributes.
+    ///
+    /// `initialBufferSize` exists so a test can start below the size any real entry needs and observe the
+    /// growth; nothing in the product passes anything but the `sysconf` hint.
+    static func accountHomeDirectory(initialBufferSize: Int) throws(SpacesAccountHomeLookupFailure) -> String {
         let uid = getuid()
-        let rawSize = sysconf(Int32(_SC_GETPW_R_SIZE_MAX))
-        let bufferSize = rawSize > 0 ? Int(rawSize) : 16_384
-        var buffer = [CChar](repeating: 0, count: bufferSize)
-        var record = passwd()
-        var result: UnsafeMutablePointer<passwd>?
-        let status = getpwuid_r(uid, &record, &buffer, buffer.count, &result)
-        guard status == 0, let entry = result else { return nil }
-        let path = String(cString: entry.pointee.pw_dir)
-        return path.isEmpty ? nil : path
+        // At least one byte: the growth doubles, so a zero-size start would double to zero forever.
+        var bufferSize = min(max(initialBufferSize, 1), accountHomeMaxBufferSize)
+        while true {
+            var buffer = [CChar](repeating: 0, count: bufferSize)
+            var record = passwd()
+            var result: UnsafeMutablePointer<passwd>?
+            let status = getpwuid_r(uid, &record, &buffer, buffer.count, &result)
+            if status == ERANGE, bufferSize < accountHomeMaxBufferSize {
+                bufferSize = min(bufferSize * 2, accountHomeMaxBufferSize)
+                continue
+            }
+            guard status == 0 else { throw SpacesAccountHomeLookupFailure.lookupFailed(uid: uid, status: status, bufferSize: bufferSize) }
+            // A zero status with no entry is how `getpwuid_r` reports that the account simply is not in the
+            // database, which is a different condition from the lookup itself failing.
+            guard let entry = result else { throw SpacesAccountHomeLookupFailure.noEntryForAccount(uid: uid) }
+            let path = String(cString: entry.pointee.pw_dir)
+            guard !path.isEmpty else { throw SpacesAccountHomeLookupFailure.emptyHomeDirectory(uid: uid) }
+            return path
+        }
     }
 
     public static func ipcObject(profileRoot: String) -> String { "spaces.profile.\(shortStableHash(canonicalPath(profileRoot)))" }

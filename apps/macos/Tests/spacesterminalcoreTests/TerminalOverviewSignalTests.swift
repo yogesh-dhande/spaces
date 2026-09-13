@@ -30,7 +30,7 @@ final class TerminalOverviewSignalTests: XCTestCase {
     /// where the swallowed call lived.
     #if os(macOS)
         func testPostStillDeliversToInProcessObserverWhenTheCrossProcessHalfIsRefused() throws {
-            let accountHomePath = try XCTUnwrap(SpacesProfile.accountHomeDirectoryPath())
+            let accountHomePath = try SpacesProfile.accountHomeDirectory()
             let originalDatabasePath = ProcessInfo.processInfo.environment[SpacesProfile.databasePathEnvironmentVariable]
             let originalRuntimePath = ProcessInfo.processInfo.environment[SpacesProfile.runtimeDirectoryEnvironmentVariable]
             let originalHome = ProcessInfo.processInfo.environment["HOME"]
