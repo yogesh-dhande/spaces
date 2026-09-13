@@ -869,6 +869,18 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
+    /// A screen state change publishes the frame a remote owner needs, as a delta against the frame the
+    /// subscriber already holds.
+    ///
+    /// The session is never started, and the owner is attached by writing the durable row rather than by
+    /// `attach`, which would spawn the configured shell. A live shell is what this test cannot have: its
+    /// prompt arrives as PTY bytes whose drain waits out the incoming-output coalescing interval, so those
+    /// bytes can still be pending when the coalesced screen turn below runs. That turn publishes them under
+    /// `output` first (`publishPendingIncomingOutputBeforeScreenStateChange`), the `output` export claims
+    /// the synthetic revision injected here, and the `state_change` frame is then correctly suppressed as a
+    /// duplicate, leaving the wait below nothing to observe for its full timeout. The same stray frames
+    /// also break the delta baseline this test accumulates. Nothing here is about a terminal's own output,
+    /// so the shell is removed rather than raced.
     func testScreenStateChangeBroadcastsRemoteOwnerFrame() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -879,20 +891,30 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "session-remote-screen-state-change-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
             shell: "/bin/zsh", command: nil, createdAt: "2026-06-02T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let snapshotTextBox = MutableBox("mobile frame 0")
         GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in Self.snapshot(text: snapshotTextBox.value) }
         defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
 
+        let remoteOwner = TerminalClient(
+            id: "remote-ipad", kind: .remote, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"), connectedAt: "2026-06-02T00:00:00Z"
+        )
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-06-02T00:00:00Z")
+
         let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
-            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
-            let remoteOwner = TerminalClient(
-                id: "remote-ipad", kind: .remote, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
-                connectedAt: "2026-06-02T00:00:00Z")
-            try host.attach(client: remoteOwner, mode: .owner, into: nil)
-            return Box(host)
+            Box(GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths))
         }
         let host = hostBox.value
         defer { TerminalEngineActor.runSynchronously { host.terminate() } }
+        // Seeds the stream's delta baseline the way a started session seeds it: `startIfNeeded` broadcasts an
+        // `initial` on the stream before any subscriber connects. Without one the producer holds no baseline
+        // and every export below falls back to a full frame.
+        try await TerminalEngineActor.run {
+            try host.debugStartStateStreamServerForTesting()
+            host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.initial.rawValue)
+        }
+        defer { TerminalEngineActor.runSynchronously { host.debugStopStateStreamServerForTesting() } }
 
         let receivedPayloads = RemoteSessionStatePayloadCollector()
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
@@ -2056,20 +2078,34 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "session-unmoved-screen-state-change-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
             workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-09-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let snapshotTextBox = MutableBox("mobile frame 0")
         GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in Self.snapshot(text: snapshotTextBox.value) }
         defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
 
+        // Owner attached by durable row and no session started, for the reason spelled out on
+        // `testScreenStateChangeBroadcastsRemoteOwnerFrame`: a live shell's prompt can still be pending when
+        // a coalesced screen turn runs, and the `output` export that then publishes it claims the synthetic
+        // revision these assertions are written against.
+        let remoteOwner = TerminalClient(
+            id: "remote-ipad", kind: .remote, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"), connectedAt: "2026-09-10T00:00:00Z"
+        )
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-09-10T00:00:00Z")
+
         let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
-            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
-            let remoteOwner = TerminalClient(
-                id: "remote-ipad", kind: .remote, identity: TerminalClientIdentity(label: "iPad", deviceName: "iPad"),
-                connectedAt: "2026-09-10T00:00:00Z")
-            try host.attach(client: remoteOwner, mode: .owner, into: nil)
-            return Box(host)
+            Box(GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths))
         }
         let host = hostBox.value
         defer { TerminalEngineActor.runSynchronously { host.terminate() } }
+        // Seeds the stream's delta baseline the way a started session seeds it: `startIfNeeded` broadcasts an
+        // `initial` on the stream before any subscriber connects. Without one the producer holds no baseline
+        // and every export below falls back to a full frame.
+        try await TerminalEngineActor.run {
+            try host.debugStartStateStreamServerForTesting()
+            host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.initial.rawValue)
+        }
+        defer { TerminalEngineActor.runSynchronously { host.debugStopStateStreamServerForTesting() } }
 
         let receivedPayloads = RemoteSessionStatePayloadCollector()
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
