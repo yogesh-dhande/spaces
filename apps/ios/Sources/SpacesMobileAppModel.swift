@@ -1141,6 +1141,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         do {
             _ = try await bridgeClient.triggerAutomation(id: id, commandChannel: commandChannel)
             guard identity == overviewIdentity else { return }
+            // The command changed the device, so every overview fetch issued before it describes a
+            // device without the change. Bumped like any other device-changing call so one of those in
+            // flight is discarded rather than published, and so the read below issues its own request
+            // instead of joining it.
+            mutationGeneration &+= 1
             await refresh()
         } catch {
             guard identity == overviewIdentity else { return }
@@ -1166,6 +1171,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         do {
             _ = try await bridgeClient.setAutomationNextRun(id: id, nextRunTime: nextRunTime, commandChannel: commandChannel)
             guard identity == overviewIdentity else { return nil }
+            // Bumped before the read for the reason given in triggerAutomation.
+            mutationGeneration &+= 1
             await refresh()
             return nil
         } catch {
@@ -1183,6 +1190,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         do {
             _ = try await bridgeClient.cancelAutomationRun(runID: runID, commandChannel: commandChannel)
             guard identity == overviewIdentity else { return }
+            // Bumped before the read for the reason given in triggerAutomation.
+            mutationGeneration &+= 1
             await refresh()
         } catch {
             guard identity == overviewIdentity else { return }
@@ -1201,6 +1210,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         do {
             _ = try await bridgeClient.endAutomationAgents(runID: runID, commandChannel: commandChannel)
             guard identity == overviewIdentity else { return }
+            // Bumped before the read for the reason given in triggerAutomation.
+            mutationGeneration &+= 1
             await refresh()
         } catch {
             guard identity == overviewIdentity else { return }

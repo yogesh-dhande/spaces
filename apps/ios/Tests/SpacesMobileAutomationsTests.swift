@@ -691,6 +691,181 @@
             XCTAssertNil(model.errorMessage)
         }
 
+        /// A poll's overview fetch is already in flight when the trigger command lands. Without bumping
+        /// `mutationGeneration` before the post-command read, that read would join the older poll and
+        /// publish the pre-trigger state once it finally resolves. It must instead issue its own request,
+        /// and the poll's stale answer (released afterward) must not overwrite what that request publishes.
+        func testTriggerAutomationReadsPastAPollIssuedBeforeTheCommand() async {
+            let recorder = SpacesMobileAutomationsRequestRecorder()
+            let overviewGate = SpacesMobileAutomationsAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let staleOverview = makeOverview(
+                automations: [makeAutomation(id: "automation-a", name: "Deploy")],
+                automationRuns: [makeRun(id: "run-old", automationID: "automation-a", status: "idle")])
+            let triggeredRun = makeRun(id: "run-new", automationID: "automation-a", status: "running")
+            let freshOverview = makeOverview(automations: [makeAutomation(id: "automation-a", name: "Deploy")], automationRuns: [triggeredRun])
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "overview" {
+                    let overviewRequestsSoFar = await recorder.snapshot().count { $0.commandName == "overview" }
+                    if overviewRequestsSoFar == 1 {
+                        await overviewGate.wait()
+                        return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(staleOverview))
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(freshOverview))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "Triggered automation.", result: .automationRuns(.init(rows: [triggeredRun])))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
+
+            // A poll's fetch, held open on the transport: this is the overview that predates the trigger.
+            let poll = Task { await model.refresh() }
+            while await recorder.snapshot().count(where: { $0.commandName == "overview" }) < 1 { await Task.yield() }
+
+            let trigger = Task { await model.triggerAutomation(id: "automation-a") }
+            for _ in 0..<100 { await Task.yield() }
+            await overviewGate.open()
+            await trigger.value
+            await poll.value
+
+            let overviewFetches = await recorder.snapshot().count { $0.commandName == "overview" }
+            XCTAssertEqual(overviewFetches, 2, "the trigger's read issues its own overview request instead of only joining the poll before it")
+            XCTAssertEqual(
+                model.automationRows.first?.lastRunStatus, "running", "the fresh overview lands, not the stale one the held poll answered with")
+        }
+
+        /// Mirrors `testTriggerAutomationReadsPastAPollIssuedBeforeTheCommand` for the schedule action.
+        func testSetAutomationNextRunReadsPastAPollIssuedBeforeTheCommand() async {
+            let recorder = SpacesMobileAutomationsRequestRecorder()
+            let overviewGate = SpacesMobileAutomationsAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let staleNextRun = Date(timeIntervalSinceReferenceDate: 1_000_000)
+            let freshNextRun = Date(timeIntervalSinceReferenceDate: 2_000_000)
+            let staleOverview = makeOverview(automations: [
+                makeAutomation(
+                    id: "automation-a", name: "Deploy", triggerKind: "cron",
+                    nextFireTime: TerminalSessionTimestamp.fractionalString(from: staleNextRun))
+            ])
+            let freshOverview = makeOverview(automations: [
+                makeAutomation(
+                    id: "automation-a", name: "Deploy", triggerKind: "cron",
+                    nextFireTime: TerminalSessionTimestamp.fractionalString(from: freshNextRun))
+            ])
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "overview" {
+                    let overviewRequestsSoFar = await recorder.snapshot().count { $0.commandName == "overview" }
+                    if overviewRequestsSoFar == 1 {
+                        await overviewGate.wait()
+                        return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(staleOverview))
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(freshOverview))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "Scheduled next run.")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
+
+            let poll = Task { await model.refresh() }
+            while await recorder.snapshot().count(where: { $0.commandName == "overview" }) < 1 { await Task.yield() }
+
+            let schedule = Task { await model.setAutomationNextRun(id: "automation-a", nextRunTime: freshNextRun) }
+            for _ in 0..<100 { await Task.yield() }
+            await overviewGate.open()
+            _ = await schedule.value
+            await poll.value
+
+            let overviewFetches = await recorder.snapshot().count { $0.commandName == "overview" }
+            XCTAssertEqual(overviewFetches, 2, "the schedule's read issues its own overview request instead of only joining the poll before it")
+            XCTAssertEqual(
+                model.automationRows.first?.automation.nextFireTime, TerminalSessionTimestamp.fractionalString(from: freshNextRun),
+                "the fresh next-run time lands, not the stale one the held poll answered with")
+        }
+
+        /// Mirrors `testTriggerAutomationReadsPastAPollIssuedBeforeTheCommand` for the cancel action.
+        func testCancelAutomationRunReadsPastAPollIssuedBeforeTheCommand() async {
+            let recorder = SpacesMobileAutomationsRequestRecorder()
+            let overviewGate = SpacesMobileAutomationsAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let staleOverview = makeOverview(
+                automations: [makeAutomation(id: "automation-a", name: "Deploy")],
+                automationRuns: [makeRun(id: "run-1", automationID: "automation-a", status: "running")])
+            let canceledRun = makeRun(id: "run-1", automationID: "automation-a", status: "canceled")
+            let freshOverview = makeOverview(automations: [makeAutomation(id: "automation-a", name: "Deploy")], automationRuns: [canceledRun])
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "overview" {
+                    let overviewRequestsSoFar = await recorder.snapshot().count { $0.commandName == "overview" }
+                    if overviewRequestsSoFar == 1 {
+                        await overviewGate.wait()
+                        return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(staleOverview))
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(freshOverview))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "Canceled automation run.", result: .automationRuns(.init(rows: [canceledRun])))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
+
+            let poll = Task { await model.refresh() }
+            while await recorder.snapshot().count(where: { $0.commandName == "overview" }) < 1 { await Task.yield() }
+
+            let cancel = Task { await model.cancelAutomationRun(runID: "run-1") }
+            for _ in 0..<100 { await Task.yield() }
+            await overviewGate.open()
+            await cancel.value
+            await poll.value
+
+            let overviewFetches = await recorder.snapshot().count { $0.commandName == "overview" }
+            XCTAssertEqual(overviewFetches, 2, "the cancel's read issues its own overview request instead of only joining the poll before it")
+            XCTAssertEqual(
+                model.automationRows.first?.lastRunStatus, "canceled", "the fresh overview lands, not the stale one the held poll answered with")
+        }
+
+        /// Mirrors `testTriggerAutomationReadsPastAPollIssuedBeforeTheCommand` for the end-agents action.
+        func testEndAutomationAgentsReadsPastAPollIssuedBeforeTheCommand() async {
+            let recorder = SpacesMobileAutomationsRequestRecorder()
+            let overviewGate = SpacesMobileAutomationsAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let liveAgent = makeAgentSummary(terminalSessionID: "agent-1", status: "running", live: true)
+            let staleOverview = makeOverview(
+                automations: [makeAutomation(id: "automation-a", name: "Deploy")],
+                automationRuns: [makeRun(id: "run-1", automationID: "automation-a", status: "succeeded", attributedAgents: [liveAgent])])
+            let settledAgent = makeAgentSummary(terminalSessionID: "agent-1", status: "exited", live: false)
+            let endedRun = makeRun(id: "run-1", automationID: "automation-a", status: "succeeded", attributedAgents: [settledAgent])
+            let freshOverview = makeOverview(automations: [makeAutomation(id: "automation-a", name: "Deploy")], automationRuns: [endedRun])
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "overview" {
+                    let overviewRequestsSoFar = await recorder.snapshot().count { $0.commandName == "overview" }
+                    if overviewRequestsSoFar == 1 {
+                        await overviewGate.wait()
+                        return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(staleOverview))
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(freshOverview))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "Ended automation agents.", result: .automationRuns(.init(rows: [endedRun])))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
+
+            let poll = Task { await model.refresh() }
+            while await recorder.snapshot().count(where: { $0.commandName == "overview" }) < 1 { await Task.yield() }
+
+            let endAgents = Task { await model.endAutomationAgents(runID: "run-1") }
+            for _ in 0..<100 { await Task.yield() }
+            await overviewGate.open()
+            await endAgents.value
+            await poll.value
+
+            let overviewFetches = await recorder.snapshot().count { $0.commandName == "overview" }
+            XCTAssertEqual(overviewFetches, 2, "the end-agents read issues its own overview request instead of only joining the poll before it")
+            XCTAssertEqual(
+                model.overview?.automationRuns.first?.attributedAgents.first?.live, false,
+                "the fresh overview lands, not the stale one the held poll answered with")
+        }
+
         /// A refresh whose fetched overview is byte-for-byte identical to what's already published must not
         /// rewrite `model.overview`: rewriting it — even to an equal value — re-triggers `@Observable`'s
         /// change notification and re-renders every view reading it, which is the invalidation storm #540
