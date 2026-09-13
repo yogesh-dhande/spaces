@@ -2882,14 +2882,21 @@
             await gate.release()
             await waitUntil("the acknowledged takeover to make this client the owner") { model.isOwner }
 
-            // The stream drops before the broadcast that would have confirmed the takeover, and the outage
-            // outlasts the lease, so the daemon drops the attachment and the ownership held through it.
+            // The stream drops before the broadcast that would have confirmed the takeover.
+            let readsBeforeRedial = ownership.stateReadCount()
             await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
-            ownership.expireAttachment()
             let didRedial = await backend.waitForSubscribeCount(2)
             XCTAssertTrue(didRedial, "a dropped stream must redial")
+            // The redial bootstraps from a `.state` read of its own, which reports an expiry it is answered
+            // after exactly as the stream does. This test is about the fresh stream's own first snapshot
+            // being the payload that reports it -- the bootstrap read's ordering is
+            // `testTheInitialExportOfASubscriptionOlderThanTheReattachIsNotASecondLoss` below -- so the
+            // lease is left alive until that read has been answered.
+            await waitUntil("the redial's bootstrap read to be answered") { ownership.stateReadCount() > readsBeforeRedial }
 
-            // The fresh stream's first snapshot is the expiry: this client holds nothing.
+            // The outage outlasts the lease, so the daemon drops the attachment and the ownership held
+            // through it, and the fresh stream's first snapshot is that expiry: this client holds nothing.
+            ownership.expireAttachment()
             await backend.fireFrame(
                 Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:40:00Z"))
 
@@ -2897,6 +2904,58 @@
             await waitUntil("the ownerless session to be reclaimed") { model.isOwner }
             XCTAssertEqual(ownership.takeoverCount(), 2, "the recovery must take back the ownership the acknowledged takeover won")
             XCTAssertEqual(ownership.attachCount(), 2, "the loss must send exactly one reattach")
+        }
+
+        /// The redial's own bootstrap read can be what reports the expiry, and the recovery it starts
+        /// re-attaches on that same connection while the fresh subscription's initial export is still in
+        /// flight. That export was built before the re-attach, so it carries no row for this client --
+        /// which is the daemon saying nothing at all about the attachment, not saying it is gone. Read as
+        /// a second loss it sends a second attach behind the reclaim's takeover, and that attach is a
+        /// viewer's, so it hands the session the reclaim just took back straight over, ownerless.
+        func testTheInitialExportOfASubscriptionOlderThanTheReattachIsNotASecondLoss() async throws {
+            let ownership = SessionOwnershipTracker()
+            let gate = ReclaimTakeoverGate()
+            let backend = StageTrackerTestBackend(transportFactory: { OwnershipTrackingRequestTransport(ownership: ownership, takeoverGate: gate) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didSubscribe = await backend.waitForSubscribeCount(1)
+            XCTAssertTrue(didSubscribe, "the open must attach and subscribe")
+            await gate.waitForStart()
+            guard let attached = ownership.lastAttachedClient() else { return XCTFail("the open must have attached") }
+            let viewerAttachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: attached.id, mode: .viewer, attachedAt: "2026-06-04T14:30:00Z")
+            await backend.fireFrame(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [attached], attachments: [viewerAttachment]),
+                    emittedAt: "2026-06-04T14:30:00Z"))
+            await gate.release()
+            await waitUntil("the open's takeover to make this client the owner") { model.isOwner }
+
+            // The outage outlasts the lease, so the daemon drops the attachment and the ownership with it.
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+            ownership.expireAttachment()
+            let didRedial = await backend.waitForSubscribeCount(2)
+            XCTAssertTrue(didRedial, "a dropped stream must redial")
+
+            // Nothing is delivered on the fresh stream yet, so the redial's own bootstrap read is the one
+            // that reports the expiry, and its recovery is let run to the end before the export below.
+            await waitUntil("the bootstrap read's recovery to reattach") { ownership.attachCount() == 2 }
+            await waitUntil("the reclaim to take the ownerless session back") { model.isOwner }
+
+            // The initial export of the subscription opened above, built before that re-attach.
+            await backend.fireFrame(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:40:00Z"))
+            await waitUntil("the initial export to be applied") { model.latestState?.emittedAt == "2026-06-04T14:40:00Z" }
+            // The recovery an export like this used to start runs on its own task, so the apply above is
+            // the anchor and this is the slack behind it.
+            try await Task.sleep(for: .milliseconds(250))
+            XCTAssertEqual(ownership.attachCount(), 2, "an export older than the re-attach must not send a second one")
+            XCTAssertEqual(ownership.takeoverCount(), 2, "and must not spend a second takeover behind it")
         }
 
         /// The expiry can reach this client while its own takeover is still sending: the daemon takes the
@@ -3514,7 +3573,7 @@
             // emits, so what they report is read rather than refused for being older than the last apply.
             model.submitLatestState(
                 Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:59:00Z"),
-                isOutOfBand: false, isFirstSubscriptionPayload: true)
+                isOutOfBand: false, attachAcknowledgementsWhenSubscribed: model.attachAcknowledgementCountForTesting)
             model.submitLatestState(
                 try Self.framedState(
                     text: "busy", sessionRevision: 5, ownerEpoch: 1, emittedAt: "2026-06-04T15:00:00Z",
@@ -8393,6 +8452,7 @@
             private var takeovers = 0
             private var takeoverAttempts = 0
             private var stamps = 0
+            private var stateReads = 0
             private var ownerClientID: String?
             private var attachedClient: TerminalClient?
             private var failsNextStateRead = false
@@ -8446,6 +8506,25 @@
                 lock.lock()
                 defer { lock.unlock() }
                 return attachedClient
+            }
+
+            /// How many `.state` reads this daemon has built an answer for. A test waits on this to place
+            /// its own actions after a connect's bootstrap read instead of racing it: the bootstrap read
+            /// and the fresh stream's first payload both report an expiry they are answered after, and
+            /// whichever gets there first owns the one recovery. "Answer built", not "read received", is
+            /// the whole point: a count raised before the snapshot was taken would leave the waiting test
+            /// free to expire the lease into the very answer it is waiting to have already been given. A
+            /// read that fails (`failNextStateRead`) builds no answer and raises nothing.
+            func stateReadCount() -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return stateReads
+            }
+
+            func recordStateRead() {
+                lock.lock()
+                stateReads += 1
+                lock.unlock()
             }
 
             /// Fails the next `.state` read, the way a read whose connection drops under it fails.
@@ -8659,7 +8738,12 @@
                 }
                 if case .state = request.command {
                     if ownership.shouldFailStateRead() { throw SpacesPinnedTLSConnectionError.connectionClosed }
-                    return TerminalViewerModelTests.terminalStateResponse(ownership.state())
+                    // Built first, counted second. The count is what a test waits on before changing this
+                    // daemon's state, so counting ahead of the snapshot would let that change land inside
+                    // this read and put it in the answer the test is waiting to have already been given.
+                    let response = TerminalViewerModelTests.terminalStateResponse(ownership.state())
+                    ownership.recordStateRead()
+                    return response
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
@@ -9487,13 +9571,24 @@
         /// actor hops are slow: that was a real one-in-a-few-runs flake, not load. Observed as the
         /// ownership flip itself, which is exactly the effect the reassert has to come after.
         ///
+        /// The read is not the last thing the redial applies, which is what made this wait too short on a
+        /// loaded machine (issue #720). The ownerless snapshot it answers with is the loss of an owner
+        /// attachment, so the model reclaims: a takeover, and then a `takeover_confirmation` `.state` read
+        /// of its own, answered by the same fake transport with the same ownerless snapshot. That answer
+        /// applies through the pipeline like any other, and a reassert made while it was still in flight is
+        /// taken straight back off, leaving every later `sendKey` to no-op on `isOwner` until the test's
+        /// own deadline. The reclaim is armed inside the same main-actor turn that applies the read, so
+        /// `hasAutomaticTakeoverInFlightForTesting` is already set by the time the ownership flip is
+        /// observable here, and it stays set until the confirmation read has been applied: waiting for it
+        /// to clear is waiting for the redial to have finished writing state.
+        ///
         /// The redial's stream install is waited on in the same breath, for the reason
         /// `waitForColdOpenToSettle` below records: a subscribe the backend has recorded is not yet a
         /// stream the model can address, and a keystroke that fails conclusively before the install is
         /// evidence `tearDownStream(reportingLoss:)` drops on the floor.
         private func waitForRedialBootstrapToLand(_ model: TerminalViewerModel) async {
-            await waitUntil("the redial's bootstrap state read to land (ownership cleared by its ownerless snapshot)") {
-                model.hasInstalledStreamForTesting && !model.isOwner
+            await waitUntil("the redial's bootstrap state read and the reclaim it starts to finish applying") {
+                model.hasInstalledStreamForTesting && !model.isOwner && !model.hasAutomaticTakeoverInFlightForTesting
             }
         }
 
