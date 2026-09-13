@@ -1518,8 +1518,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // A refresh that decoded but published nothing (the daemon needs an update) is not a list load
             // the user saw, so it does not count as one.
             perfOutcome =
-                acceptedOverview.map { (count: $0.sessions.count, success: true, error: nil) }
-                ?? (count: nil, success: false, error: "daemon_update_required")
+                acceptedOverview.map { (count: $0.sessions.count, success: true, error: nil) } ?? (
+                    count: nil, success: false, error: "daemon_update_required"
+                )
             // Rebuilds the live client only after the overview above is already published, deliberately:
             // this runs mid-refresh, and racing the rebuild against the `overviewIdentity` guards earlier
             // in this method could drop the very overview the user is waiting for. Publishing first means
@@ -1581,6 +1582,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // matching overview_refresh_end for a refresh that fails below the delay.
             perfOutcome = (count: nil, success: false, error: DevicePerformanceLog.sanitized(error.localizedDescription))
             guard now() - startedAt >= refreshFailureAlertDelay else { return }
+            // While a terminal is open, its own connection banner (Reconnecting, then Device unreachable)
+            // already reports this exact outage, so the modal alert would just repeat it while dimming the
+            // whole screen. The streak above keeps advancing regardless, so leaving the terminal while the
+            // device is still failing raises the alert on the very next failed poll rather than restarting
+            // the delay. A browser session detail has no banner of its own, so it is not covered here.
+            // The gate is the open terminal, not the banner: a terminal whose session already ended shows
+            // no banner, and an outage that starts while it is open goes unreported until the user leaves
+            // it. Accepted: the ended pane is what the user is looking at, nothing on it can change, and
+            // the next poll after leaving raises the alert with the streak intact.
+            guard activeTerminalSessionID == nil else { return }
             errorMessage = error.localizedDescription
         }
     }
@@ -3302,9 +3313,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // detail is dismissed, which is exactly when the list's first refresh lands. This is the only
             // place that knows which sessions still exist and who owns them, and it runs against every
             // successful fetch rather than only the ones that changed `overview`.
-            retainedTerminalScreens.retainOnly(sessionIDs: Set(payload.sessions.filter { session in
-                !TerminalViewerModel.isEndedRuntimeState(session.state) && !retainedTerminalScreens.isOwnedElsewhere(session.attachmentSnapshot)
-            }.map(\.id)))
+            retainedTerminalScreens.retainOnly(
+                sessionIDs: Set(
+                    payload.sessions.filter { session in
+                        !TerminalViewerModel.isEndedRuntimeState(session.state)
+                            && !retainedTerminalScreens.isOwnedElsewhere(session.attachmentSnapshot)
+                    }.map(\.id)))
         }
     }
 

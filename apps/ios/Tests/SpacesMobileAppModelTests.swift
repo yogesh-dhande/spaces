@@ -2314,6 +2314,41 @@
             XCTAssertEqual(model.errorMessage, "Socket is not connected")
         }
 
+        /// With a terminal open, its own connection banner already reports the outage (Reconnecting, then
+        /// Device unreachable), so the modal alert must stay quiet even once the failures outlast the delay.
+        func testFailuresPastTheDelayStayQuietWhileATerminalIsOpen() async {
+            let clock = TestClock()
+            let model = makeModel(
+                refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"), refreshFailureAlertDelay: .milliseconds(50),
+                clock: clock)
+            model.setActiveTerminalSession("session-1")
+
+            await model.refresh()
+            clock.advance(by: .milliseconds(60))
+            await model.refresh()
+
+            XCTAssertNil(model.errorMessage, "the terminal's banner already reports this outage")
+        }
+
+        /// Leaving the terminal while the device is still unreachable raises the alert on the very next
+        /// failed poll: the streak kept running while suppressed, so it does not restart the delay.
+        func testLeavingTheTerminalRaisesTheSuppressedAlertOnTheNextFailure() async {
+            let clock = TestClock()
+            let model = makeModel(
+                refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"), refreshFailureAlertDelay: .milliseconds(50),
+                clock: clock)
+            model.setActiveTerminalSession("session-1")
+            await model.refresh()
+            clock.advance(by: .milliseconds(60))
+            await model.refresh()
+            XCTAssertNil(model.errorMessage, "sanity: still suppressed while the terminal is open")
+
+            model.setActiveTerminalSession(nil)
+            await model.refresh()
+
+            XCTAssertEqual(model.errorMessage, "Socket is not connected", "fires immediately: the delay had already elapsed while suppressed")
+        }
+
         /// An unreachable host does not refuse the connection, it swallows it: a single refresh burns the
         /// overview request's timeout and the compatibility handshake's before throwing once. Gating on
         /// elapsed time rather than a failure count is what keeps that case from waiting several more
