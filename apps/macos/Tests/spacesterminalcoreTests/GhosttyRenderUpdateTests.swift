@@ -240,6 +240,24 @@ final class GhosttyRenderUpdateTests: XCTestCase {
             try GhosttyRenderUpdateBinaryCodec.encode(.full(phoneFrame)).count, 3072, "a 52x41 shell screen must stay under 3 KB on the wire")
     }
 
+    /// A pane filling a fullscreen window on a laptop display carries a grid of roughly 12,000 cells,
+    /// whose body runs well past the 128 KiB the Darwin compression back end writes per
+    /// `compression_stream_process` call. Its full frame has to survive the wire like any smaller one:
+    /// a frame that fails to decode leaves the pane painting the last picture it could read while the
+    /// session runs on behind it, and the once-a-second resync it asks for fails the same way (#698).
+    func testFullFrameForAFullscreenSizedGridRoundTrips() throws {
+        let snapshot = makeUniformRowSnapshot(columns: 194, rows: 63, firstScalar: 0x41)
+        let update = GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 7, ownerEpoch: 3, snapshot: snapshot))
+
+        let encoded = try GhosttyRenderUpdateBinaryCodec.encode(update)
+
+        // Read from the header rather than inflating, so the fixture is proven large enough by something
+        // other than the decode path this test is here to exercise.
+        let declaredBodyLength = encoded[6..<10].withUnsafeBytes { Int(UInt32(littleEndian: $0.loadUnaligned(as: UInt32.self))) }
+        XCTAssertGreaterThan(declaredBodyLength, 128 * 1024, "the fixture must exceed one call's output for this to test anything")
+        XCTAssertEqual(try GhosttyRenderUpdateBinaryCodec.decode(encoded), update)
+    }
+
     /// Cluster support must cost an all-ASCII frame nothing in the body: the flag bits that mark a
     /// payload live in the cell's existing flags word, and a block with no flagged cell writes no
     /// sparse section at all. The body is the plaintext the compressor sees, so the invariant is
@@ -325,9 +343,7 @@ final class GhosttyRenderUpdateTests: XCTestCase {
 
         XCTAssertThrowsError(
             try GhosttyRenderUpdateBodyCompression.inflate(Data(count: ratioAdmissibleCompressedByteCount), expectedLength: Int(oversizedLength))
-        ) { error in
-            XCTAssertEqual(error as? GhosttyRenderUpdateBodyCompression.CompressionError, .inflateFailed)
-        }
+        ) { error in XCTAssertEqual(error as? GhosttyRenderUpdateBodyCompression.CompressionError, .inflateFailed) }
     }
 
     /// No representable snapshot may encode to a frame its own decoder rejects, so the tables normalize
