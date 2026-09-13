@@ -44,7 +44,11 @@ public enum ThemeRegistry {
         borderStrong: ThemeColor(184, 189, 181), accent: ThemeColor(15, 122, 118), accentStrong: ThemeColor(13, 95, 93),
         accentTint: ThemeColor(15, 122, 118, alpha: 0.12), onAccent: ThemeColor(255, 255, 255), primaryButtonFill: ThemeColor(61, 198, 184),
         primaryButtonText: ThemeColor(15, 21, 23), green: ThemeColor(58, 158, 95), red: ThemeColor(198, 58, 47), orange: ThemeColor(208, 122, 26),
-        blue: ThemeColor(52, 101, 164), statusFailed: ThemeColor(186, 67, 111, alpha: 0.95), rowHover: ThemeColor(15, 32, 40, alpha: 0.04),
+        blue: ThemeColor(52, 101, 164), statusFailed: ThemeColor(186, 67, 111, alpha: 0.95),
+        // Opaque, same RGB as `statusFailed`: at alpha 1 it already clears 4.5:1 against white text
+        // (~5.10:1; see `ThemeAppearanceTokens.connectionBannerFill`), so light appearance needs no
+        // darkening.
+        connectionBannerFill: ThemeColor(186, 67, 111), onConnectionBanner: ThemeColor(255, 255, 255), rowHover: ThemeColor(15, 32, 40, alpha: 0.04),
         rowSelected: ThemeColor(15, 122, 118, alpha: 0.14), rowSelectedCard: ThemeColor(15, 122, 118, alpha: 0.07),
         rowSelectedCardBorder: ThemeColor(13, 95, 93, alpha: 0.28), chipBackground: ThemeColor(15, 32, 40, alpha: 0.06),
         iconProcessBackground: ThemeColor(58, 158, 95, alpha: 0.16), iconAgentBackground: ThemeColor(15, 32, 40, alpha: 0.08),
@@ -58,12 +62,16 @@ public enum ThemeRegistry {
         accent: ThemeColor(89, 219, 205), accentStrong: ThemeColor(61, 198, 184), accentTint: ThemeColor(89, 219, 205, alpha: 0.16),
         onAccent: ThemeColor(15, 21, 23), primaryButtonFill: ThemeColor(61, 198, 184), primaryButtonText: ThemeColor(15, 21, 23),
         green: ThemeColor(76, 208, 122), red: ThemeColor(255, 107, 96), orange: ThemeColor(245, 167, 66), blue: ThemeColor(122, 162, 210),
-        statusFailed: ThemeColor(255, 111, 91, alpha: 0.95), rowHover: ThemeColor(234, 240, 239, alpha: 0.06),
-        rowSelected: ThemeColor(89, 219, 205, alpha: 0.18), rowSelectedCard: ThemeColor(89, 219, 205, alpha: 0.07),
-        rowSelectedCardBorder: ThemeColor(61, 198, 184, alpha: 0.28), chipBackground: ThemeColor(234, 240, 239, alpha: 0.08),
-        iconProcessBackground: ThemeColor(76, 208, 122, alpha: 0.16), iconAgentBackground: ThemeColor(234, 240, 239, alpha: 0.10),
-        iconPortBackground: ThemeColor(245, 167, 66, alpha: 0.14), statusRunningHalo: ThemeColor(76, 208, 122, alpha: 0.22),
-        terminal: spacesBrandDarkTerminal)
+        statusFailed: ThemeColor(255, 111, 91, alpha: 0.95),
+        // Opaque and darkened from `statusFailed` (255,111,91 scaled to 0.7 brightness, same hue):
+        // at alpha 1 the raw `statusFailed` RGB only reaches ~2.73:1 against white text, under the
+        // 4.5:1 floor; the 0.7 scale reaches ~5.15:1 (see `ThemeAppearanceTokens.connectionBannerFill`).
+        connectionBannerFill: ThemeColor(179, 78, 64), onConnectionBanner: ThemeColor(255, 255, 255),
+        rowHover: ThemeColor(234, 240, 239, alpha: 0.06), rowSelected: ThemeColor(89, 219, 205, alpha: 0.18),
+        rowSelectedCard: ThemeColor(89, 219, 205, alpha: 0.07), rowSelectedCardBorder: ThemeColor(61, 198, 184, alpha: 0.28),
+        chipBackground: ThemeColor(234, 240, 239, alpha: 0.08), iconProcessBackground: ThemeColor(76, 208, 122, alpha: 0.16),
+        iconAgentBackground: ThemeColor(234, 240, 239, alpha: 0.10), iconPortBackground: ThemeColor(245, 167, 66, alpha: 0.14),
+        statusRunningHalo: ThemeColor(76, 208, 122, alpha: 0.22), terminal: spacesBrandDarkTerminal)
 }
 
 /// The process-wide active theme. The GUI resolves the stored theme id once at launch and

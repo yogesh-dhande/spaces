@@ -90,6 +90,18 @@ public struct ThemeAppearanceTokens: Sendable {
     /// The "this stopped and you may care" tint for persistent stopped-pane chrome and other
     /// warning surfaces. Distinct from the operational sidebar's truer red-orange `red` token.
     public let statusFailed: ThemeColor
+    /// Opaque fill for the terminal connection-health banner (Reconnecting / Device unreachable on
+    /// both clients). Derived from `statusFailed`'s hue rather than reused directly: `statusFailed`
+    /// carries a 0.95 alpha meant for a border/icon tint drawn over another surface, and in dark
+    /// appearance its raw RGB is too light for `onConnectionBanner` text to clear WCAG's 4.5:1
+    /// small-text contrast floor. This token is always alpha 1 (the banner must read as fully
+    /// opaque, not merely a strong tint) and, in dark appearance, scaled down from `statusFailed`
+    /// (255,111,91 to 179,78,64, a uniform 0.7 brightness scale that preserves the hue) so white
+    /// text clears the floor; light appearance keeps `statusFailed`'s own RGB, which already clears
+    /// it once alpha is forced to 1.
+    public let connectionBannerFill: ThemeColor
+    /// Foreground for label, spinner, icon, and Retry text drawn on `connectionBannerFill`.
+    public let onConnectionBanner: ThemeColor
 
     // Row states
     public let rowHover: ThemeColor
@@ -111,10 +123,10 @@ public struct ThemeAppearanceTokens: Sendable {
         background: ThemeColor, surface: ThemeColor, surface2: ThemeColor, paletteSurface: ThemeColor, sidebarBackground: ThemeColor,
         text: ThemeColor, muted: ThemeColor, mutedSecondary: ThemeColor, border: ThemeColor, borderStrong: ThemeColor, accent: ThemeColor,
         accentStrong: ThemeColor, accentTint: ThemeColor, onAccent: ThemeColor, primaryButtonFill: ThemeColor, primaryButtonText: ThemeColor,
-        green: ThemeColor, red: ThemeColor, orange: ThemeColor, blue: ThemeColor, statusFailed: ThemeColor, rowHover: ThemeColor,
-        rowSelected: ThemeColor, rowSelectedCard: ThemeColor, rowSelectedCardBorder: ThemeColor, chipBackground: ThemeColor,
-        iconProcessBackground: ThemeColor, iconAgentBackground: ThemeColor, iconPortBackground: ThemeColor, statusRunningHalo: ThemeColor,
-        terminal: GhosttyThemeExport
+        green: ThemeColor, red: ThemeColor, orange: ThemeColor, blue: ThemeColor, statusFailed: ThemeColor, connectionBannerFill: ThemeColor,
+        onConnectionBanner: ThemeColor, rowHover: ThemeColor, rowSelected: ThemeColor, rowSelectedCard: ThemeColor, rowSelectedCardBorder: ThemeColor,
+        chipBackground: ThemeColor, iconProcessBackground: ThemeColor, iconAgentBackground: ThemeColor, iconPortBackground: ThemeColor,
+        statusRunningHalo: ThemeColor, terminal: GhosttyThemeExport
     ) {
         self.background = background
         self.surface = surface
@@ -137,6 +149,8 @@ public struct ThemeAppearanceTokens: Sendable {
         self.orange = orange
         self.blue = blue
         self.statusFailed = statusFailed
+        self.connectionBannerFill = connectionBannerFill
+        self.onConnectionBanner = onConnectionBanner
         self.rowHover = rowHover
         self.rowSelected = rowSelected
         self.rowSelectedCard = rowSelectedCard
