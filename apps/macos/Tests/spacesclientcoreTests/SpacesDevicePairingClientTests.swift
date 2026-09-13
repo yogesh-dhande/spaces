@@ -291,7 +291,7 @@ final class SpacesDevicePairingClientTests: XCTestCase {
     /// the installed-profile command. `remotePairCommand`/`remoteDevelopmentProfileName` already `throw`
     /// end to end, so nothing but the fix itself stands between the refusal and the caller now.
     func testRemotePairCommandRethrowsTestHostRefusalInsteadOfDegradingToInstalledDefault() throws {
-        let accountHomePath = try XCTUnwrap(SpacesProfile.accountHomeDirectoryPath())
+        let accountHomePath = try SpacesProfile.accountHomeDirectory()
 
         try withProfileEnvironmentOverride(home: accountHomePath) {
             SpacesProfile.resetCacheForTesting()
@@ -316,7 +316,7 @@ final class SpacesDevicePairingClientTests: XCTestCase {
     /// fallback — the same id a profile explicitly rooted at `NSHomeDirectory()` would produce — rather
     /// than crashing or producing something else.
     func testLocalMacClientInstallationIDFallsBackToHomeDirectoryIDWhenProfileResolutionIsRefused() throws {
-        let accountHomePath = try XCTUnwrap(SpacesProfile.accountHomeDirectoryPath())
+        let accountHomePath = try SpacesProfile.accountHomeDirectory()
         let homeDirectory = NSHomeDirectory()
         let fallbackProfile = SpacesProfile(
             source: .installedFallback, databasePath: "\(homeDirectory)/.spaces/spaces.db", rootDirectory: homeDirectory, isInstalledProfile: false,

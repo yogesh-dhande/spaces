@@ -21,7 +21,7 @@ final class ProfileBindingEntryPointTests: XCTestCase {
     /// gone afterward. A live root is used deliberately because that is the value that would otherwise abort
     /// the caller rather than merely misdirect it.
     func testClearHelperRemovesAnInheritedLiveRootBinding() throws {
-        let accountHome = try XCTUnwrap(SpacesProfile.accountHomeDirectoryPath())
+        let accountHome = try SpacesProfile.accountHomeDirectory()
         let liveRoot = "\(accountHome)/.spaces-dev/profiles/spaces/inherited-abc123def456"
 
         let output = try runBash(

@@ -122,6 +122,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - A standard Spaces app installation includes everything required to create and render built-in terminals; it does not require a repository checkout or terminal-specific environment variables.
 - Workspace processes launch, stop, recover, and reopen through Spaces-owned built-in terminal sessions.
 - Launching a second app instance for the same profile should fail immediately and identify the existing owner process.
+- When the account's home directory cannot be read from the password database at launch, the app exits before showing a window and prints one line that names the condition (the lookup status by name, no entry for the account, or an entry without a home) and the command that reads the same record by uid. No substitute location is used for the machine-wide desktop-control lease, since two processes each holding a lease of their own is worse than a plain failure.
 - Launching a different profile while another Spaces instance already owns desktop-global control should still load profile data and windows, but it should start in passive mode with local in-app shortcuts only and a status that global shortcuts are unavailable.
 
 ## Projects

@@ -310,7 +310,9 @@ import Foundation
         ///
         /// - Parameter accountHomeDirectoryPath: The account's real home, from the password database rather
         ///   than `HOME`, which is what makes it evidence of identity rather than of what the environment
-        ///   claims. `nil` means it could not be read.
+        ///   claims. `nil` means it could not be read; the reason is dropped because this decision only needs to
+        ///   know whether identity is established, and an unestablished identity is answered by spawning
+        ///   directly rather than by reporting anything.
         /// - Parameter launchAgentURL: Where to look for the agent plist. `nil` resolves it under the same home
         ///   `environment` resolves a profile from (`SpacesProfile.currentHomeDirectoryURL`), rather than
         ///   `SpacesBinaryLayout.launchAgentURL()`'s `NSHomeDirectory()`, which ignores an overridden `HOME`.
@@ -318,7 +320,7 @@ import Foundation
         ///   stated in terms of the home actually in play.
         static func resolveStartPlan(
             environment: [String: String] = ProcessInfo.processInfo.environment, profile: SpacesProfile, fileManager: FileManager = .default,
-            accountHomeDirectoryPath: String? = SpacesProfile.accountHomeDirectoryPath(), launchAgentURL: URL? = nil
+            accountHomeDirectoryPath: String? = try? SpacesProfile.accountHomeDirectory(), launchAgentURL: URL? = nil
         ) -> DaemonStartPlan {
             for variable in kickstartForbiddingEnvironmentVariables {
                 let value = environment[variable]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

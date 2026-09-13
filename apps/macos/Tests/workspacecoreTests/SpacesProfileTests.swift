@@ -762,6 +762,16 @@ final class SpacesProfileTests: XCTestCase {
         XCTAssertNotEqual(leaseDirectory, "\(tempHomeURL!.path)/.spaces/leases/desktop-control")
     }
 
+    func testDesktopControlLeaseFailureNamesTheAccountHomeLookupReason() {
+        let error = SpacesLeaseCoordinatorError.accountHomeUnavailable(reason: .lookupFailed(uid: 501, status: ERANGE, bufferSize: 1_048_576))
+
+        XCTAssertEqual(
+            error.localizedDescription,
+            "Could not read the account home directory from the password database (getpwuid_r for uid 501 failed: ERANGE, with a 1048576-byte "
+                + "record buffer), so the machine-wide desktop-control lease directory cannot be located. Check that this account has a home "
+                + "directory in the directory service, with `dscacheutil -q user -a uid 501`.")
+    }
+
     func testProfileAppOwnerLeaseRecoversWhenPIDIsReusedByDifferentExecutable() throws {
         let profile = try explicitProfile(named: "mismatched-owner")
         let leaseDirectory = URL(fileURLWithPath: profile.rootDirectory).appendingPathComponent("leases/app-owner", isDirectory: true)
