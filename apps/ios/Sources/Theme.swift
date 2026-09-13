@@ -51,6 +51,12 @@ enum Theme {
     /// The one tint for a stopped runtime target, matching the Mac sidebar's exited rows. Distinct
     /// from `red`, which stays for attention marks that are not a stopped target.
     static let statusFailed = dynamic(\.statusFailed)
+    /// Opaque fill for the terminal connection-health banner (Reconnecting / Device unreachable).
+    /// Always alpha 1, and darkened from `statusFailed` in dark appearance so `onConnectionBanner`
+    /// text clears WCAG's 4.5:1 floor; see `ThemeAppearanceTokens.connectionBannerFill`.
+    static let connectionBannerFill = dynamic(\.connectionBannerFill)
+    /// Foreground for the connection-health banner's label, spinner, icon, and Retry text.
+    static let onConnectionBanner = dynamic(\.onConnectionBanner)
 
     // MARK: Chips & tiles
 

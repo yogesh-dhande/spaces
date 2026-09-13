@@ -221,31 +221,42 @@ struct TerminalDetailView: View {
         }
     }
 
-    /// Stage 1 (`.reconnecting`) reads neutral (a small spinner plus "Reconnecting…"), matching the
-    /// chrome pill language used by `chromeActivityBadge`/`previewStatusBanner` elsewhere on this screen.
-    /// Stage 2 (`.unreachable`) keeps the identical pill shape but swaps the hairline border for
-    /// `Theme.statusFailed` and adds the Retry button, so the transition between stages reads as a
-    /// change in severity rather than a different control appearing. Only the Retry button takes a tap:
-    /// the text, spinner, and capsule background all opt out of hit testing so a tap anywhere else in
-    /// the banner's footprint falls through to the terminal underneath.
+    /// Stage 1 (`.reconnecting`) reads a small spinner plus "Reconnecting…"; stage 2 (`.unreachable`)
+    /// keeps the identical pill and adds the Retry button, so the transition between stages reads as a
+    /// change in what the banner offers rather than a different control appearing. Only the Retry
+    /// button takes a tap: the text, spinner, and capsule background all opt out of hit testing so a
+    /// tap anywhere else in the banner's footprint falls through to the terminal underneath.
+    ///
+    /// Filled with `Theme.connectionBannerFill` in both stages, never a translucent tint: unlike the
+    /// chrome pills further down this file (`chromeActivityBadge`, `previewStatusBanner`,
+    /// `Theme.terminalChromePillBackground`), which sit directly against the fixed-dark terminal
+    /// surface and so can afford a translucent tint, this banner reports connection health and must
+    /// stay legible over any terminal content scrolling underneath it, so it needs an opaque fill, the
+    /// same opaque-over-translucent choice `TerminalJumpToBottomButton` makes for its floating control.
+    /// `connectionBannerFill` is a dedicated token rather than `Theme.statusFailed` reused directly:
+    /// `statusFailed` carries a 0.95 alpha meant for a border/icon tint drawn over another surface,
+    /// and its raw RGB in dark appearance is too light for `Theme.onConnectionBanner` text to clear
+    /// WCAG's 4.5:1 small-text floor (see the token's doc comment in `ThemeDescriptor.swift` for the
+    /// derivation and both appearances' contrast ratios). Reconnecting gets the same red as
+    /// unreachable rather than a neutral tint: a stalled reconnect can leave the pane frozen for
+    /// several seconds, which deserves the same visual urgency as a confirmed outage rather than
+    /// reading as a quieter, lower-stakes state.
     private var connectionBanner: some View {
         let isUnreachable = model.connectionStage == .unreachable
         return HStack(spacing: 6) {
             if isUnreachable {
-                Text(TerminalConnectionNotice.unreachableText).font(.footnote).foregroundStyle(.white.opacity(0.92)).lineLimit(1).allowsHitTesting(
-                    false)
-                Button(TerminalConnectionNotice.retryActionTitle) { model.retryConnection() }.font(.footnote.weight(.semibold)).foregroundStyle(
-                    Theme.accent
-                ).accessibilityIdentifier("terminal.connectionBanner.retry")
+                Text(TerminalConnectionNotice.unreachableText).font(.footnote).foregroundStyle(Theme.onConnectionBanner).lineLimit(1)
+                    .allowsHitTesting(false)
+                Button(TerminalConnectionNotice.retryActionTitle) { model.retryConnection() }.font(.footnote.weight(.bold)).foregroundStyle(
+                    Theme.onConnectionBanner
+                ).underline().accessibilityIdentifier("terminal.connectionBanner.retry")
             } else {
-                ProgressView().controlSize(.mini).tint(.white.opacity(0.9)).allowsHitTesting(false)
-                Text(TerminalConnectionNotice.reconnectingText).font(.footnote).foregroundStyle(.white.opacity(0.92)).lineLimit(1).allowsHitTesting(
-                    false)
+                ProgressView().controlSize(.mini).tint(Theme.onConnectionBanner).allowsHitTesting(false)
+                Text(TerminalConnectionNotice.reconnectingText).font(.footnote).foregroundStyle(Theme.onConnectionBanner).lineLimit(1)
+                    .allowsHitTesting(false)
             }
         }.padding(.horizontal, 12).padding(.vertical, 6).background(
-            Capsule().fill(.black.opacity(0.28)).overlay(
-                Capsule().strokeBorder(isUnreachable ? Theme.statusFailed : .white.opacity(0.10), lineWidth: isUnreachable ? 1.5 : 1)
-            ).allowsHitTesting(false)
+            Capsule().fill(Theme.connectionBannerFill).overlay(Capsule().strokeBorder(.white.opacity(0.25), lineWidth: 1)).allowsHitTesting(false)
         ).scaleEffect(connectionBannerPulseScale).accessibilityElement(children: .contain).accessibilityIdentifier("terminal.connectionBanner")
     }
 

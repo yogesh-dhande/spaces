@@ -57,23 +57,36 @@ public struct TerminalPaneBannerAction: Sendable {
 /// restores the persistent notice rather than hiding the banner. One banner per pane means the two
 /// can never overlap in the same corner, and precedence is decided here instead of by z-order.
 ///
-/// The material and neutral text come from system-dynamic values, and the stopped-state accent from
-/// the active theme's `statusFailed` token. The operational sidebar uses the stronger `red` token
-/// for an exited process so it wins the workspace attention rollup unambiguously.
-/// The banner's chrome view. Owns its own border color because a `CALayer`'s `borderColor` is a
-/// `CGColor`, which snapshots whichever appearance resolved it — a dynamic `NSColor` assigned once
-/// would leave a light-mode border sitting on a dark pane forever. `spacesui`'s
+/// The neutral fill and text come from system-dynamic values, the stopped-state accent comes from the
+/// active theme's `statusFailed` token, and both connection-health states' fill and foreground come
+/// from the dedicated `connectionBannerFill`/`onConnectionBanner` tokens (an opaque, contrast-checked
+/// derivative of `statusFailed`; see `ThemeAppearanceTokens.connectionBannerFill`'s doc comment). The
+/// operational sidebar uses the stronger `red` token for an exited process so it wins the workspace
+/// attention rollup unambiguously.
+/// The banner's chrome view. A plain layer-backed `NSView`, not `NSVisualEffectView`: the banner
+/// reports connection health over content that keeps scrolling underneath it, so it needs a fully
+/// opaque fill rather than a vibrant material that blends with whatever is directly behind it in the
+/// window. `TerminalJumpToBottomControl`, the other floating control over a terminal pane, uses the
+/// same plain opaque-layer approach with the same `activeTheme(\.surface)` fill, so the two read as
+/// one family. Owns its own border and fill colors because a `CALayer`'s `borderColor`/
+/// `backgroundColor` are `CGColor`s, which snapshot whichever appearance resolved them — a dynamic
+/// `NSColor` assigned once would leave a light-mode fill sitting on a dark pane forever. `spacesui`'s
 /// `bindAppearanceReactiveLayer` solves this app-side, but it lives above this module, so the
 /// re-resolve happens here instead.
-@MainActor private final class TerminalPaneBannerContainerView: NSVisualEffectView {
+@MainActor private final class TerminalPaneBannerContainerView: NSView {
     var borderColor: NSColor = .separatorColor { didSet { applyBorderColor() } }
+    var fillColor: NSColor = .activeTheme(\.surface) { didSet { applyBackgroundColor() } }
 
     /// What a click landing in the banner's footprint reaches. `passThrough`: nothing, the terminal
     /// underneath gets it. `controlsOnly`: only the listed controls (Retry, Cancel); the label and the
     /// chrome around them stay transparent, so a click beside the button still reaches the terminal.
     /// `whole`: the entire banner, for a transient notice that dismisses on click. Set by
     /// `TerminalPaneBanner.render` from what the banner is actually showing.
-    enum ClickPolicy { case passThrough, controlsOnly([NSView]), whole }
+    enum ClickPolicy {
+        case passThrough
+        case controlsOnly([NSView])
+        case whole
+    }
     var clickPolicy: ClickPolicy = .passThrough
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -89,9 +102,12 @@ public struct TerminalPaneBannerAction: Sendable {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyBorderColor()
+        applyBackgroundColor()
     }
 
     func applyBorderColor() { effectiveAppearance.performAsCurrentDrawingAppearance { [self] in layer?.borderColor = borderColor.cgColor } }
+
+    func applyBackgroundColor() { effectiveAppearance.performAsCurrentDrawingAppearance { [self] in layer?.backgroundColor = fillColor.cgColor } }
 }
 
 @MainActor public final class TerminalPaneBanner: TerminalPaneBannerPresenting {
@@ -115,6 +131,13 @@ public struct TerminalPaneBannerAction: Sendable {
     private var transientMode: TransientMode?
     private var persistentNotice: TerminalPaneBannerNotice?
     private var persistentAction: TerminalPaneBannerAction?
+    /// Color `applyPersistentAction` renders the Retry title in, kept alongside the plain foreground
+    /// colors `applyTransientChrome`/`applyPersistentChrome` set for the rest of the banner's controls
+    /// (`label.textColor`, `iconView.contentTintColor`) rather than on `actionButton.contentTintColor`:
+    /// once the title carries its own bold-and-underlined attributed string (see
+    /// `Self.actionButtonAttributedTitle`), the button's own color attribute is what actually draws,
+    /// so `contentTintColor` would be dead state.
+    private var actionButtonColor: NSColor = .controlAccentColor
     private var onCancel: (@MainActor () -> Void)?
     // `nonisolated(unsafe)` so deinit can cancel without asserting main-actor isolation: the last
     // release of a banner (via its owning pane controller) can land on a background thread when an
@@ -244,6 +267,8 @@ public struct TerminalPaneBannerAction: Sendable {
 
     private func applyTransientChrome(_ mode: TransientMode) {
         applyBorder(emphasized: false)
+        label.textColor = .labelColor
+        actionButtonColor = .controlAccentColor
         let showsSpinner = mode == .progress
         spinner.isHidden = !showsSpinner
         if showsSpinner { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
@@ -265,14 +290,14 @@ public struct TerminalPaneBannerAction: Sendable {
     /// stop/pause mark — a filled square in a circle reads as a button on a pane where nothing is
     /// clickable.
     ///
-    /// A stage 1 dropped connection is drawn as an ordinary notice instead: neutral glyph, neutral
-    /// tint, hairline border. It is not yet a failure, it is expected to resolve itself on reconnect,
-    /// and the sidebar likewise dims a still-retrying device rather than tinting it like a crash.
-    ///
-    /// A stage 2 unreachable connection gets the same emphasized chrome as a stopped session: every
-    /// candidate address has refused to dial, which is worth the eye the way a crash is, but keeps the
-    /// connection glyph (not the warning triangle) so it still reads as a link problem, not a process
-    /// death, matching `TerminalPaneBannerNotice.resolve`'s precedence.
+    /// Both connection-health states (a stage 1 dropped stream and a stage 2 unreachable device) fill
+    /// the banner with `connectionBannerFill`'s opaque red rather than a neutral tint, with
+    /// `onConnectionBanner` text/icon/action so they stay legible on it: a stalled reconnect can leave
+    /// the pane frozen for several seconds, which deserves the same visual urgency as a confirmed
+    /// outage rather than reading as a quieter, lower-stakes state. They differ only in what the
+    /// banner offers: stage 1 names the drop with no action (it is expected to resolve itself on
+    /// reconnect), stage 2 adds the Retry button once every candidate address has refused to dial,
+    /// matching `TerminalPaneBannerNotice.resolve`'s precedence.
     private func applyPersistentChrome(_ kind: TerminalPaneBannerNotice.Kind) {
         spinner.stopAnimation(nil)
         spinner.isHidden = true
@@ -280,30 +305,56 @@ public struct TerminalPaneBannerAction: Sendable {
         switch kind {
         case .stopped:
             applyBorder(emphasized: true)
+            label.textColor = .labelColor
+            actionButtonColor = .controlAccentColor
             applyIcon("exclamationmark.triangle.fill", description: "Session stopped", tint: .activeTheme(\.statusFailed))
-        case .disconnected:
-            applyBorder(emphasized: false)
-            applyIcon("antenna.radiowaves.left.and.right.slash", description: "Connection lost", tint: .secondaryLabelColor)
-        case .unreachable:
-            applyBorder(emphasized: true)
-            applyIcon("antenna.radiowaves.left.and.right.slash", description: "Device unreachable", tint: .activeTheme(\.statusFailed))
+        case .disconnected, .unreachable:
+            // `connectionBannerFill`/`onConnectionBanner` rather than `statusFailed`/`.white` directly:
+            // `statusFailed` carries a 0.95 alpha meant for a border/icon tint over another surface,
+            // and its raw RGB in dark appearance is too light for white text to clear WCAG's 4.5:1
+            // small-text floor. See the tokens' doc comments in `ThemeDescriptor.swift` for the
+            // derivation and both appearances' contrast ratios; mirrors iOS's `Theme.connectionBannerFill`.
+            container.layer?.borderWidth = Self.idleBorderWidth
+            container.borderColor = NSColor.white.withAlphaComponent(0.25)
+            container.fillColor = .activeTheme(\.connectionBannerFill)
+            let onBanner = NSColor.activeTheme(\.onConnectionBanner)
+            label.textColor = onBanner
+            actionButtonColor = onBanner
+            let description = kind == .unreachable ? "Device unreachable" : "Connection lost"
+            applyIcon("antenna.radiowaves.left.and.right.slash", description: description, tint: onBanner)
         }
         // A persistent notice has no timer to wait out; the pane clears it (or its action redials it).
         cancelButton.isHidden = true
     }
 
     /// Shows the notice's one recovery action, when it has one, as a small text button in the trailing
-    /// slot the transient banner's Cancel button uses.
+    /// slot the transient banner's Cancel button uses. Bold and underlined (`actionButtonAttributedTitle`)
+    /// rather than plain text at the label's weight: plain text left Retry reading as a continuation of
+    /// the label's sentence with nothing marking it as a control, matching the emphasis iOS gives its
+    /// own Retry button.
     private func applyPersistentAction(_ action: TerminalPaneBannerAction?) {
-        actionButton.title = action?.title ?? ""
+        actionButton.attributedTitle = Self.actionButtonAttributedTitle(action?.title ?? "", color: actionButtonColor)
         actionButton.isHidden = action == nil
     }
 
+    /// Bold, underlined attributed title for the persistent notice's one recovery action (Retry).
+    /// `NSFont.systemFont(ofSize:weight:)` rather than `NSFontManager.convert(_:toHaveTrait:)`: the
+    /// action button's font is the system font, which exposes weight directly, so asking for `.bold`
+    /// at the same point size is both simpler and more reliable than a trait conversion.
+    private static func actionButtonAttributedTitle(_ title: String, color: NSColor) -> NSAttributedString {
+        let font = NSFont.systemFont(ofSize: Typography.rowDetail.pointSize, weight: .bold)
+        return NSAttributedString(
+            string: title, attributes: [.font: font, .foregroundColor: color, .underlineStyle: NSUnderlineStyle.single.rawValue])
+    }
+
     /// The stopped banner outlines itself in the same tint as its glyph, so it separates from the
-    /// terminal behind it instead of reading as one more HUD. Every other banner keeps the hairline.
-    private func applyBorder(emphasized: Bool) {
+    /// terminal behind it instead of reading as one more HUD. A transient banner keeps the hairline on
+    /// the neutral surface fill; the connection-health kinds set their own red fill and border directly
+    /// in `applyPersistentChrome`, since neither reuses this neutral/surface pairing.
+    private func applyBorder(emphasized: Bool, fill: NSColor = .activeTheme(\.surface)) {
         container.layer?.borderWidth = emphasized ? Self.stoppedBorderWidth : Self.idleBorderWidth
         container.borderColor = emphasized ? .activeTheme(\.statusFailed) : .separatorColor
+        container.fillColor = fill
     }
 
     private func applyIcon(_ symbolName: String, description: String, tint: NSColor) {
@@ -336,10 +387,8 @@ public struct TerminalPaneBannerAction: Sendable {
 
     private func buildUI(in hostView: NSView) {
         container.translatesAutoresizingMaskIntoConstraints = false
-        container.material = .hudWindow
-        container.blendingMode = .withinWindow
-        container.state = .active
         container.wantsLayer = true
+        container.applyBackgroundColor()
         container.layer?.cornerRadius = 8
         container.layer?.masksToBounds = false
         container.layer?.borderWidth = Self.idleBorderWidth
@@ -370,8 +419,9 @@ public struct TerminalPaneBannerAction: Sendable {
         actionButton.translatesAutoresizingMaskIntoConstraints = false
         actionButton.bezelStyle = .inline
         actionButton.isBordered = false
-        actionButton.font = Typography.rowDetail
-        actionButton.contentTintColor = .controlAccentColor
+        // Font and color come from the attributed title `applyPersistentAction` builds
+        // (`actionButtonAttributedTitle`), not from `font`/`contentTintColor`: the button always shows
+        // an attributed title once it has one to show, so these plain properties are never drawn.
         actionButton.target = self
         actionButton.action = #selector(persistentActionTapped)
         actionButton.setButtonType(.momentaryPushIn)
