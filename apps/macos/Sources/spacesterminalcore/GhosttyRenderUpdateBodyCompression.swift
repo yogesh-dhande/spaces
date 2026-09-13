@@ -16,9 +16,9 @@ import Foundation
 /// streaming to an iPhone therefore needs no format negotiation.
 ///
 /// The compressed bytes carry no length of their own, so `inflate` is told the uncompressed size the
-/// codec recorded next to them. Both directions run in a single pass and insist on a clean end of
-/// stream, so a truncated or over-long stream fails rather than yielding a short buffer the codec's
-/// reader would then misparse.
+/// codec recorded next to them. Both directions read their input once, into a destination sized up front
+/// for the whole result, and insist on a clean end of stream, so a truncated or over-long stream fails
+/// rather than yielding a short buffer the codec's reader would then misparse.
 public enum GhosttyRenderUpdateBodyCompression {
     public enum CompressionError: Error, Sendable, Equatable {
         /// The platform back end could not produce a stream.
@@ -71,9 +71,7 @@ public enum GhosttyRenderUpdateBodyCompression {
     public static func inflate(_ source: Data, expectedLength: Int) throws -> Data {
         guard !source.isEmpty, expectedLength > 0, expectedLength <= maximumInflatedByteCount,
             expectedLength <= maximumInflatedLength(forCompressedByteCount: source.count)
-        else {
-            throw CompressionError.inflateFailed
-        }
+        else { throw CompressionError.inflateFailed }
         #if canImport(Compression)
             return try darwinInflate(source, expectedLength: expectedLength)
         #elseif canImport(CZlib)
@@ -92,10 +90,35 @@ public enum GhosttyRenderUpdateBodyCompression {
     }
 
     /// zlib's `deflateBound` for a raw stream: room for the pathological case where every block is stored
-    /// verbatim, so one pass always reaches the end of the stream and no growth loop is needed.
+    /// verbatim, so the destination is sized once up front and never has to grow.
     private static func deflateBound(forSourceByteCount count: Int) -> Int { count + ((count + 7) >> 3) + ((count + 63) >> 6) + 5 + 64 }
 
     #if canImport(Compression)
+        /// Runs a finalizing `compression_stream_process` to completion over buffers the caller has already
+        /// sized to hold the whole result, and reports the status the stream ended on.
+        ///
+        /// The loop is the whole point. `compression_stream_process` is a chunked API, not a one-shot one:
+        /// its decode back end writes at most 128 KiB per call and returns `COMPRESSION_STATUS_OK` with
+        /// output space still left, expecting to be called again. A single call therefore silently stops
+        /// 128 KiB in on any larger body, which a render update reaches at roughly 9,400 cells (a terminal
+        /// grid a fullscreen or large-display pane exceeds), and the caller's `END` check then reads that as
+        /// a corrupt stream and drops the frame.
+        ///
+        /// Termination does not rest on the back end's good behavior: a call that returns `OK` without
+        /// consuming input or producing output is treated as the end of what this stream can do, so a
+        /// truncated or corrupt body ends the loop at `OK` and fails the caller's `END` check rather than
+        /// spinning. Filling the destination exactly is likewise not termination on its own, since the caller
+        /// requires `END`, so a body that decodes past the length the header recorded still fails.
+        private static func drain(_ stream: UnsafeMutablePointer<compression_stream>) -> compression_status {
+            while true {
+                let sourceRemaining = stream.pointee.src_size
+                let destinationRemaining = stream.pointee.dst_size
+                let status = compression_stream_process(stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+                guard status == COMPRESSION_STATUS_OK, stream.pointee.dst_size > 0 else { return status }
+                guard stream.pointee.src_size < sourceRemaining || stream.pointee.dst_size < destinationRemaining else { return status }
+            }
+        }
+
         /// `COMPRESSION_ZLIB` takes no level: the Compression framework picks its own, in the middle of
         /// zlib's range. The two platforms need not emit identical bytes, only mutually readable ones,
         /// which raw DEFLATE guarantees.
@@ -116,9 +139,7 @@ public enum GhosttyRenderUpdateBodyCompression {
                     stream.pointee.dst_size = destinationRaw.count
                     stream.pointee.src_ptr = sourceRaw.bindMemory(to: UInt8.self).baseAddress!
                     stream.pointee.src_size = sourceRaw.count
-                    guard compression_stream_process(stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue)) == COMPRESSION_STATUS_END else {
-                        throw CompressionError.deflateFailed
-                    }
+                    guard drain(stream) == COMPRESSION_STATUS_END else { throw CompressionError.deflateFailed }
                     return destinationRaw.count - stream.pointee.dst_size
                 }
             }
@@ -144,8 +165,7 @@ public enum GhosttyRenderUpdateBodyCompression {
                     // END with the destination exactly filled is the only acceptable outcome: a truncated
                     // stream stops at OK or ERROR without reaching the end marker, and one that decodes past
                     // the recorded length runs the destination out and reports OK rather than END.
-                    let status = compression_stream_process(stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
-                    guard status == COMPRESSION_STATUS_END, stream.pointee.dst_size == 0 else { throw CompressionError.inflateFailed }
+                    guard drain(stream) == COMPRESSION_STATUS_END, stream.pointee.dst_size == 0 else { throw CompressionError.inflateFailed }
                 }
             }
             return destination
