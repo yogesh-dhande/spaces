@@ -180,6 +180,11 @@ struct TerminalSessionNavigationModifier: ViewModifier {
                 // Scoped to this route's session so a teardown that lands after another session's route
                 // has taken over cannot end the new session's watch.
                 .onDisappear { model.endTerminalWatch(forSessionID: route.session.id) }
+                // The mirror of the teardown above: a tab switch made for the user (a pairing link raising
+                // Settings) un-appears this detail without touching `selectedSession`, so returning to the
+                // tab shows the same route again with no `onChange` to re-register it. Appearing does, and
+                // it is a no-op on the first push, where `onChange` has already registered this session.
+                .onAppear { model.setActiveTerminalSession(route.session.id) }
         }.navigationDestination(item: $pendingTerminalLaunch) { launch in
             TerminalLaunchPendingView(launch: launch, model: model) { session in
                 pendingTerminalLaunch = nil
@@ -286,7 +291,8 @@ struct OverviewPollingModifier: ViewModifier {
     }
 
     private var shouldPoll: Bool {
-        OverviewPollingPolicy.shouldPoll(scenePhase: scenePhase, isSelectedTab: model.selectedTab == tab, isPaired: model.settings.isPaired, route: route)
+        OverviewPollingPolicy.shouldPoll(
+            scenePhase: scenePhase, isSelectedTab: model.selectedTab == tab, isPaired: model.settings.isPaired, route: route)
     }
 
     /// A daemon update deliberately takes its device offline mid-handoff, and `requestDaemonUpdate()`
