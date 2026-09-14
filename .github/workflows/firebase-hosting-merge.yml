@@ -21,9 +21,12 @@ jobs:
       - run: cd apps/web && npm ci && npm run build
         env:
           GH_TOKEN: ${{ github.token }}
+      # The site's Firebase config lives in apps/web, so entryPoint points the deploy at the
+      # same firebase.json local commands read.
       - uses: FirebaseExtended/action-hosting-deploy@v0
         with:
           repoToken: ${{ secrets.GITHUB_TOKEN }}
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
           channelId: live
           projectId: spaces-a1814
+          entryPoint: apps/web
