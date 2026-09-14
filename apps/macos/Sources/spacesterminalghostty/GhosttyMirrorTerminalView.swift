@@ -1443,6 +1443,15 @@
 
         var debugHasLiveMirrorSurface: Bool { mirror != nil }
 
+        /// Whether this pane has deferred main-actor work outstanding. Each of these tasks takes a strong
+        /// reference to the pane when it resumes, so a test that hands the pane to another thread to
+        /// perform its last release has to wait for this to clear first: work resuming during that
+        /// release holds a reference across it, and the release is then not the last one.
+        var debugHasPendingDeferredWork: Bool {
+            pendingSurfacePresentationTask != nil || pendingFrameApplyRetryTask != nil || pendingFirstResponderRestoreTask != nil
+                || pendingSearchQueryTask != nil
+        }
+
         /// The address `GhosttyMirrorAppService` keys this pane's action handler under, so a test can ask
         /// the service whether the registration is still there once the pane is gone.
         var debugMirrorSurfaceKey: UInt? { mirrorSurface().map { UInt(bitPattern: $0) } }

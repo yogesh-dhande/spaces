@@ -92,6 +92,11 @@
             entries = retained
         }
 
+        /// Whether a sweep is queued. A queued sweep loads every entry's pane out of its weak slot and
+        /// holds it strongly for the length of the sweep, so a test that needs a pane's next release to
+        /// be its last has to let a queued sweep run first. Never read by the app.
+        var debugHasPendingSweep: Bool { isSweepScheduled }
+
         /// Clears the recorded order without freeing anything, so one test's panes cannot occupy warm
         /// slots in the next test's ordering. Never called by the app.
         func resetForTesting() { entries.removeAll() }

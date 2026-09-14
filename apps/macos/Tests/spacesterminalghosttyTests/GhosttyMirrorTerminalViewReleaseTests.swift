@@ -55,12 +55,18 @@ import spacesterminalcore
             autoreleasepool { box.view = nil }
             // Read from the releasing thread itself: a pane that is gone by the time this line runs was
             // deallocated by that thread's release, which is the scenario under test. A pane still alive
-            // here outlived the release (an autorelease elsewhere held it) and would be torn down on the
-            // main thread instead, where nothing about this deinit is at risk.
+            // here outlived the release (something else held a reference across it) and would be torn down
+            // on the main thread instead, where nothing about this deinit is at risk.
             deallocatedOnReleasingThread.value = weakReference.view == nil
             releaseFinished.signal()
         }
-        waitForCondition("the releasing thread finishes") { releaseFinished.wait(timeout: .now()) == .success }
+        // Blocked rather than spun: anything the main run loop ran here would run precisely while the
+        // releasing thread drops its reference, and main-thread work that loads the pane holds a strong
+        // reference to it for as long as it runs, which is the one condition this test's premise cannot
+        // survive. The pane's main-thread `deinit` cleanup is handed to the main queue rather than run
+        // synchronously (`MainThreadDeinitCleanup`), so blocking the main thread here cannot deadlock the
+        // release; the `settle()` below is what runs that cleanup.
+        XCTAssertEqual(releaseFinished.wait(timeout: .now() + .seconds(10)), .success, "the releasing thread did not finish")
         settle()
 
         XCTAssertTrue(deallocatedOnReleasingThread.value, "the background thread did not perform the pane's last release")
@@ -120,6 +126,22 @@ import spacesterminalcore
         // the pane is deliberately dropped with a live mirror still attached to it.
         view.removeFromSuperview()
         container.removeFromSuperview()
+
+        // Displaying and then detaching the pane leaves main-actor work outstanding that takes a strong
+        // reference to it when it runs: the MRU's sweep, queued by the pane reporting itself hidden, and
+        // the pane's own deferred presentation and frame-apply-retry tasks, which resume a frame's worth of
+        // time after it was displayed. Work that runs while another thread drops the pane's reference holds
+        // a reference across that release, so the release is not the last one and the pane is torn down
+        // later, on the main thread, leaving the off-main scenario silently unexercised. The wait drains
+        // that work: it spins the main run loop, which runs the queued task and pops the loop's pool each
+        // turn.
+        // The `settle()` is one further main-queue round trip, so anything that work itself enqueued has
+        // also run before the pane is handed over.
+        waitForCondition("the pane's deferred main-actor work to finish") {
+            !GhosttyMirrorSurfaceMRU.shared.debugHasPendingSweep && !view.debugHasPendingDeferredWork
+        }
+        settle()
+
         box.view = view
         return surfaceKey
     }
