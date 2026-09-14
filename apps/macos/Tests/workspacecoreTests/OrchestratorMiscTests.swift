@@ -1174,7 +1174,10 @@ extension OrchestratorTests {
         }
 
         let workspace = try orchestrator.createWorkspace(projectID: project.id, runSetupScript: false)
-        let setupThread = WorkspaceSetupThread(orchestrator: orchestrator, workspaceID: workspace.id)
+        // The setup thread runs on its own connection because the test thread goes on using `store` through
+        // `orchestrator` while setup is in flight, and one connection serves one thread.
+        let setupThread = WorkspaceSetupThread(
+            orchestrator: makeTestOrchestrator(store: try makeSecondTestStoreConnection()), workspaceID: workspace.id)
         setupThread.start()
 
         // Wait until the background setup has registered as in-flight before launching, so the

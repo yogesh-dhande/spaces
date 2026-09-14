@@ -1172,7 +1172,8 @@ extension OrchestratorTests {
         }
 
         let storedA = try XCTUnwrap(store.workspace(id: workspaceA.id))
-        XCTAssertEqual(storedA.branch, "shared-branch", "a create that fails before making a worktree must not have released the claim it never replaced")
+        XCTAssertEqual(
+            storedA.branch, "shared-branch", "a create that fails before making a worktree must not have released the claim it never replaced")
     }
 
     /// The collision-release step and the import loop each claim the project lifecycle gate on their own
@@ -1197,7 +1198,9 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let holder = makeTestOrchestrator(store: store)
         let orchestrator = makeTestOrchestrator(store: store)
-        let scanOrchestrator = makeTestOrchestrator(store: store)
+        // The scan below runs on its own thread while the test thread polls `store` for the padding
+        // workspace's reconcile write, so it gets its own connection rather than sharing this one.
+        let scanOrchestrator = makeTestOrchestrator(store: try makeSecondTestStoreConnection())
         let project = try orchestrator.addProject(dir: repo.path)
 
         let client = GitClient()
@@ -1212,8 +1215,7 @@ extension OrchestratorTests {
         // Sorts ahead of workspace A (`ORDER BY is_default DESC, branch`), so the reconcile write this
         // forces is the first real work the reconcile+retire loop does — the signal that the release loop
         // ahead of it, including workspace A's one attempt, has already run to completion.
-        @discardableResult
-        func makePaddingWorkspace(name: String, realBranch: String, staleBranch: String) throws -> WorkspaceRecord {
+        @discardableResult func makePaddingWorkspace(name: String, realBranch: String, staleBranch: String) throws -> WorkspaceRecord {
             let worktree = root.appendingPathComponent(name, isDirectory: true)
             try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: realBranch)
             let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path)
@@ -1270,11 +1272,13 @@ extension OrchestratorTests {
             "the release lost the gate race, so workspace A's stale claim is still in place after this pass")
         XCTAssertNil(
             try store.workspace(dir: worktreeC.path),
-            "importing the live claimant this pass would hit the real uniqueness constraint the release above was supposed to clear first; it is skipped instead, same as the busy path")
+            "importing the live claimant this pass would hit the real uniqueness constraint the release above was supposed to clear first; it is skipped instead, same as the busy path"
+        )
 
         let createdAfterRelease = try scanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
         XCTAssertEqual(createdAfterRelease.count, 1)
-        XCTAssertNotNil(try store.workspace(dir: worktreeC.path), "a rerun once the gate is free releases the stale claim and imports the live worktree")
+        XCTAssertNotNil(
+            try store.workspace(dir: worktreeC.path), "a rerun once the gate is free releases the stale claim and imports the live worktree")
         XCTAssertNil(try store.workspace(id: workspaceA.id)?.branch, "the stale claim is released on the rerun that succeeds")
     }
 
