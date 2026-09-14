@@ -24,8 +24,14 @@ jobs:
       - run: cd apps/web && npm ci && npm run build
         env:
           GH_TOKEN: ${{ github.token }}
+      # The only deploy that stays on the action: it creates the preview channel and posts its URL
+      # as a pull request comment, and it fails this job on a deploy error because nothing here
+      # sets continue-on-error. Live-channel deploys run scripts/deploy-firebase-hosting.sh. The
+      # site's Firebase config lives in apps/web, so entryPoint points there: this preview deploy
+      # and the live deploy script read the same firebase.json.
       - uses: FirebaseExtended/action-hosting-deploy@v0
         with:
           repoToken: ${{ secrets.GITHUB_TOKEN }}
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
           projectId: spaces-a1814
+          entryPoint: apps/web

@@ -369,16 +369,15 @@ jobs:
           npm ci
           npm run build
 
+      # Deploys through the CLI and fails this step on a real deploy error while passing the HTTP
+      # 400 no-op of an unchanged site. The `continue-on-error` that used to tolerate that no-op
+      # also hid every real error: a Hosting storage quota HTTP 429 reached the check below as a
+      # green step. The verification step that follows stays the end-to-end gate that the feed and
+      # its download are live.
       - name: Deploy Firebase Hosting
-        # The verification step below is the gate: a live-channel deploy of an unchanged site
-        # answers HTTP 400 "is the current active version", which is a no-op rather than a failure.
-        continue-on-error: true
-        uses: FirebaseExtended/action-hosting-deploy@v0
-        with:
-          repoToken: ${{ secrets.GITHUB_TOKEN }}
-          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
-          channelId: live
-          projectId: spaces-a1814
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
+        run: scripts/deploy-firebase-hosting.sh
 
       - name: Confirm the pre-release feed serves this release
         run: scripts/verify-live-appcast.sh https://usespaces.dev/releases/prerelease/appcast.xml "${{ inputs.version }}"

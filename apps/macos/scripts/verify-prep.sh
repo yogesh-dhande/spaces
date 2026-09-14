@@ -55,6 +55,7 @@ stop_current_profile_runtime_for_tests() {
 "$root/Tests/setup_ghostty_cache_restore.sh"
 "$root/Tests/ensure_ghostty_artifacts_key_drift.sh"
 "$root/Tests/deploy_linux_profile_validation.sh"
+"$root/Tests/deploy_firebase_hosting_result.sh"
 # Sync the local GhosttyKit/libghostty-vt artifacts to the pinned submodule before building. CI
 # runs ensure_ghostty_artifacts.sh ahead of verify, but a local .local can drift from the pin
 # (worktree .local copies, iOS/Linux builds swapping artifacts), which makes embedded-terminal

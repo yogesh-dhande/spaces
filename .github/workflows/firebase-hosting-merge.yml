@@ -21,9 +21,10 @@ jobs:
       - run: cd apps/web && npm ci && npm run build
         env:
           GH_TOKEN: ${{ github.token }}
-      - uses: FirebaseExtended/action-hosting-deploy@v0
-        with:
-          repoToken: ${{ secrets.GITHUB_TOKEN }}
-          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
-          channelId: live
-          projectId: spaces-a1814
+      # Runs through the CLI so all three live-channel deploys share one deploy path and one rule
+      # for the HTTP 400 "is the current active version" no-op. A deploy error fails this job, and
+      # this workflow has no feed check behind it to catch one otherwise.
+      - name: Deploy Firebase Hosting
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
+        run: scripts/deploy-firebase-hosting.sh

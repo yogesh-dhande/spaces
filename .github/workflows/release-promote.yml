@@ -42,6 +42,22 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name }}
 
+      # The deploy and verification tooling comes from `main` because the released commit may
+      # predate it: a release tagged before a tooling change carries a checkout where that script
+      # does not exist, and promoting it would fail on a missing file. Only the tooling comes from
+      # `main`; the site content stays the released commit's. The checkout lands in a subdirectory
+      # of the workspace that the site build never reads.
+      - name: Checkout promotion tooling from main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          path: .promote-tooling
+          sparse-checkout: |
+            scripts/deploy-firebase-hosting.sh
+            scripts/verify-live-appcast.sh
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+
       # Ordered before the site build because the build resolves the stable feed through
       # `releases/latest/download`. Selecting "Latest" moves the marker in the same update that
       # raises this event, but a promotion made some other way (clearing the pre-release flag
@@ -69,18 +85,17 @@ jobs:
           npm ci
           npm run build
 
+      # Deploys through the CLI and fails this step on a real deploy error while passing the HTTP
+      # 400 no-op of an unchanged site. The `continue-on-error` that used to tolerate that no-op
+      # also hid every real error: a Hosting storage quota HTTP 429 reached the check below as a
+      # green step. The verification step that follows stays the end-to-end gate that the feed and
+      # its download are live.
       - name: Deploy Firebase Hosting
-        # The verification step below is the gate: a live-channel deploy of an unchanged site
-        # answers HTTP 400 "is the current active version", which is a no-op rather than a failure.
-        continue-on-error: true
-        uses: FirebaseExtended/action-hosting-deploy@v0
-        with:
-          repoToken: ${{ secrets.GITHUB_TOKEN }}
-          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
-          channelId: live
-          projectId: spaces-a1814
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
+        run: .promote-tooling/scripts/deploy-firebase-hosting.sh
 
       - name: Confirm the stable feed serves the promoted release
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: scripts/verify-live-appcast.sh https://usespaces.dev/releases/appcast.xml "${RELEASE_TAG#v}"
+        run: .promote-tooling/scripts/verify-live-appcast.sh https://usespaces.dev/releases/appcast.xml "${RELEASE_TAG#v}"

@@ -17,6 +17,13 @@
         ]
       }
     ],
+    "redirects": [
+      {
+        "regex": "^/releases/(?P<archive>Spaces)-(?P<version>[0-9]+(?:\\.[0-9]+)*)\\.zip$",
+        "destination": "https://github.com/yogesh-dhande/spaces/releases/download/v:version/:archive-:version.zip",
+        "type": 302
+      }
+    ],
     "rewrites": [
       {
         "source": "**",
