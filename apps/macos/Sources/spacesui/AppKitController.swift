@@ -3919,7 +3919,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private func showLoadingPlaceholder(message: String, detail: String?) {
+    /// Internal rather than `private`: the launch-landing tests put the detail container in the state a
+    /// launch leaves behind, which is this placeholder.
+    func showLoadingPlaceholder(message: String, detail: String?) {
         stopWorkspaceSetupDetailRefreshTimer()
         // A visible compatibility block survives the loading placeholder: the reload behind this loading
         // state re-resolves back to the block. Only a workspace or alerts pane is cleared.
@@ -5801,7 +5803,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // this device. If a staged update is what made the daemon incompatible, launching the
         // app must itself request the apply here, or `shouldRenderCompatibilityBlock` withholds
         // the block for `.applyStagedUpdate` on the premise that a handoff is already under way
-        // while nothing has asked for one, leaving the loading placeholder up indefinitely.
+        // while nothing has asked for one. That withheld block leaves the launch loading placeholder
+        // on screen, so the two halves of the rule live together: the launch requests the handoff
+        // here, and the load that reached this branch marks the launch landing as owed
+        // (`SidebarController.loadInitialSidebarData`), so the reload that follows the handoff
+        // replaces the placeholder instead of leaving it up indefinitely.
         daemonUpdate.maybeRequestSilentDaemonHandoff(deviceID: deviceModel.localDeviceID, status: incompatibility.status)
         showCompatibilityBlock(deviceID: deviceModel.localDeviceID, verdict: incompatibility.verdict)
         if let window { windowFocus.revealTargetedHotkeyWindow(window) }
