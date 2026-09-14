@@ -190,8 +190,8 @@ private struct DeviceSyncState {
     /// result and disconnect means.
     private var remoteOverviewSubscriptions: RemoteOverviewSubscriptionCoordinator<SpacesDeviceAPIOverviewStreamClient>!
     private var reloadCoordinator: SidebarReloadCoordinator<SidebarReloadPayload>!
-    /// Stands in for the daemon read a reload performs, so a test can drive an apply with a snapshot of
-    /// its own choosing and assert what the app does once it lands.
+    /// Stands in for the daemon read the launch load and every full reload perform, so a test can drive
+    /// an apply with a snapshot of its own choosing and assert what the app does once it lands.
     var loadSnapshotOverrideForTesting: (@MainActor () async -> Result<SidebarDataSnapshot, any Error>)?
     /// Stands in for the narrow local-overview read used by terminal runtime signals.
     var localOverviewLoadOverrideForTesting: (@MainActor () async -> Result<LocalDeviceSidebarSnapshot, any Error>)?
@@ -359,7 +359,8 @@ private struct DeviceSyncState {
 
     func loadInitialSidebarData() async {
         host.logStartupProfile("sidebar_snapshot_requested")
-        let result = await AppKitController.initialSidebarDataSnapshot()
+        let result =
+            if let override = loadSnapshotOverrideForTesting { await override() } else { await AppKitController.initialSidebarDataSnapshot() }
         guard !Task.isCancelled else { return }
         switch result {
         case .success(let snapshot):
@@ -378,6 +379,12 @@ private struct DeviceSyncState {
         case .failure(let error):
             if host.handleDeferredSetupRequirementIfNeeded(error) { return }
             if host.showLocalDaemonCompatibilityBlockIfNeeded(error) {
+                // The launch landed no pane here either. A withheld block (the staged-update remedy,
+                // whose silent handoff is already in flight) leaves the launch loading placeholder in
+                // the detail container with nothing on the handoff's reload path to replace it, so
+                // that first successful reload owes the landing. A rendered block still wins: the owed
+                // landing only fires on a `.none` pane.
+                launchLandingOwed = true
                 host.startBackgroundServicesIfNeeded()
                 return
             }
@@ -392,8 +399,10 @@ private struct DeviceSyncState {
         }
     }
 
-    /// Whether the app still owes the user its launch landing because the initial snapshot failed and
-    /// rendered the load-error placeholder instead. Consumed by the first successful snapshot apply.
+    /// Whether the app still owes the user its launch landing because the initial snapshot failed: it
+    /// rendered the load-error placeholder instead, or it hit a daemon incompatibility whose block was
+    /// withheld and left the launch loading placeholder up. Consumed by the first successful snapshot
+    /// apply.
     private var launchLandingOwed = false
 
     /// Performs the launch landing deferred by a failed initial load, once data has arrived. The pane
