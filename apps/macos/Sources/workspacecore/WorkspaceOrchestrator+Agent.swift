@@ -21,7 +21,7 @@ extension WorkspaceOrchestrator {
             // that never refreshes it. Without this the row could reach its exit still carrying no kind
             // and the exit block would name an anonymous "coding agent" for an agent listings had
             // identified all along.
-            if try refreshPersistedDetectedAgentKind(sessionID: sessionID, runtimeState: session.runtimeState) { didMutate = true }
+            if try refreshPersistedForegroundAgentDetails(sessionID: sessionID, runtimeState: session.runtimeState) { didMutate = true }
             let ownership = builtInTerminalSessionOwnership(sessionID: sessionID, index: ownershipIndex)
             if builtInTerminalSessionHasConfiguredOwner(ownership) { continue }
             guard let workspace = try workspaceForBuiltInTerminalSession(sessionID: sessionID, ownership: ownership) else { continue }
@@ -79,24 +79,27 @@ extension WorkspaceOrchestrator {
         return didMutate
     }
 
-    /// Persists the coding-agent kind a live session's foreground state reports onto the agent row bound
-    /// to that terminal, when the row does not already carry it. Returns whether anything was written.
+    /// Persists what a live session's foreground state reports about its coding agent onto the agent row
+    /// bound to that terminal: the agent's kind, and the command that relaunches it. Returns whether
+    /// anything was written.
     ///
-    /// The kind is what the exit notification's `(<kind>)` parenthetical and an orchestration row's
-    /// `agent:` field name, and live foreground state goes nil the moment the agent process ends — so the
-    /// kind has to be captured on the row while the agent runs, and the observation can land after the row
-    /// already exists (`registerAgentWindow` samples it, but a configured `.agent` launch registers before
-    /// its command is even running). Writes the kind column alone: no lifecycle event, and no `updated_at`
-    /// bump, so learning which agent is running is never mistaken for a state transition (clients read
-    /// `updated_at` as an alert's event time). A session whose foreground reports no kind writes nothing —
-    /// an unclassified sample must not erase a kind the row already learned, the same rule both upserts
-    /// enforce with `COALESCE`.
-    @discardableResult func refreshPersistedDetectedAgentKind(sessionID: String, runtimeState: TerminalSessionRuntimeState) throws -> Bool {
-        guard let kind = runtimeState.foregroundDetectedAgentKind?.displayLabel else { return false }
-        guard let record = try store.agentWindowByTerminalSession(terminalSessionID: sessionID), record.detectedAgentKind != kind else {
-            return false
-        }
-        try store.setAgentSessionDetectedKind(id: record.id, kind: kind)
+    /// Both facts have to be captured while the agent runs, because live foreground state goes nil the
+    /// moment the agent process ends and both are read after it has. The kind is what the exit
+    /// notification's `(<kind>)` parenthetical and an orchestration row's `agent:` field name; the command
+    /// is what session restore relaunches an agent the user typed into a terminal from, read at the next
+    /// daemon start when the stale-session repair has already nulled the runtime row's foreground columns.
+    /// Either observation can land after the row exists (`registerAgentWindow` samples the kind, but a
+    /// configured `.agent` launch registers before its command is even running), which is why this runs for
+    /// every live session on every pass. A session whose foreground reports neither writes nothing.
+    @discardableResult func refreshPersistedForegroundAgentDetails(sessionID: String, runtimeState: TerminalSessionRuntimeState) throws -> Bool {
+        let kind = runtimeState.foregroundDetectedAgentKind?.displayLabel
+        let launchCommand = runtimeState.foregroundCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard kind != nil || launchCommand?.isEmpty == false else { return false }
+        guard let record = try store.agentWindowByTerminalSession(terminalSessionID: sessionID) else { return false }
+        let kindToWrite = kind == record.detectedAgentKind ? nil : kind
+        let commandToWrite = (launchCommand?.isEmpty ?? true) || launchCommand == record.launchCommand ? nil : launchCommand
+        guard kindToWrite != nil || commandToWrite != nil else { return false }
+        try store.setAgentSessionDetectedForeground(id: record.id, kind: kindToWrite, launchCommand: commandToWrite)
         return true
     }
 
@@ -117,16 +120,17 @@ extension WorkspaceOrchestrator {
             launchShell: session.launchConfiguration.shell)
     }
 
-    func adHocDetectedForegroundAgent(from runtimeState: TerminalSessionRuntimeState) -> (kind: String, label: String, displayCommand: String?)? {
+    func adHocDetectedForegroundAgent(from runtimeState: TerminalSessionRuntimeState) -> AdHocDetectedForegroundAgent? {
         guard let kind = runtimeState.foregroundDetectedAgentKind else { return nil }
         let label = runtimeState.foregroundDisplayLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
         let displayCommand = runtimeState.foregroundDisplayCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (kind.displayLabel, label.flatMap { $0.isEmpty ? nil : $0 } ?? kind.displayLabel, displayCommand.flatMap { $0.isEmpty ? nil : $0 })
+        let launchCommand = runtimeState.foregroundCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return AdHocDetectedForegroundAgent(
+            kind: kind.displayLabel, label: label.flatMap { $0.isEmpty ? nil : $0 } ?? kind.displayLabel,
+            displayCommand: displayCommand.flatMap { $0.isEmpty ? nil : $0 }, launchCommand: launchCommand.flatMap { $0.isEmpty ? nil : $0 })
     }
 
-    func insertAdHocDetectedAgent(
-        detectedAgent: (kind: String, label: String, displayCommand: String?), workspace: WorkspaceRecord, sessionID: String
-    ) throws {
+    func insertAdHocDetectedAgent(detectedAgent: AdHocDetectedForegroundAgent, workspace: WorkspaceRecord, sessionID: String) throws {
         let terminalWindow = try store.windows(workspaceID: workspace.id).first { window in
             window.roleValue == .terminal && terminalHost(for: window.app) == .spaces && terminalSessionID(for: window) == sessionID
         }
@@ -155,7 +159,8 @@ extension WorkspaceOrchestrator {
         let record = AgentWindowRecord(
             id: agentID, workspaceID: workspace.id, provider: .spaces, label: resolvedLabel,
             userLabel: workspaceAgentWindows.first { $0.id == agentID }?.userLabel, runtimeTargetID: terminalWindow?.id,
-            terminalTarget: terminalTarget, sessionKey: nil, status: .idle, detectedAgentKind: detectedAgent.kind, createdAt: now, updatedAt: now)
+            terminalTarget: terminalTarget, sessionKey: nil, status: .idle, detectedAgentKind: detectedAgent.kind,
+            launchCommand: detectedAgent.launchCommand, createdAt: now, updatedAt: now)
         let nextAgentWindows = workspaceAgentWindows.filter { $0.id != agentID } + [record]
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: try store.workspaceProcesses(workspaceID: workspace.id),
@@ -579,7 +584,18 @@ extension WorkspaceOrchestrator {
         // the daemon and remote signal init paths (both pass the preserved `existing.status`) and by the
         // foreground reconciler's relaunch branch, which is what covers an agent whose SessionStart does
         // not fire at its prompt (codex fires it with the first turn).
-        let resolvedStatus: AgentWindowStatus = status == .exited ? .idle : status
+        //
+        // The stored conversation id is dropped in the same breath, because it belongs to the lifecycle
+        // that ended: the restorable capture reads an agent's kind and conversation id off this row, so a
+        // fresh agent left holding its predecessor's key would be offered back as that older conversation
+        // until its own first hook signal replaced it. A signal that carries a key of its own supplies the
+        // replacement here; the foreground reconciler's relaunch carries none, so the row waits keyless
+        // for the new agent's hooks, which is the same state a newly detected agent starts in. The
+        // relaunch command is not dropped with it: `refreshPersistedForegroundAgentDetails` has already
+        // sampled the new agent's command onto the row by the time this runs, so `existing` carries the
+        // command the reused terminal is running now.
+        let isReusedAfterExit = status == .exited
+        let resolvedStatus: AgentWindowStatus = isReusedAfterExit ? .idle : status
         if let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey) {
             // The default heals a row stored without a label before materialization existed, so every
             // signal leaves the row addressable by the one name its surfaces display.
@@ -590,9 +606,9 @@ extension WorkspaceOrchestrator {
                 runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
                 terminalTarget: TerminalTargetRecord(
                     runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
-                sessionKey: sessionKey ?? existing.sessionKey, status: resolvedStatus, note: existing.note,
+                sessionKey: sessionKey ?? (isReusedAfterExit ? nil : existing.sessionKey), status: resolvedStatus, note: existing.note,
                 detectedAgentKind: liveDetectedAgentKind(terminalSessionID: terminalTrackingID ?? existing.terminalTrackingID)
-                    ?? existing.detectedAgentKind, createdAt: existing.createdAt, updatedAt: now)
+                    ?? existing.detectedAgentKind, launchCommand: existing.launchCommand, createdAt: existing.createdAt, updatedAt: now)
             try validateWorkspaceFocusNames(
                 workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
                 browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
@@ -651,7 +667,7 @@ extension WorkspaceOrchestrator {
                     runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
                 sessionKey: sessionKey ?? existing.sessionKey, status: status, note: existing.note,
                 detectedAgentKind: liveDetectedAgentKind(terminalSessionID: terminalTrackingID ?? existing.terminalTrackingID)
-                    ?? existing.detectedAgentKind, createdAt: existing.createdAt, updatedAt: now)
+                    ?? existing.detectedAgentKind, launchCommand: existing.launchCommand, createdAt: existing.createdAt, updatedAt: now)
             try validateWorkspaceFocusNames(
                 workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
                 browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
@@ -717,7 +733,8 @@ extension WorkspaceOrchestrator {
         return AgentWindowRecord(
             id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: existing.label, userLabel: existing.userLabel,
             runtimeTargetID: existing.runtimeTargetID, terminalTarget: terminalTarget, sessionKey: existing.sessionKey, status: .exited,
-            note: existing.note, detectedAgentKind: existing.detectedAgentKind, createdAt: existing.createdAt, updatedAt: now)
+            note: existing.note, detectedAgentKind: existing.detectedAgentKind, launchCommand: existing.launchCommand, createdAt: existing.createdAt,
+            updatedAt: now)
     }
 
     public func stopCodingAgent(workspaceID: String, agentID: String) throws {

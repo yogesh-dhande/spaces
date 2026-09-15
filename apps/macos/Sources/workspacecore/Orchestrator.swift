@@ -768,8 +768,9 @@ public final class WorkspaceOrchestrator {
                 // which the scan's own collision-release step treats the same way). Only a workspace whose
                 // worktree is listed and still actually checked out on this branch keeps the refusal; every
                 // other shape is a stale claim this create is entitled to take over.
-                let existingWorktreeActuallyHoldsBranch = try git.listWorktrees(path: project.dir)
-                    .contains { normalizePath($0.path) == normalizePath(existing.dir) && $0.branchName == branchName }
+                let existingWorktreeActuallyHoldsBranch = try git.listWorktrees(path: project.dir).contains {
+                    normalizePath($0.path) == normalizePath(existing.dir) && $0.branchName == branchName
+                }
                 guard !existingWorktreeActuallyHoldsBranch else {
                     throw WorkspaceError.invalidArgument(message: "Branch '\(branchName)' is already used by workspace '\(existing.displayName)'.")
                 }
@@ -1752,11 +1753,10 @@ public final class WorkspaceOrchestrator {
             // With no command the session IS the user's shell (`exec <shell> -l` on a PTY, interactive by
             // virtue of the terminal); with one, the command runs through that same interactive login shell
             // so it resolves exactly the tools the bare session would.
-            let shellCommand =
-                hasNonblankCommand ? interactiveLoginShellCommand(command!) : interactiveShellCommand(cwd: workspace.dir)
+            let shellCommand = hasNonblankCommand ? interactiveLoginShellCommand(command!) : interactiveShellCommand(cwd: workspace.dir)
             return try launchWorkspaceCommandSession(
                 project: project, workspace: workspace, title: explicitTitle, shellCommand: shellCommand, kind: .shell,
-                defaultTitle: try generatedAdHocTerminalWindowName(workspaceID: workspace.id))
+                defaultTitle: try generatedAdHocTerminalWindowName(workspaceID: workspace.id), workingDirectory: workspace.dir)
         }
     }
 
@@ -1774,7 +1774,8 @@ public final class WorkspaceOrchestrator {
     /// the original, so the next capture rewrites the original again instead of stacking a second resume
     /// selector onto the first. Every other caller records the command it runs.
     @discardableResult public func createWorkspaceAgentSession(
-        workspaceID: String, command: String, title: String?, automationRunID: String? = nil, recordedLaunchCommand: String? = nil
+        workspaceID: String, command: String, title: String?, automationRunID: String? = nil, recordedLaunchCommand: String? = nil,
+        workingDirectory: String? = nil
     ) throws -> TerminalServiceSessionSummary {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
             let (project, workspace) = try resolveWorkspace(id: workspaceID)
@@ -1782,10 +1783,23 @@ public final class WorkspaceOrchestrator {
             guard !trimmedCommand.isEmpty else { throw WorkspaceError.invalidArgument(message: "Agent command is required.") }
             let defaultTitle =
                 CodingAgent.matching(command: command)?.displayName
-                ?? (CodingAgent.executableToken(inCommand: command).map { ($0 as NSString).lastPathComponent } ?? "Agent")
+                ?? (CodingAgent.executableToken(inCommand: command).map {
+                    (TerminalForegroundProcessInspector.posixUnquoted($0) as NSString).lastPathComponent
+                } ?? "Agent")
+            // A restore names the directory the agent was working in, which can be anywhere under the
+            // workspace the agent `cd`-ed to and which may since have been deleted. A directory that is
+            // gone fails this launch rather than silently starting the agent somewhere else: the caller
+            // reports that row as one that could not come back, which is honest, where a relaunch in the
+            // wrong directory would look like a success and act on the wrong tree.
+            if let workingDirectory {
+                var isDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: workingDirectory, isDirectory: &isDirectory), isDirectory.boolValue else {
+                    throw WorkspaceError.invalidArgument(message: "Working directory no longer exists: \(workingDirectory)")
+                }
+            }
             return try launchWorkspaceCommandSession(
                 project: project, workspace: workspace, title: title, shellCommand: interactiveLoginShellCommand(command), kind: .agent,
-                defaultTitle: defaultTitle, automationRunID: automationRunID,
+                defaultTitle: defaultTitle, workingDirectory: workingDirectory ?? workspace.dir, automationRunID: automationRunID,
                 launchCommand: recordedLaunchCommand?.trimmingCharacters(in: .whitespacesAndNewlines) ?? trimmedCommand)
         }
     }
@@ -1800,7 +1814,7 @@ public final class WorkspaceOrchestrator {
             let (project, workspace) = try resolveWorkspace(id: workspaceID)
             return try launchWorkspaceCommandSession(
                 project: project, workspace: workspace, title: title, shellCommand: interactiveLoginShellCommand(command), kind: .automation,
-                defaultTitle: title, automationRunID: runID)
+                defaultTitle: title, workingDirectory: workspace.dir, automationRunID: runID)
         }
     }
 
@@ -1810,16 +1824,19 @@ public final class WorkspaceOrchestrator {
     /// `kind` and the fallback title.
     ///
     /// `launchCommand` is the raw command the caller passed, recorded alongside the wrapped one so a later
-    /// daemon can relaunch it. Only a spawned coding agent carries one: it is the single session kind a
-    /// restore offer brings back, and an ad-hoc shell's command is the user's own typing in a session they
-    /// closed deliberately.
+    /// daemon can relaunch it. Only a coding agent Spaces launched carries one: an ad-hoc shell's command is
+    /// the user's own typing, and an agent inside such a shell is relaunched from the command foreground
+    /// detection sampled onto its agent row instead.
+    ///
+    /// `workingDirectory` is the workspace directory for everything a caller starts fresh, and the recorded
+    /// directory for an agent a restore brings back.
     ///
     /// Both callers hold the workspace's lifecycle gate and resolve `workspace` inside it — creating
     /// runtime is a lifecycle action, and a session started while a teardown was between its row snapshot
     /// and its record delete would survive as a live terminal in a directory that no longer exists.
     @discardableResult private func launchWorkspaceCommandSession(
         project: ProjectRecord, workspace: WorkspaceRecord, title: String?, shellCommand: String, kind: TerminalSessionKind, defaultTitle: String,
-        automationRunID: String? = nil, launchCommand: String? = nil
+        workingDirectory: String, automationRunID: String? = nil, launchCommand: String? = nil
     ) throws -> TerminalServiceSessionSummary {
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
         let sessionID = UUID().uuidString
@@ -1839,7 +1856,7 @@ public final class WorkspaceOrchestrator {
         // session never stamps the same createdAt as the one it replaces: the client-side replacement
         // diff (TerminalSessionReplacementDiff) orders same-second pairings by this field.
         let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: sessionTitle, workingDirectory: workspace.dir,
+            sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: sessionTitle, workingDirectory: workingDirectory,
             shell: shellPath, command: environmentPrefixedCommand, createdAt: TerminalSessionTimestamp.fractionalString(from: Date()),
             workspaceID: workspace.id, kind: kind, automationRunID: automationRunID, launchCommand: launchCommand)
 
@@ -2034,7 +2051,8 @@ public final class WorkspaceOrchestrator {
                 foregroundExecutableName: previousRuntimeState?.foregroundExecutableName, foregroundArgv: previousRuntimeState?.foregroundArgv,
                 foregroundDetectedAgentKind: previousRuntimeState?.foregroundDetectedAgentKind,
                 foregroundDisplayLabel: previousRuntimeState?.foregroundDisplayLabel,
-                foregroundDisplayCommand: previousRuntimeState?.foregroundDisplayCommand, bellAt: previousRuntimeState?.bellAt)
+                foregroundDisplayCommand: previousRuntimeState?.foregroundDisplayCommand, foregroundCommand: previousRuntimeState?.foregroundCommand,
+                bellAt: previousRuntimeState?.bellAt)
             try? TerminalSessionPersistence.writeRuntimeState(failedState, paths: paths)
             try? TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: now)
             try? FileManager.default.removeItem(atPath: paths.controlSocketPath)

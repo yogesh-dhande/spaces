@@ -26,7 +26,8 @@ extension SQLiteStore {
         agent_sessions.created_at,
         agent_sessions.updated_at,
         COALESCE(agent_sessions.detected_agent_kind, ''),
-        COALESCE(agent_sessions.user_label, '')
+        COALESCE(agent_sessions.user_label, ''),
+        COALESCE(agent_sessions.launch_command, '')
         """
 
     /// Lifecycle-owning upsert. Hook/lifecycle writers (`registerAgentWindow`, `updateAgentWindowStatus`)
@@ -92,6 +93,7 @@ extension SQLiteStore {
           session_key = excluded.session_key,
           note = COALESCE(excluded.note, agent_sessions.note),
           detected_agent_kind = COALESCE(excluded.detected_agent_kind, agent_sessions.detected_agent_kind),
+          launch_command = COALESCE(excluded.launch_command, agent_sessions.launch_command),
           updated_at = excluded.updated_at
         """
 
@@ -106,6 +108,7 @@ extension SQLiteStore {
           session_key = agent_sessions.session_key,
           note = COALESCE(excluded.note, agent_sessions.note),
           detected_agent_kind = COALESCE(excluded.detected_agent_kind, agent_sessions.detected_agent_kind),
+          launch_command = COALESCE(excluded.launch_command, agent_sessions.launch_command),
           created_at = agent_sessions.created_at,
           updated_at = agent_sessions.updated_at
         """
@@ -123,15 +126,15 @@ extension SQLiteStore {
             try execute(
                 sql: """
                         INSERT INTO agent_sessions(
-                          id, workspace_id, provider, label, status, runtime_target_id, terminal_session_id, session_key, note, detected_agent_kind, created_at, updated_at
+                          id, workspace_id, provider, label, status, runtime_target_id, terminal_session_id, session_key, note, detected_agent_kind, launch_command, created_at, updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
+                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
                         \(conflictClause)
                     """,
                 bindings: [
                     record.id, record.workspaceID, record.provider.rawValue, record.label ?? "", record.status.rawValue, runtimeTargetID ?? "",
-                    terminalSessionID ?? "", record.sessionKey ?? "", record.note ?? "", record.detectedAgentKind ?? "", record.createdAt,
-                    record.updatedAt,
+                    terminalSessionID ?? "", record.sessionKey ?? "", record.note ?? "", record.detectedAgentKind ?? "", record.launchCommand ?? "",
+                    record.createdAt, record.updatedAt,
                 ])
         }
     }
@@ -278,15 +281,23 @@ extension SQLiteStore {
         }
     }
 
-    /// Records the coding-agent kind foreground detection classified for an agent session, writing that
-    /// column and nothing else — for the same reason `setAgentSessionNote` writes directly rather than
-    /// through `upsertAgentWindow`: `updated_at` tracks when the row entered its current lifecycle state
-    /// (clients read it as the alert's event time), and learning which agent is running is not a lifecycle
-    /// transition, so bumping it would re-date a stale blocked/finished alert to now. Takes a non-optional
-    /// kind because a nil observation must never erase a kind the row already learned — the same rule both
-    /// upserts enforce with `COALESCE`.
-    public func setAgentSessionDetectedKind(id: String, kind: String) throws {
-        try execute(sql: "UPDATE agent_sessions SET detected_agent_kind = ? WHERE id = ?", bindings: [kind, id])
+    /// Writes what live foreground detection observed about an agent onto its row: the coding-agent kind
+    /// and the command that relaunches it. Either may be nil, meaning "nothing new to say"; a nil never
+    /// erases a value the row already learned, the same rule both upserts enforce, because detection goes
+    /// quiet exactly when the agent exits and that is when both values are read.
+    ///
+    /// Writes those columns and nothing else, for the same reason `setAgentSessionNote` writes directly
+    /// rather than through `upsertAgentWindow`: `updated_at` tracks when the row entered its current
+    /// lifecycle state (clients read it as an alert's event time), and learning what is running is not a
+    /// lifecycle transition, so bumping it would re-date a stale blocked/finished alert to the present.
+    public func setAgentSessionDetectedForeground(id: String, kind: String?, launchCommand: String?) throws {
+        try execute(
+            sql: """
+                UPDATE agent_sessions
+                SET detected_agent_kind = COALESCE(NULLIF(?, ''), detected_agent_kind),
+                    launch_command = COALESCE(NULLIF(?, ''), launch_command)
+                WHERE id = ?
+                """, bindings: [kind ?? "", launchCommand ?? "", id])
     }
 
     /// Whether an agent session row with this id exists in any workspace. Used to validate a
@@ -756,7 +767,7 @@ extension SQLiteStore {
     }
 
     func decodeAgentWindow(row: [String]) -> AgentWindowRecord? {
-        guard row.count >= 17 else { return nil }
+        guard row.count >= 18 else { return nil }
         guard let provider = AgentProvider(rawValue: row[2]) else { return nil }
         let terminalSessionID = row[9].isEmpty ? nil : row[9]
         let status = AgentWindowStatus(rawValue: row[11]) ?? .idle
@@ -767,8 +778,8 @@ extension SQLiteStore {
         return AgentWindowRecord(
             id: row[0], workspaceID: row[1], provider: provider, label: row[3].isEmpty ? nil : row[3], userLabel: row[16].isEmpty ? nil : row[16],
             runtimeTargetID: row[4].isEmpty ? nil : row[4], terminalTarget: terminalTarget, sessionKey: row[10].isEmpty ? nil : row[10],
-            status: status, note: row[12].isEmpty ? nil : row[12], detectedAgentKind: row[15].isEmpty ? nil : row[15], createdAt: row[13],
-            updatedAt: row[14])
+            status: status, note: row[12].isEmpty ? nil : row[12], detectedAgentKind: row[15].isEmpty ? nil : row[15],
+            launchCommand: row[17].isEmpty ? nil : row[17], createdAt: row[13], updatedAt: row[14])
     }
 
     func spacesAgentTerminalSessionID(_ record: AgentWindowRecord) -> String? {

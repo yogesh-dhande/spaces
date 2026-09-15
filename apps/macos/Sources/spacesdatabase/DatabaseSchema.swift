@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 21
+    public static let currentVersion = 22
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -725,6 +725,75 @@ public enum DatabaseSchema {
                     );
                     """)
         },
+        // Records every live coding agent, not only the ones Spaces launched itself. An agent the user
+        // typed into a terminal runs under a `shell`-kind session whose relaunch command exists nowhere in
+        // the tables: the foreground sample that identifies it is bounded for display and is nulled by the
+        // daemon-start repair before the unclean-exit capture reads it. So the command is sampled onto the
+        // agent row, which survives that repair, as `agent_sessions.launch_command`, and the runtime row
+        // carries the unbounded foreground command it is sampled from.
+        //
+        // Both columns are nullable and stay NULL on existing rows, which reads correctly: a session whose
+        // agent was never sampled has no command recorded and is offered back only if its own session row
+        // carries one. The frozen v21 shapes are created first for the reason every altering step in this
+        // file writes one out: the ALTER needs a table to alter, and a database old enough to predate either
+        // table carries neither.
+        DatabaseMigrationStep(
+            fromVersion: 21, toVersion: 22, description: "Record the relaunch command of a detected coding agent", requiresBackup: true
+        ) { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS terminal_runtime_states (
+                      session_id TEXT PRIMARY KEY,
+                      root_directory TEXT NOT NULL UNIQUE,
+                      backend TEXT NOT NULL,
+                      service_pid INTEGER NOT NULL,
+                      child_pid INTEGER,
+                      title TEXT,
+                      working_directory TEXT,
+                      columns INTEGER,
+                      rows INTEGER,
+                      state TEXT NOT NULL,
+                      updated_at TEXT NOT NULL,
+                      exited_at TEXT,
+                      foreground_pid INTEGER,
+                      foreground_executable_path TEXT,
+                      foreground_executable_name TEXT,
+                      foreground_argv_json TEXT,
+                      foreground_detected_agent_kind TEXT,
+                      foreground_display_label TEXT,
+                      foreground_display_command TEXT,
+                      bell_at TEXT,
+                      bracketed_paste_active INTEGER NOT NULL DEFAULT 0
+                    );
+
+                    CREATE TABLE IF NOT EXISTS agent_sessions (
+                      id TEXT PRIMARY KEY,
+                      workspace_id TEXT NOT NULL,
+                      provider TEXT NOT NULL,
+                      label TEXT,
+                      user_label TEXT,
+                      status TEXT NOT NULL DEFAULT 'idle',
+                      runtime_target_id TEXT,
+                      terminal_session_id TEXT,
+                      session_key TEXT,
+                      note TEXT,
+                      detected_agent_kind TEXT,
+                      created_at TEXT NOT NULL,
+                      updated_at TEXT NOT NULL,
+                      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+                      FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE SET NULL
+                    );
+                    """)
+            // The column guards make the step idempotent, so a retry after a half-applied step lands on the
+            // same schema.
+            if !(try migrationColumnExists(handle, table: "terminal_runtime_states", column: "foreground_command")) {
+                try migrationExecuteBatch(handle, sql: "ALTER TABLE terminal_runtime_states ADD COLUMN foreground_command TEXT;")
+            }
+            if !(try migrationColumnExists(handle, table: "agent_sessions", column: "launch_command")) {
+                try migrationExecuteBatch(handle, sql: "ALTER TABLE agent_sessions ADD COLUMN launch_command TEXT;")
+            }
+        },
     ]
 
     /// The persisted final-render state of a session, one row per session. `has_final_render` stores
@@ -838,6 +907,9 @@ public enum DatabaseSchema {
               foreground_detected_agent_kind TEXT,
               foreground_display_label TEXT,
               foreground_display_command TEXT,
+              -- A shell command line that relaunches the coding agent running in the foreground, built
+              -- from the unbounded argv; NULL whenever no coding agent is in the foreground.
+              foreground_command TEXT,
               bell_at TEXT,
               bracketed_paste_active INTEGER NOT NULL DEFAULT 0
             );
@@ -1068,6 +1140,10 @@ public enum DatabaseSchema {
               session_key TEXT,
               note TEXT,
               detected_agent_kind TEXT,
+              -- The command that relaunches this agent, sampled from the terminal's foreground process
+              -- while the agent runs. It lives here rather than only on the runtime row because the
+              -- daemon-start repair nulls every foreground column before the restorable capture reads it.
+              launch_command TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,

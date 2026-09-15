@@ -237,11 +237,63 @@ final class TerminalSessionModelTests: XCTestCase {
             title: "shell", workingDirectory: "/tmp/work", columns: 80, rows: 24, foregroundPID: 789,
             foregroundExecutablePath: "/opt/homebrew/bin/node", foregroundExecutableName: "node",
             foregroundArgv: ["node", "/opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js", "--model", "gpt-5"],
-            foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex", foregroundDisplayCommand: "codex --model gpt-5")
+            foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex", foregroundDisplayCommand: "codex --model gpt-5",
+            foregroundCommand: #"codex --model gpt-5 'ship the release notes'"#)
 
         try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
 
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths), runtimeState)
+    }
+
+    /// The relaunch command is stored and read back, and never encoded. Runtime state is embedded in
+    /// `GhosttyRemoteSessionStatePayload`, which a paired device receives on every output update of every
+    /// subscribed terminal, so an unbounded command line in the encoded form would ride each of those
+    /// frames for the whole life of the session. Everything that reads the command is on the device that
+    /// sampled it, and reads it from the row.
+    func testTheRelaunchCommandIsPersistedButNeverEncoded() throws {
+        let sessionID = "session-relaunch-command-off-the-wire"
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try writeLaunchConfiguration(sessionID: sessionID, paths: paths)
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, servicePID: 123, childPID: 456, state: .running, updatedAt: "2026-05-08T00:00:00Z", foregroundPID: 789,
+            foregroundExecutableName: "claude", foregroundArgv: ["claude"], foregroundDetectedAgentKind: .claude, foregroundDisplayLabel: "claude",
+            foregroundDisplayCommand: "claude --model opus", foregroundCommand: #"claude --model opus 'fix the build'"#)
+
+        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+        XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).foregroundCommand, #"claude --model opus 'fix the build'"#)
+
+        let encoded = String(decoding: try JSONEncoder().encode(runtimeState), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("foregroundCommand"), "the relaunch command must not be encoded: \(encoded)")
+        XCTAssertFalse(encoded.contains("fix the build"), "the relaunch command must not be encoded: \(encoded)")
+        XCTAssertTrue(encoded.contains("foregroundDisplayCommand"), "the bounded display command still is: \(encoded)")
+
+        let decoded = try JSONDecoder().decode(TerminalSessionRuntimeState.self, from: try JSONEncoder().encode(runtimeState))
+        XCTAssertNil(decoded.foregroundCommand)
+        XCTAssertEqual(decoded.foregroundDisplayCommand, "claude --model opus")
+    }
+
+    /// The daemon-start repair records how a run ended and keeps nothing about what was running in it: every
+    /// foreground field goes, the relaunch command included. That is why the restorable capture reads an
+    /// agent's command off its `agent_sessions` row instead of this one.
+    func testFinalizingASessionRepairClearsTheForegroundRelaunchCommand() throws {
+        let sessionID = "session-repair-foreground"
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try writeLaunchConfiguration(sessionID: sessionID, paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: sessionID, servicePID: 123, childPID: 456, state: .running, updatedAt: "2026-05-08T00:00:00Z", foregroundPID: 789,
+                foregroundExecutableName: "claude", foregroundArgv: ["claude"], foregroundDetectedAgentKind: .claude,
+                foregroundDisplayLabel: "claude", foregroundDisplayCommand: "claude", foregroundCommand: #"claude "fix the build""#), paths: paths)
+
+        try TerminalSessionPersistence.finalizeSessionRepair(
+            TerminalSessionRuntimeState(
+                sessionID: sessionID, servicePID: 1, childPID: 456, state: .failed, updatedAt: "2026-05-08T00:01:00Z",
+                exitedAt: "2026-05-08T00:01:00Z"), detachedAt: "2026-05-08T00:01:00Z", paths: paths)
+
+        let repaired = try TerminalSessionPersistence.readRuntimeState(paths: paths)
+        XCTAssertEqual(repaired.state, .failed)
+        XCTAssertNil(repaired.foregroundCommand)
+        XCTAssertNil(repaired.foregroundDetectedAgentKind)
     }
 
     func testAttachAndDetachClientPersistsActiveOwner() throws {

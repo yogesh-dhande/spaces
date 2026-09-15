@@ -143,6 +143,10 @@
             core.currentRemoteStatePayload(reason: TerminalRemoteSessionStateReason.stateChange)
         }
 
+        /// The directory a live process reports for itself through `/proc/<pid>/cwd`: the kernel answers
+        /// with the resolved path, so a test comparing against a configured directory resolves that too.
+        private static func resolvedPath(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().path }
+
         // MARK: - Tests
 
         /// A program that sets its window title with OSC 2 replaces the launch-time title everywhere a
@@ -187,21 +191,29 @@
         }
 
         /// OSC 7 carries a URI, and libghostty-vt stores it unparsed, so the reported working directory
-        /// must be the decoded absolute path — not the raw `file://…` payload.
-        @Test func workingDirectoryFromOSC7DecodesToAnAbsolutePath() async throws {
+        /// must be the decoded absolute path, not the raw `file://…` payload.
+        ///
+        /// What clients read is the live directory of the process itself, which is why the script `cd`s
+        /// into a real directory while reporting a different one: the reported value is the decode, and the
+        /// published value follows the shell's own `cd` even though this shell reports nothing about it.
+        @Test func workingDirectoryFromOSC7DecodesToAnAbsolutePathWhileClientsReadTheLiveProcessDirectory() async throws {
             let paths = try makeTemporaryPaths()
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+            let liveDirectory = paths.rootDirectory + "/work dir"
+            try FileManager.default.createDirectory(atPath: liveDirectory, withIntermediateDirectories: true)
 
             // `%%` is the printf escape for a literal `%`, so the shell emits the percent-encoded space
             // the decode has to unescape.
             let coreBox = try await startCore(
-                makeConfiguration(named: "metadata-cwd", script: "printf '\\033]7;file://localhost/srv/work/my%%20repo\\007'"), paths: paths)
+                makeConfiguration(named: "metadata-cwd", script: "cd '\(liveDirectory)'; printf '\\033]7;file://localhost/srv/work/my%%20repo\\007'"),
+                paths: paths)
             let core = coreBox.value
             defer { TerminalEngineActor.runSynchronously { core.terminate() } }
 
-            try await waitAsync { Self.payload(of: core)?.workingDirectory == "/srv/work/my repo" }
+            try await waitAsync { core.debugReportedWorkingDirectory == "/srv/work/my repo" }
+            try await waitAsync { Self.payload(of: core)?.workingDirectory == Self.resolvedPath(liveDirectory) }
             let payload = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: core) })
-            #expect(payload.runtimeState?.workingDirectory == "/srv/work/my repo")
+            #expect(payload.runtimeState?.workingDirectory == Self.resolvedPath(liveDirectory))
         }
 
         /// Clearing the title returns the session to its launch-configuration title rather than
@@ -251,8 +263,10 @@
             // the engine, so a visible transcript means the refresh for those bytes has already run.
             try await waitAsync { (try? String(contentsOfFile: paths.outputPath, encoding: .utf8))?.contains("SETTLED") == true }
             let payload = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: core) })
-            #expect(payload.workingDirectory == configuration.workingDirectory)
-            #expect(payload.runtimeState?.workingDirectory == configuration.workingDirectory)
+            let reported = TerminalEngineActor.runSynchronously { core.debugReportedWorkingDirectory }
+            #expect(reported == nil, "neither payload is an accepted report")
+            #expect(payload.workingDirectory == Self.resolvedPath(configuration.workingDirectory))
+            #expect(payload.runtimeState?.workingDirectory == Self.resolvedPath(configuration.workingDirectory))
             #expect(metadataChanges.count == 0, "an ignored OSC 7 payload must not announce a metadata change")
         }
 
@@ -276,11 +290,10 @@
             let core = coreBox.value
             defer { TerminalEngineActor.runSynchronously { core.terminate() } }
 
-            try await waitAsync { Self.payload(of: core)?.workingDirectory == "/srv/local" }
+            try await waitAsync { core.debugReportedWorkingDirectory == "/srv/local" }
             try await waitAsync { (try? String(contentsOfFile: paths.outputPath, encoding: .utf8))?.contains("SETTLED") == true }
-            let payload = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: core) })
-            #expect(payload.workingDirectory == "/srv/local")
-            #expect(payload.runtimeState?.workingDirectory == "/srv/local")
+            let reported = TerminalEngineActor.runSynchronously { core.debugReportedWorkingDirectory }
+            #expect(reported == "/srv/local")
         }
 
         /// A daemon handoff builds a fresh core and a fresh vt session, and a trimmed transcript's state
