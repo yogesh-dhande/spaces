@@ -373,7 +373,9 @@
         /// A rejected OSC 7 never clears or replaces the directory an earlier accepted report
         /// established, even when it arrives in the same write as a report that would have been
         /// accepted: the value is read back after the write, so the terminal has already overwritten
-        /// the intermediate payload with the unusable one.
+        /// the intermediate payload with the unusable one. The reported value is what the OSC 7 path
+        /// owns; the payload's directory is the live process's own, which the running script never
+        /// changes (see `workingDirectoryFromOSC7DecodesToAnAbsolutePathWhileClientsReadTheLiveProcessDirectory`).
         @Test func aRejectedOSC7InTheSameWriteLeavesTheAcceptedDirectoryStanding() async throws {
             let paths = try makeTemporaryPaths()
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
@@ -386,11 +388,10 @@
             ).value
             defer { TerminalEngineActor.runSynchronously { core.terminate() } }
 
-            try await waitAsync { Self.payload(of: core)?.workingDirectory == "/srv/local" }
+            try await waitAsync { core.debugReportedWorkingDirectory == "/srv/local" }
             try await waitAsync { (try? String(contentsOfFile: paths.outputPath, encoding: .utf8))?.contains("SETTLED") == true }
-            let payload = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: core) })
-            #expect(payload.workingDirectory == "/srv/local")
-            #expect(payload.runtimeState?.workingDirectory == "/srv/local")
+            let reported = TerminalEngineActor.runSynchronously { core.debugReportedWorkingDirectory }
+            #expect(reported == "/srv/local")
         }
 
         /// A program that clears its title right after a daemon handoff is honoured: the rebuilt vt
