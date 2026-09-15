@@ -419,7 +419,7 @@ import workspacecore
                 detail: detail, browserSessions: cachedBrowserCycleState.state.openBrowserSessions(workspaceID: workspaceID),
                 openTerminalSessionIDs: openTerminalSessionIDs)
             return CycleModeRowModel(mode: mode, count: targets.count, deviceCount: 1, workspaceName: detail.title)
-        case .attention, .allAgents, .openSessions:
+        case .alerts, .allAgents, .openSessions:
             let devices = host.deviceModel.deviceSections.compactMap { section in
                 section.overview.map {
                     WindowCycleDeviceSnapshot(
@@ -440,15 +440,15 @@ import workspacecore
             //
             // The open-pane map costs an in-memory pass over already-cached state (see
             // `openTerminalSessionIDsForCycleModes`), so it is worth computing for every mode, not just
-            // Open sessions: Attention and All agents read it too, to keep an unreachable device's
-            // agent in the row's count exactly when a press could actually land on it (see
+            // Open sessions: Alerts and All agents read it too, to keep an unreachable device's row in
+            // the row's count exactly when a press could actually land on it (see
             // `WindowCycleModeTargets.agentTargets`).
             let openTerminalSessionIDsByWorkspace = openTerminalSessionIDsForCycleModes(devices: devices)
             let targets = WindowCycleModeTargets.targets(
                 mode: mode, devices: devices, openTerminalSessionIDsByWorkspace: openTerminalSessionIDsByWorkspace,
                 openBrowserSessionsByWorkspace: mode == .openSessions ? browserState.openBrowserSessionsByWorkspace : [:],
                 trackedBrowserWindowIDsByWorkspace: mode == .openSessions ? browserState.trackedWindowIDsByWorkspace : [:],
-                recentCursors: windowCycleState.recentCursors(for: .mode(mode)),
+                dismissedAlertIDs: host.alerts.dismissedAlertsAttentionItemIDs, recentCursors: windowCycleState.recentCursors(for: .mode(mode)),
                 retaining: windowCycleState.validCycleSession(for: .mode(mode))?.orderedCursors ?? [])
             return CycleModeRowModel(mode: mode, count: targets.count, deviceCount: Set(targets.map(\.deviceID)).count, workspaceName: nil)
         }
@@ -793,7 +793,7 @@ import workspacecore
         // Every workspace of every REACHABLE device, so a workspace whose panel this launch has not
         // restored contributes the panes its persisted layout holds. Restoration is lazy, so without
         // it a fresh launch would name only the workspaces the user has already visited. Computed for
-        // every mode, not gated to Open sessions like the browser state below: Attention and All agents
+        // every mode, not gated to Open sessions like the browser state below: Alerts and All agents
         // read it too, to tell an unreachable device's already-open pane apart from one that would hit
         // `openOrFocusTerminalPane`'s modal refusal (see `WindowCycleModeTargets.agentTargets`).
         // Limited to reachable devices: see `WindowCycleModeTargets.persistedLayoutKeys` for why an
@@ -820,7 +820,8 @@ import workspacecore
             mode: mode, devices: devices, openTerminalSessionIDsByWorkspace: openTerminalSessionIDsByWorkspace,
             openBrowserSessionsByWorkspace: browserCycleState.openBrowserSessionsByWorkspace,
             trackedBrowserWindowIDsByWorkspace: browserCycleState.trackedWindowIDsByWorkspace,
-            recentCursors: windowCycleState.recentCursors(for: .mode(mode)), retaining: retainedCursors)
+            dismissedAlertIDs: host.alerts.dismissedAlertsAttentionItemIDs, recentCursors: windowCycleState.recentCursors(for: .mode(mode)),
+            retaining: retainedCursors)
         // A focused built-in terminal decides the current target before any browser state is read, so
         // the browser fields are dropped together when there is one.
         //
@@ -861,7 +862,10 @@ import workspacecore
         }
     }
 
-    nonisolated private static func cycleTargetSessionID(
+    /// The terminal session a target lands in, or nil for one that is not terminal-backed. Internal
+    /// rather than `private`: `WindowCycleModeTargets` resolves an Alerts target's session the same way,
+    /// to tell a window it can land in from one it cannot.
+    nonisolated static func cycleTargetSessionID(
         for target: AppKitController.WorkspaceRunShortcutTarget, detail: SpacesDeviceWorkspaceDetailViewModel
     ) -> String? {
         switch target.kind {

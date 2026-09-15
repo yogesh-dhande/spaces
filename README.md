@@ -21,7 +21,7 @@ Manage parallel coding sessions across all of your devices
 <p align="center"><img src="docs/media/readme-ios.png" width="620" alt="The iOS app's workspace list next to a live agent terminal session"></p>
 - **CLI** — [`spaces`](https://usespaces.dev/docs/cli) cli drives projects, workspaces, and terminal sessions from a shell. Scriptable, and the way coding agents report status.
 - **MCP server** — [`spaces mcp`](https://usespaces.dev/docs/mcp) exposes projects, workspaces, and terminals as tools. A coding agent can inspect and drive Spaces directly.
-- **Keyboard shortcuts** — Next/Previous window cycling steps through a selectable scope: one workspace, agents waiting on you, every working or waiting agent, or every open session, any of them across devices. A leader chord in Spaces or the sidebar's cycling row picks the scope.
+- **Keyboard shortcuts** — Next/Previous window cycling steps through a selectable scope: one workspace, everything in Alerts, every live agent, or every open session, any of them across devices. A leader chord in Spaces or the sidebar's cycling row picks the scope.
 - **Global command palette** — `⌘⌥-` jumps to any window in any workspace. One key to reach anything without hunting through Mission Control.
 <p align="center"><img src="docs/media/palette.png" width="620" alt="The iOS app's workspace list next to a live agent terminal session"></p>
 

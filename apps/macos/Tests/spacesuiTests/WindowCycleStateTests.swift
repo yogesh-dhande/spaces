@@ -18,7 +18,7 @@ import Testing
         // Both visits are in the one list every cross-device mode reads, most recent first.
         let globalRecents = ["device:linux/workspace:w2/terminal:session-b", "device:mac/workspace:w1/terminal:session-a"]
         #expect(state.recentCursors(for: .mode(.openSessions)) == globalRecents)
-        #expect(state.recentCursors(for: .mode(.attention)) == globalRecents)
+        #expect(state.recentCursors(for: .mode(.alerts)) == globalRecents)
         // Each workspace's own list holds only its own visits.
         #expect(state.recentCursors(for: .workspace("w1")) == ["terminal:session-a"])
         #expect(state.recentCursors(for: .workspace("w2")) == ["terminal:session-b"])
@@ -41,10 +41,10 @@ import Testing
         state.recordCycleLanding(scope: .workspace("w1"), orderedCursors: ["terminal:a", "terminal:b"], index: 1)
 
         state.recordCycleLanding(
-            scope: .mode(.attention), orderedCursors: ["device:mac/workspace:w2/agent:x", "device:mac/workspace:w2/agent:y"], index: 1)
+            scope: .mode(.alerts), orderedCursors: ["device:mac/workspace:w2/agent:x", "device:mac/workspace:w2/agent:y"], index: 1)
 
         #expect(state.cursor(for: .workspace("w1")) == "terminal:b")
-        #expect(state.cursor(for: .mode(.attention)) == "device:mac/workspace:w2/agent:y")
+        #expect(state.cursor(for: .mode(.alerts)) == "device:mac/workspace:w2/agent:y")
         // Each mode is its own rotation, so stepping the mode starts from that mode's own cursor.
         #expect(state.cursor(for: .mode(.allAgents)) == nil)
     }
@@ -52,11 +52,11 @@ import Testing
     @Test func aFrozenCrossDeviceRotationSurvivesTheSetReorderingMidSequence() {
         var state = WindowCycleState()
         let ordered = ["device:mac/workspace:w1/agent:a", "device:mac/workspace:w1/agent:b", "device:linux/workspace:w2/agent:c"]
-        state.recordCycleLanding(scope: .mode(.attention), orderedCursors: ordered, index: 0)
+        state.recordCycleLanding(scope: .mode(.alerts), orderedCursors: ordered, index: 0)
 
         // An agent reporting a new state re-sorts the set: `c` is now newest and leads the rebuilt list.
         let rebuilt = ["device:linux/workspace:w2/agent:c", "device:mac/workspace:w1/agent:a", "device:mac/workspace:w1/agent:b"]
-        let session = state.validCycleSession(for: .mode(.attention))
+        let session = state.validCycleSession(for: .mode(.alerts))
         let ordering = WorkspaceWindowCycle.cycleOrdering(cursors: rebuilt, currentIndex: 1, session: session, recentCursors: [])
 
         #expect(ordering.indices.map { rebuilt[$0] } == ordered)
@@ -66,10 +66,10 @@ import Testing
     @Test func aFrozenRotationWalksOnWhileTheAnsweredAgentIsStillACandidate() {
         var state = WindowCycleState()
         let ordered = ["device:mac/workspace:w1/agent:a", "device:mac/workspace:w1/agent:b", "device:mac/workspace:w1/agent:c"]
-        state.recordCycleLanding(scope: .mode(.attention), orderedCursors: ordered, index: 0)
-        let session = state.validCycleSession(for: .mode(.attention))
+        state.recordCycleLanding(scope: .mode(.alerts), orderedCursors: ordered, index: 0)
+        let session = state.validCycleSession(for: .mode(.alerts))
 
-        // The user answered `a`, so it is working and Attention no longer admits it; the set the burst
+        // The user answered `a`, so it is working and Alerts no longer admits it; the set the burst
         // is handed retains it and re-sorts around its newer state change.
         let retained = ["device:mac/workspace:w1/agent:a", "device:mac/workspace:w1/agent:c", "device:mac/workspace:w1/agent:b"]
         let kept = WorkspaceWindowCycle.cycleOrdering(cursors: retained, currentIndex: 0, session: session, recentCursors: [])
@@ -89,23 +89,23 @@ import Testing
     @Test func aFrozenRotationExpiresWithItsBurst() {
         var state = WindowCycleState()
         state.recordCycleLanding(
-            scope: .mode(.attention), orderedCursors: ["a", "b"], index: 0,
+            scope: .mode(.alerts), orderedCursors: ["a", "b"], index: 0,
             at: Date().addingTimeInterval(-(WorkspaceWindowCycle.cycleSessionTimeout + 1)))
 
-        #expect(state.validCycleSession(for: .mode(.attention)) == nil)
+        #expect(state.validCycleSession(for: .mode(.alerts)) == nil)
     }
 
     @Test func aVisitThatDidNotComeFromCyclingEndsEveryFrozenRotation() {
         var state = WindowCycleState()
-        state.recordCycleLanding(scope: .mode(.attention), orderedCursors: ["a", "b"], index: 0)
+        state.recordCycleLanding(scope: .mode(.alerts), orderedCursors: ["a", "b"], index: 0)
         state.recordCycleLanding(scope: .workspace("w1"), orderedCursors: ["terminal:a", "terminal:b"], index: 0)
 
         state.recordVisit(cursor: "terminal:b", globalCursor: "device:mac/workspace:w1/terminal:b", workspaceID: "w1", preserveCycleSession: true)
-        #expect(state.validCycleSession(for: .mode(.attention)) != nil)
+        #expect(state.validCycleSession(for: .mode(.alerts)) != nil)
         #expect(state.validCycleSession(for: .workspace("w1")) != nil)
 
         state.recordVisit(cursor: "terminal:b", globalCursor: "device:mac/workspace:w1/terminal:b", workspaceID: "w1", preserveCycleSession: false)
-        #expect(state.validCycleSession(for: .mode(.attention)) == nil)
+        #expect(state.validCycleSession(for: .mode(.alerts)) == nil)
         #expect(state.validCycleSession(for: .workspace("w1")) == nil)
     }
 

@@ -1552,7 +1552,8 @@ private struct DeviceSyncState {
         host.deviceModel.workspaceRuntimeStatusByID = merged.workspaceRuntimeStatusByID
         host.deviceModel.alertsGroups = merged.alertsGroups
         // Every path that installs alerts groups lands here, so this is where a bell in the pane the user
-        // is typing in gets consumed — before anything reads the groups for the badge or the list.
+        // is typing in gets consumed, before anything reads the groups for the badge, the list, or the
+        // cycling row's Alerts count, which `applySidebarDataChange` repaints right after this merge.
         host.alerts.consumeFocusedSessionBellAlerts()
         host.panelCoordinator.refreshGlobalPanelTitles()
     }
@@ -1570,10 +1571,10 @@ private struct DeviceSyncState {
         // so it repaints from them when it is open and no-ops otherwise.
         host.devicePairing.refreshDeviceSettingsForDeviceStatusChange()
         rebuildFlatSidebarData()
-        // An agent changing state or a workspace appearing changes what the cycling row counts, so the
-        // count follows the applied data. `refreshCycleModeRow` itself starts the Chrome half of that
-        // count off the main actor, capped to once per couple of seconds: see
-        // `WindowFocusController.refreshCycleModeBrowserState`.
+        // An agent changing state, an alert arriving or being dismissed, or a workspace appearing
+        // changes what the cycling row counts, so the count follows the applied data.
+        // `refreshCycleModeRow` itself starts the Chrome half of that count off the main actor, capped
+        // to once per couple of seconds: see `WindowFocusController.refreshCycleModeBrowserState`.
         refreshCycleModeRow()
         // Until `attachOutlineView` wires the outline's data source (the window build runs on a
         // deferred launch task, so an IPC-triggered reload can get here first; issue #581), there is
@@ -3572,7 +3573,7 @@ private struct DeviceSyncState {
         stack.addArrangedSubview(countLabel)
         stack.addArrangedSubview(NSView())  // spacer
         stack.addArrangedSubview(hintLabel)
-        // The count slot can grow to a phrase ("nothing waiting"), and a narrow sidebar has to keep
+        // The count slot can grow to a phrase ("no alerts"), and a narrow sidebar has to keep
         // the state rather than the reminder of how to change it, so the hint is what leaves.
         stack.setVisibilityPriority(.detachOnlyIfNecessary, for: hintLabel)
 

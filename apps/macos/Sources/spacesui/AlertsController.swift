@@ -130,9 +130,9 @@ import workspacecore
                     AlertsAttentionEntry(
                         attentionID: "alert:\(deviceID):agent:\(agent.agentID ?? agent.id):\(agent.activityState.rawValue):\(agent.updatedAt ?? "")",
                         icon: "cpu.fill", iconTint: iconTint, label: agent.name,
-                        detail: AppKitController.terminalPaletteSecondaryLabel(liveTitle: agent.liveTitle, sessionID: agent.sessionID, sessionsByID: sessionsByID),
-                        shortcut: "", processStatus: nil, agentStatus: AgentWindowStatus(rawValue: agent.activityState.rawValue),
-                        countsTowardBadge: true, eventDate: eventDate,
+                        detail: AppKitController.terminalPaletteSecondaryLabel(
+                            liveTitle: agent.liveTitle, sessionID: agent.sessionID, sessionsByID: sessionsByID), shortcut: "", processStatus: nil,
+                        agentStatus: AgentWindowStatus(rawValue: agent.activityState.rawValue), countsTowardBadge: true, eventDate: eventDate,
                         // Mirror `agentWindows(from:)` so the `.agentWindow` resolution finds the row by
                         // `agentID`/`id` and opens its session.
                         focusRequest: .agentWindow(
@@ -158,8 +158,9 @@ import workspacecore
                         // The row reads exactly as the session's sidebar row does — name, then what the
                         // program is doing — because its presence under Alerts is what says the bell rang.
                         label: session.title,
-                        detail: AppKitController.terminalPaletteSecondaryLabel(liveTitle: session.liveTitle, sessionID: session.id, sessionsByID: sessionsByID),
-                        shortcut: "", processStatus: nil, agentStatus: nil, countsTowardBadge: true, eventDate: eventDate,
+                        detail: AppKitController.terminalPaletteSecondaryLabel(
+                            liveTitle: session.liveTitle, sessionID: session.id, sessionsByID: sessionsByID), shortcut: "", processStatus: nil,
+                        agentStatus: nil, countsTowardBadge: true, eventDate: eventDate,
                         focusRequest: .terminalSession(workspaceID: workspace.id, sessionID: session.id)))
             }
             guard !items.isEmpty else { continue }
@@ -577,7 +578,8 @@ import workspacecore
             if host.showingAlerts { showAlertsDetail() }
             // A dismissal can flip an exited process's row color (failed → inactive) and always
             // changes which rows still carry an undismissed alert, so the sidebar re-derives through
-            // its normal signature-diff reload rather than an unconditional or per-frame rebuild.
+            // its normal signature-diff reload rather than an unconditional or per-frame rebuild. That
+            // apply is also what repaints the cycling row, whose Alerts set this dismissal just shrank.
             host.sidebar.applySidebarDataChange()
             // The palette otherwise only re-derives on its next presentation (`commandPaletteNeedsReload`);
             // while it is already open, reload it now so a dismissal from underneath it (e.g. the sidebar's

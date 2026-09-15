@@ -8,21 +8,21 @@ import spacesclientcore
 /// remembered in between launches.
 @Suite struct WindowCycleModeTests {
     @Test func steppingWalksEveryModeAndWrapsBackToWorkspace() {
-        #expect(WindowCycleMode.workspace.next == .attention)
-        #expect(WindowCycleMode.attention.next == .allAgents)
+        #expect(WindowCycleMode.workspace.next == .alerts)
+        #expect(WindowCycleMode.alerts.next == .allAgents)
         #expect(WindowCycleMode.allAgents.next == .openSessions)
         #expect(WindowCycleMode.openSessions.next == .workspace)
     }
 
-    @Test func everyModeHasAName() {
-        #expect(WindowCycleMode.allCases.map(\.displayName) == ["Workspace", "Attention", "All agents", "Open sessions"])
-    }
+    @Test func everyModeHasAName() { #expect(WindowCycleMode.allCases.map(\.displayName) == ["Workspace", "Alerts", "All agents", "Open sessions"]) }
 
     @Test func anUnsetOrUnreadableSettingResolvesToWorkspace() {
         #expect(WindowCycleMode.resolved(persistedRawValue: nil) == .workspace)
         #expect(WindowCycleMode.resolved(persistedRawValue: "") == .workspace)
-        // A value written by some other build is not a preference this one can honor.
+        // A value written by some other build is not a preference this one can honor, including the
+        // raw value the Alerts mode was stored under before it was renamed.
         #expect(WindowCycleMode.resolved(persistedRawValue: "everythingEverywhere") == .workspace)
+        #expect(WindowCycleMode.resolved(persistedRawValue: "attention") == .workspace)
     }
 
     /// The mode survives a launch: it is stored under its own client setting and read back as itself.
@@ -43,10 +43,10 @@ import spacesclientcore
     @Test func aScopeNamesTheModeItRotatesFor() {
         #expect(WindowCycleScope.workspace("w1").mode == .workspace)
         #expect(WindowCycleScope.workspace("w1").workspaceID == "w1")
-        #expect(WindowCycleScope.mode(.attention).mode == .attention)
-        #expect(WindowCycleScope.mode(.attention).workspaceID == nil)
+        #expect(WindowCycleScope.mode(.alerts).mode == .alerts)
+        #expect(WindowCycleScope.mode(.alerts).workspaceID == nil)
         // Two workspaces, and a workspace and a mode, never share cycle state.
         #expect(WindowCycleScope.workspace("w1").key != WindowCycleScope.workspace("w2").key)
-        #expect(WindowCycleScope.workspace("attention").key != WindowCycleScope.mode(.attention).key)
+        #expect(WindowCycleScope.workspace("alerts").key != WindowCycleScope.mode(.alerts).key)
     }
 }

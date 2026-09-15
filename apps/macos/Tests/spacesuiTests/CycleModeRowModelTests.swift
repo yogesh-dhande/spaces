@@ -12,11 +12,11 @@ import Testing
         #expect(!model.isEmpty)
     }
 
-    @Test func emptyAttentionSetReadsAsNothingWaitingRatherThanZero() {
-        let model = CycleModeRowModel(mode: .attention, count: 0, deviceCount: 0, workspaceName: nil)
+    @Test func emptyAlertsSetReadsAsNoAlertsRatherThanZero() {
+        let model = CycleModeRowModel(mode: .alerts, count: 0, deviceCount: 0, workspaceName: nil)
         #expect(model.isEmpty)
-        #expect(model.countText == "nothing waiting")
-        #expect(model.accessibilityLabel == "Cycling Attention, nothing waiting")
+        #expect(model.countText == "no alerts")
+        #expect(model.accessibilityLabel == "Cycling Alerts, no alerts")
     }
 
     @Test func everyOtherEmptyModeStillCountsInNumbers() {
@@ -30,15 +30,15 @@ import Testing
         #expect(model.accessibilityLabel == "Cycling All agents, 3")
     }
 
-    @Test func attentionSummaryCountsAgentsAndDevices() {
-        #expect(CycleModeRowModel(mode: .attention, count: 3, deviceCount: 2, workspaceName: nil).hudSummary == "3 waiting or done across 2 devices")
-        #expect(CycleModeRowModel(mode: .attention, count: 1, deviceCount: 1, workspaceName: nil).hudSummary == "1 waiting or done across 1 device")
-        #expect(CycleModeRowModel(mode: .attention, count: 0, deviceCount: 0, workspaceName: nil).hudSummary == "nothing waiting")
+    @Test func alertsSummaryCountsAlertsAndDevices() {
+        #expect(CycleModeRowModel(mode: .alerts, count: 3, deviceCount: 2, workspaceName: nil).hudSummary == "3 alerts across 2 devices")
+        #expect(CycleModeRowModel(mode: .alerts, count: 1, deviceCount: 1, workspaceName: nil).hudSummary == "1 alert across 1 device")
+        #expect(CycleModeRowModel(mode: .alerts, count: 0, deviceCount: 0, workspaceName: nil).hudSummary == "no alerts")
     }
 
     @Test func allAgentsSummaryCountsAgentsAndDevices() {
         #expect(CycleModeRowModel(mode: .allAgents, count: 4, deviceCount: 2, workspaceName: nil).hudSummary == "4 agents across 2 devices")
-        #expect(CycleModeRowModel(mode: .allAgents, count: 0, deviceCount: 0, workspaceName: nil).hudSummary == "no agents running")
+        #expect(CycleModeRowModel(mode: .allAgents, count: 0, deviceCount: 0, workspaceName: nil).hudSummary == "no agents")
     }
 
     @Test func openSessionsSummaryCountsSessions() {
