@@ -1264,6 +1264,106 @@ extension OrchestratorTests {
         }
     }
 
+    /// The relaunch command of an agent the user typed into a terminal only exists in that terminal's live
+    /// foreground state, which is cleared when the agent ends and nulled again by the daemon-start repair.
+    /// The classification pass therefore samples it onto the agent row while the agent runs: on the first
+    /// detection, on a later tick for a row that was registered before its command was running, and without
+    /// being lost to a hook signal landing in between.
+    func testForegroundSamplingRecordsTheRelaunchCommandOnTheAgentRow() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        let orchestrator = makeTestOrchestrator(store: store)
+
+        // First detection: the row is created carrying the sampled command.
+        let detectedSessionID = "typed-agent-session"
+        try orchestrator.insertAdHocDetectedAgent(
+            detectedAgent: AdHocDetectedForegroundAgent(
+                kind: "claude", label: "claude", displayCommand: "claude --model opus", launchCommand: #"claude --model opus "fix the build""#),
+            workspace: workspace, sessionID: detectedSessionID)
+        XCTAssertEqual(
+            try store.agentWindowByTerminalSession(terminalSessionID: detectedSessionID)?.launchCommand, #"claude --model opus "fix the build""#)
+
+        // A row registered by a hook before its command was running learns it on a later tick.
+        let hookSessionID = "hook-first-session"
+        let registered = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude", terminalTrackingID: hookSessionID, status: .spinning)
+        XCTAssertNil(registered.launchCommand)
+        XCTAssertTrue(
+            try orchestrator.refreshPersistedForegroundAgentDetails(
+                sessionID: hookSessionID, runtimeState: Self.foregroundRuntimeState(sessionID: hookSessionID, command: #"claude "review the diff""#)))
+        XCTAssertEqual(try store.agentWindowByTerminalSession(terminalSessionID: hookSessionID)?.launchCommand, #"claude "review the diff""#)
+
+        // A hook signal carries no command of its own and must not erase the sampled one.
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude", terminalTrackingID: hookSessionID, status: .waiting)
+        XCTAssertEqual(try store.agentWindowByTerminalSession(terminalSessionID: hookSessionID)?.launchCommand, #"claude "review the diff""#)
+
+        // A repeat sample of the same command writes nothing, so the pass reports no mutation.
+        XCTAssertFalse(
+            try orchestrator.refreshPersistedForegroundAgentDetails(
+                sessionID: hookSessionID, runtimeState: Self.foregroundRuntimeState(sessionID: hookSessionID, command: #"claude "review the diff""#)))
+    }
+
+    /// A terminal whose agent exited keeps its row, conversation id and all, so subscribers see a real
+    /// exit. When a new agent is detected in that same shell the row is reset for it, and the key must go
+    /// with the lifecycle that ended: the restorable capture reads an agent's kind and conversation id off
+    /// this row, so a fresh agent left holding its predecessor's key would be offered back as the older
+    /// conversation. The new agent's own command replaces the old one, and its first hook signal is what
+    /// gives the row a key again.
+    func testReusingAnExitedRowForANewAgentDropsThePreviousConversationID() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        let orchestrator = makeTestOrchestrator(store: store)
+        let sessionID = "reused-shell-session"
+
+        let started = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude", terminalTrackingID: sessionID, sessionKey: "conversation-1",
+            status: .spinning)
+        XCTAssertTrue(
+            try orchestrator.refreshPersistedForegroundAgentDetails(
+                sessionID: sessionID, runtimeState: Self.foregroundRuntimeState(sessionID: sessionID, command: #"claude "fix the build""#)))
+        XCTAssertTrue(try store.markAgentWindowExitStatus(started, updatedAt: "2026-09-11T00:00:00Z"))
+
+        // The foreground reconciler's relaunch branch: a new agent is running in the same shell, so the
+        // classification pass samples its command and the row is reset through `registerAgentWindow`.
+        XCTAssertTrue(
+            try orchestrator.refreshPersistedForegroundAgentDetails(
+                sessionID: sessionID, runtimeState: Self.foregroundRuntimeState(sessionID: sessionID, command: #"claude --model opus "ship it""#)))
+        let reused = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, status: .exited, eventType: "init",
+            eventSource: "foreground_relaunch")
+
+        XCTAssertEqual(reused.id, started.id, "the same row is reused")
+        XCTAssertEqual(reused.status, .idle)
+        XCTAssertNil(reused.sessionKey, "the key belonged to the conversation that exited")
+        XCTAssertEqual(reused.launchCommand, #"claude --model opus "ship it""#)
+        let stored = try XCTUnwrap(try store.agentWindowByTerminalSession(terminalSessionID: sessionID))
+        XCTAssertNil(stored.sessionKey)
+        XCTAssertEqual(stored.launchCommand, #"claude --model opus "ship it""#)
+
+        // The new agent's first hook signal names its own conversation.
+        let signaled = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, sessionKey: "conversation-2", status: .spinning)
+        XCTAssertEqual(signaled.sessionKey, "conversation-2")
+        XCTAssertEqual(try store.agentWindowByTerminalSession(terminalSessionID: sessionID)?.sessionKey, "conversation-2")
+    }
+
+    /// The live runtime state of a terminal whose foreground is a detected coding agent.
+    private static func foregroundRuntimeState(sessionID: String, command: String) -> TerminalSessionRuntimeState {
+        TerminalSessionRuntimeState(
+            sessionID: sessionID, servicePID: 100, childPID: 200, state: .running, updatedAt: "2026-09-11T00:00:00Z", foregroundPID: 300,
+            foregroundExecutableName: "claude", foregroundArgv: ["claude"], foregroundDetectedAgentKind: .claude, foregroundDisplayLabel: "claude",
+            foregroundDisplayCommand: "claude", foregroundCommand: command)
+    }
+
     /// Regression for a live rename bug. `TerminalForegroundAgentReconciler` is the single owner of
     /// foreground classification and serializes its passes (one in flight plus one trailing re-run), but a
     /// re-run still runs `insertAdHocDetectedAgent` over a session whose row the pass before it inserted.
@@ -1278,7 +1378,7 @@ extension OrchestratorTests {
         try store.upsert(workspace: workspace)
         let orchestrator = makeTestOrchestrator(store: store)
         let sessionID = "ad-hoc-overlapping-agent"
-        let detectedAgent = (kind: "claude", label: "claude", displayCommand: "claude")
+        let detectedAgent = AdHocDetectedForegroundAgent(kind: "claude", label: "claude", displayCommand: "claude", launchCommand: "claude")
 
         try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
         try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
@@ -1309,7 +1409,7 @@ extension OrchestratorTests {
         try store.upsert(workspace: workspace)
         let orchestrator = makeTestOrchestrator(store: store)
         let sessionID = "ad-hoc-stale-detection-agent"
-        let detectedAgent = (kind: "claude", label: "claude", displayCommand: "claude")
+        let detectedAgent = AdHocDetectedForegroundAgent(kind: "claude", label: "claude", displayCommand: "claude", launchCommand: "claude")
 
         // Pass A's insert.
         try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
@@ -2144,7 +2244,7 @@ extension OrchestratorTests {
 
         // Another pass classifies the session and persists the kind. There is no live session behind this
         // row, so live foreground state reports nothing — the row is the only place the kind now exists.
-        try store.setAgentSessionDetectedKind(id: stale.id, kind: "codex")
+        try store.setAgentSessionDetectedForeground(id: stale.id, kind: "codex", launchCommand: nil)
         XCTAssertNil(orchestrator.resolvedAgentKind(stale), "the stale snapshot alone cannot name the agent")
 
         try orchestrator.finalizeAgentRow(stale, reason: .exited(eventType: "exit", eventSource: "foreground_reconciler", environmentKeys: nil))

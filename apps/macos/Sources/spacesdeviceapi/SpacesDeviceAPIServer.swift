@@ -6298,6 +6298,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// The relaunched session records the captured command rather than the resume command it runs, so an
     /// agent restored twice resumes its newest conversation from the original command instead of carrying
     /// the previous restore's selector as well.
+    ///
+    /// Each relaunch lands in the directory the agent was working in and carries no automation run
+    /// attribution: an agent an automation started comes back as a standalone conversation, because the run
+    /// that owned it was canceled along with the teardown that captured it.
     private func handleRestoreSessionsRequest(_ payload: SpacesDeviceRestorableSessionsRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
@@ -6314,7 +6318,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             let command = CodingAgent.resumeCommand(launchCommand: record.launchCommand, sessionKey: record.agentSessionKey)
             do {
                 let session = try orchestrator.createWorkspaceAgentSession(
-                    workspaceID: record.workspaceID, command: command, title: record.title, recordedLaunchCommand: record.launchCommand)
+                    workspaceID: record.workspaceID, command: command, title: record.title, recordedLaunchCommand: record.launchCommand,
+                    workingDirectory: record.workingDirectory)
                 newSessionIDsByCapturedSessionID[record.sessionID] = session.id
             } catch {
                 failures.append(

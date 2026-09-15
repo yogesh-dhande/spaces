@@ -29,13 +29,22 @@ public struct AgentWindowRecord: Codable, Sendable {
     /// agent exits, which is when the exited notification has to name the kind. Nil until a kind is
     /// detected, which renders honestly as "coding agent" downstream.
     public let detectedAgentKind: String?
+    /// The command that relaunches this agent, sampled from its terminal's foreground process while the
+    /// agent runs (`TerminalSessionRuntimeState.foregroundCommand`). Nil until a sample lands, and never
+    /// erased by one that reports none, the way `detectedAgentKind` is not.
+    ///
+    /// It is persisted on this row rather than read live from the runtime row because the restorable
+    /// capture that matters most reads it after a daemon restart, by which point the stale-session repair
+    /// has nulled every foreground column. This row outlives that repair. Daemon-side only: it is not part
+    /// of any client payload, and a client rebuilding a record from an overview row carries none.
+    public let launchCommand: String?
     public let createdAt: String
     public let updatedAt: String
 
     public init(
         id: String, workspaceID: String, provider: AgentProvider, label: String?, userLabel: String? = nil, runtimeTargetID: String? = nil,
         terminalTarget: TerminalTargetRecord? = nil, sessionKey: String? = nil, status: AgentWindowStatus, note: String? = nil,
-        detectedAgentKind: String? = nil, createdAt: String, updatedAt: String
+        detectedAgentKind: String? = nil, launchCommand: String? = nil, createdAt: String, updatedAt: String
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -48,6 +57,7 @@ public struct AgentWindowRecord: Codable, Sendable {
         self.status = status
         self.note = note
         self.detectedAgentKind = detectedAgentKind
+        self.launchCommand = launchCommand
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -90,6 +100,6 @@ public struct AgentWindowRecord: Codable, Sendable {
         AgentWindowRecord(
             id: id, workspaceID: workspaceID, provider: provider, label: label, userLabel: userLabel, runtimeTargetID: runtimeTargetID,
             terminalTarget: terminalTarget, sessionKey: sessionKey, status: status, note: note, detectedAgentKind: detectedAgentKind,
-            createdAt: createdAt, updatedAt: updatedAt)
+            launchCommand: launchCommand, createdAt: createdAt, updatedAt: updatedAt)
     }
 }

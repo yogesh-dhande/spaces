@@ -124,6 +124,10 @@
         /// deliberately does not restore titles.
         private var currentTitle: String?
         private var currentWorkingDirectory: String?
+        /// The working directory last read off the running process itself, refreshed by
+        /// `makeRuntimeStateSnapshot`. Platform parity with the macOS
+        /// `GhosttyEmbeddedSessionCore.lastObservedProcessWorkingDirectory`.
+        private var lastObservedProcessWorkingDirectory: String?
         /// When the running program last rang the bell, coalesced by `bellCoalescer`. Cached on the core
         /// for the same reason the title is: a handoff rebuilds the vt session, and the replay carries no
         /// bell at all, so the value has to come from the row the pre-exec image wrote.
@@ -415,6 +419,25 @@
         /// macOS; the conditional stop asks whether that shell is holding any child process.
         public func childPID() -> Int32? { ptyDriver.childPID() }
 
+        // Prefer the live cwd observed from the foreground/child process (cached by
+        // makeRuntimeStateSnapshot) so the working directory clients see converges on reality even when the
+        // shell never reports a new PWD through Ghostty shell integration (OSC 7). currentWorkingDirectory
+        // (the PWD-action value) remains the next fallback, then the launch directory. Platform parity with
+        // `GhosttyEmbeddedSessionCore.effectiveWorkingDirectory`; a captured coding agent comes back in the
+        // directory it was working in on either platform.
+        private var effectiveWorkingDirectory: String {
+            lastObservedProcessWorkingDirectory ?? currentWorkingDirectory ?? launchConfiguration.workingDirectory
+        }
+
+        /// The running process's own working directory: the foreground process first, since that is what the
+        /// user is interacting with, then the session's shell. Platform parity with
+        /// `GhosttyEmbeddedSessionCore.liveProcessWorkingDirectory(foregroundPID:childPID:)`.
+        private static func liveProcessWorkingDirectory(foregroundPID: Int32?, childPID: Int32?) -> String? {
+            if let foregroundPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: foregroundPID) { return cwd }
+            if let childPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: childPID) { return cwd }
+            return nil
+        }
+
         private func handleSessionClosed() {
             guard !terminating else { return }
             terminate()
@@ -662,6 +685,12 @@
         }
 
         var debugOwnerEpoch: UInt64 { ownerEpoch }
+
+        /// The directory the running program last reported with OSC 7, read before
+        /// `effectiveWorkingDirectory` puts the live process's own directory ahead of it. The metadata tests
+        /// pin the decode and the rejection policy through this, since a live process's real directory masks
+        /// the reported one in everything a client reads.
+        var debugReportedWorkingDirectory: String? { currentWorkingDirectory }
         var isStarted: Bool { started }
 
         private func installOutputHandler() {
@@ -1757,17 +1786,29 @@
             let foregroundPID = ptyDriver.foregroundPID()
             let foregroundProcess = foregroundPID.flatMap { TerminalForegroundProcessInspector.inspect(pid: $0) }
             let foregroundAgent = foregroundProcess.flatMap { TerminalForegroundProcessInspector.classify($0) }
+            // Refresh the cached live cwd here so effectiveWorkingDirectory publishes the process's real
+            // directory even when the shell never reports a new PWD through Ghostty shell integration
+            // (OSC 7). Platform parity with `GhosttyEmbeddedSessionCore.refreshRuntimeState`.
+            // This snapshot is built for every output chunk, and it already reads /proc/<pid>/exe and
+            // /proc/<pid>/cmdline for the foreground classification above; the cwd readlink is one more
+            // syscall of the same class on the same cadence, so it deliberately follows that read rather
+            // than getting a timer or a change gate of its own. A `cd` changes the directory without
+            // changing the pid, so a pid-change gate would publish a stale directory.
+            if let liveWorkingDirectory = Self.liveProcessWorkingDirectory(foregroundPID: foregroundPID, childPID: liveChildPID ?? lastKnownChildPID)
+            {
+                lastObservedProcessWorkingDirectory = liveWorkingDirectory
+            }
             return TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
                 childPID: liveChildPID ?? lastKnownChildPID, state: state, updatedAt: nowISO8601(),
                 // The raw reported title, not a launch-title fallback: the runtime state records what the
                 // program said, and a reader that needs a name applies its own fallback.
-                exitedAt: state.isInteractive ? nil : nowISO8601(), title: currentTitle,
-                workingDirectory: currentWorkingDirectory ?? launchConfiguration.workingDirectory, columns: terminalSize.columns,
-                rows: terminalSize.rows, foregroundPID: foregroundPID, foregroundExecutablePath: foregroundProcess?.executablePath,
-                foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
-                foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind, foregroundDisplayLabel: foregroundAgent?.displayLabel,
-                foregroundDisplayCommand: foregroundAgent?.displayCommand, bellAt: currentBellAt,
+                exitedAt: state.isInteractive ? nil : nowISO8601(), title: currentTitle, workingDirectory: effectiveWorkingDirectory,
+                columns: terminalSize.columns, rows: terminalSize.rows, foregroundPID: foregroundPID,
+                foregroundExecutablePath: foregroundProcess?.executablePath, foregroundExecutableName: foregroundProcess?.executableName,
+                foregroundArgv: foregroundProcess?.argv, foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind,
+                foregroundDisplayLabel: foregroundAgent?.displayLabel, foregroundDisplayCommand: foregroundAgent?.displayCommand,
+                foregroundCommand: foregroundAgent?.agentCommand, bellAt: currentBellAt,
                 // Published alongside the foreground classification because the two answer different halves
                 // of "is this agent ready for its prompt?": the classification says the agent process is
                 // there, this says its TUI has taken the terminal over. Agent-prompt delivery waits for both.
@@ -2209,12 +2250,11 @@
             TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: lastKnownChildPID,
                 state: state, updatedAt: nowISO8601(), exitedAt: state.isInteractive ? nil : nowISO8601(), title: currentTitle,
-                workingDirectory: currentWorkingDirectory ?? launchConfiguration.workingDirectory, columns: terminalSize.columns,
-                rows: terminalSize.rows, bellAt: currentBellAt)
+                workingDirectory: effectiveWorkingDirectory, columns: terminalSize.columns, rows: terminalSize.rows, bellAt: currentBellAt)
         }
 
         private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {
-            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")|\(state.bellAt ?? "nil")|\(state.bracketedPasteActive)"
+            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.foregroundCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")|\(state.bellAt ?? "nil")|\(state.bracketedPasteActive)"
         }
 
         private func nowISO8601() -> String { GhosttyRemoteSessionStateTimestamp.string(from: Date()) }

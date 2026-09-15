@@ -3,23 +3,100 @@ import spacesdatabase
 import spacesterminalcore
 
 extension SQLiteStore {
+    /// Where a typed agent's relaunch command comes from, which is the one thing the two capture queries
+    /// read differently. Each query reads the row that is authoritative at the moment it runs, so neither
+    /// depends on the other's timing.
+    private struct TypedAgentSource {
+        /// The SQL expression holding the command of an agent the user typed into a terminal.
+        let command: String
+        /// The SQL predicate that admits a `.shell`-kind session as running an agent.
+        let admission: String
+
+        /// What the live capture reads: the runtime row's own foreground sample, which the session's core
+        /// refreshes on its tick while the agent runs. It is the row that knows an agent is in the
+        /// foreground right now, before the orchestrator's classification pass has written an agent row for
+        /// it, so an agent typed a moment before a quit is still offered back.
+        static let liveRuntimeRow = TypedAgentSource(
+            command: "terminal_runtime_states.foreground_command",
+            admission: """
+                terminal_runtime_states.foreground_detected_agent_kind IS NOT NULL
+                AND COALESCE(terminal_runtime_states.foreground_command, '') <> ''
+                """)
+
+        /// What the stranded capture reads: the agent row's sampled command. That capture runs at daemon
+        /// start, after `TerminalSessionStaleRecovery` has nulled every `foreground_*` column of the runtime
+        /// row, so the runtime row can no longer say what was running; the agent row survives the repair and
+        /// its status is what says the agent had not finished.
+        ///
+        /// Accepted consequence: an unclean exit that lands between the first foreground sample and the
+        /// reconciler pass that turns it into an agent row strands a typed agent this capture cannot see,
+        /// since the repair has already taken the runtime row's copy of the command away. The window is one
+        /// reconciler pass wide: the pass runs on the runtime-state-change notification the first sample
+        /// itself raises, milliseconds later, and that sample lands about a second after the agent starts,
+        /// so a crash has to fall inside a few milliseconds roughly a second into an agent's life to hit it.
+        /// Carrying the foreground fields through the repair, or starting the reconciler before the capture,
+        /// would buy that back by making the repair or daemon startup owe this capture something, which is a
+        /// worse trade than losing an agent a second old.
+        static let agentRow = TypedAgentSource(
+            command: "agent_sessions.launch_command",
+            admission: """
+                agent_sessions.status IS NOT NULL
+                AND agent_sessions.status <> 'exited'
+                AND COALESCE(agent_sessions.launch_command, '') <> ''
+                """)
+    }
+
     /// Canonical column order for reading a capture off the live session tables; shared by both capture
-    /// queries so they decode through one row shape.
+    /// queries so they decode through one row shape, with only the typed agent's command coming from the
+    /// query's own `source`.
     ///
     /// The agent row is joined in on the left: a spawned agent session exists as a terminal session from
     /// the moment it launches, while its `agent_sessions` row is written once its hooks or foreground
     /// detection report it, so a session captured before that still restores, just without a
-    /// conversation id to resume. A session's manual rename wins over its launch title, matching how a
-    /// session is named everywhere else.
-    private static let restorableCaptureColumns = """
+    /// conversation id to resume. The kind and the conversation id always come off that row, in both
+    /// queries (see `typedAgentIdentity(_:)` for the one case a row is not read), which is why a typed
+    /// agent captured in the window before the classification pass has written its row carries neither:
+    /// the offer lists it, says it comes back as a new conversation, and relaunches the command the
+    /// runtime row recorded. A session's manual rename wins over its launch title, matching how a session
+    /// is named everywhere else.
+    ///
+    /// The command is decided by what the session is, not by which row happens to hold a value: an agent
+    /// Spaces launched relaunches from its own session row, and an agent typed into a terminal from the
+    /// query's typed-agent source, which is the only place that command exists. The directory is the
+    /// runtime row's live one, which advances with the agent's `cd`, and the session's launch directory
+    /// only when no runtime row is joined in: the agent comes back where it was working, not where its
+    /// terminal opened.
+    private static func restorableCaptureColumns(source: TypedAgentSource) -> String {
+        """
         terminal_sessions.session_id,
         terminal_sessions.workspace_id,
-        COALESCE(agent_sessions.detected_agent_kind, ''),
-        COALESCE(agent_sessions.session_key, ''),
-        terminal_sessions.launch_command,
-        terminal_sessions.working_directory,
+        \(typedAgentIdentity("agent_sessions.detected_agent_kind")),
+        \(typedAgentIdentity("agent_sessions.session_key")),
+        CASE terminal_sessions.kind WHEN 'shell' THEN \(source.command) ELSE terminal_sessions.launch_command END,
+        COALESCE(NULLIF(terminal_runtime_states.working_directory, ''), terminal_sessions.working_directory),
         COALESCE(NULLIF(terminal_sessions.user_title, ''), terminal_sessions.title)
         """
+    }
+
+    /// `column` read off the joined `agent_sessions` row, which a `.shell`-kind session takes only while
+    /// that row's status says the agent lifecycle it describes has not finished.
+    ///
+    /// A terminal outlives the agents typed into it, and its agent row is reused rather than replaced. When
+    /// one agent exits and the user types another shortly before a teardown, the row bound to that terminal
+    /// is still the exited predecessor's, carrying the predecessor's conversation id, until the foreground
+    /// relaunch reconciler (`WorkspaceOrchestrator.registerAgentWindow`, driven from
+    /// `reconcileForegroundAgentRows`) resets it and clears `session_key` on its next tick. Reading it
+    /// unconditionally would pair the runtime row's new command with the old conversation, and the restore
+    /// would reopen a conversation the user had already finished with. An exited row therefore contributes
+    /// no kind and no key: the capture relaunches the command the runtime row recorded as a fresh
+    /// conversation, which is the honest outcome, and once the reconciler has reset the row it is idle and
+    /// keyless until the new agent's hook signal supplies its own key.
+    ///
+    /// An `.agent`-kind session is unaffected: its terminal exists to run the one agent Spaces launched
+    /// into it, so its agent row always describes that session's own lifecycle.
+    private static func typedAgentIdentity(_ column: String) -> String {
+        "COALESCE(CASE WHEN terminal_sessions.kind <> 'shell' OR agent_sessions.status <> 'exited' THEN \(column) END, '')"
+    }
 
     /// Canonical column order for a stored `restorable_sessions` row.
     private static let restorableSessionColumns = """
@@ -34,12 +111,12 @@ extension SQLiteStore {
         let placeholders = Array(repeating: "?", count: interactiveStates.count).joined(separator: ", ")
         let rows = try queryRows(
             sql: """
-                SELECT \(Self.restorableCaptureColumns)
+                SELECT \(Self.restorableCaptureColumns(source: .liveRuntimeRow))
                 FROM terminal_sessions
                 JOIN workspaces ON workspaces.id = terminal_sessions.workspace_id
                 JOIN terminal_runtime_states ON terminal_runtime_states.root_directory = terminal_sessions.root_directory
                 LEFT JOIN agent_sessions ON agent_sessions.terminal_session_id = terminal_sessions.session_id
-                WHERE \(Self.restorableCaptureFilter) AND terminal_runtime_states.state IN (\(placeholders))
+                WHERE \(Self.restorableCaptureFilter(source: .liveRuntimeRow)) AND terminal_runtime_states.state IN (\(placeholders))
                 ORDER BY terminal_sessions.created_at, terminal_sessions.session_id
                 """, bindings: interactiveStates)
         return Self.firstCapturePerSession(rows.compactMap(Self.decodeCapture(row:)))
@@ -53,31 +130,55 @@ extension SQLiteStore {
         let placeholders = Array(repeating: "?", count: sessionIDs.count).joined(separator: ", ")
         let rows = try queryRows(
             sql: """
-                SELECT \(Self.restorableCaptureColumns)
+                SELECT \(Self.restorableCaptureColumns(source: .agentRow))
                 FROM terminal_sessions
                 JOIN workspaces ON workspaces.id = terminal_sessions.workspace_id
+                LEFT JOIN terminal_runtime_states ON terminal_runtime_states.root_directory = terminal_sessions.root_directory
                 LEFT JOIN agent_sessions ON agent_sessions.terminal_session_id = terminal_sessions.session_id
-                WHERE \(Self.restorableCaptureFilter) AND terminal_sessions.session_id IN (\(placeholders))
+                WHERE \(Self.restorableCaptureFilter(source: .agentRow)) AND terminal_sessions.session_id IN (\(placeholders))
                 ORDER BY terminal_sessions.created_at, terminal_sessions.session_id
                 """, bindings: sessionIDs)
         return Self.firstCapturePerSession(rows.compactMap(Self.decodeCapture(row:)))
     }
 
     /// What makes a session restorable at all, shared by both capture queries so neither can widen on its
-    /// own: a coding-agent session (never a shell, an automation, or a configured process, since a shell is the
-    /// user's own typing, and the other two come back through their own machinery), bound to a workspace,
-    /// and carrying the raw command it was launched with. An automation's own agent runs as an `.agent`
-    /// session too, and is excluded by its run attribution: that agent belongs to a run the automation
-    /// machinery owns end to end, and bringing it back outside its run would report to nothing. Both
-    /// queries inner-join `workspaces` for the same reason the offer exists at all: an agent can only be
-    /// relaunched into a workspace that is still there, and a session whose workspace has since been
+    /// own. Every live coding agent is restorable however it was started, which is two shapes in SQL:
+    ///  - an `.agent`-kind session carrying the raw command it was launched with. That is every agent
+    ///    Spaces started: the CLI, the MCP server, an automation, and a previous restore.
+    ///  - a `.shell`-kind session that `source` says is running an agent. That is an agent the user typed
+    ///    into a terminal, whose command lives nowhere on the session row.
+    ///
+    /// The typed-agent half is the only part the two queries disagree on, and deliberately so: each reads
+    /// the row that is authoritative when it runs (see `TypedAgentSource`). The live capture asks the
+    /// runtime row what is in the foreground, because that row is written by the session's own core and
+    /// owes nothing to the orchestrator's classification tick: an agent typed seconds before a quit has no
+    /// agent row yet, and admitting it through one would drop it from the offer. The stranded capture asks
+    /// the agent row, because by the time it runs the daemon-start repair has nulled the runtime row's
+    /// foreground columns and the agent row is the only surviving record of what was running.
+    ///
+    /// A bare shell is excluded because it holds no state worth bringing back, and an automation's script
+    /// session and a configured process come back through their own machinery.
+    ///
+    /// An automation's own agent IS captured, and comes back as a standalone conversation: the relaunch
+    /// carries no run attribution, because the run that owned it was canceled with the teardown. The
+    /// accepted consequence is that the automation can fire a new run while the restored agent is still
+    /// working, since nothing ties that agent to the automation any more.
+    ///
+    /// Both queries inner-join `workspaces` for the same reason the offer exists at all: an agent can only
+    /// be relaunched into a workspace that is still there, and a session whose workspace has since been
     /// deleted has nowhere to come back to.
-    private static let restorableCaptureFilter = """
-        terminal_sessions.kind = 'agent'
-        AND terminal_sessions.workspace_id IS NOT NULL
-        AND terminal_sessions.automation_run_id IS NULL
-        AND COALESCE(terminal_sessions.launch_command, '') <> ''
+    private static func restorableCaptureFilter(source: TypedAgentSource) -> String {
         """
+        terminal_sessions.workspace_id IS NOT NULL
+        AND (
+          (terminal_sessions.kind = 'agent' AND COALESCE(terminal_sessions.launch_command, '') <> '')
+          OR (
+            terminal_sessions.kind = 'shell'
+            AND \(source.admission)
+          )
+        )
+        """
+    }
 
     /// Records every live coding agent as restorable under a fresh generation, and reports how many were
     /// captured. This is what a teardown writes: a clean Stop All and Quit before its stops run, and a
@@ -183,15 +284,16 @@ extension SQLiteStore {
     }
 
     /// Decodes one capture row, and is the single place that decides whether a session comes back resumed
-    /// or fresh. A Codex `exec` run is captured without its conversation id even when one was reported:
-    /// that run is a one-shot job whose options belong to the `exec` subcommand, so the relaunch cannot
-    /// place a resume selector in it safely (see `CodingAgent.launchIsOneShotCodexExec`). Dropping the key
-    /// here puts such a row on the path an agent that never reported a conversation already takes: the
-    /// offer says it comes back as a new run, and the relaunch runs the recorded command unchanged.
+    /// or fresh. A one-shot run (`codex exec`, `claude -p`, `opencode run`) is captured without its
+    /// conversation id even when one was reported: such a run prints an answer and exits rather than
+    /// holding a conversation, and Codex takes its own as `codex exec resume <key>` after options whose
+    /// arity only Codex knows (see `CodingAgent.launchIsOneShotJob`). Dropping the key here puts such a row
+    /// on the path an agent that never reported a conversation already takes: the offer says it comes back
+    /// as a new run, and the relaunch runs the recorded command unchanged.
     private static func decodeCapture(row: [String]) -> RestorableSessionCapture? {
         guard row.count >= 7, !row[0].isEmpty, !row[1].isEmpty, !row[4].isEmpty else { return nil }
         let launchCommand = row[4]
-        let agentSessionKey = row[3].isEmpty || CodingAgent.launchIsOneShotCodexExec(launchCommand: launchCommand) ? nil : row[3]
+        let agentSessionKey = row[3].isEmpty || CodingAgent.launchIsOneShotJob(launchCommand: launchCommand) ? nil : row[3]
         return RestorableSessionCapture(
             sessionID: row[0], workspaceID: row[1], agentKind: TerminalDetectedAgentKind(rawValue: row[2]), agentSessionKey: agentSessionKey,
             launchCommand: launchCommand, workingDirectory: row[5], title: row[6])

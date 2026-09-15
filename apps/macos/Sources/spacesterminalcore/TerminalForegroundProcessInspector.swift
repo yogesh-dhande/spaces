@@ -8,7 +8,14 @@ public struct TerminalForegroundProcessSnapshot: Codable, Sendable, Equatable {
     public let pid: Int32
     public let executablePath: String?
     public let executableName: String
+    /// The process's arguments bounded for display (see `TerminalForegroundProcessInspector.boundedArguments`):
+    /// this is what every reader that shows a command to a person reads, and what the runtime row stores.
     public let argv: [String]
+    /// The same arguments exactly as the OS reported them. Only the relaunch command is built from these
+    /// (`TerminalForegroundAgentSnapshot.agentCommand`): a bounded argv drops arguments past the sixteenth
+    /// and truncates long ones, which is right for a label and wrong for a command line another process
+    /// has to run.
+    public let fullArgv: [String]
 
     public init(pid: Int32, executablePath: String?, executableName: String? = nil, argv: [String]) {
         self.pid = pid
@@ -17,6 +24,7 @@ public struct TerminalForegroundProcessSnapshot: Codable, Sendable, Equatable {
             executableName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? executablePath.flatMap(Self.basename) ?? argv.first.flatMap(
                 Self.basename) ?? ""
         self.argv = TerminalForegroundProcessInspector.boundedArguments(argv)
+        self.fullArgv = argv
     }
 
     private static func basename(_ value: String) -> String? {
@@ -29,14 +37,25 @@ public struct TerminalForegroundAgentSnapshot: Codable, Sendable, Equatable {
     public let detectedAgentKind: TerminalDetectedAgentKind
     public let displayLabel: String
     public let displayCommand: String
+    /// A shell command line that relaunches this agent: the executable token it was invoked with followed
+    /// by every argument after that token, each POSIX-quoted so the shell that runs the relaunch passes it
+    /// on as the literal word the agent was given (see `posixQuoted`). Built from the unbounded argv, unlike
+    /// `displayCommand`, because this string is run rather than read.
+    ///
+    /// The executable is kept as the user typed it (a bare `claude`, an absolute path, a `claude-code`
+    /// wrapper), and only a `node .../cli.js` invocation is rewritten to the agent's canonical command
+    /// name (see `relaunchExecutableToken`).
+    public let agentCommand: String
 
     public init(
-        process: TerminalForegroundProcessSnapshot, detectedAgentKind: TerminalDetectedAgentKind, displayLabel: String, displayCommand: String
+        process: TerminalForegroundProcessSnapshot, detectedAgentKind: TerminalDetectedAgentKind, displayLabel: String, displayCommand: String,
+        agentCommand: String
     ) {
         self.process = process
         self.detectedAgentKind = detectedAgentKind
         self.displayLabel = displayLabel
         self.displayCommand = displayCommand
+        self.agentCommand = agentCommand
     }
 }
 
@@ -142,7 +161,9 @@ public enum TerminalForegroundProcessInspector {
     }
 
     public static func classify(_ process: TerminalForegroundProcessSnapshot) -> TerminalForegroundAgentSnapshot? {
-        let argv = boundedArguments(process.argv)
+        // Matching runs on the unbounded argv so the matched index addresses the same argument in both
+        // command builds below; bounding only ever drops arguments the executable token sits ahead of.
+        let argv = process.fullArgv
         let commandNameCandidates = commandNameCandidates(executableName: process.executableName, argv: argv)
 
         for definition in definitions {
@@ -184,6 +205,9 @@ public enum TerminalForegroundProcessInspector {
         return lastPathComponent(of: executableName).nilIfEmpty
     }
 
+    /// The argv a `/proc/<pid>/cmdline` read carries: the arguments NUL-separated, with a terminator after
+    /// the last one. Every span between terminators is an argument, an empty one included (`claude --tools
+    /// ""`), and only the empty span the trailing terminator produces is dropped.
     static func procCmdlineArguments(from data: Data) -> [String] {
         guard !data.isEmpty else { return [] }
         var arguments: [String] = []
@@ -196,8 +220,9 @@ public enum TerminalForegroundProcessInspector {
             }
             index = data.index(after: index)
         }
+        // A read the kernel truncated ends without a terminator and still carries a last argument.
         if start < data.endIndex { appendProcArgument(data[start..<data.endIndex], to: &arguments) }
-        return boundedArguments(arguments)
+        return arguments
     }
 
     private static func commandNameCandidates(executableName: String, argv: [String]) -> [CommandNameCandidate] {
@@ -224,28 +249,144 @@ public enum TerminalForegroundProcessInspector {
     {
         TerminalForegroundAgentSnapshot(
             process: process, detectedAgentKind: definition.kind, displayLabel: definition.displayLabel,
-            displayCommand: displayCommand(for: process.argv, definition: definition, matchedArgumentIndex: matchedArgumentIndex))
+            displayCommand: command(
+                arguments: boundedArguments(process.argv), commandName: definition.commandName, matchedArgumentIndex: matchedArgumentIndex,
+                render: renderArgument),
+            // Inline environment assignments typed before the command (`CODEX_HOME=/custom codex`,
+            // `ANTHROPIC_API_KEY=... claude`) are not part of this command: the shell consumes them into
+            // the child's environment, so they are nowhere in argv and a relaunch comes back without them.
+            // Recovering them would mean reading and persisting the child's whole environment, which holds
+            // the user's secrets, and diffing it against the shell's to tell an assignment typed on the
+            // line from a variable the shell already exported. Accepted rather than paid for.
+            agentCommand: command(
+                arguments: process.fullArgv, commandName: relaunchExecutableToken(for: process, definition: definition),
+                matchedArgumentIndex: matchedArgumentIndex, render: posixQuoted))
     }
 
-    private static func displayCommand(for argv: [String], definition: CodingAgentDetectionVariant, matchedArgumentIndex: Int?) -> String {
-        let bounded = boundedArguments(argv)
+    /// The executable token a relaunch leads with, already quoted for the shell that runs it.
+    ///
+    /// It is `argv[0]` exactly as the agent was invoked whenever that word's basename is one of the owning
+    /// agent's detection variant executable names, because that word is what actually starts the agent on
+    /// this machine: an absolute path (`/opt/x/bin/claude`) and a wrapper named `claude-code` both name an
+    /// executable the relaunch's login shell may not find under any other spelling, and a relaunch is
+    /// worth nothing if it does not run. `CodingAgent.matching(command:)` matches the same variant names,
+    /// so a token kept as typed still resolves to its agent for the spawn gate and the resume rewrite.
+    ///
+    /// A node wrapper (`node .../cli.js ...`) is the one shape rewritten to the agent's canonical command
+    /// name: its executable token is `node` and the agent is named by a script path further along, where
+    /// neither the gate's scan nor the resume rewrite's splice can reach: Claude Code's `--resume <key>`
+    /// goes immediately after the executable token, which would put it before the script. A hand-typed
+    /// node invocation is rare enough to pay for that, and the rewritten command runs the agent the user
+    /// was using.
+    private static func relaunchExecutableToken(for process: TerminalForegroundProcessSnapshot, definition: CodingAgentDetectionVariant) -> String {
+        let agent = definition.kind.agent
+        guard let invoked = process.fullArgv.first,
+            agent.detectionVariants.contains(where: { $0.executableNames.contains(normalizedBasename(invoked)) })
+        else { return agent.primaryCommandName }
+        return posixQuoted(invoked)
+    }
+
+    /// `commandName` followed by everything after the executable token (after the script token for a node
+    /// wrapper). Fed the bounded argv, the display rendering, and the observed variant's name it is a
+    /// label; fed the unbounded argv, POSIX quoting, and the token the agent was invoked with it is a
+    /// runnable command line. The two are built the same way so what the user is shown and what a relaunch
+    /// runs can only differ in that leading token, in quoting, and in where bounding trimmed.
+    private static func command(arguments: [String], commandName: String, matchedArgumentIndex: Int?, render: (String) -> String) -> String {
         let trailingArguments: ArraySlice<String>
-        if let matchedArgumentIndex, matchedArgumentIndex < bounded.count {
-            trailingArguments = bounded.dropFirst(matchedArgumentIndex + 1)
-        } else if !bounded.isEmpty {
-            trailingArguments = bounded.dropFirst()
+        if let matchedArgumentIndex, matchedArgumentIndex < arguments.count {
+            trailingArguments = arguments.dropFirst(matchedArgumentIndex + 1)
+        } else if !arguments.isEmpty {
+            trailingArguments = arguments.dropFirst()
         } else {
             trailingArguments = []
         }
-        return ([definition.commandName] + trailingArguments.map(renderArgument)).joined(separator: " ")
+        return ([commandName] + trailingArguments.map(render)).joined(separator: " ")
     }
 
+    /// Quoting for a command a person reads: only an argument that would visibly run together with its
+    /// neighbours is quoted, so a label stays as close to what the user typed as it can.
     private static func renderArgument(_ argument: String) -> String {
         guard !argument.isEmpty else { return "''" }
         let needsQuoting = argument.rangeOfCharacter(from: .whitespacesAndNewlines) != nil || argument.contains("'") || argument.contains("\"")
         guard needsQuoting else { return argument }
         return "'\(argument.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
+
+    /// Quoting for a command a shell runs. A relaunch is handed to an interactive login shell, so every
+    /// argument that is not plainly inert has to come back as the single literal word the agent was given:
+    /// left bare, an argument carrying `$(...)`, a backtick, a glob, or a `;`/`|`/`&`/`>` would be expanded
+    /// or executed rather than passed on. Only characters no shell treats specially stay unquoted;
+    /// everything else is wrapped in single quotes, which suppress every expansion, with an embedded single
+    /// quote spliced back in as `'\''` (close, escaped quote, reopen) since single quotes cannot nest.
+    private static func posixQuoted(_ argument: String) -> String {
+        guard !argument.isEmpty else { return "''" }
+        guard argument.unicodeScalars.contains(where: { !shellSafeArgumentScalars.contains($0) }) else { return argument }
+        return "'\(argument.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
+    /// The inverse of `posixQuoted`: the literal word a shell hands on for a token quoted that way.
+    ///
+    /// `CodingAgent.matching(command:)` reads a relaunch command's executable token through this before
+    /// taking its basename, because that token is quoted whenever the path the agent was invoked with
+    /// needs it: the basename of the raw token `'/opt/My Tools/claude'` is `claude'`, which matches no
+    /// agent, and the restore would then bring the agent back on a fresh conversation. Single quotes are
+    /// dropped and the `'\''` splice `posixQuoted` writes for an embedded quote reads back as that quote,
+    /// so the two stay exact inverses of each other.
+    ///
+    /// Double quotes are read the same way a shell reads them, because a command a person typed is quoted
+    /// however they chose rather than the way `posixQuoted` writes one, and the rewrite in
+    /// `CodingAgent+Resume` has to see the same word the agent's CLI will: the token `"--"` is the word
+    /// `--`, which ends option parsing. Inside double quotes a backslash escapes only `"`, `\`, `$`, and a
+    /// backtick, and stands for itself anywhere else.
+    public static func posixUnquoted(_ token: String) -> String {
+        guard token.contains("'") || token.contains("\"") || token.contains("\\") else { return token }
+        var literal = ""
+        var insideSingleQuotes = false
+        var insideDoubleQuotes = false
+        var index = token.startIndex
+        while index < token.endIndex {
+            let character = token[index]
+            if insideSingleQuotes {
+                if character == "'" { insideSingleQuotes = false } else { literal.append(character) }
+            } else if insideDoubleQuotes {
+                if character == "\"" {
+                    insideDoubleQuotes = false
+                } else if character == "\\" {
+                    let next = token.index(after: index)
+                    guard next < token.endIndex else {
+                        literal.append(character)
+                        break
+                    }
+                    if #"\"$`"#.contains(token[next]) {
+                        index = next
+                        literal.append(token[next])
+                    } else {
+                        literal.append(character)
+                    }
+                } else {
+                    literal.append(character)
+                }
+            } else if character == "'" {
+                insideSingleQuotes = true
+            } else if character == "\"" {
+                insideDoubleQuotes = true
+            } else if character == "\\" {
+                // Outside quotes a backslash makes the next character literal, which is how `posixQuoted`
+                // carries an embedded single quote through the close/escape/reopen splice.
+                index = token.index(after: index)
+                guard index < token.endIndex else { break }
+                literal.append(token[index])
+            } else {
+                literal.append(character)
+            }
+            index = token.index(after: index)
+        }
+        return literal
+    }
+
+    /// The characters an argument may consist of and still be passed to a shell unquoted.
+    private static let shellSafeArgumentScalars = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_@%+=:,./-")
 
     private static func executableArgumentIndex(in argv: [String], matching executableName: String) -> Int? {
         guard !executableName.isEmpty else { return nil }
@@ -313,8 +454,12 @@ public enum TerminalForegroundProcessInspector {
         return String(name)
     }
 
+    /// Appends one argv element, an empty one included: an argument the user wrote as `""` is a word the
+    /// agent was given, and dropping it rebuilds a command that means something else (`claude --tools ""`
+    /// would come back as `claude --tools`). Bytes that are not valid UTF-8 cannot be rebuilt into a
+    /// command at all, so such an element is dropped, on this reader and on the macOS one alike.
     private static func appendProcArgument(_ bytes: Data.SubSequence, to arguments: inout [String]) {
-        guard !bytes.isEmpty, let argument = String(bytes: bytes, encoding: .utf8), !argument.isEmpty else { return }
+        guard let argument = String(bytes: bytes, encoding: .utf8) else { return }
         arguments.append(argument)
     }
 
@@ -342,25 +487,41 @@ public enum TerminalForegroundProcessInspector {
             guard sysctl(&mib, u_int(mib.count), nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return [] }
             var buffer = [CChar](repeating: 0, count: size)
             guard sysctl(&mib, u_int(mib.count), &buffer, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return [] }
+            return procargs2Arguments(from: buffer, limit: size)
+        }
+
+        /// The argv a `KERN_PROCARGS2` buffer carries. The kernel lays one out as an `argc` int, the
+        /// executable path, NUL padding, then exactly `argc` NUL-terminated argv strings, then the
+        /// environment.
+        ///
+        /// Exactly `argc` strings are read after the padding, each ending at its own single terminator.
+        /// That is what keeps an empty argument the user wrote (`claude --tools ""`) in the argv as the
+        /// empty word it is, rather than letting it be swallowed as more padding and rebuilding the
+        /// command with a different meaning, while still stopping at the end of argv so no environment
+        /// variable is ever read as an argument. Only the padding that follows the executable path is
+        /// skipped as padding, which the layout permits because `argv[0]` is never the empty string.
+        static func procargs2Arguments(from buffer: [CChar], limit: Int) -> [String] {
+            guard limit > MemoryLayout<Int32>.size, limit <= buffer.count else { return [] }
             let argc = buffer.withUnsafeBytes { $0.load(as: Int32.self) }
             guard argc > 0 else { return [] }
 
             var cursor = MemoryLayout<Int32>.size
-            skipString(in: buffer, cursor: &cursor, limit: size)
-            skipNULs(in: buffer, cursor: &cursor, limit: size)
+            skipString(in: buffer, cursor: &cursor, limit: limit)
+            skipNULs(in: buffer, cursor: &cursor, limit: limit)
 
             var arguments: [String] = []
             for _ in 0..<argc {
-                guard cursor < size else { break }
+                guard cursor < limit else { break }
                 let start = cursor
-                skipString(in: buffer, cursor: &cursor, limit: size)
-                if cursor > start {
-                    let bytes = buffer[start..<cursor].map { UInt8(bitPattern: $0) }
-                    if let argument = String(bytes: bytes, encoding: .utf8), !argument.isEmpty { arguments.append(argument) }
-                }
-                skipNULs(in: buffer, cursor: &cursor, limit: size)
+                skipString(in: buffer, cursor: &cursor, limit: limit)
+                let bytes = buffer[start..<cursor].map { UInt8(bitPattern: $0) }
+                // Bytes that are not valid UTF-8 cannot be rebuilt into a command, so that element is
+                // dropped, the way the `/proc` reader drops one.
+                if let argument = String(bytes: bytes, encoding: .utf8) { arguments.append(argument) }
+                // One terminator per argv string: stepping over more would eat the next empty argument.
+                if cursor < limit { cursor += 1 }
             }
-            return boundedArguments(arguments)
+            return arguments
         }
 
         private static func skipString(in buffer: [CChar], cursor: inout Int, limit: Int) {

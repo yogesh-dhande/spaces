@@ -10,10 +10,11 @@ final class RestorableSessionStoreTests: XCTestCase {
 
     // MARK: - liveAgentSessionCaptures
 
-    /// Only a `.agent`-kind session is captured. A `.shell`, `.automation`, and `.process` session in the
-    /// same workspace, each carrying a launch command too, prove the filter is on kind, not on whether a
-    /// command happens to be recorded.
-    func testLiveAgentSessionCapturesOnlyCapturesAgentKindSessions() throws {
+    /// A `.agent`-kind session is captured, and a bare `.shell` is not: it holds no state worth bringing
+    /// back. An `.automation` script session and a `.process` session stay out too, each carrying a launch
+    /// command, which proves the filter is on what the session is rather than on whether a command happens
+    /// to be recorded.
+    func testLiveAgentSessionCapturesSkipsShellAutomationAndProcessSessionsWithNoAgentOfTheirOwn() throws {
         let store = try makeTemporaryStore()
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
@@ -50,8 +51,7 @@ final class RestorableSessionStoreTests: XCTestCase {
             AgentWindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, provider: .spaces, label: "Claude",
                 terminalTarget: TerminalTargetRecord(trackingID: withAgentRow), sessionKey: "conv-123", status: .idle,
-                detectedAgentKind: TerminalDetectedAgentKind.claude.rawValue, createdAt: "2026-09-11T00:00:00Z",
-                updatedAt: "2026-09-11T00:00:00Z"))
+                detectedAgentKind: TerminalDetectedAgentKind.claude.rawValue, createdAt: "2026-09-11T00:00:00Z", updatedAt: "2026-09-11T00:00:00Z"))
 
         let withoutAgentRow = "agent-before-hooks-fired"
         try seedLiveSession(sessionID: withoutAgentRow, workspaceID: workspace.id, kind: .agent, launchCommand: "codex")
@@ -67,18 +67,152 @@ final class RestorableSessionStoreTests: XCTestCase {
         XCTAssertNil(beforeHooks.agentKind)
     }
 
-    /// An automation's own agent runs as an `.agent`-kind session with a run attribution, and is not
-    /// captured: that agent belongs to a run the automation machinery starts and ends, so bringing it back
-    /// on its own would leave it reporting to nothing.
-    func testLiveAgentSessionCapturesSkipsAnAutomationRunsOwnAgentSession() throws {
+    /// An automation's own agent is a live coding agent like any other and is captured. It comes back as a
+    /// standalone conversation: the relaunch carries no run attribution, because the run that owned it was
+    /// canceled with the teardown that captured it.
+    func testLiveAgentSessionCapturesIncludesAnAutomationRunsOwnAgentSession() throws {
         let store = try makeTemporaryStore()
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         try seedLiveSession(sessionID: "spawned-agent", workspaceID: workspace.id, kind: .agent, launchCommand: "claude")
-        try seedLiveSession(
-            sessionID: "automation-agent", workspaceID: workspace.id, kind: .agent, launchCommand: "claude", automationRunID: "run-1")
+        try seedLiveSession(sessionID: "automation-agent", workspaceID: workspace.id, kind: .agent, launchCommand: "claude", automationRunID: "run-1")
 
-        XCTAssertEqual(try store.liveAgentSessionCaptures().map(\.sessionID), ["spawned-agent"])
+        XCTAssertEqual(Set(try store.liveAgentSessionCaptures().map(\.sessionID)), ["spawned-agent", "automation-agent"])
+    }
+
+    // MARK: - An agent the user typed into a terminal
+
+    /// A shell session running a detected coding agent is captured live off its runtime row: the command is
+    /// the foreground sample the session's own core wrote (the session row has none), the conversation id
+    /// and kind come off the agent row, and the directory is the live one the agent `cd`-ed to rather than
+    /// the directory the terminal opened in.
+    func testLiveCaptureReadsATypedAgentsCommandFromTheRuntimeRow() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let sessionID = "typed-agent"
+        try seedLiveSession(
+            sessionID: sessionID, workspaceID: workspace.id, kind: .shell, launchCommand: nil, workingDirectory: "/tmp/\(sessionID)/packages/api",
+            foregroundAgentKind: .claude, foregroundCommand: #"claude --model opus 'fix the build'"#)
+        try upsertAgentRow(
+            store: store, workspaceID: workspace.id, terminalSessionID: sessionID, status: .spinning, sessionKey: "conv-typed",
+            launchCommand: "claude")
+
+        let capture = try XCTUnwrap(try store.liveAgentSessionCaptures().first { $0.sessionID == sessionID })
+
+        XCTAssertEqual(capture.launchCommand, #"claude --model opus 'fix the build'"#)
+        XCTAssertEqual(capture.workingDirectory, "/tmp/\(sessionID)/packages/api")
+        XCTAssertEqual(capture.agentSessionKey, "conv-typed")
+        XCTAssertEqual(capture.agentKind, .claude)
+    }
+
+    /// An agent typed seconds before the teardown is captured even though the classification pass has not
+    /// written its agent row yet: the runtime row alone says an agent is in the foreground and what it would
+    /// take to relaunch it. Without a row there is no conversation to resume, so the offer says it comes back
+    /// as a new conversation, which is the same thing it says for an agent that never reported one.
+    func testLiveCaptureTakesATypedAgentBeforeItsAgentRowExists() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let sessionID = "typed-agent-not-yet-classified"
+        try seedLiveSession(
+            sessionID: sessionID, workspaceID: workspace.id, kind: .shell, launchCommand: nil, foregroundAgentKind: .claude,
+            foregroundCommand: "claude --model opus")
+
+        let capture = try XCTUnwrap(try store.liveAgentSessionCaptures().first { $0.sessionID == sessionID })
+
+        XCTAssertEqual(capture.launchCommand, "claude --model opus")
+        XCTAssertNil(capture.agentSessionKey)
+        XCTAssertNil(capture.agentKind)
+    }
+
+    /// A terminal outlives the agents typed into it, and its agent row is reused rather than replaced. An
+    /// agent typed after the previous one exited is captured against the exited row until the foreground
+    /// relaunch reconciler resets it, so the exited row contributes no conversation id: the new command
+    /// comes back as a fresh conversation rather than reopening the conversation the user had finished
+    /// with. The same runtime row over a row the reconciler has already reset takes that row's key, which
+    /// is what the ordinary live capture does.
+    func testLiveCaptureIgnoresTheConversationOfAnExitedAgentRowUnderANewForegroundAgent() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        let unreconciled = "agent-typed-over-an-exited-row"
+        try seedLiveSession(
+            sessionID: unreconciled, workspaceID: workspace.id, kind: .shell, launchCommand: nil, foregroundAgentKind: .claude,
+            foregroundCommand: #"claude "start the migration""#)
+        try upsertAgentRow(
+            store: store, workspaceID: workspace.id, terminalSessionID: unreconciled, status: .exited, sessionKey: "conv-finished",
+            launchCommand: "claude")
+
+        let reconciled = "agent-typed-over-a-reset-row"
+        try seedLiveSession(
+            sessionID: reconciled, workspaceID: workspace.id, kind: .shell, launchCommand: nil, foregroundAgentKind: .claude,
+            foregroundCommand: #"claude "start the migration""#)
+        try upsertAgentRow(
+            store: store, workspaceID: workspace.id, terminalSessionID: reconciled, status: .idle, sessionKey: "conv-live", launchCommand: "claude")
+
+        let captures = Dictionary(uniqueKeysWithValues: try store.liveAgentSessionCaptures().map { ($0.sessionID, $0) })
+
+        let overExitedRow = try XCTUnwrap(captures[unreconciled])
+        XCTAssertEqual(overExitedRow.launchCommand, #"claude "start the migration""#)
+        XCTAssertNil(overExitedRow.agentSessionKey)
+        XCTAssertNil(overExitedRow.agentKind)
+
+        let overIdleRow = try XCTUnwrap(captures[reconciled])
+        XCTAssertEqual(overIdleRow.launchCommand, #"claude "start the migration""#)
+        XCTAssertEqual(overIdleRow.agentSessionKey, "conv-live")
+        XCTAssertEqual(overIdleRow.agentKind, .claude)
+    }
+
+    /// A shell whose foreground is back at its prompt is not captured live, even while an agent row from the
+    /// agent that just ended is still sitting there: the reconcilers clear that row on their own tick, and
+    /// until they do, the runtime row is the one telling the truth about what is running.
+    func testLiveCaptureSkipsAShellWhoseRuntimeRowShowsNoForegroundAgent() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try seedLiveSession(sessionID: "agent-just-ended", workspaceID: workspace.id, kind: .shell, launchCommand: nil)
+        try upsertAgentRow(
+            store: store, workspaceID: workspace.id, terminalSessionID: "agent-just-ended", status: .spinning, sessionKey: "conv-gone",
+            launchCommand: "claude")
+        try seedLiveSession(sessionID: "plain-shell", workspaceID: workspace.id, kind: .shell, launchCommand: nil)
+
+        XCTAssertTrue(try store.liveAgentSessionCaptures().isEmpty)
+    }
+
+    /// The unclean-exit capture reads the typed agent off its agent row instead, because it runs after the
+    /// daemon-start repair has nulled every foreground column of the runtime row. The command survives on
+    /// the agent row, and the directory on the repaired runtime row.
+    func testStrandedCaptureStillCarriesATypedAgentsCommandAndDirectoryAfterTheRepair() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let sessionID = "stranded-typed-agent"
+        try seedEndedSession(
+            sessionID: sessionID, workspaceID: workspace.id, kind: .shell, launchCommand: nil, workingDirectory: "/tmp/\(sessionID)/services/web")
+        try upsertAgentRow(
+            store: store, workspaceID: workspace.id, terminalSessionID: sessionID, status: .waiting, sessionKey: "conv-stranded",
+            launchCommand: #"claude 'fix the build'"#)
+
+        let capture = try XCTUnwrap(try store.agentSessionCaptures(sessionIDs: [sessionID]).first)
+
+        XCTAssertEqual(capture.launchCommand, #"claude 'fix the build'"#)
+        XCTAssertEqual(capture.workingDirectory, "/tmp/\(sessionID)/services/web")
+        XCTAssertEqual(capture.agentSessionKey, "conv-stranded")
+    }
+
+    /// The stranded capture skips a shell whose agent had finished before the daemon died, and one whose
+    /// agent row carries no command: the first ran its agent to the end and the second has nothing to
+    /// relaunch, which is the state of a row detection has seen but not yet sampled a command onto.
+    func testStrandedCaptureSkipsAShellWhoseAgentExitedOrCarriesNoCommand() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try seedEndedSession(sessionID: "exited-agent-shell", workspaceID: workspace.id, kind: .shell, launchCommand: nil)
+        try upsertAgentRow(
+            store: store, workspaceID: workspace.id, terminalSessionID: "exited-agent-shell", status: .exited, sessionKey: "conv-gone",
+            launchCommand: "claude")
+        try seedEndedSession(sessionID: "unsampled-agent-shell", workspaceID: workspace.id, kind: .shell, launchCommand: nil)
+        try upsertAgentRow(
+            store: store, workspaceID: workspace.id, terminalSessionID: "unsampled-agent-shell", status: .idle, sessionKey: nil, launchCommand: nil)
+        try seedEndedSession(sessionID: "plain-ended-shell", workspaceID: workspace.id, kind: .shell, launchCommand: nil)
+
+        XCTAssertTrue(try store.agentSessionCaptures(sessionIDs: ["exited-agent-shell", "unsampled-agent-shell", "plain-ended-shell"]).isEmpty)
     }
 
     /// A Codex `exec` run is captured without its conversation id even though its hooks reported one: the
@@ -94,8 +228,8 @@ final class RestorableSessionStoreTests: XCTestCase {
                 AgentWindowRecord(
                     id: UUID().uuidString, workspaceID: workspace.id, provider: .spaces, label: "Codex",
                     terminalTarget: TerminalTargetRecord(trackingID: sessionID), sessionKey: "conversation-1", status: .idle,
-                    detectedAgentKind: TerminalDetectedAgentKind.codex.rawValue, createdAt: "2026-09-11T00:00:00Z",
-                    updatedAt: "2026-09-11T00:00:00Z"))
+                    detectedAgentKind: TerminalDetectedAgentKind.codex.rawValue, createdAt: "2026-09-11T00:00:00Z", updatedAt: "2026-09-11T00:00:00Z")
+            )
         }
 
         let captures = Dictionary(uniqueKeysWithValues: try store.liveAgentSessionCaptures().map { ($0.sessionID, $0) })
@@ -159,8 +293,8 @@ final class RestorableSessionStoreTests: XCTestCase {
                 try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths, databasePath: databasePath)
                 try TerminalSessionPersistence.writeRuntimeState(
                     TerminalSessionRuntimeState(
-                        sessionID: sessionID, servicePID: 100, childPID: 100, state: .running, updatedAt: "2026-09-11T00:00:01Z"),
-                    paths: paths, databasePath: databasePath)
+                        sessionID: sessionID, servicePID: 100, childPID: 100, state: .running, updatedAt: "2026-09-11T00:00:01Z"), paths: paths,
+                    databasePath: databasePath)
             } catch { writeFailure.record(error) }
         }
 
@@ -192,8 +326,8 @@ final class RestorableSessionStoreTests: XCTestCase {
             do {
                 try TerminalSessionPersistence.writeRuntimeState(
                     TerminalSessionRuntimeState(
-                        sessionID: sessionID, servicePID: 100, childPID: 100, state: .exited, updatedAt: "2026-09-11T00:00:02Z"),
-                    paths: paths, databasePath: databasePath)
+                        sessionID: sessionID, servicePID: 100, childPID: 100, state: .exited, updatedAt: "2026-09-11T00:00:02Z"), paths: paths,
+                    databasePath: databasePath)
             } catch { writeFailure.record(error) }
         }
 
@@ -223,7 +357,8 @@ final class RestorableSessionStoreTests: XCTestCase {
 
         // The quit stopped one workspace before it was canceled, which ended that workspace's agent.
         try TerminalSessionPersistence.writeRuntimeState(
-            TerminalSessionRuntimeState(sessionID: "agent-stopped", servicePID: 100, childPID: 100, state: .exited, updatedAt: "2026-09-11T00:01:00Z"),
+            TerminalSessionRuntimeState(
+                sessionID: "agent-stopped", servicePID: 100, childPID: 100, state: .exited, updatedAt: "2026-09-11T00:01:00Z"),
             paths: try TerminalSessionPaths.forSession(id: "agent-stopped"))
 
         XCTAssertEqual(try store.reconcileRestorableSessionsWithLiveSessions(generation: "gen-quit"), 1)
@@ -345,7 +480,8 @@ final class RestorableSessionStoreTests: XCTestCase {
     /// Seeds a session's launch configuration and marks it live with a running runtime-state row, the
     /// shape `liveAgentSessionCaptures()` reads.
     private func seedLiveSession(
-        sessionID: String, workspaceID: String, kind: TerminalSessionKind, launchCommand: String?, automationRunID: String? = nil
+        sessionID: String, workspaceID: String, kind: TerminalSessionKind, launchCommand: String?, automationRunID: String? = nil,
+        workingDirectory: String? = nil, foregroundAgentKind: TerminalDetectedAgentKind? = nil, foregroundCommand: String? = nil
     ) throws {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         try paths.ensureDirectories()
@@ -354,24 +490,48 @@ final class RestorableSessionStoreTests: XCTestCase {
                 sessionID: sessionID, title: sessionID, workingDirectory: "/tmp/\(sessionID)", shell: "/bin/zsh", command: "wrapped-\(sessionID)",
                 createdAt: "2026-09-11T00:00:00Z", workspaceID: workspaceID, kind: kind, automationRunID: automationRunID,
                 launchCommand: launchCommand), paths: paths)
+        // The runtime row carries the live directory, which advances with the agent's own `cd`; the launch
+        // configuration's never moves off the directory the terminal opened in. Its foreground columns are
+        // what the session's core samples off the running process, and are how the live capture recognises
+        // an agent the user typed into the terminal.
         try TerminalSessionPersistence.writeRuntimeState(
-            TerminalSessionRuntimeState(sessionID: sessionID, servicePID: 100, childPID: 100, state: .running, updatedAt: "2026-09-11T00:00:01Z"),
+            TerminalSessionRuntimeState(
+                sessionID: sessionID, servicePID: 100, childPID: 100, state: .running, updatedAt: "2026-09-11T00:00:01Z",
+                workingDirectory: workingDirectory, foregroundDetectedAgentKind: foregroundAgentKind, foregroundCommand: foregroundCommand),
             paths: paths)
+    }
+
+    /// The agent row foreground detection promotes a terminal to, carrying the command a restore relaunches
+    /// a typed agent from.
+    private func upsertAgentRow(
+        store: SQLiteStore, workspaceID: String, terminalSessionID: String, status: AgentWindowStatus, sessionKey: String?, launchCommand: String?
+    ) throws {
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-\(terminalSessionID)", workspaceID: workspaceID, provider: .spaces, label: "claude",
+                terminalTarget: TerminalTargetRecord(trackingID: terminalSessionID), sessionKey: sessionKey, status: status,
+                detectedAgentKind: TerminalDetectedAgentKind.claude.rawValue, launchCommand: launchCommand, createdAt: "2026-09-11T00:00:00Z",
+                updatedAt: "2026-09-11T00:00:00Z"))
     }
 
     /// Seeds an `.agent`-kind session's launch configuration and marks it ended, the shape
     /// `agentSessionCaptures(sessionIDs:)` reads: it derives restorability from how the session ended,
     /// not from what runtime state it is in.
-    private func seedEndedSession(sessionID: String, workspaceID: String, launchCommand: String?) throws {
+    private func seedEndedSession(
+        sessionID: String, workspaceID: String, kind: TerminalSessionKind = .agent, launchCommand: String?, workingDirectory: String? = nil
+    ) throws {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         try paths.ensureDirectories()
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(
                 sessionID: sessionID, title: sessionID, workingDirectory: "/tmp/\(sessionID)", shell: "/bin/zsh", command: "wrapped-\(sessionID)",
-                createdAt: "2026-09-11T00:00:00Z", workspaceID: workspaceID, kind: .agent, launchCommand: launchCommand), paths: paths)
+                createdAt: "2026-09-11T00:00:00Z", workspaceID: workspaceID, kind: kind, launchCommand: launchCommand), paths: paths)
+        // What the daemon-start repair leaves behind: the run's terminal state and its last known directory,
+        // and no foreground columns at all.
         try TerminalSessionPersistence.writeRuntimeState(
-            TerminalSessionRuntimeState(sessionID: sessionID, servicePID: 100, childPID: 100, state: .exited, updatedAt: "2026-09-11T00:00:01Z"),
-            paths: paths)
+            TerminalSessionRuntimeState(
+                sessionID: sessionID, servicePID: 100, childPID: 100, state: .failed, updatedAt: "2026-09-11T00:00:01Z",
+                exitedAt: "2026-09-11T00:00:01Z", workingDirectory: workingDirectory), paths: paths)
     }
 
     /// Carries an error thrown on the persistence queue back to the test body.

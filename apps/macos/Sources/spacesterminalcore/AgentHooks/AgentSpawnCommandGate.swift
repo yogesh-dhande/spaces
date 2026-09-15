@@ -3,15 +3,28 @@ import Foundation
 extension CodingAgent {
     /// Parses the executable token from a shell command line and matches it against a supported coding
     /// agent by executable name. Leading `VAR=value` environment assignments and a leading `env` (with
-    /// its own assignments) are skipped, then the executable's basename is compared to each agent's
-    /// `executableNames`. Returns `nil` when the command does not launch a supported coding agent.
+    /// its own assignments) are skipped, then the executable's basename is compared against the executable
+    /// names of every one of that agent's detection variants. Returns `nil` when the command does not
+    /// launch a supported coding agent.
     ///
-    /// Used both to gate `spaces agent spawn` (only supported agents report the lifecycle signals spawn
-    /// readiness depends on) and to derive a spawned session's default title from the agent it launches.
+    /// The whole variant table rather than `executableNames` alone, because a relaunch command keeps the
+    /// executable the user typed (`TerminalForegroundProcessInspector.relaunchExecutableToken`): a
+    /// `claude-code` wrapper and an `opencode.exe` are the same agents as `claude` and `opencode`, and a
+    /// name this scan does not know silently skips the resume rewrite, bringing the agent back on a fresh
+    /// conversation after the offer promised a resumed one. A path is matched by its basename, so an
+    /// absolute path resolves like the bare word.
+    ///
+    /// The token is read the way a shell reads it (`TerminalForegroundProcessInspector.posixUnquoted`),
+    /// because that same relaunch command quotes an executable whose path needs it: the raw token
+    /// `'/opt/My Tools/claude'` has the basename `claude'`, which is in no variant table.
+    ///
+    /// Used to gate `spaces agent spawn` (only supported agents report the lifecycle signals spawn
+    /// readiness depends on), to derive a spawned session's default title from the agent it launches, and
+    /// to decide which agent's rules a restore's resume rewrite follows.
     public static func matching(command: String) -> CodingAgent? {
         guard let token = executableToken(inCommand: command) else { return nil }
-        let name = (token as NSString).lastPathComponent
-        return allCases.first { $0.executableNames.contains(name) }
+        let name = (TerminalForegroundProcessInspector.posixUnquoted(token) as NSString).lastPathComponent
+        return allCases.first { agent in agent.detectionVariants.contains { $0.executableNames.contains(name) } }
     }
 
     /// The executable token of a command line: the first token that is neither a `VAR=value` assignment
