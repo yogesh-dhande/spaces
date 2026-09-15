@@ -315,6 +315,44 @@ import workspacecore
         #expect(targets.map(\.cursorKey) == [burst[0]])
     }
 
+    // MARK: - Reachability
+
+    /// A paired device the sidebar can no longer reach keeps its last-known overview (see
+    /// `WindowCycleDeviceSnapshot`), so a waiting agent on it is still in the payload. Without an open
+    /// pane to land on, a cycle press would hit `openOrFocusTerminalPane`'s modal refusal, so the
+    /// target, and the row's count, leave it out.
+    @Test func anUnreachableDevicesWaitingAgentWithoutAnOpenPaneIsNotATarget() {
+        let device = WindowCycleDeviceSnapshot(
+            deviceID: "linux",
+            overview: SpacesDeviceOverviewPayload(
+                workspaces: [
+                    workspace(id: "w1", agents: [agentRow(id: "a-offline", workspaceID: "w1", state: .waiting, updatedAt: "2026-01-01T10:00:00Z")])
+                ], sessions: []), isReachable: false)
+
+        let targets = WindowCycleModeTargets.targets(
+            mode: .attention, devices: [device], openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
+
+        #expect(targets.isEmpty)
+    }
+
+    /// The same unreachable device's agent, but its pane is already open locally: focusing it needs no
+    /// round trip to the offline device, so it stays a target.
+    @Test func anUnreachableDevicesWaitingAgentWithAnOpenPaneStaysATarget() {
+        let device = WindowCycleDeviceSnapshot(
+            deviceID: "linux",
+            overview: SpacesDeviceOverviewPayload(
+                workspaces: [
+                    workspace(id: "w1", agents: [agentRow(id: "a-offline", workspaceID: "w1", state: .waiting, updatedAt: "2026-01-01T10:00:00Z")])
+                ], sessions: []), isReachable: false)
+
+        let targets = WindowCycleModeTargets.targets(
+            mode: .attention, devices: [device], openTerminalSessionIDsByWorkspace: ["w1": ["session-a-offline"]],
+            openBrowserSessionsByWorkspace: [:], trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
+
+        #expect(targets.map { $0.target.agentWindow?.id } == ["a-offline"])
+    }
+
     // MARK: - Fixtures
 
     /// Two devices whose agents sit in every activity state, with state-change times that make the

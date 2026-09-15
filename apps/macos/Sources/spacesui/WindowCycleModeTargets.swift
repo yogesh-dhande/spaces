@@ -3,13 +3,6 @@ import spacesclientcore
 import spacesdevicecore
 import workspacecore
 
-/// One device's slice of the input a cross-device cycle mode is built from: the device's id and the
-/// overview the sidebar last installed for it.
-struct WindowCycleDeviceSnapshot: Sendable {
-    let deviceID: String
-    let overview: SpacesDeviceOverviewPayload
-}
-
 /// Builds the ordered target list a cross-device cycle mode rotates over. Pure, so the cycle itself
 /// and any surface that reports the mode's contents derive the same set the same way.
 ///
@@ -33,10 +26,16 @@ enum WindowCycleModeTargets {
         // overview by `WindowFocusController.cycleWindowTargets`, so there is nothing cross-device
         // to gather for it here.
         case .workspace: return []
-        case .attention: return agentTargets(devices: devices, activityStates: [.waiting, .done], retaining: Set(retainedCursors))
+        case .attention:
+            return agentTargets(
+                devices: devices, activityStates: [.waiting, .done], openTerminalSessionIDsByWorkspace: openTerminalSessionIDsByWorkspace,
+                retaining: Set(retainedCursors))
         // An idle row is a terminal no agent has started in yet and an exited row is an agent that is
         // over: neither is an agent the user can go back to work with, so neither is in this mode.
-        case .allAgents: return agentTargets(devices: devices, activityStates: [.spinning, .waiting, .done], retaining: Set(retainedCursors))
+        case .allAgents:
+            return agentTargets(
+                devices: devices, activityStates: [.spinning, .waiting, .done], openTerminalSessionIDsByWorkspace: openTerminalSessionIDsByWorkspace,
+                retaining: Set(retainedCursors))
         case .openSessions:
             // Nothing for a burst to retain here: this mode's filter is existence itself, an open pane
             // or a tracked browser tab, so the only way a target leaves this set is by vanishing.
@@ -66,7 +65,7 @@ enum WindowCycleModeTargets {
     /// rotation rebuilds into once the burst ends.
     private static func agentTargets(
         devices: [WindowCycleDeviceSnapshot], activityStates: Set<SpacesDeviceCodingAgentActivityState>,
-        retaining retainedCursors: Set<WorkspaceWindowCycle.Cursor>
+        openTerminalSessionIDsByWorkspace: [String: [String]], retaining retainedCursors: Set<WorkspaceWindowCycle.Cursor>
     ) -> [WindowCycleTarget] {
         var candidates: [(target: WindowCycleTarget, sidebarIndex: Int, stateChangedAt: Date?)] = []
         var sidebarIndex = 0
@@ -74,10 +73,20 @@ enum WindowCycleModeTargets {
             for workspace in cycleableWorkspaces(of: device) {
                 let detail = SpacesDeviceWorkspaceDetailViewModel(workspace: workspace)
                 let rowsByAgentID = Dictionary(detail.codingAgentRows.map { ($0.agentID ?? $0.id, $0) }, uniquingKeysWith: { first, _ in first })
+                let openSessionIDs = Set(openTerminalSessionIDsByWorkspace[workspace.id] ?? [])
                 for target in AppKitController.workspaceShortcutTargets(detail: detail, browserSessions: []) where target.kind == .agent {
                     guard let agentID = target.agentWindow?.id, let row = rowsByAgentID[agentID] else { continue }
                     // A row with no session has no terminal to land in, so it is not a cycle target.
                     guard let sessionID = row.sessionID, !sessionID.isEmpty else { continue }
+                    // A device the sidebar cannot currently reach keeps its last-known overview (see
+                    // `WindowCycleDeviceSnapshot`), so its agent rows still show up here even while the
+                    // device is offline. Landing a cycle press on one without an open pane hits
+                    // `openOrFocusTerminalPane`'s synchronous refusal, which surfaces a modal error, and
+                    // `cycleWindows` then advances to the next candidate: one press can raise one modal
+                    // per stale agent. An already-open pane is still focusable locally, so only that
+                    // case is exempt; Open sessions never reaches this filter because every one of its
+                    // targets is an open pane by construction.
+                    guard device.isReachable || openSessionIDs.contains(sessionID) else { continue }
                     let candidate = cycleTarget(
                         device: device, workspaceID: workspace.id, detail: detail, target: target, trackedBrowserWindowIDs: [])
                     guard activityStates.contains(row.activityState) || retainedCursors.contains(candidate.cursorKey) else { continue }

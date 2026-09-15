@@ -412,7 +412,9 @@ import workspacecore
             return CycleModeRowModel(mode: mode, count: targets.count, deviceCount: 1, workspaceName: detail.title)
         case .attention, .allAgents, .openSessions:
             let devices = host.deviceModel.deviceSections.compactMap { section in
-                section.overview.map { WindowCycleDeviceSnapshot(deviceID: section.deviceID, overview: $0) }
+                section.overview.map {
+                    WindowCycleDeviceSnapshot(deviceID: section.deviceID, overview: $0, isReachable: section.loadState == .loaded)
+                }
             }
             let browserState = cachedBrowserCycleState.state
             // A frozen cycle session (a burst still within `WorkspaceWindowCycle.cycleSessionTimeout`)
@@ -425,9 +427,15 @@ import workspacecore
             // own, so a count painted mid-burst that retained a departed target stands until the next
             // trigger (a sidebar apply lands within a second under any live workspace); a timer per
             // burst is not worth a count that is at most one high for that gap.
+            //
+            // The open-pane map costs an in-memory pass over already-cached state (see
+            // `openTerminalSessionIDsForCycleModes`), so it is worth computing for every mode, not just
+            // Open sessions: Attention and All agents read it too, to keep an unreachable device's
+            // agent in the row's count exactly when a press could actually land on it (see
+            // `WindowCycleModeTargets.agentTargets`).
+            let openTerminalSessionIDsByWorkspace = openTerminalSessionIDsForCycleModes(devices: devices)
             let targets = WindowCycleModeTargets.targets(
-                mode: mode, devices: devices,
-                openTerminalSessionIDsByWorkspace: mode == .openSessions ? openTerminalSessionIDsForCycleModes(devices: devices) : [:],
+                mode: mode, devices: devices, openTerminalSessionIDsByWorkspace: openTerminalSessionIDsByWorkspace,
                 openBrowserSessionsByWorkspace: mode == .openSessions ? browserState.openBrowserSessionsByWorkspace : [:],
                 trackedBrowserWindowIDsByWorkspace: mode == .openSessions ? browserState.trackedWindowIDsByWorkspace : [:],
                 recentCursors: windowCycleState.recentCursors(for: .mode(mode)),
@@ -743,7 +751,7 @@ import workspacecore
         mode: WindowCycleMode, preferredTerminalSessionID: String?, retaining retainedCursors: [WorkspaceWindowCycle.Cursor]
     ) async -> WindowCycleTargetSnapshot {
         let devices = host.deviceModel.deviceSections.compactMap { section in
-            section.overview.map { WindowCycleDeviceSnapshot(deviceID: section.deviceID, overview: $0) }
+            section.overview.map { WindowCycleDeviceSnapshot(deviceID: section.deviceID, overview: $0, isReachable: section.loadState == .loaded) }
         }
         // Only Open sessions can contain a browser target, so the other modes never script Chrome or
         // read the browser-tracking table for a cycle step. They give up nothing by it: with no
@@ -752,13 +760,14 @@ import workspacecore
         let needsBrowserState = mode == .openSessions
         // Every workspace every device reports, so a workspace whose panel this launch has not
         // restored contributes the panes its persisted layout holds. Restoration is lazy, so without
-        // it a fresh launch would name only the workspaces the user has already visited.
-        let openTerminalSessionIDsByWorkspace =
-            needsBrowserState
-            ? host.panelCoordinator.openTerminalSessionIDsByWorkspace(
-                includingPersistedLayoutsFor: devices.flatMap { device in
-                    device.overview.workspaces.map { PanelLayoutEngine.WorkspaceKey(deviceID: device.deviceID, workspaceID: $0.id) }
-                }) : [:]
+        // it a fresh launch would name only the workspaces the user has already visited. Computed for
+        // every mode, not gated to Open sessions like the browser state below: Attention and All agents
+        // read it too, to tell an unreachable device's already-open pane apart from one that would hit
+        // `openOrFocusTerminalPane`'s modal refusal (see `WindowCycleModeTargets.agentTargets`).
+        let openTerminalSessionIDsByWorkspace = host.panelCoordinator.openTerminalSessionIDsByWorkspace(
+            includingPersistedLayoutsFor: devices.flatMap { device in
+                device.overview.workspaces.map { PanelLayoutEngine.WorkspaceKey(deviceID: device.deviceID, workspaceID: $0.id) }
+            })
         // Captured synchronously, before the round trip's suspension point, so the tag below names
         // exactly the set this round trip queried, not whatever `host.deviceModel.deviceSections`
         // reports once it returns: a workspace added or removed elsewhere during that await would
