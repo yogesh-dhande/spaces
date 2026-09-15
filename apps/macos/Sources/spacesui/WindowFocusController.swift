@@ -1857,14 +1857,22 @@ import workspacecore
 
     private func scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: String?, source: String) {
         deferredHotkeySelectionRefreshTask?.cancel()
-        deferredHotkeySelectionRefreshTask = Task { @MainActor [weak self] in
+        // This Task suspends on the yield below and may resume much later. `host` is `unowned` on the
+        // controller, which is only safe to read while something else is guaranteed to keep the host
+        // alive; a suspended Task is not that guarantee. Capturing `host` strongly here evaluates the
+        // capture synchronously at Task creation, while the host is certainly alive, so the Task pins
+        // its own strong reference for its whole lifetime instead of re-reading the unowned property
+        // after resuming. In the running app the host lives for the process anyway, so this changes
+        // nothing there; it matters in test processes, where one test's host can deallocate while
+        // another test's Task (sharing the process) is still suspended on this yield.
+        deferredHotkeySelectionRefreshTask = Task { @MainActor [weak self, host] in
             await Task.yield()
             guard let self, !Task.isCancelled else { return }
             let refreshStartedAt = Date()
             self.refreshWorkspaceSelectionForActivation(focusedWorkspaceID: focusedWorkspaceID)
-            self.host.logPerfMetric(
+            host.logPerfMetric(
                 "toggle_window_selection_refresh", target: "workspace=\(focusedWorkspaceID ?? "keep_current")",
-                elapsedMS: self.host.windowShortcutElapsedMS(since: refreshStartedAt), success: true, detail: "source=\(source)")
+                elapsedMS: host.windowShortcutElapsedMS(since: refreshStartedAt), success: true, detail: "source=\(source)")
         }
     }
 
