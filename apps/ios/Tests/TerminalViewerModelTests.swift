@@ -2714,9 +2714,23 @@
             let didSubscribe = await backend.waitForSubscribeCount(1)
             XCTAssertTrue(didSubscribe, "the redial must reconnect the stream it never had")
             await waitUntil("the redial to attach again") { ownership.attachCount() == 2 }
-            await waitUntil("the ownerless session to be reclaimed") { model.isOwner }
+            // The reclaim is waited for where the daemon records it, not on `model.isOwner`, because that
+            // reading never falls during this recovery. Ownership moves only on a payload the model
+            // applies, and the loss here is a heartbeat answered `notFound`: it records the reclaim owed
+            // and says nothing about ownership, so the model still names the owner it carried into the
+            // backgrounding. The first payload that reports the ownerless session the expiry left is the
+            // answer to the attach counted on the line above, and the count moves where the request lands,
+            // a hop or two ahead of that answer reaching the model, so a wait on ownership here is
+            // satisfied by the reading that was already true and asserts the reclaim before it was sent.
+            // The stale reading is intended rather than a gap: an owner's recovery reconnects silently
+            // (`shouldReconnectSilently` is true while `isOwner`), which keeps the owner's surface up
+            // across the redial instead of flashing a viewer state the reclaim is about to undo.
+            await waitUntil("the ownerless session to be reclaimed") { ownership.takeoverCount() == 1 }
             XCTAssertEqual(ownership.takeoverCount(), 1, "the ownerless session must be reclaimed once")
             XCTAssertEqual(ownership.attachCount(), 2, "one failed reattach must produce one further attach, not a redial loop")
+            // Waited for, not asserted: the takeover is counted where it lands, before its answer reaches
+            // the model, and the ownerless bootstrap read may have lowered the reading in between.
+            await waitUntil("the reclaim's answer to restore ownership") { model.isOwner }
         }
 
         /// The recovery is unfinished while its re-attach keeps failing, and the client that took the
