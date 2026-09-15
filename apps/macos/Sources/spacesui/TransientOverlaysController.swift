@@ -150,7 +150,14 @@ import workspacecore
         // on screen, key or not: a detached panel or another app being frontmost is no reason to hide
         // a confirmation the user can see. Only a main window that is off screen (hidden, minimized,
         // another Space) leaves the row and the next press as the confirmation, an accepted rule.
-        guard let contentView = host.window?.contentView else { return }
+        // The window's on-screen state is checked explicitly here rather than trusting the HUD subview
+        // to stay invisible: the HUD is installed as a subview of the window's content view, so if the
+        // window were off screen when a press arrived and then came back while the HUD's one-second
+        // timer was still running, the subview would be on screen for the remainder of that second.
+        // `isVisible` is false while the window is miniaturized or the app is hidden; `isOnActiveSpace`
+        // is false while the window is on another Space. This guard does not hide an existing HUD: one
+        // already up is hidden along with its window, and its own timer removes it when it fires.
+        guard let window = host.window, window.isVisible, window.isOnActiveSpace, let contentView = window.contentView else { return }
         // The cycle-mode hotkey is registered before the main window content exists: during the
         // setup flow, `contentView` is the setup flow's own view and `detailContainer` is not yet
         // attached to any window (it is installed in `buildMainWindowContent()`). Constraining the

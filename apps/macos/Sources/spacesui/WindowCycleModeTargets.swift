@@ -84,8 +84,11 @@ enum WindowCycleModeTargets {
                     // `openOrFocusTerminalPane`'s synchronous refusal, which surfaces a modal error, and
                     // `cycleWindows` then advances to the next candidate: one press can raise one modal
                     // per stale agent. An already-open pane is still focusable locally, so only that
-                    // case is exempt; Open sessions never reaches this filter because every one of its
-                    // targets is an open pane by construction.
+                    // case is exempt; Open sessions applies the same rule to its browser targets in
+                    // `openSessionTargets`, so its panes are always focusable. "Open" here means
+                    // materialized in memory, or persisted on a device the sidebar reaches: see
+                    // `persistedLayoutKeys` for why an unreachable device's persisted-only panes do not
+                    // count.
                     guard device.isReachable || openSessionIDs.contains(sessionID) else { continue }
                     let candidate = cycleTarget(
                         device: device, workspaceID: workspace.id, detail: detail, target: target, trackedBrowserWindowIDs: [])
@@ -119,7 +122,15 @@ enum WindowCycleModeTargets {
         for device in devices {
             for workspace in cycleableWorkspaces(of: device) {
                 let openTerminalSessionIDs = Set(openTerminalSessionIDsByWorkspace[workspace.id] ?? [])
-                let openBrowserSessions = openBrowserSessionsByWorkspace[workspace.id] ?? []
+                // Focusing a browser target of a remote workspace resolves its SSH-forwarded route
+                // through the device record (`WindowFocusController`'s `.openURL` case), which an
+                // unreachable device has none of: the press would raise the offline modal and
+                // `cycleWindows` would skip it, same as an agent row without an open pane. An open
+                // pane is exempt because it focuses locally and asks the device for nothing. The local
+                // device is exempt too (`device.isLocal`): its browser sessions focus through this
+                // Mac's Chrome with no device record involved, so its own `spacesd` being down (which
+                // is what makes its section read unreachable) does not affect them.
+                let openBrowserSessions = (device.isReachable || device.isLocal) ? openBrowserSessionsByWorkspace[workspace.id] ?? [] : []
                 guard !openTerminalSessionIDs.isEmpty || !openBrowserSessions.isEmpty else { continue }
                 let detail = SpacesDeviceWorkspaceDetailViewModel(workspace: workspace)
                 let targets = WindowFocusController.cycleWindowTargets(
@@ -152,6 +163,27 @@ enum WindowCycleModeTargets {
     /// workspace is hidden mid-burst leaves the rotation exactly as one whose row vanished does.
     private static func cycleableWorkspaces(of device: WindowCycleDeviceSnapshot) -> [SpacesDeviceWorkspaceSummary] {
         device.overview.workspaces.filter { device.overview.isWorkspaceVisible($0) }
+    }
+
+    /// The persisted-layout keys a cross-device open-pane read should merge in: every workspace of
+    /// every REACHABLE device, in device and overview order.
+    ///
+    /// Persisted layouts are merged into the open-pane set only for devices the sidebar reaches,
+    /// because a persisted-only pane (one held in a workspace's stored layout but not yet restored
+    /// into memory this launch) is opened by restoring it through its device's daemon
+    /// (`openOrFocusTerminalPane`), which an unreachable device cannot do. Merging an unreachable
+    /// device's persisted layouts in would mark such a pane "open" when a cycle press cannot actually
+    /// land on it, the exact modal-refusal case `agentTargets`' reachability exemption and
+    /// `openSessionTargets` exist to keep out. An unreachable device therefore contributes only the
+    /// panes materialized in memory (from the caller's own in-memory pass, not from this list), which
+    /// are the ones that focus without the daemon. A reachable device's persisted-only panes are fine
+    /// to merge: restoring them attaches through a daemon that is actually there.
+    ///
+    /// Not private, so a unit test can assert the filter directly.
+    nonisolated static func persistedLayoutKeys(for devices: [WindowCycleDeviceSnapshot]) -> [PanelLayoutEngine.WorkspaceKey] {
+        devices.filter(\.isReachable).flatMap { device in
+            device.overview.workspaces.map { PanelLayoutEngine.WorkspaceKey(deviceID: device.deviceID, workspaceID: $0.id) }
+        }
     }
 
     private static func cycleTarget(

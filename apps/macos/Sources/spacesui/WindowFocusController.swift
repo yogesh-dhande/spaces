@@ -404,16 +404,26 @@ import workspacecore
             let cachedFrontmostBrowserWorkspaceID = BrowserSessionCoordinator.workspaceIDForFrontmostBrowserURL(
                 cachedBrowserCycleState.state.frontmostURL, in: host.deviceModel.deviceSections.compactMap(\.overview))
             guard let workspaceID = focusedTerminalSessionWorkspaceID ?? cachedFrontmostBrowserWorkspaceID ?? host.clientActiveWorkspaceID(),
-                let overview = host.overview(forWorkspaceID: workspaceID), let detail = AppKitController.workspaceDetail(workspaceID, in: overview)
+                let overview = host.overview(forWorkspaceID: workspaceID), let detail = AppKitController.workspaceDetail(workspaceID, in: overview),
+                let deviceID = host.deviceID(forWorkspaceID: workspaceID)
             else { return CycleModeRowModel(mode: mode, count: 0, deviceCount: 0, workspaceName: nil) }
+            // Persisted-aware, like `workspaceCycleTargetSnapshot` below: see that site's comment for
+            // why, and for why the persisted layout is included only when the device is reachable
+            // (`WindowCycleModeTargets.persistedLayoutKeys`).
+            let isDeviceReachable = host.deviceSection(id: deviceID)?.loadState == .loaded
+            let openTerminalSessionIDs = Set(
+                host.panelCoordinator.openTerminalSessionIDsByWorkspace(
+                    includingPersistedLayoutsFor: isDeviceReachable
+                        ? [PanelLayoutEngine.WorkspaceKey(deviceID: deviceID, workspaceID: workspaceID)] : [])[workspaceID] ?? [])
             let targets = Self.cycleWindowTargets(
                 detail: detail, browserSessions: cachedBrowserCycleState.state.openBrowserSessions(workspaceID: workspaceID),
-                openTerminalSessionIDs: Set(host.panelCoordinator.openTerminalSessionIDs(workspaceID: workspaceID)))
+                openTerminalSessionIDs: openTerminalSessionIDs)
             return CycleModeRowModel(mode: mode, count: targets.count, deviceCount: 1, workspaceName: detail.title)
         case .attention, .allAgents, .openSessions:
             let devices = host.deviceModel.deviceSections.compactMap { section in
                 section.overview.map {
-                    WindowCycleDeviceSnapshot(deviceID: section.deviceID, overview: $0, isReachable: section.loadState == .loaded)
+                    WindowCycleDeviceSnapshot(
+                        deviceID: section.deviceID, overview: $0, isReachable: section.loadState == .loaded, isLocal: section.isLocal)
                 }
             }
             let browserState = cachedBrowserCycleState.state
@@ -506,19 +516,19 @@ import workspacecore
         let workspaceIDs = Set(workspaces.map(\.workspaceID))
         browserCycleStateRefreshInFlight = true
         browserCycleStateRefreshInFlightWorkspaceIDs = workspaceIDs
-        Task { [weak self] in
+        // This Task suspends on the Chrome round trip below and may resume much later. `host` is
+        // `unowned` on the controller, and a suspended Task is not what keeps it alive. Capturing
+        // `host` strongly here pins it for the Task's lifetime (host -> controller -> task -> host,
+        // which breaks once the Task finishes); in the running app the host lives for the process
+        // anyway, so this matters in test processes where one test's host can deallocate while
+        // another test's Task is still suspended here.
+        Task { [weak self, host] in
             guard let self else { return }
-            // `trackedBrowserCycleState`'s Chrome tab snapshot runs `tell application "Google
-            // Chrome"`, which launches Chrome via Apple Events when it is not already running. This
-            // refresh fires on every sidebar apply, including app launch, so it must never be what
-            // launches Chrome on a machine where the user has not opened it: publish the empty state
-            // instead and let the next refresh, once Chrome is running, pick up real sessions.
-            let state: BrowserSessionCoordinator.BrowserCycleState
-            if ChromeAdapter().isRunning() {
-                state = await host.browserSessions.trackedBrowserCycleState(workspaces: workspaces)
-            } else {
-                state = .noBrowserState
-            }
+            // This refresh fires on every sidebar apply, including app launch, so it must never be
+            // what launches Chrome on a machine where the user has not opened it. It is not: Chrome
+            // launches only from `tabSnapshot`'s AppleScript round trip, and `trackedBrowserCycleState`
+            // itself refuses to run that round trip while Chrome is not running.
+            let state = await host.browserSessions.trackedBrowserCycleState(workspaces: workspaces)
             // Tag even the no-Chrome placeholder with `workspaceIDs`, the set this round trip queried
             // for, rather than an empty set: the placeholder covers that set for this cadence window,
             // so the next refresh only re-checks whether Chrome is running once the cadence elapses or
@@ -580,12 +590,11 @@ import workspacecore
     }
 
     /// The open-pane map a cross-device mode is built from, including the panes the persisted layout
-    /// of an unvisited workspace holds, exactly as a cycle press builds it.
+    /// of an unvisited workspace on a reachable device holds, exactly as a cycle press builds it (see
+    /// `WindowCycleModeTargets.persistedLayoutKeys`).
     private func openTerminalSessionIDsForCycleModes(devices: [WindowCycleDeviceSnapshot]) -> [String: [String]] {
         host.panelCoordinator.openTerminalSessionIDsByWorkspace(
-            includingPersistedLayoutsFor: devices.flatMap { device in
-                device.overview.workspaces.map { PanelLayoutEngine.WorkspaceKey(deviceID: device.deviceID, workspaceID: $0.id) }
-            })
+            includingPersistedLayoutsFor: WindowCycleModeTargets.persistedLayoutKeys(for: devices))
     }
 
     /// The world one cycle step walks: its candidate targets, the overview each candidate resolves
@@ -726,7 +735,19 @@ import workspacecore
         let browserCycleState = await host.browserSessions.trackedBrowserCycleState(workspaces: [
             BrowserSessionCoordinator.BrowserCycleWorkspace(workspaceID: workspaceID, detail: detail)
         ])
-        let openTerminalSessionIDs = Set(host.panelCoordinator.openTerminalSessionIDs(workspaceID: workspaceID))
+        // Persisted-aware, not the plain in-memory `openTerminalSessionIDs(workspaceID:)`: restoration
+        // is lazy, so a workspace this launch has not shown yet holds its panes only in its persisted
+        // layout, and the in-memory lookup would return nothing for it. Reading them here keeps the
+        // Workspace rotation and the row's count equal to what the cross-device modes already see (see
+        // `modeCycleTargetSnapshot`'s `openTerminalSessionIDsByWorkspace` read), and a landing restores
+        // the layout on demand (`openOrFocusTerminalPane`). Included only when the device is reachable:
+        // an unreachable device cannot restore a persisted-only pane, so it would not actually be
+        // focusable (`WindowCycleModeTargets.persistedLayoutKeys`).
+        let isDeviceReachable = host.deviceSection(id: deviceID)?.loadState == .loaded
+        let openTerminalSessionIDs = Set(
+            host.panelCoordinator.openTerminalSessionIDsByWorkspace(
+                includingPersistedLayoutsFor: isDeviceReachable ? [PanelLayoutEngine.WorkspaceKey(deviceID: deviceID, workspaceID: workspaceID)] : [])[
+                    workspaceID] ?? [])
         let targets = Self.cycleWindowTargets(
             detail: detail, browserSessions: browserCycleState.openBrowserSessions(workspaceID: workspaceID),
             openTerminalSessionIDs: openTerminalSessionIDs
@@ -738,6 +759,14 @@ import workspacecore
         }
         // A focused built-in terminal decides the current target before any browser state is read, so
         // the browser fields are dropped together when there is one.
+        //
+        // Accepted: `browserCycleState.frontmostURL` is the active tab of Chrome's front window, read
+        // whether or not Chrome is the desktop's frontmost application, so a cycle press made from a
+        // third application (Finder, an editor) with no Spaces terminal focused treats Chrome's front
+        // tab as the current target and advances from it, rather than from the remembered cursor. The
+        // cycle shortcut is reachable from any application, and Chrome's front tab is the browser window
+        // the user most recently had in front, which is the best answer to "where am I" that does not
+        // depend on which app happened to be in front at the keystroke.
         let readsBrowserState = preferredTerminalSessionID?.isEmpty != false
         return WindowCycleTargetSnapshot(
             targets: targets, overviewsByDeviceID: [deviceID: overview],
@@ -751,23 +780,26 @@ import workspacecore
         mode: WindowCycleMode, preferredTerminalSessionID: String?, retaining retainedCursors: [WorkspaceWindowCycle.Cursor]
     ) async -> WindowCycleTargetSnapshot {
         let devices = host.deviceModel.deviceSections.compactMap { section in
-            section.overview.map { WindowCycleDeviceSnapshot(deviceID: section.deviceID, overview: $0, isReachable: section.loadState == .loaded) }
+            section.overview.map {
+                WindowCycleDeviceSnapshot(
+                    deviceID: section.deviceID, overview: $0, isReachable: section.loadState == .loaded, isLocal: section.isLocal)
+            }
         }
         // Only Open sessions can contain a browser target, so the other modes never script Chrome or
         // read the browser-tracking table for a cycle step. They give up nothing by it: with no
         // browser candidate to match, the frontmost Chrome tab could not resolve the current target
         // either.
         let needsBrowserState = mode == .openSessions
-        // Every workspace every device reports, so a workspace whose panel this launch has not
+        // Every workspace of every REACHABLE device, so a workspace whose panel this launch has not
         // restored contributes the panes its persisted layout holds. Restoration is lazy, so without
         // it a fresh launch would name only the workspaces the user has already visited. Computed for
         // every mode, not gated to Open sessions like the browser state below: Attention and All agents
         // read it too, to tell an unreachable device's already-open pane apart from one that would hit
         // `openOrFocusTerminalPane`'s modal refusal (see `WindowCycleModeTargets.agentTargets`).
+        // Limited to reachable devices: see `WindowCycleModeTargets.persistedLayoutKeys` for why an
+        // unreachable device's persisted-only panes do not belong in this map.
         let openTerminalSessionIDsByWorkspace = host.panelCoordinator.openTerminalSessionIDsByWorkspace(
-            includingPersistedLayoutsFor: devices.flatMap { device in
-                device.overview.workspaces.map { PanelLayoutEngine.WorkspaceKey(deviceID: device.deviceID, workspaceID: $0.id) }
-            })
+            includingPersistedLayoutsFor: WindowCycleModeTargets.persistedLayoutKeys(for: devices))
         // Captured synchronously, before the round trip's suspension point, so the tag below names
         // exactly the set this round trip queried, not whatever `host.deviceModel.deviceSections`
         // reports once it returns: a workspace added or removed elsewhere during that await would
@@ -791,6 +823,8 @@ import workspacecore
             recentCursors: windowCycleState.recentCursors(for: .mode(mode)), retaining: retainedCursors)
         // A focused built-in terminal decides the current target before any browser state is read, so
         // the browser fields are dropped together when there is one.
+        //
+        // Same rule, and the same accepted reading of a background Chrome, as `workspaceCycleTargetSnapshot`.
         let readsBrowserState = preferredTerminalSessionID?.isEmpty != false
         return WindowCycleTargetSnapshot(
             targets: targets, overviewsByDeviceID: Dictionary(devices.map { ($0.deviceID, $0.overview) }, uniquingKeysWith: { first, _ in first }),
@@ -1331,6 +1365,15 @@ import workspacecore
             return true
         case .openTerminal(let request):
             guard await openOrFocusTerminalTarget(request, requestID: requestID) else { return false }
+            // A pane in the workspace's main-window panel is already selected by the panel show
+            // itself (`showPanelScope`'s `.workspace` case). This only changes anything for a pane
+            // the user detached into its own window (`PanelScope.globalWindow`), where fronting the
+            // window says nothing to the sidebar; the landing contract is that a cross-device landing
+            // always selects the target's workspace, so select it explicitly here too. The guard makes
+            // this a no-op when the selection already matches.
+            if host.selectedWorkspaceID != request.workspaceID, let (_, workspace) = host.findWorkspace(id: request.workspaceID) {
+                host.selectWorkspace(workspace)
+            }
             rememberWindowNavigationFocus(
                 resolution: resolution, preferredTarget: preferredTarget, preferredDetail: preferredDetail,
                 preserveWindowCycleSession: preserveWindowCycleSession)

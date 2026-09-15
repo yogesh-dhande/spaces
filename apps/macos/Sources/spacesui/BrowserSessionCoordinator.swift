@@ -467,9 +467,19 @@ import workspacecore
 
             let chrome = ChromeAdapter()
             let chromeStartedAt = Date()
-            let snapshot =
-                (try? chrome.tabSnapshot(inWindowIDs: Array(trackedWindowIDs)))
-                ?? ChromeTabSnapshot(tabs: [], frontmostActiveTabURL: nil, frontmostWindowID: nil)
+            // `tabSnapshot` runs `tell application "Google Chrome"`, which launches Chrome via Apple
+            // Events when it is not running. Tracked rows outlive a Chrome quit, so every reader of
+            // this state (a cycle press in any mode that reads browser state, and the cycling row's
+            // refresh) would otherwise relaunch Chrome only to learn its tabs are gone. With Chrome
+            // not running no tracked tab is open, which is exactly what the empty snapshot says.
+            let snapshot: ChromeTabSnapshot
+            if chrome.isRunning() {
+                snapshot =
+                    (try? chrome.tabSnapshot(inWindowIDs: Array(trackedWindowIDs)))
+                    ?? ChromeTabSnapshot(tabs: [], frontmostActiveTabURL: nil, frontmostWindowID: nil)
+            } else {
+                snapshot = ChromeTabSnapshot(tabs: [], frontmostActiveTabURL: nil, frontmostWindowID: nil)
+            }
             let chromeAppleScriptMS = TerminalPerformance.elapsedMS(since: chromeStartedAt)
             var openBrowserSessionsByWorkspace: [String: [BrowserSession]] = [:]
             var trackedWindowIDsByWorkspace: [String: Set<Int>] = [:]
@@ -477,6 +487,12 @@ import workspacecore
                 let trackedWindows = trackedWindowsByWorkspace[workspace.workspaceID] ?? []
                 guard !trackedWindows.isEmpty else { continue }
                 let workspaceWindowIDs = Set(trackedWindows.map(\.windowID))
+                // Accepted: this set is per workspace, not per session. A Chrome window holding tabs from two
+                // workspaces that configured the same target URL and both have it open matches both sets, so
+                // WindowFocusController.cycleCurrentIndex's front-window tie-break falls back to the rotation's
+                // cursor instead of the window's true owner. It takes duplicate target URLs across workspaces
+                // plus a hand-mixed window (tabs dragged between them) to hit; per-session window tracking would
+                // carry the tab-to-window association through every snapshot just for this case.
                 trackedWindowIDsByWorkspace[workspace.workspaceID] = workspaceWindowIDs
                 let openSessions = Self.openBrowserSessionsForCycle(
                     resolvedSessions: workspace.detail.config.resolvedBrowserSessions, assignedPorts: workspace.detail.assignedPorts,

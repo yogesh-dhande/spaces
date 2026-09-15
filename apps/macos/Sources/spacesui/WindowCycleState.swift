@@ -49,6 +49,16 @@ struct WindowCycleState {
         cursorByScope[scope.key] = cursor
         recentCursorsByWorkspaceScope[scope.key] = Self.promoting(cursor, in: recentCursorsByWorkspaceScope[scope.key] ?? [])
         if let globalCursor, !globalCursor.isEmpty { recentGlobalCursors = Self.promoting(globalCursor, in: recentGlobalCursors) }
+        // Accepted: this drops every scope's frozen rotation, not just this one's. When a cycle step
+        // lands on a terminal, pane activation (`PanelCoordinator.activateFocusedPane` /
+        // `refocusFocusedTerminalPane`) calls `WindowFocusController.noteWindowNavigationTerminalFocus`,
+        // which records this focus sync with `preserveCycleSession: false` before `cycleWindows`
+        // finishes; `recordCycleLanding` then restores only the landing scope's frozen rotation, so
+        // every other scope's still-live rotation is rebuilt from current state instead of continued.
+        // This only matters for a user who cycles in one mode, switches mode and cycles, then switches
+        // back within the same burst window (a couple of seconds): two mode switches inside one live
+        // burst is rare enough, and the rotation the user is actually walking (the landing scope's)
+        // survives, so it is left as is.
         if !preserveCycleSession { cycleSessionByScope.removeAll() }
     }
 

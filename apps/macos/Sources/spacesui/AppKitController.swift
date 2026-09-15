@@ -6576,10 +6576,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// overview. A focused built-in terminal is resolved earlier by its session id. This AppleScript
     /// round trip gets only the URL; `WindowFocusController.cycleModeRowModel` calls the same helper
     /// with `cachedBrowserCycleState`'s snapshot URL instead of paying for another round trip on every
-    /// repaint, and both apply the same URL rule with no tie-break.
+    /// repaint, and both apply the same URL rule with no tie-break. With Chrome not running there is no
+    /// Chrome window to resolve, and the running check comes first because `isAvailable` scripts Chrome,
+    /// which launches it; a Workspace-mode cycle press with no Spaces terminal focused reaches this on
+    /// every press, and `docs/spec.md` promises a cycle press never launches Chrome.
     func clientWorkspaceIDForFocusedWindow() -> String? {
         let chrome = ChromeAdapter()
-        guard chrome.isAvailable(), let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil, !activeURL.isEmpty else { return nil }
+        guard chrome.isRunning(), chrome.isAvailable(), let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil, !activeURL.isEmpty else {
+            return nil
+        }
         return BrowserSessionCoordinator.workspaceIDForFrontmostBrowserURL(activeURL, in: deviceModel.deviceSections.compactMap(\.overview))
     }
 

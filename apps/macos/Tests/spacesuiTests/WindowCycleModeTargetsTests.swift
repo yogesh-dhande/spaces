@@ -353,6 +353,90 @@ import workspacecore
         #expect(targets.map { $0.target.agentWindow?.id } == ["a-offline"])
     }
 
+    /// Open sessions applies the same reachability rule to its browser targets: focusing a browser
+    /// session of a remote workspace resolves its SSH-forwarded route through the device record, which
+    /// an unreachable device has none of, so the browser target drops while the open pane, which
+    /// focuses locally, stays.
+    @Test func openSessionsDropsAnUnreachableDevicesBrowserSessionButKeepsItsOpenPane() {
+        let device = WindowCycleDeviceSnapshot(
+            deviceID: "linux",
+            overview: SpacesDeviceOverviewPayload(
+                workspaces: [
+                    workspace(
+                        id: "w1", browserSessionURL: "http://localhost:3000",
+                        terminals: [terminalRow(id: "t-open", workspaceID: "w1", sessionID: "session-open", title: "open")])
+                ], sessions: []), isReachable: false)
+
+        let targets = WindowCycleModeTargets.targets(
+            mode: .openSessions, devices: [device], openTerminalSessionIDsByWorkspace: ["w1": ["session-open"]],
+            openBrowserSessionsByWorkspace: ["w1": [BrowserSession(name: "docs", url: "http://localhost:3000")]],
+            trackedBrowserWindowIDsByWorkspace: ["w1": [7]], recentCursors: [], retaining: [])
+
+        #expect(targets.map(\.cursorKey) == ["device:linux/workspace:w1/terminal:session-open"])
+    }
+
+    /// The same fixture with the device reachable keeps both the pane and the browser session.
+    @Test func openSessionsKeepsAReachableDevicesBrowserSessionAlongsideItsOpenPane() {
+        let device = WindowCycleDeviceSnapshot(
+            deviceID: "linux",
+            overview: SpacesDeviceOverviewPayload(
+                workspaces: [
+                    workspace(
+                        id: "w1", browserSessionURL: "http://localhost:3000",
+                        terminals: [terminalRow(id: "t-open", workspaceID: "w1", sessionID: "session-open", title: "open")])
+                ], sessions: []))
+
+        let targets = WindowCycleModeTargets.targets(
+            mode: .openSessions, devices: [device], openTerminalSessionIDsByWorkspace: ["w1": ["session-open"]],
+            openBrowserSessionsByWorkspace: ["w1": [BrowserSession(name: "docs", url: "http://localhost:3000")]],
+            trackedBrowserWindowIDsByWorkspace: ["w1": [7]], recentCursors: [], retaining: [])
+
+        #expect(
+            targets.map(\.cursorKey) == [
+                "device:linux/workspace:w1/browser:http://localhost:3000", "device:linux/workspace:w1/terminal:session-open",
+            ])
+    }
+
+    /// The local device's own `spacesd` outage reads the section unreachable too, but its browser
+    /// sessions focus through this Mac's Chrome with no device record involved, so `isLocal` keeps
+    /// them in the set alongside the open pane.
+    @Test func openSessionsKeepsTheLocalDevicesBrowserSessionWhileItsOwnDaemonIsDown() {
+        let device = WindowCycleDeviceSnapshot(
+            deviceID: "mac",
+            overview: SpacesDeviceOverviewPayload(
+                workspaces: [
+                    workspace(
+                        id: "w1", browserSessionURL: "http://localhost:3000",
+                        terminals: [terminalRow(id: "t-open", workspaceID: "w1", sessionID: "session-open", title: "open")])
+                ], sessions: []), isReachable: false, isLocal: true)
+
+        let targets = WindowCycleModeTargets.targets(
+            mode: .openSessions, devices: [device], openTerminalSessionIDsByWorkspace: ["w1": ["session-open"]],
+            openBrowserSessionsByWorkspace: ["w1": [BrowserSession(name: "docs", url: "http://localhost:3000")]],
+            trackedBrowserWindowIDsByWorkspace: ["w1": [7]], recentCursors: [], retaining: [])
+
+        #expect(
+            targets.map(\.cursorKey) == ["device:mac/workspace:w1/browser:http://localhost:3000", "device:mac/workspace:w1/terminal:session-open"])
+    }
+
+    /// `persistedLayoutKeys` is what keeps an unreachable device's persisted-only panes out of the
+    /// open-pane map (see the tests above): it should name every workspace of the reachable device and
+    /// none of the unreachable one's.
+    @Test func persistedLayoutKeysNamesOnlyReachableDevicesWorkspaces() {
+        let reachable = WindowCycleDeviceSnapshot(
+            deviceID: "mac", overview: SpacesDeviceOverviewPayload(workspaces: [workspace(id: "w1"), workspace(id: "w2")], sessions: []))
+        let unreachable = WindowCycleDeviceSnapshot(
+            deviceID: "linux", overview: SpacesDeviceOverviewPayload(workspaces: [workspace(id: "w3")], sessions: []), isReachable: false)
+
+        let keys = WindowCycleModeTargets.persistedLayoutKeys(for: [reachable, unreachable])
+
+        #expect(
+            keys == [
+                PanelLayoutEngine.WorkspaceKey(deviceID: "mac", workspaceID: "w1"),
+                PanelLayoutEngine.WorkspaceKey(deviceID: "mac", workspaceID: "w2"),
+            ])
+    }
+
     // MARK: - Fixtures
 
     /// Two devices whose agents sit in every activity state, with state-change times that make the
