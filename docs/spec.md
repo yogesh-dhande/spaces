@@ -450,9 +450,17 @@ Review comments can be sent only to a non-exited coding agent that still belongs
 - A command-palette row's context line should identify its project and branch. A workspace name that differs from its branch should appear between them; a workspace whose display name is its branch should not repeat that name outside the branch chip.
 - Once the user types a query, command-palette search should fuzzy-match across all workspaces using the project name, workspace display name (branch, or folder name for non-git), target name, and secondary detail text, including compact cross-field queries such as `fu` matching `Frontend` plus `URL`.
 - The first command-palette result should stay selected by default, arrow keys should move the selection, and `Enter` should execute the same target-level focus/open action used by the numbered window shortcuts.
-- Leader-based previous/next window cycling should follow the most recently focused targets within the workspace rather than the static workspace definition order. Each repeated cycle sequence should traverse a frozen ordering snapshot so `previous` and `next` walk the full target set instead of bouncing between the last two windows.
+- Leader-based previous/next window cycling should rotate over the set the selected cycling mode names, following the most recently focused targets in that set rather than the static definition order. Each repeated cycle sequence should traverse a frozen ordering snapshot, so `previous` and `next` walk the full set and wrap at both ends instead of bouncing between the last two windows, and a target whose state changes mid-sequence keeps its place until the sequence ends. Typing or clicking in the target the sequence landed on ends the sequence; the next press starts a new one from that target.
 - Leader-based next/previous window cycling should always mean window cycling, even when the main Spaces window is focused.
-- Leader-based previous/next window cycling should include only already-open workspace windows: browser sessions whose resolved URL is present in their tracked Chrome window, and terminal-backed process, ad hoc terminal, and coding-agent targets whose Spaces pane is open. Direct browser-session focus updates tracking when it adopts a user-moved tab, so cycling follows that tab after focus. Unopened browser sessions, not-yet-running configured processes, and terminal sessions without a pane stay available through direct focus but are skipped by cycling.
+- Cycling has four modes, and the cycle-mode shortcut steps through them in this order, wrapping back to the first:
+  - `Workspace`: the windows of one workspace, resolved from what is focused. It includes only already-open windows: browser sessions whose resolved URL is present in their tracked Chrome window, and terminal-backed process, ad hoc terminal, and coding-agent targets whose Spaces pane is open. Direct browser-session focus updates tracking when it adopts a user-moved tab, so cycling follows that tab after focus. Unopened browser sessions, not-yet-running configured processes, and terminal sessions without a pane stay available through direct focus but are skipped by cycling.
+  - `Attention`: coding agents on any device that are waiting on the user or done, the agent that changed state most recently first.
+  - `All agents`: coding agents on any device that are working, waiting, or done, the agent that changed state most recently first. An agent that never started, or that has exited, is not in the set.
+  - `Open sessions`: every open terminal-backed pane and every browser session reported open, on any device, ordered by how recently each was visited; a target that has not been visited this launch comes after those that have, in sidebar order.
+- A cycling mode other than `Workspace` spans every paired device, and landing on a target selects its workspace and brings its window forward, the same as focusing that target from Alerts or the command palette.
+- Cycling with nothing in the selected mode's set, such as `Attention` with no agent waiting, does nothing at all: no window changes and the mode stays selected.
+- Clicking or typing into a terminal pane counts as visiting it for cycling, so a window reached by hand becomes the most recent one just as a window reached by a shortcut does. Visit order is remembered for the life of the app: a fresh launch cycles in sidebar order until windows are visited.
+- The selected cycling mode persists across launches. A stored mode this build does not recognize reads as `Workspace`.
 - Window rows in the selected workspace should expose numbered shortcuts for direct focus.
 - Numbered window focus shortcuts should keep the saved workspace-settings order for configured browser sessions and processes, and append newly added ad-hoc windows after those configured rows.
 - Window focus actions and numbered shortcuts should follow one target-level rule: make that target available immediately.
@@ -484,6 +492,7 @@ Review comments can be sent only to a non-exited coding agent that still belongs
 - Shortcut handling must not break normal text-edit shortcuts while an input is focused.
 - Recovery affordances should reserve `Cmd+R`; app-data reload should default to leader+`R` so it stays distinct from recovery modals.
 - Alerts should default to leader+`A`.
+- Stepping the window-cycling mode should default to leader+`\`.
 - Opening the new-tab session picker should default to `Cmd+T`.
 - Every keyboard shortcut the product supports must be configurable from the GUI settings panel.
 

@@ -30,16 +30,12 @@ import workspacecore
 @MainActor final class WindowFocusController {
     unowned let host: AppKitController
 
-    init(host: AppKitController) {
-        self.host = host
-    }
+    init(host: AppKitController) { self.host = host }
 
     /// Cancels in-flight deferred work owned by this controller. Called from
     /// `AppKitController.applicationWillTerminate` so a pending selection refresh never fires after
     /// the app starts tearing down.
-    func cancelDeferredWork() {
-        deferredHotkeySelectionRefreshTask?.cancel()
-    }
+    func cancelDeferredWork() { deferredHotkeySelectionRefreshTask?.cancel() }
 
     /// The app finished activating: log and clear an in-flight shortcut profile (the route landed while
     /// the app was still becoming active). Called from `AppKitController`'s
@@ -66,7 +62,6 @@ import workspacecore
         activeWindowShortcutProfile = nil
     }
 
-
     // MARK: - Perf context types
 
     struct HotkeyPerfContext {
@@ -86,7 +81,6 @@ import workspacecore
         let workspaceID: String?
         let source: String
     }
-
 
     // MARK: - State
 
@@ -109,7 +103,6 @@ import workspacecore
         let detail: SpacesDeviceWorkspaceDetailViewModel?
     }
 
-
     // MARK: - Focusable window context and named/process focus
 
     /// A workspace's focusable targets read out of the app's current sidebar snapshot, with the data
@@ -123,7 +116,8 @@ import workspacecore
     /// using the same ordering and (all configured) browser sessions as the numbered
     /// shortcuts so by-name focus, the names dump, and Cmd-N stay consistent.
     func focusableWindowContext(workspaceID: String) -> FocusableWindowContext? {
-        guard let overview = host.overview(forWorkspaceID: workspaceID), let detail = AppKitController.workspaceDetail(workspaceID, in: overview) else { return nil }
+        guard let overview = host.overview(forWorkspaceID: workspaceID), let detail = AppKitController.workspaceDetail(workspaceID, in: overview)
+        else { return nil }
         let browserSessions = detail.config.resolvedBrowserSessions.map(AppKitController.localBrowserSession(from:))
         let targets = AppKitController.workspaceShortcutTargets(detail: detail, browserSessions: browserSessions)
         return (detail, overview, browserSessions, targets)
@@ -183,7 +177,8 @@ import workspacecore
                 detail: "target_resolution_ms=\(targetResolutionMS) route_ms=\(routeMS)\(reasonDetail)\(retryDetail)")
         }
         let resolutionStartedAt = Date()
-        let resolved = await resolvingAfterFreshSidebarSnapshot { () -> (context: FocusableWindowContext, target: AppKitController.WorkspaceRunShortcutTarget)? in
+        let resolved = await resolvingAfterFreshSidebarSnapshot {
+            () -> (context: FocusableWindowContext, target: AppKitController.WorkspaceRunShortcutTarget)? in
             guard let context = self.focusableWindowContext(workspaceID: workspaceID),
                 let target = context.targets.first(where: {
                     Self.focusableWindowName(for: $0, detail: context.detail, browserSessions: context.browserSessions).map {
@@ -201,7 +196,8 @@ import workspacecore
         }
         let (context, target) = match
         targetResolutionMS = host.windowShortcutElapsedMS(since: resolutionStartedAt)
-        let resolution = AppKitController.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
+        let resolution = AppKitController.windowShortcutTargetResolution(
+            target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
         let routeStartedAt = Date()
         guard await executeWindowFocusResolution(resolution, preferredTarget: target, preferredDetail: context.detail) else {
             routeMS = host.windowShortcutElapsedMS(since: routeStartedAt)
@@ -276,7 +272,8 @@ import workspacecore
         }
         let (context, target) = match
         targetResolutionMS = host.windowShortcutElapsedMS(since: resolutionStartedAt)
-        let resolution = AppKitController.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
+        let resolution = AppKitController.windowShortcutTargetResolution(
+            target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
         let routeStartedAt = Date()
         guard await executeWindowFocusResolution(resolution, requestID: requestID, preferredTarget: target, preferredDetail: context.detail) else {
             routeMS = host.windowShortcutElapsedMS(since: routeStartedAt)
@@ -287,75 +284,99 @@ import workspacecore
         logResult(true)
     }
 
-
     // MARK: - Window-cycle state and core
 
-    // In-memory window-cycle state (a "window" is a client concept). The cursor remembers
-    // the last-focused target per workspace, recent cursors provide MRU ordering at the
-    // start of a cycle burst, and the cycle session preserves that burst's rotation order
-    // across rapid presses. MainActor-isolated, so no lock is needed.
-    private static let maxWindowNavigationRecentCursorCount = 128
-    private var windowNavigationCursorByWorkspace: [String: WorkspaceWindowCycle.Cursor] = [:]
-    private var windowNavigationRecentCursorsByWorkspace: [String: [WorkspaceWindowCycle.Cursor]] = [:]
-    private var windowNavigationCycleSessionByWorkspace: [String: WorkspaceWindowCycle.CycleSession] = [:]
+    // In-memory window-cycle state (a "window" is a client concept), filed by cycle scope.
+    // MainActor-isolated, so no lock is needed.
+    private var windowCycleState = WindowCycleState()
 
-    /// Cycles focus to the next/previous window of a workspace, entirely client-side:
-    /// rebuilds the focusable targets from the workspace's overview, resolves the current
-    /// target from the focused terminal session / frontmost Chrome tab / remembered
-    /// cursor, advances, and focuses through the shared `executeWindowFocusResolution`.
-    // Not private: AppKitController's `handleCycleWorkspaceWindowIPC` calls this from a different
-    // file in the same module (cross-file `private` isn't visible).
-    func cycleWorkspaceWindow(workspaceID: String, delta: Int, preferredTerminalSessionID: String?, requestID: String? = nil) async {
+    /// Every cycle step runs through this queue, whichever entry point asked for it. A burst of
+    /// presses is one sequence: each step starts from where the previous step landed, so a press that
+    /// arrives while an earlier step is still awaiting Chrome or a remote pane open waits for that
+    /// landing instead of reading the same pre-landing state and repeating its target.
+    private let windowCycleSteps = WindowCycleStepQueue()
+
+    /// Which set of windows the next/previous shortcuts rotate over. Read from the client database
+    /// once at launch and written back on every change, the `activeWorkspaceID` pattern.
+    private(set) var windowCycleMode: WindowCycleMode = .workspace
+
+    /// Adopts the profile's persisted cycling mode. Called once from
+    /// `AppKitController.applicationDidFinishLaunching`, before any shortcut can fire.
+    func loadStoredWindowCycleMode() { windowCycleMode = host.clientWindowCycleMode() }
+
+    /// Steps to the next cycling mode and persists it. Bound to the `Cycle mode` shortcut.
+    func stepWindowCycleMode() {
+        windowCycleMode = windowCycleMode.next
+        AppKitController.setClientWindowCycleMode(windowCycleMode)
+        host.windowCycleModeDidChange(windowCycleMode)
+    }
+
+    /// The world one cycle step walks: its candidate targets, the overview each candidate resolves
+    /// against, and the browser/pane state the current-target resolution and the perf line report.
+    private struct WindowCycleTargetSnapshot {
+        let targets: [WindowCycleTarget]
+        let overviewsByDeviceID: [String: SpacesDeviceOverviewPayload]
+        let frontmostBrowserURL: String?
+        /// Chrome's front window id, which separates two workspaces whose browser sessions share a
+        /// target URL. Snapshot level rather than per target: there is one front window.
+        let frontmostBrowserWindowID: Int?
+        let openTerminalPaneCount: Int
+        let browserPerfDetail: String
+    }
+
+    /// Cycles focus to the next/previous window of a scope, entirely client-side: rebuilds the
+    /// candidate targets (one workspace's open windows, or the mode's set across every device),
+    /// resolves the current target from the focused terminal session / frontmost Chrome tab /
+    /// remembered cursor, advances, and focuses through the shared `executeWindowFocusResolution`.
+    ///
+    /// Private because every entry point reaches a step through `windowCycleSteps`, never directly.
+    private func cycleWindows(scope: WindowCycleScope, delta: Int, preferredTerminalSessionID: String?, requestID: String? = nil) async {
         let cycleStartedAt = Date()
         let direction = delta > 0 ? "next" : "previous"
+        // A cross-device rotation has no workspace until it lands on one; the landed (or first
+        // attempted) target supplies it, and a rotation that never got that far reports none.
+        var metricWorkspaceID = scope.workspaceID ?? "none"
         // The real-system E2E waits for this `window_cycle` perf line, so emit it on both
         // success and failure (matching the orchestrator's format) — it is a parsed surface.
+        // Existing fields keep their order and `mode=` is appended last, so those matchers keep
+        // matching.
         func logCycleMetric(target: String, success: Bool, detail extraDetail: String = "") {
             let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
             let suffix = extraDetail.isEmpty ? "" : " \(extraDetail)"
             TerminalPerformance.logWorkspaceMetric(
-                "window_cycle", workspaceID: workspaceID, target: target, elapsedMS: host.windowShortcutElapsedMS(since: cycleStartedAt), success: success,
-                detail: "direction=\(direction)\(requestDetail)\(suffix)")
+                "window_cycle", workspaceID: metricWorkspaceID, target: target, elapsedMS: host.windowShortcutElapsedMS(since: cycleStartedAt),
+                success: success, detail: "direction=\(direction)\(requestDetail)\(suffix) mode=\(scope.mode.rawValue)")
         }
-        guard let overview = host.overview(forWorkspaceID: workspaceID), let detail = AppKitController.workspaceDetail(workspaceID, in: overview) else {
+        let cycleSession = windowCycleState.validCycleSession(for: scope)
+        let targetResolutionStartedAt = Date()
+        // The live burst's cursors go into the candidate build, not just into `cycleOrdering`: a mode's
+        // filter would otherwise drop a target the burst is walking the moment its state changed, and
+        // the rotation would be rebuilt mid-burst.
+        guard
+            let snapshot = await cycleTargetSnapshot(
+                scope: scope, preferredTerminalSessionID: preferredTerminalSessionID, retaining: cycleSession?.orderedCursors ?? [])
+        else {
             logCycleMetric(target: "none", success: false)
             return
         }
-        let cycleSession = validCycleSession(workspaceID: workspaceID)
-        let targetResolutionStartedAt = Date()
-        let browserCycleState = await host.browserSessions.trackedBrowserCycleState(workspaceID: workspaceID, detail: detail)
-        let openTerminalSessionIDs = Set(host.panelCoordinator.openTerminalSessionIDs(workspaceID: workspaceID))
-
-        // Cycle over the same base targets the numbered shortcuts use, limited to running
-        // windows (open browsers, running processes/terminals, agents) and ordered by MRU
-        // at the start of the burst — not launch actions.
-        let targets = Self.cycleWindowTargets(
-            detail: detail, browserSessions: browserCycleState.openBrowserSessions, openTerminalSessionIDs: openTerminalSessionIDs)
         let targetResolutionMS = host.windowShortcutElapsedMS(since: targetResolutionStartedAt)
         let resolutionDetail =
-            "target_resolution_ms=\(targetResolutionMS) client_db_lookup_ms=\(browserCycleState.clientDBLookupMS) chrome_applescript_ms=\(browserCycleState.chromeAppleScriptMS) tracked_browser_windows=\(browserCycleState.trackedWindowCount) tracked_browser_tabs=\(browserCycleState.trackedTabCount) open_terminal_panes=\(openTerminalSessionIDs.count)"
-        guard !targets.isEmpty else {
-            logCycleMetric(target: "none", success: false, detail: resolutionDetail)
+            "target_resolution_ms=\(targetResolutionMS) \(snapshot.browserPerfDetail) open_terminal_panes=\(snapshot.openTerminalPaneCount)"
+        guard !snapshot.targets.isEmpty else {
+            logCycleMetric(target: "none", success: false, detail: "\(resolutionDetail) reason=empty")
             return
         }
 
-        let cursorKeys = targets.map { Self.cycleCursorKey(for: $0, detail: detail) }
-        let cursor = windowNavigationCursorByWorkspace[workspaceID]
-        let frontmostBrowserURL = (preferredTerminalSessionID?.isEmpty == false) ? nil : browserCycleState.frontmostURL
-        let configuredBrowserTargetURLs = BrowserSessionCoordinator.browserSessionTargetURLs(resolvedSessions: detail.config.resolvedBrowserSessions)
+        let cursor = windowCycleState.cursor(for: scope)
         let currentIndex = Self.cycleCurrentIndex(
-            targets: targets, detail: detail, focusedTerminalSessionID: preferredTerminalSessionID, frontmostBrowserURL: frontmostBrowserURL,
-            browserTargetURLs: configuredBrowserTargetURLs, cursorKeys: cursorKeys, cursor: cursor)
-        if let currentIndex { rememberWindowNavigationCursor(cursorKeys[currentIndex], workspaceID: workspaceID, preserveWindowCycleSession: true) }
+            targets: snapshot.targets, focusedTerminalSessionID: preferredTerminalSessionID, frontmostBrowserURL: snapshot.frontmostBrowserURL,
+            frontmostBrowserWindowID: snapshot.frontmostBrowserWindowID, cursor: cursor)
+        if let currentIndex { rememberWindowNavigationCycleTarget(snapshot.targets[currentIndex], preserveWindowCycleSession: true) }
         let ordering = WorkspaceWindowCycle.cycleOrdering(
-            cursors: cursorKeys, currentIndex: currentIndex, session: cycleSession,
-            recentCursors: windowNavigationRecentCursorsByWorkspace[workspaceID] ?? [])
-        let orderedTargets = ordering.indices.map { targets[$0] }
-        let orderedCursors = ordering.indices.map { cursorKeys[$0] }
-        guard !orderedTargets.isEmpty else {
-            logCycleMetric(target: "none", success: false, detail: resolutionDetail)
-            return
-        }
+            cursors: snapshot.targets.map(\.cursorKey), currentIndex: currentIndex, session: cycleSession,
+            recentCursors: windowCycleState.recentCursors(for: scope))
+        let orderedTargets = ordering.indices.map { snapshot.targets[$0] }
+        let orderedCursors = orderedTargets.map(\.cursorKey)
         let startIndex = WorkspaceWindowCycle.nextIndex(orderedCount: orderedTargets.count, orderedCurrentIndex: ordering.currentIndex, delta: delta)
 
         // Cycling closes the palette for every target it can land on, browser sessions included,
@@ -369,10 +390,14 @@ import workspacecore
         var resolvedIndex = startIndex
         for attempt in 0..<orderedTargets.count {
             let candidateIndex = (startIndex + (attempt * delta) + (orderedTargets.count * 4)) % orderedTargets.count
+            let candidate = orderedTargets[candidateIndex]
+            // Keyed by the same devices the candidates were built from, so this names the overview the
+            // candidate's workspace came from and cannot miss.
+            guard let overview = snapshot.overviewsByDeviceID[candidate.deviceID] else { continue }
             let resolution = AppKitController.windowShortcutTargetResolution(
-                orderedTargets[candidateIndex], workspaceID: workspaceID, detail: detail, overview: overview)
+                candidate.target, workspaceID: candidate.workspaceID, detail: candidate.detail, overview: overview)
             if await executeWindowFocusResolution(
-                resolution, requestID: requestID, preferredTarget: orderedTargets[candidateIndex], preferredDetail: detail,
+                resolution, requestID: requestID, preferredTarget: candidate.target, preferredDetail: candidate.detail,
                 preserveWindowCycleSession: true)
             {
                 didFocus = true
@@ -381,14 +406,107 @@ import workspacecore
             }
         }
         guard didFocus else {
-            logCycleMetric(target: Self.cycleDebugName(for: orderedTargets[startIndex], detail: detail), success: false, detail: resolutionDetail)
+            metricWorkspaceID = orderedTargets[startIndex].workspaceID
+            logCycleMetric(
+                target: Self.cycleDebugName(for: orderedTargets[startIndex].target, detail: orderedTargets[startIndex].detail), success: false,
+                detail: resolutionDetail)
             return
         }
 
-        windowNavigationCursorByWorkspace[workspaceID] = orderedCursors[resolvedIndex]
-        windowNavigationCycleSessionByWorkspace[workspaceID] = WorkspaceWindowCycle.CycleSession(
-            orderedCursors: orderedCursors, currentIndex: resolvedIndex, lastUsedAt: Date())
-        logCycleMetric(target: Self.cycleDebugName(for: orderedTargets[resolvedIndex], detail: detail), success: true, detail: resolutionDetail)
+        windowCycleState.recordCycleLanding(scope: scope, orderedCursors: orderedCursors, index: resolvedIndex)
+        metricWorkspaceID = orderedTargets[resolvedIndex].workspaceID
+        logCycleMetric(
+            target: Self.cycleDebugName(for: orderedTargets[resolvedIndex].target, detail: orderedTargets[resolvedIndex].detail), success: true,
+            detail: resolutionDetail)
+    }
+
+    private func cycleTargetSnapshot(
+        scope: WindowCycleScope, preferredTerminalSessionID: String?, retaining retainedCursors: [WorkspaceWindowCycle.Cursor]
+    ) async -> WindowCycleTargetSnapshot? {
+        switch scope {
+        // A workspace rotation has no state filter to retain anything against: its targets are the
+        // workspace's open windows, so a target leaves that set only by closing.
+        case .workspace(let workspaceID):
+            return await workspaceCycleTargetSnapshot(workspaceID: workspaceID, preferredTerminalSessionID: preferredTerminalSessionID)
+        case .mode(let mode):
+            return await modeCycleTargetSnapshot(mode: mode, preferredTerminalSessionID: preferredTerminalSessionID, retaining: retainedCursors)
+        }
+    }
+
+    /// One workspace's open windows: the same base targets the numbered shortcuts use, limited to
+    /// running windows (open browsers, running processes/terminals, agents) and carrying the
+    /// per-workspace cursor keys, which are what the workspace rotation has always been filed under.
+    private func workspaceCycleTargetSnapshot(workspaceID: String, preferredTerminalSessionID: String?) async -> WindowCycleTargetSnapshot? {
+        guard let overview = host.overview(forWorkspaceID: workspaceID), let detail = AppKitController.workspaceDetail(workspaceID, in: overview),
+            let deviceID = host.deviceID(forWorkspaceID: workspaceID)
+        else { return nil }
+        let browserCycleState = await host.browserSessions.trackedBrowserCycleState(workspaces: [
+            BrowserSessionCoordinator.BrowserCycleWorkspace(workspaceID: workspaceID, detail: detail)
+        ])
+        let openTerminalSessionIDs = Set(host.panelCoordinator.openTerminalSessionIDs(workspaceID: workspaceID))
+        let targets = Self.cycleWindowTargets(
+            detail: detail, browserSessions: browserCycleState.openBrowserSessions(workspaceID: workspaceID),
+            openTerminalSessionIDs: openTerminalSessionIDs
+        ).map {
+            WindowCycleTarget(
+                deviceID: deviceID, workspaceID: workspaceID, cursorKey: Self.cycleCursorKey(for: $0, detail: detail), target: $0, detail: detail,
+                // Only a browser target can be matched against a Chrome window.
+                trackedBrowserWindowIDs: $0.kind == .browser ? browserCycleState.trackedWindowIDs(workspaceID: workspaceID) : [])
+        }
+        // A focused built-in terminal decides the current target before any browser state is read, so
+        // the browser fields are dropped together when there is one.
+        let readsBrowserState = preferredTerminalSessionID?.isEmpty != false
+        return WindowCycleTargetSnapshot(
+            targets: targets, overviewsByDeviceID: [deviceID: overview],
+            frontmostBrowserURL: readsBrowserState ? browserCycleState.frontmostURL : nil,
+            frontmostBrowserWindowID: readsBrowserState ? browserCycleState.frontmostWindowID : nil,
+            openTerminalPaneCount: openTerminalSessionIDs.count, browserPerfDetail: browserCycleState.perfDetail)
+    }
+
+    /// A cross-device mode's set, built from every device's installed overview.
+    private func modeCycleTargetSnapshot(
+        mode: WindowCycleMode, preferredTerminalSessionID: String?, retaining retainedCursors: [WorkspaceWindowCycle.Cursor]
+    ) async -> WindowCycleTargetSnapshot {
+        let devices = host.deviceModel.deviceSections.compactMap { section in
+            section.overview.map { WindowCycleDeviceSnapshot(deviceID: section.deviceID, overview: $0) }
+        }
+        // Only Open sessions can contain a browser target, so the other modes never script Chrome or
+        // read the browser-tracking table for a cycle step. They give up nothing by it: with no
+        // browser candidate to match, the frontmost Chrome tab could not resolve the current target
+        // either.
+        let needsBrowserState = mode == .openSessions
+        // Every workspace every device reports, so a workspace whose panel this launch has not
+        // restored contributes the panes its persisted layout holds. Restoration is lazy, so without
+        // it a fresh launch would name only the workspaces the user has already visited.
+        let openTerminalSessionIDsByWorkspace =
+            needsBrowserState
+            ? host.panelCoordinator.openTerminalSessionIDsByWorkspace(
+                includingPersistedLayoutsFor: devices.flatMap { device in
+                    device.overview.workspaces.map { PanelLayoutEngine.WorkspaceKey(deviceID: device.deviceID, workspaceID: $0.id) }
+                }) : [:]
+        let browserCycleState =
+            needsBrowserState
+            ? await host.browserSessions.trackedBrowserCycleState(
+                workspaces: devices.flatMap { device in
+                    device.overview.workspaces.map {
+                        BrowserSessionCoordinator.BrowserCycleWorkspace(
+                            workspaceID: $0.id, detail: SpacesDeviceWorkspaceDetailViewModel(workspace: $0))
+                    }
+                }) : .noBrowserState
+        let targets = WindowCycleModeTargets.targets(
+            mode: mode, devices: devices, openTerminalSessionIDsByWorkspace: openTerminalSessionIDsByWorkspace,
+            openBrowserSessionsByWorkspace: browserCycleState.openBrowserSessionsByWorkspace,
+            trackedBrowserWindowIDsByWorkspace: browserCycleState.trackedWindowIDsByWorkspace,
+            recentCursors: windowCycleState.recentCursors(for: .mode(mode)), retaining: retainedCursors)
+        // A focused built-in terminal decides the current target before any browser state is read, so
+        // the browser fields are dropped together when there is one.
+        let readsBrowserState = preferredTerminalSessionID?.isEmpty != false
+        return WindowCycleTargetSnapshot(
+            targets: targets, overviewsByDeviceID: Dictionary(devices.map { ($0.deviceID, $0.overview) }, uniquingKeysWith: { first, _ in first }),
+            frontmostBrowserURL: readsBrowserState ? browserCycleState.frontmostURL : nil,
+            frontmostBrowserWindowID: readsBrowserState ? browserCycleState.frontmostWindowID : nil,
+            openTerminalPaneCount: openTerminalSessionIDsByWorkspace.values.reduce(0) { $0 + $1.count },
+            browserPerfDetail: browserCycleState.perfDetail)
     }
 
     nonisolated static func cycleWindowTargets(
@@ -405,17 +523,10 @@ import workspacecore
         }
     }
 
-    private func validCycleSession(workspaceID: String) -> WorkspaceWindowCycle.CycleSession? {
-        guard let session = windowNavigationCycleSessionByWorkspace[workspaceID] else { return nil }
-        guard Date().timeIntervalSince(session.lastUsedAt) <= WorkspaceWindowCycle.cycleSessionTimeout else {
-            windowNavigationCycleSessionByWorkspace.removeValue(forKey: workspaceID)
-            return nil
-        }
-        return session
-    }
-
     /// Stable per-target identity used to remember the cursor and preserve cycle order.
-    nonisolated static func cycleCursorKey(for target: AppKitController.WorkspaceRunShortcutTarget, detail: SpacesDeviceWorkspaceDetailViewModel) -> String {
+    nonisolated static func cycleCursorKey(for target: AppKitController.WorkspaceRunShortcutTarget, detail: SpacesDeviceWorkspaceDetailViewModel)
+        -> String
+    {
         switch target.kind {
         case .browser: return "browser:\(target.targetURL ?? "")"
         case .process: return "process:\(target.processID ?? "")"
@@ -425,9 +536,9 @@ import workspacecore
         }
     }
 
-    nonisolated private static func cycleTargetSessionID(for target: AppKitController.WorkspaceRunShortcutTarget, detail: SpacesDeviceWorkspaceDetailViewModel)
-        -> String?
-    {
+    nonisolated private static func cycleTargetSessionID(
+        for target: AppKitController.WorkspaceRunShortcutTarget, detail: SpacesDeviceWorkspaceDetailViewModel
+    ) -> String? {
         switch target.kind {
         case .process: return detail.processRows.first(where: { ($0.processID ?? $0.id) == target.processID })?.sessionID
         case .window:
@@ -436,6 +547,15 @@ import workspacecore
         case .agent: return detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == target.agentWindow?.id })?.sessionID
         case .browser, .missingConfiguredProcess: return nil
         }
+    }
+
+    /// Records a visit to one cycle candidate. The cursor passed in is always the candidate's
+    /// per-workspace key: the recording site derives the cross-workspace key from it, whichever scope
+    /// the rotation itself is using.
+    private func rememberWindowNavigationCycleTarget(_ target: WindowCycleTarget, preserveWindowCycleSession: Bool) {
+        rememberWindowNavigationCursor(
+            Self.cycleCursorKey(for: target.target, detail: target.detail), workspaceID: target.workspaceID,
+            preserveWindowCycleSession: preserveWindowCycleSession)
     }
 
     private func rememberWindowNavigationFocus(
@@ -467,7 +587,8 @@ import workspacecore
     }
 
     @discardableResult private func rememberWindowNavigationTargetIfCycleable(
-        _ target: AppKitController.WorkspaceRunShortcutTarget, workspaceID: String, detail: SpacesDeviceWorkspaceDetailViewModel, preserveWindowCycleSession: Bool
+        _ target: AppKitController.WorkspaceRunShortcutTarget, workspaceID: String, detail: SpacesDeviceWorkspaceDetailViewModel,
+        preserveWindowCycleSession: Bool
     ) -> Bool {
         switch target.kind {
         case .browser: guard target.targetURL?.isEmpty == false else { return false }
@@ -483,14 +604,14 @@ import workspacecore
         guard !sessionID.isEmpty, let context = focusableWindowContext(workspaceID: workspaceID) else { return }
         let matches = context.targets.filter { Self.cycleTargetSessionID(for: $0, detail: context.detail) == sessionID }
         guard !matches.isEmpty else { return }
-        let currentCursor = windowNavigationCursorByWorkspace[workspaceID]
+        let currentCursor = windowCycleState.cursor(for: .workspace(workspaceID))
         if let currentCursor, let target = matches.first(where: { Self.cycleCursorKey(for: $0, detail: context.detail) == currentCursor }),
             rememberWindowNavigationTargetIfCycleable(
                 target, workspaceID: workspaceID, detail: context.detail, preserveWindowCycleSession: preserveWindowCycleSession)
         {
             return
         }
-        let recentCursors = windowNavigationRecentCursorsByWorkspace[workspaceID] ?? []
+        let recentCursors = windowCycleState.recentCursors(for: .workspace(workspaceID))
         for cursor in recentCursors {
             if let target = matches.first(where: { Self.cycleCursorKey(for: $0, detail: context.detail) == cursor }),
                 rememberWindowNavigationTargetIfCycleable(
@@ -510,6 +631,34 @@ import workspacecore
         rememberWindowNavigationTerminalSession(workspaceID: workspaceID, sessionID: sessionID, preserveWindowCycleSession: false)
     }
 
+    /// The session this controller last tried to record a content visit for. Every other recording
+    /// path clears it, so it is only ever set while that visit is still the most recent one.
+    private var lastNotedContentVisitSessionID: String?
+
+    /// A click or a keystroke landed in a terminal pane's content: record it as a visit, so a pane
+    /// reached by hand becomes the most recent target for cycling exactly as one reached by focusing
+    /// it does.
+    ///
+    /// Every keystroke in a focused pane reaches here, and recording rebuilds the workspace's target
+    /// list, so the same session in a row is noted once. That is deliberately one note per session
+    /// rather than one per recorded visit: a session with no cycleable target yet (its pane opened
+    /// ahead of the overview that describes it) would otherwise rebuild that list on every keystroke
+    /// for as long as the user keeps typing. Such a session simply stays unvisited until focus lands
+    /// on it again, which is what any focus path already records.
+    ///
+    /// The visit is recorded without preserving the cycle session on purpose: a keystroke in the target
+    /// a burst landed on is the user engaging with it, and that ends the burst in every mode. In
+    /// Attention mode that means answering a waiting agent and pressing Next right away starts a new
+    /// sequence from that agent, over the set as it stands then (the answered agent, now working, is
+    /// no longer in it), rather than continuing the frozen order. Accepted: the retained-target rule
+    /// in `WindowCycleModeTargets` covers state changes the user did not cause, and a burst the user
+    /// interrupted by typing is over.
+    func noteWindowNavigationContentVisit(sessionID: String) {
+        guard sessionID != lastNotedContentVisitSessionID else { return }
+        noteWindowNavigationTerminalFocus(sessionID: sessionID)
+        lastNotedContentVisitSessionID = sessionID
+    }
+
     private func rememberWindowNavigationProcess(workspaceID: String, processKey: String, preserveWindowCycleSession: Bool) {
         guard let context = focusableWindowContext(workspaceID: workspaceID) else { return }
         let target = context.targets.first { target in
@@ -525,14 +674,17 @@ import workspacecore
     }
 
     private func rememberWindowNavigationCursor(_ cursor: WorkspaceWindowCycle.Cursor, workspaceID: String, preserveWindowCycleSession: Bool) {
-        guard !cursor.isEmpty else { return }
-        windowNavigationCursorByWorkspace[workspaceID] = cursor
-        var cursors = windowNavigationRecentCursorsByWorkspace[workspaceID] ?? []
-        cursors.removeAll { $0 == cursor }
-        cursors.insert(cursor, at: 0)
-        if cursors.count > Self.maxWindowNavigationRecentCursorCount { cursors.removeLast(cursors.count - Self.maxWindowNavigationRecentCursorCount) }
-        windowNavigationRecentCursorsByWorkspace[workspaceID] = cursors
-        if !preserveWindowCycleSession { windowNavigationCycleSessionByWorkspace.removeValue(forKey: workspaceID) }
+        // The cross-device rotations order by visits across every workspace, so the same visit is
+        // also recorded under a key carrying the owning device and workspace. That device is resolved
+        // here rather than threaded through every caller: `deviceID(forWorkspaceID:)` is an O(1)
+        // index lookup, and a workspace whose device is not loaded is one no cross-device rotation
+        // can name a target in anyway.
+        let globalCursor = host.deviceID(forWorkspaceID: workspaceID).map {
+            WindowCycleTarget.globalCursorKey(deviceID: $0, workspaceID: workspaceID, cursorKey: cursor)
+        }
+        windowCycleState.recordVisit(
+            cursor: cursor, globalCursor: globalCursor, workspaceID: workspaceID, preserveCycleSession: preserveWindowCycleSession)
+        lastNotedContentVisitSessionID = nil
     }
 
     nonisolated private static func workspaceID(for resolution: AppKitController.DeviceWindowShortcutResolution) -> String? {
@@ -545,7 +697,9 @@ import workspacecore
 
     /// Short name for a target, used in the `window_cycle` perf line the E2E parses; matches
     /// the orchestrator's `kind:name` shape (e.g. `process:web`, `terminal:shell`).
-    nonisolated private static func cycleDebugName(for target: AppKitController.WorkspaceRunShortcutTarget, detail: SpacesDeviceWorkspaceDetailViewModel) -> String {
+    nonisolated private static func cycleDebugName(
+        for target: AppKitController.WorkspaceRunShortcutTarget, detail: SpacesDeviceWorkspaceDetailViewModel
+    ) -> String {
         switch target.kind {
         case .browser: return "browser:\(target.targetURL ?? "")"
         case .process:
@@ -559,36 +713,53 @@ import workspacecore
         }
     }
 
-    nonisolated private static func cycleCurrentIndex(
-        targets: [AppKitController.WorkspaceRunShortcutTarget], detail: SpacesDeviceWorkspaceDetailViewModel, focusedTerminalSessionID: String?,
-        frontmostBrowserURL: String?, browserTargetURLs: [String], cursorKeys: [String], cursor: String?
+    /// Which candidate the cycle is standing on: the focused terminal session, else the frontmost
+    /// Chrome tab (by URL, narrowed by the front window's id when that separates two workspaces), else
+    /// the rotation's remembered cursor. Each candidate is matched against its own workspace's detail,
+    /// so this reads the same for one workspace's rotation and for one spanning devices.
+    // Not private: pure, and covered directly by `WindowCycleCurrentIndexTests`.
+    nonisolated static func cycleCurrentIndex(
+        targets: [WindowCycleTarget], focusedTerminalSessionID: String?, frontmostBrowserURL: String?, frontmostBrowserWindowID: Int?, cursor: String?
     ) -> Int? {
         if let focusedTerminalSessionID, !focusedTerminalSessionID.isEmpty {
-            let matches = targets.indices.filter { cycleTargetSessionID(for: targets[$0], detail: detail) == focusedTerminalSessionID }
+            let matches = targets.indices.filter {
+                cycleTargetSessionID(for: targets[$0].target, detail: targets[$0].detail) == focusedTerminalSessionID
+            }
             if !matches.isEmpty {
-                if let cursor, let match = matches.first(where: { cursorKeys[$0] == cursor }) { return match }
+                if let cursor, let match = matches.first(where: { targets[$0].cursorKey == cursor }) { return match }
                 return matches.last
             }
         }
         if let frontmostBrowserURL, !frontmostBrowserURL.isEmpty {
             let matches = targets.indices.compactMap { index -> (offset: Int, matchLength: Int)? in
-                guard targets[index].kind == .browser, let targetURL = targets[index].targetURL, !targetURL.isEmpty else { return nil }
+                let candidate = targets[index]
+                guard candidate.target.kind == .browser, let targetURL = candidate.target.targetURL, !targetURL.isEmpty else { return nil }
+                let browserTargetURLs = BrowserSessionCoordinator.browserSessionTargetURLs(
+                    resolvedSessions: candidate.detail.config.resolvedBrowserSessions)
                 let siblingTargetURLs = BrowserSessionCoordinator.browserSessionSiblingTargetURLs(targetURL: targetURL, targetURLs: browserTargetURLs)
                 guard
                     let matchLength = BrowserSessionCoordinator.browserObservedURLMatchLength(
-                        frontmostBrowserURL, targetURL: targetURL, siblingTargetURLs: siblingTargetURLs, assignedPorts: detail.assignedPorts)
+                        frontmostBrowserURL, targetURL: targetURL, siblingTargetURLs: siblingTargetURLs, assignedPorts: candidate.detail.assignedPorts
+                    )
                 else { return nil }
                 return (index, matchLength)
             }
             if !matches.isEmpty {
-                if let cursor, let match = matches.first(where: { cursorKeys[$0.offset] == cursor }) { return match.offset }
-                return matches.max(by: { $0.matchLength < $1.matchLength })?.offset
+                // Two workspaces can configure the same target URL and have it open in separate Chrome
+                // windows, and then the URL matches both. The window the frontmost tab is in belongs to
+                // exactly one of their tracked sets, so it names the workspace the user is standing in;
+                // without it (no front window, or an untracked one) every URL match stays in play.
+                let windowMatches =
+                    frontmostBrowserWindowID.map { windowID in matches.filter { targets[$0.offset].trackedBrowserWindowIDs.contains(windowID) } }
+                    ?? []
+                let candidates = windowMatches.isEmpty ? matches : windowMatches
+                if let cursor, let match = candidates.first(where: { targets[$0.offset].cursorKey == cursor }) { return match.offset }
+                return candidates.max(by: { $0.matchLength < $1.matchLength })?.offset
             }
         }
-        if let cursor { return cursorKeys.firstIndex(of: cursor) }
+        if let cursor { return targets.firstIndex(where: { $0.cursorKey == cursor }) }
         return nil
     }
-
 
     // MARK: - Activation and reveal helpers
 
@@ -601,7 +772,6 @@ import workspacecore
         guard let focusedWorkspaceID else { return nil }
         return .workspace(focusedWorkspaceID)
     }
-
 
     // MARK: - Focus resolution and dispatch
 
@@ -651,7 +821,9 @@ import workspacecore
                 resolution: Self.windowFocusResolution(for: request, overview: overview), target: targetContext?.target, detail: targetContext?.detail
             )
         }
-        guard let selectedWorkspaceID = host.selectedWorkspaceID else { return WindowFocusResolutionContext(resolution: .noWorkspace, target: nil, detail: nil) }
+        guard let selectedWorkspaceID = host.selectedWorkspaceID else {
+            return WindowFocusResolutionContext(resolution: .noWorkspace, target: nil, detail: nil)
+        }
         guard let overview = host.overview(forWorkspaceID: selectedWorkspaceID) else {
             return WindowFocusResolutionContext(resolution: .noWorkspace, target: nil, detail: nil)
         }
@@ -668,7 +840,6 @@ import workspacecore
             resolution: AppKitController.windowShortcutTargetResolution(target, workspaceID: selectedWorkspaceID, detail: detail, overview: overview),
             target: target, detail: detail)
     }
-
 
     /// Maps an explicit alerts/command-palette focus request to the same device-agnostic
     /// target the numbered-shortcut path produces, so both flow through one dispatcher.
@@ -716,7 +887,8 @@ import workspacecore
         target: AppKitController.WorkspaceRunShortcutTarget, detail: SpacesDeviceWorkspaceDetailViewModel
     )? {
         guard let detail = AppKitController.workspaceDetail(request.workspaceID, in: overview) else { return nil }
-        let targets = AppKitController.workspaceShortcutTargets(detail: detail, browserSessions: detail.config.resolvedBrowserSessions.map(AppKitController.localBrowserSession(from:)))
+        let targets = AppKitController.workspaceShortcutTargets(
+            detail: detail, browserSessions: detail.config.resolvedBrowserSessions.map(AppKitController.localBrowserSession(from:)))
         let target: AppKitController.WorkspaceRunShortcutTarget?
         switch request {
         case .workspaceBrowserSession(_, let targetURL): target = targets.first { $0.kind == .browser && $0.targetURL == targetURL }
@@ -724,7 +896,8 @@ import workspacecore
         case .workspaceWindow(_, let index): target = targets.first { $0.kind == .window && $0.windowListIndex == index - 1 }
         case .workspaceMissingConfiguredProcess(_, let processKey):
             target = targets.first {
-                $0.kind == .missingConfiguredProcess && AppKitController.normalizedRunRowName($0.processKey ?? "") == AppKitController.normalizedRunRowName(processKey)
+                $0.kind == .missingConfiguredProcess
+                    && AppKitController.normalizedRunRowName($0.processKey ?? "") == AppKitController.normalizedRunRowName(processKey)
             }
         case .agentWindow(let record): target = targets.first { $0.kind == .agent && $0.agentWindow?.id == record.id }
         // A bell alert's session isn't one of the workspace's numbered run-shortcut targets, so it
@@ -787,8 +960,9 @@ import workspacecore
     /// URLs may need remote-service routing before local Chrome focus, and terminal
     /// windows use native sessions locally vs Device API mirrors remotely.
     @discardableResult func executeWindowFocusResolution(
-        _ resolution: AppKitController.DeviceWindowShortcutResolution, requestID: String? = nil, preferredTarget: AppKitController.WorkspaceRunShortcutTarget? = nil,
-        preferredDetail: SpacesDeviceWorkspaceDetailViewModel? = nil, preserveWindowCycleSession: Bool = false
+        _ resolution: AppKitController.DeviceWindowShortcutResolution, requestID: String? = nil,
+        preferredTarget: AppKitController.WorkspaceRunShortcutTarget? = nil, preferredDetail: SpacesDeviceWorkspaceDetailViewModel? = nil,
+        preserveWindowCycleSession: Bool = false
     ) async -> Bool {
         switch resolution {
         case .openURL(let workspaceID, let targetURL):
@@ -846,13 +1020,20 @@ import workspacecore
                     return false
                 }
             } else {
-                guard await host.browserSessions.focusLocalChromeTab(workspaceID: workspaceID, targetURL: targetURL, siblingTargetURLs: siblingTargetURLs)
+                guard
+                    await host.browserSessions.focusLocalChromeTab(
+                        workspaceID: workspaceID, targetURL: targetURL, siblingTargetURLs: siblingTargetURLs)
                 else {
                     host.browserSessions.showBrowserSessionFocusFailureError()
                     return false
                 }
             }
             AppKitController.setClientActiveWorkspaceID(workspaceID)
+            // A browser landing brings Chrome forward rather than a Spaces window, so unlike the
+            // terminal path (which selects through its own pane), nothing else re-selects the
+            // sidebar's workspace when the user comes back to Spaces. Select it here so the
+            // sidebar matches the workspace the landing just focused.
+            if host.selectedWorkspaceID != workspaceID, let (_, workspace) = host.findWorkspace(id: workspaceID) { host.selectWorkspace(workspace) }
             rememberWindowNavigationFocus(
                 resolution: resolution, preferredTarget: preferredTarget, preferredDetail: preferredDetail,
                 preserveWindowCycleSession: preserveWindowCycleSession)
@@ -881,7 +1062,9 @@ import workspacecore
         }
     }
 
-    @discardableResult private func openOrFocusTerminalTarget(_ request: AppKitController.DeviceTerminalOpenRequest, requestID: String? = nil) async -> Bool {
+    @discardableResult private func openOrFocusTerminalTarget(_ request: AppKitController.DeviceTerminalOpenRequest, requestID: String? = nil) async
+        -> Bool
+    {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         var requestResolveMS = 0
@@ -895,7 +1078,8 @@ import workspacecore
             let reasonDetail = reason.isEmpty ? "" : " reason=\(reason)"
             let retryDetail = retriedAfterReload ? " retried_after_reload=1" : ""
             host.logPerfMetric(
-                "terminal_pane_focus", target: "session=\(request.sessionID)", elapsedMS: host.windowShortcutElapsedMS(since: startedAt), success: success,
+                "terminal_pane_focus", target: "session=\(request.sessionID)", elapsedMS: host.windowShortcutElapsedMS(since: startedAt),
+                success: success,
                 detail:
                     "request_resolution_ms=\(requestResolveMS) existing_pane_focus_ms=\(existingPaneFocusMS) pane_open_ms=\(paneOpenMS) ownership_request_ms=\(ownershipRequestMS) focus_observation_ms=\(focusObservationMS) focus_observed=\(focusObserved ? 1 : 0)\(requestDetail)\(reasonDetail)\(retryDetail)"
             )
@@ -988,14 +1172,15 @@ import workspacecore
         return true
     }
 
-    nonisolated static func terminalOpenRequestNeedsColdResolution(_ request: AppKitController.DeviceTerminalOpenRequest, hasExistingPane: Bool) -> Bool {
-        !hasExistingPane && request.shell == nil
-    }
+    nonisolated static func terminalOpenRequestNeedsColdResolution(_ request: AppKitController.DeviceTerminalOpenRequest, hasExistingPane: Bool)
+        -> Bool
+    { !hasExistingPane && request.shell == nil }
 
     private func runTerminalSessionMutationAndOpenPane(
         workspaceID: String, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
     ) async -> Bool {
-        guard let request = await host.runTerminalSessionMutation(workspaceID: workspaceID, operation: operation), await openOrFocusTerminalTarget(request)
+        guard let request = await host.runTerminalSessionMutation(workspaceID: workspaceID, operation: operation),
+            await openOrFocusTerminalTarget(request)
         else { return false }
         return true
     }
@@ -1090,22 +1275,50 @@ import workspacecore
     // same module (cross-file `private` isn't visible).
     func focusGlobalWindowNavigation(direction: Int) {
         let requestID = UUID().uuidString
+        // Elapsed is measured from the press, so a step that waited its turn behind an earlier press
+        // reports the wait: that is what the user felt.
         let startedAt = Date()
-        guard let workspaceID = globalWindowNavigationWorkspaceID(requestID: requestID) else {
-            host.logPerfMetric(
-                "global_window_navigation", target: "workspace=nil", elapsedMS: host.windowShortcutElapsedMS(since: startedAt), success: false,
-                detail: "direction=\(direction > 0 ? "next" : "previous") reason=no_workspace request_id=\(requestID)")
-            return
-        }
-        let preferredFocusedBuiltInTerminalSessionID = focusedBuiltInTerminalSessionIDForGlobalNavigation()
-        Task { @MainActor [weak self] in
+        // The mode is read at the press: a press means "step in the mode I am in now", and a mode
+        // change typed while this press waits behind a slow step must not retroactively change what
+        // the earlier press meant. The workspace the mode resolves and the focused session are read
+        // inside the step instead, so they describe where the previous step of the burst landed.
+        let mode = windowCycleMode
+        windowCycleSteps.enqueue { [weak self] in
             guard let self else { return }
-            await self.cycleWorkspaceWindow(
-                workspaceID: workspaceID, delta: direction > 0 ? 1 : -1, preferredTerminalSessionID: preferredFocusedBuiltInTerminalSessionID,
+            // Workspace mode resolves the one workspace to cycle first, and has nothing to do when it
+            // cannot; every other mode spans devices, so there is no workspace to resolve.
+            let scope: WindowCycleScope
+            if mode == .workspace {
+                guard let workspaceID = self.globalWindowNavigationWorkspaceID(requestID: requestID) else {
+                    self.host.logPerfMetric(
+                        "global_window_navigation", target: "workspace=nil", elapsedMS: self.host.windowShortcutElapsedMS(since: startedAt),
+                        success: false, detail: "direction=\(direction > 0 ? "next" : "previous") reason=no_workspace request_id=\(requestID)")
+                    return
+                }
+                scope = .workspace(workspaceID)
+            } else {
+                scope = .mode(mode)
+            }
+            await self.cycleWindows(
+                scope: scope, delta: direction > 0 ? 1 : -1, preferredTerminalSessionID: self.focusedBuiltInTerminalSessionIDForGlobalNavigation(),
                 requestID: requestID)
             self.host.logPerfMetric(
-                "global_window_navigation", target: "workspace=\(workspaceID)", elapsedMS: self.host.windowShortcutElapsedMS(since: startedAt),
-                success: true, detail: "direction=\(direction > 0 ? "next" : "previous") request_id=\(requestID)")
+                "global_window_navigation", target: "workspace=\(scope.workspaceID ?? "none")",
+                elapsedMS: self.host.windowShortcutElapsedMS(since: startedAt), success: true,
+                detail: "direction=\(direction > 0 ? "next" : "previous") mode=\(scope.mode.rawValue) request_id=\(requestID)")
+        }
+    }
+
+    /// The `spaces.ipc.cycle-workspace-window` entry point, which names the workspace to cycle rather
+    /// than reading the shortcut's mode. It joins the same chain as the shortcut so an IPC step and a
+    /// keypress cannot run against the same pre-landing state.
+    func enqueueWorkspaceWindowCycleStep(workspaceID: String, delta: Int, preferredTerminalSessionID: String?) {
+        windowCycleSteps.enqueue { [weak self] in
+            guard let self else { return }
+            let sessionID =
+                (preferredTerminalSessionID?.isEmpty == false)
+                ? preferredTerminalSessionID : self.focusedBuiltInTerminalSessionIDForGlobalNavigation()
+            await self.cycleWindows(scope: .workspace(workspaceID), delta: delta, preferredTerminalSessionID: sessionID)
         }
     }
 
@@ -1184,7 +1397,6 @@ import workspacecore
         guard let frontmostApplicationProcessID, frontmostApplicationProcessID != currentProcessID else { return nil }
         return frontmostApplicationProcessID
     }
-
 
     // MARK: - Hotkey reveal and toggle
 

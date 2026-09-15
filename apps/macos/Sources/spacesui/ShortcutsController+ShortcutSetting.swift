@@ -12,6 +12,7 @@ extension ShortcutsController {
         case guiReloadShortcut
         case guiNextShortcut
         case guiPreviousShortcut
+        case guiCycleModeShortcut
         case guiSidebarNextShortcut
         case guiSidebarPreviousShortcut
         case guiOpenEditorShortcut
@@ -31,6 +32,7 @@ extension ShortcutsController {
             case .guiReloadShortcut: return "Reload data"
             case .guiNextShortcut: return "Next window"
             case .guiPreviousShortcut: return "Previous window"
+            case .guiCycleModeShortcut: return "Cycle mode"
             case .guiSidebarNextShortcut: return "Next workspace"
             case .guiSidebarPreviousShortcut: return "Previous workspace"
             case .guiOpenEditorShortcut: return "Open in Editor"
@@ -43,15 +45,15 @@ extension ShortcutsController {
         }
 
         static let settingsPanelCases: [ShortcutSetting] = [
-            .guiLeaderHotkey, .guiHotkey, .guiCommandPaletteHotkey, .guiNextShortcut, .guiPreviousShortcut, .guiSidebarNextShortcut,
-            .guiSidebarPreviousShortcut, .guiOpenEditorShortcut, .guiAlertsShortcut, .guiAddWorkspaceShortcut, .guiReloadShortcut,
-            .guiOpenTerminalShortcut, .guiNewTabShortcut, .guiOpenFinderShortcut, .guiOpenSettingsShortcut, .guiWindowShortcut,
+            .guiLeaderHotkey, .guiHotkey, .guiCommandPaletteHotkey, .guiNextShortcut, .guiPreviousShortcut, .guiCycleModeShortcut,
+            .guiSidebarNextShortcut, .guiSidebarPreviousShortcut, .guiOpenEditorShortcut, .guiAlertsShortcut, .guiAddWorkspaceShortcut,
+            .guiReloadShortcut, .guiOpenTerminalShortcut, .guiNewTabShortcut, .guiOpenFinderShortcut, .guiOpenSettingsShortcut, .guiWindowShortcut,
         ]
 
         var usesLeader: Bool {
             switch self {
-            case .guiAlertsShortcut, .guiNextShortcut, .guiPreviousShortcut, .guiSidebarNextShortcut, .guiSidebarPreviousShortcut,
-                .guiOpenEditorShortcut, .guiOpenTerminalShortcut, .guiOpenFinderShortcut, .guiReloadShortcut:
+            case .guiAlertsShortcut, .guiNextShortcut, .guiPreviousShortcut, .guiCycleModeShortcut, .guiSidebarNextShortcut,
+                .guiSidebarPreviousShortcut, .guiOpenEditorShortcut, .guiOpenTerminalShortcut, .guiOpenFinderShortcut, .guiReloadShortcut:
                 return true
             default: return false
             }
@@ -81,6 +83,7 @@ extension ShortcutsController {
             case .guiReloadShortcut: return ClientSettingsKey.guiReloadShortcut
             case .guiNextShortcut: return ClientSettingsKey.guiNextShortcut
             case .guiPreviousShortcut: return ClientSettingsKey.guiPreviousShortcut
+            case .guiCycleModeShortcut: return ClientSettingsKey.guiCycleModeShortcut
             case .guiSidebarNextShortcut: return ClientSettingsKey.guiSidebarNextShortcut
             case .guiSidebarPreviousShortcut: return ClientSettingsKey.guiSidebarPreviousShortcut
             case .guiOpenEditorShortcut: return ClientSettingsKey.guiOpenEditorShortcut
@@ -102,6 +105,7 @@ extension ShortcutsController {
             case .guiReloadShortcut: return ClientSettingsKey.defaultGUIReloadShortcut
             case .guiNextShortcut: return ClientSettingsKey.defaultGUINextShortcut
             case .guiPreviousShortcut: return ClientSettingsKey.defaultGUIPreviousShortcut
+            case .guiCycleModeShortcut: return ClientSettingsKey.defaultGUICycleModeShortcut
             case .guiSidebarNextShortcut: return ClientSettingsKey.defaultGUISidebarNextShortcut
             case .guiSidebarPreviousShortcut: return ClientSettingsKey.defaultGUISidebarPreviousShortcut
             case .guiOpenEditorShortcut: return ClientSettingsKey.defaultGUIOpenEditorShortcut
@@ -123,6 +127,7 @@ extension ShortcutsController {
             case ClientSettingsKey.guiReloadShortcut: self = .guiReloadShortcut
             case ClientSettingsKey.guiNextShortcut: self = .guiNextShortcut
             case ClientSettingsKey.guiPreviousShortcut: self = .guiPreviousShortcut
+            case ClientSettingsKey.guiCycleModeShortcut: self = .guiCycleModeShortcut
             case ClientSettingsKey.guiSidebarNextShortcut: self = .guiSidebarNextShortcut
             case ClientSettingsKey.guiSidebarPreviousShortcut: self = .guiSidebarPreviousShortcut
             case ClientSettingsKey.guiOpenEditorShortcut: self = .guiOpenEditorShortcut

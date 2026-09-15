@@ -16,6 +16,7 @@ final class ChromeAdapterTests: XCTestCase {
             #!/bin/sh
             printf '%s' "$2" > \(shellQuoted(scriptLog.path))
             printf 'https://front.example/current\\n'
+            printf '202\\n'
             printf '__SPACES_FRONTMOST_TABS__\\n'
             printf '101\t1\tDocs\thttp://localhost:3000/docs\\n'
             printf '202\t2\tAdmin\thttp://localhost:4000/admin\\n'
@@ -25,6 +26,7 @@ final class ChromeAdapterTests: XCTestCase {
             let snapshot = try makeAdapter().tabSnapshot(inWindowIDs: [202, 101, 101, -1, 0])
 
             XCTAssertEqual(snapshot.frontmostActiveTabURL, "https://front.example/current")
+            XCTAssertEqual(snapshot.frontmostWindowID, 202)
             XCTAssertEqual(snapshot.tabs.map(\.windowID), [101, 202])
             XCTAssertEqual(snapshot.tabs.map(\.tabIndex), [1, 2])
             XCTAssertEqual(snapshot.tabs.map(\.url), ["http://localhost:3000/docs", "http://localhost:4000/admin"])
@@ -32,13 +34,15 @@ final class ChromeAdapterTests: XCTestCase {
             let script = try String(contentsOf: scriptLog, encoding: .utf8)
             XCTAssertTrue(script.contains("set requestedWindowIDs to {\"101\", \"202\"}"))
             XCTAssertTrue(script.contains("set frontmostURL to URL of active tab of front window"))
+            XCTAssertTrue(script.contains("set frontmostWindowID to (id of front window) as string"))
             XCTAssertTrue(script.contains("return frontmostURL &"))
         }
     }
 
-    func testTabSnapshotInWindowIDsParsesRowsWhenFrontmostURLIsEmpty() throws {
+    func testTabSnapshotInWindowIDsParsesRowsWhenChromeHasNoFrontWindow() throws {
         let mock = """
             #!/bin/sh
+            printf '\\n'
             printf '\\n'
             printf '__SPACES_FRONTMOST_TABS__\\n'
             printf '101\t1\tDocs\thttp://localhost:3000/docs\\n'
@@ -48,6 +52,7 @@ final class ChromeAdapterTests: XCTestCase {
             let snapshot = try makeAdapter().tabSnapshot(inWindowIDs: [101])
 
             XCTAssertNil(snapshot.frontmostActiveTabURL)
+            XCTAssertNil(snapshot.frontmostWindowID)
             XCTAssertEqual(snapshot.tabs.map(\.windowID), [101])
             XCTAssertEqual(snapshot.tabs.map(\.tabIndex), [1])
             XCTAssertEqual(snapshot.tabs.map(\.url), ["http://localhost:3000/docs"])
@@ -65,6 +70,7 @@ final class ChromeAdapterTests: XCTestCase {
 
             XCTAssertTrue(snapshot.tabs.isEmpty)
             XCTAssertNil(snapshot.frontmostActiveTabURL)
+            XCTAssertNil(snapshot.frontmostWindowID)
         }
     }
 

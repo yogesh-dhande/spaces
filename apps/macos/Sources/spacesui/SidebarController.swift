@@ -1822,21 +1822,41 @@ private struct DeviceSyncState {
     }
 
     func selectWorkspace(_ workspace: WorkspaceSummary) {
-        // A non-git project's single workspace has no dedicated row; its project row
-        // stands in for it, so select that row instead of a `.workspace` item.
         let owningProject = findWorkspace(id: workspace.id)?.0
+        if let row = materializedSelectionRow(for: workspace, owningProject: owningProject) {
+            host.outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            return
+        }
+        // Every landing in a mode that spans workspaces has to select the workspace it landed in, and a
+        // collapsed git project materializes no row for its workspaces, so the row the selection needs is
+        // not there to find. Expand the owning project first, through the same call the disclosure click
+        // makes, so its persisted collapse state is updated the same way rather than diverging from what
+        // is on screen. Alerts focus and the command palette run this same selection and are covered by it.
+        //
+        // Only navigation expands. `reloadOutlinePreservingSelection` re-asserts the selection under
+        // `suppressOutlineSelectionChanges` because it is a repaint, and structural repaints arrive
+        // several times a second under a live workspace: expanding there would reopen a project the user
+        // collapsed, over and over, instead of leaving the outline unselected as that repaint intends.
+        guard !host.suppressOutlineSelectionChanges, let owningProject, owningProject.isGitRepo, owningProject.isCollapsed else { return }
+        toggleProjectExpanded(projectID: owningProject.id)
+        guard let row = materializedSelectionRow(for: workspace, owningProject: owningProject) else { return }
+        host.outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+    }
+
+    /// The outline row that stands for `workspace`, or nil while none is materialized.
+    ///
+    /// A non-git project's single workspace has no dedicated row; its project row stands in for it, so
+    /// that row is the answer instead of a `.workspace` item.
+    private func materializedSelectionRow(for workspace: WorkspaceSummary, owningProject: ProjectSummary?) -> Int? {
         for row in 0..<host.outlineView.numberOfRows {
             guard let ref = host.outlineView.item(atRow: row) as? OutlineItemRef else { continue }
             switch ref.item {
-            case .workspace(_, let ws) where ws.id == workspace.id:
-                host.outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-                return
-            case .project(let project) where !project.isGitRepo && project.id == owningProject?.id:
-                host.outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-                return
+            case .workspace(_, let ws) where ws.id == workspace.id: return row
+            case .project(let project) where !project.isGitRepo && project.id == owningProject?.id: return row
             default: continue
             }
         }
+        return nil
     }
 
     func orderedSidebarWorkspaces() -> [WorkspaceSummary] { host.deviceModel.projects.flatMap { visibleWorkspaces(projectID: $0.id) } }

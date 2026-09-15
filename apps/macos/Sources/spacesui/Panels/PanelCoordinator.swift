@@ -209,17 +209,47 @@ import spacesterminalcore
     /// Ordered open session ids for a workspace across all panels: its workspace panel
     /// first (tab order), then panes of that workspace hosted in global panel windows.
     /// This is the "open targets" source for window cycling.
-    func openTerminalSessionIDs(workspaceID: String) -> [String] {
-        var ordered: [String] = []
+    func openTerminalSessionIDs(workspaceID: String) -> [String] { openTerminalSessionIDsByWorkspace()[workspaceID] ?? [] }
+
+    /// The same ordered open session ids for every workspace at once, gathered in one pass. The
+    /// window cycle's cross-device modes need all of them on every keypress.
+    func openTerminalSessionIDsByWorkspace() -> [String: [String]] {
+        var ordered: [String: [String]] = [:]
         for (scope, state) in panels.sorted(by: { scopeSortKey($0.key) < scopeSortKey($1.key) }) {
-            switch scope {
-            case .workspace(_, let scopeWorkspaceID):
-                guard scopeWorkspaceID == workspaceID else { continue }
-                ordered.append(contentsOf: PanelLayoutEngine.orderedTerminalSessionIDs(in: state.layout))
-            case .globalWindow:
-                for sessionID in PanelLayoutEngine.orderedTerminalSessionIDs(in: state.layout)
-                where contentControllers[sessionID]?.workspaceID == workspaceID { ordered.append(sessionID) }
+            for sessionID in PanelLayoutEngine.orderedTerminalSessionIDs(in: state.layout) {
+                let sessionWorkspaceID: String?
+                switch scope {
+                case .workspace(_, let scopeWorkspaceID): sessionWorkspaceID = scopeWorkspaceID
+                case .globalWindow: sessionWorkspaceID = contentControllers[sessionID]?.workspaceID
+                }
+                guard let sessionWorkspaceID else { continue }
+                ordered[sessionWorkspaceID, default: []].append(sessionID)
             }
+        }
+        return ordered
+    }
+
+    /// The same map as the cycle sees it: the in-memory pass above, completed out of the persisted
+    /// layouts of the workspaces in `workspaceKeys` whose panel this launch has not restored.
+    ///
+    /// A workspace panel's layout is materialized lazily, the first time the workspace is selected or
+    /// one of its panes is opened, so after a relaunch `panels` holds only the workspaces reached so
+    /// far. A pane's openness is its persisted layout until its workspace is visited, and the cycle
+    /// counts it either way, so a fresh launch enumerates what the user left open instead of what
+    /// happens to have been restored. Reading a layout restores nothing: no panel state, view, or
+    /// content controller is created here. A workspace whose panel is restored keeps reading memory,
+    /// which is the truth once restored because it can hold layout changes not yet written back.
+    func openTerminalSessionIDsByWorkspace(includingPersistedLayoutsFor workspaceKeys: [PanelLayoutEngine.WorkspaceKey]) -> [String: [String]] {
+        var ordered = openTerminalSessionIDsByWorkspace()
+        for key in workspaceKeys where panels[.workspace(deviceID: key.deviceID, workspaceID: key.workspaceID)] == nil {
+            guard let layout = host.restoredWorkspacePanelLayout(deviceID: key.deviceID, workspaceID: key.workspaceID) else { continue }
+            // Whatever the in-memory pass already found for this workspace is hosted in a global panel
+            // window, since its own panel is not restored. Those panes come second, as they do in that
+            // pass, and one of them still named by the stale persisted row is not counted twice.
+            let hostedInPanelWindows = ordered[key.workspaceID] ?? []
+            let persisted = PanelLayoutEngine.orderedTerminalSessionIDs(in: layout).filter { !hostedInPanelWindows.contains($0) }
+            guard !persisted.isEmpty else { continue }
+            ordered[key.workspaceID] = persisted + hostedInPanelWindows
         }
         return ordered
     }
@@ -419,6 +449,12 @@ import spacesterminalcore
     /// found by scanning for which paneID's controller this is.
     func noteContentFocused(_ content: any PaneContentHosting) {
         guard let (scope, paneID) = placement(forContent: content) else { return }
+        // Reaching a pane by hand is a visit for window cycling, exactly as focusing it through
+        // `activateFocusedPane` is. Recorded ahead of the guard below, because that guard asks
+        // whether this pane is its own panel's focused pane: clicking into a pane in another
+        // workspace's panel, which already calls it focused, is still the visit that makes that pane
+        // the most recent target.
+        if let sessionID = (content as? any TerminalPaneContentHosting)?.sessionID { host.noteWindowNavigationContentVisit(sessionID: sessionID) }
         guard layout(for: scope).focusedPaneID != paneID else { return }
         focusPane(scope: scope, paneID: paneID, moveKeyboardFocus: false)
     }
@@ -1305,9 +1341,7 @@ import spacesterminalcore
         case .codePane(let paneDeviceID, let paneWorkspaceID): needsRetarget = paneDeviceID != deviceID || paneWorkspaceID != workspaceID
         default: needsRetarget = false
         }
-        if needsRetarget {
-            retargetCodePane(paneID: placement.paneID, scope: placement.scope, toDeviceID: deviceID, workspaceID: workspaceID)
-        }
+        if needsRetarget { retargetCodePane(paneID: placement.paneID, scope: placement.scope, toDeviceID: deviceID, workspaceID: workspaceID) }
         focus(placement: placement)
     }
 
@@ -1315,11 +1349,9 @@ import spacesterminalcore
     /// creation arm `openOrFocusGlobalEditorWindow` reaches once `anyGlobalCodePanePlacement` finds
     /// nothing to reuse.
     @discardableResult func openCodePaneInNewTab(
-        deviceID: String, workspaceID: String, initialMode: CodePaneMode,
-        initialModePolicy: CodePaneInitialModePolicy = .restoreWorkspaceMode, in scope: PanelScope? = nil
-    )
-        -> Bool
-    {
+        deviceID: String, workspaceID: String, initialMode: CodePaneMode, initialModePolicy: CodePaneInitialModePolicy = .restoreWorkspaceMode,
+        in scope: PanelScope? = nil
+    ) -> Bool {
         guard let resolvedScope = scope ?? workspaceScope(forWorkspaceID: workspaceID) else { return false }
         guard mayCreateCodePane(workspaceID: workspaceID) else { return false }
         let paneID = UUID().uuidString

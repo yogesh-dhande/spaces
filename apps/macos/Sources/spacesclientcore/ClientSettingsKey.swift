@@ -28,6 +28,8 @@ public enum ClientSettingsKey {
     public static let defaultGUINextShortcut = "]"
     public static let guiPreviousShortcut = "gui_previous_shortcut"
     public static let defaultGUIPreviousShortcut = "["
+    public static let guiCycleModeShortcut = "gui_cycle_mode_shortcut"
+    public static let defaultGUICycleModeShortcut = "\\"
     public static let guiSidebarNextShortcut = "gui_sidebar_next_shortcut"
     public static let defaultGUISidebarNextShortcut = "down"
     public static let guiSidebarPreviousShortcut = "gui_sidebar_previous_shortcut"
@@ -36,6 +38,9 @@ public enum ClientSettingsKey {
     public static let defaultGUIWindowShortcut = "cmd+1"
     public static let alertsDismissedAttentionItems = "alerts_dismissed_attention_items"
     public static let activeWorkspaceID = "active_workspace_id"
+    /// Which set of windows the next/previous window shortcuts rotate over (a `WindowCycleMode` raw
+    /// value). An unset or unparseable value resolves to the Workspace default.
+    public static let windowCycleMode = "window_cycle_mode"
     /// Client-side theme selection (a `ThemeID` raw value). Internal-only: persisted and
     /// honored at launch, but not exposed through any settings UI or CLI yet.
     public static let appThemeID = "app_theme_id"

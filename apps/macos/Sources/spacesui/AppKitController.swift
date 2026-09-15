@@ -167,6 +167,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// terminal-pane callback through `host.`) does not need a second cross-controller import.
     func noteWindowNavigationTerminalFocus(sessionID: String) { windowFocus.noteWindowNavigationTerminalFocus(sessionID: sessionID) }
 
+    /// Thin forwarder to `windowFocus`, for the same reason as `noteWindowNavigationTerminalFocus`.
+    func noteWindowNavigationContentVisit(sessionID: String) { windowFocus.noteWindowNavigationContentVisit(sessionID: sessionID) }
+
     /// Thin forwarder to `windowFocus`, kept so `SidebarController` and `AlertsController` (which
     /// already reach the rest of their shortcut-badge state through `host.`) do not need a second
     /// cross-controller import.
@@ -330,6 +333,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // all render in the chosen light/dark variant from the first frame.
         applyStoredAppAppearance()
         loadStoredTerminalTextSize()
+        windowFocus.loadStoredWindowCycleMode()
         logStartupProfile(
             "did_finish_launching",
             details:
@@ -559,11 +563,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         Task { @MainActor [weak self, object, workspaceID, delta, preferredFocusedBuiltInTerminalSessionID] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
-            let preferredTerminalSessionID =
-                (preferredFocusedBuiltInTerminalSessionID?.isEmpty == false)
-                ? preferredFocusedBuiltInTerminalSessionID : self.windowFocus.focusedBuiltInTerminalSessionIDForGlobalNavigation()
-            await self.windowFocus.cycleWorkspaceWindow(
-                workspaceID: workspaceID, delta: delta, preferredTerminalSessionID: preferredTerminalSessionID)
+            // This entry point names the workspace to cycle, so it always cycles that workspace's own
+            // windows: the caller asked for a workspace, not for whichever mode the shortcut is in.
+            self.windowFocus.enqueueWorkspaceWindowCycleStep(
+                workspaceID: workspaceID, delta: delta, preferredTerminalSessionID: preferredFocusedBuiltInTerminalSessionID)
         }
     }
 
@@ -6428,6 +6431,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated static func setClientActiveWorkspaceID(_ workspaceID: String?) {
         try? SpacesClientDatabase.setDefaultSetting(key: ClientSettingsKey.activeWorkspaceID, value: workspaceID)
     }
+
+    /// The profile's persisted window-cycling mode. Read once at launch by `WindowFocusController`,
+    /// which owns the mode in effect from then on.
+    // Not private: WindowFocusController calls this from a different file in the same module
+    // (cross-file 'private' isn't visible).
+    func clientWindowCycleMode() -> WindowCycleMode {
+        WindowCycleMode.resolved(persistedRawValue: (try? clientDatabase().setting(key: ClientSettingsKey.windowCycleMode)) ?? nil)
+    }
+
+    nonisolated static func setClientWindowCycleMode(_ mode: WindowCycleMode) {
+        try? SpacesClientDatabase.setDefaultSetting(key: ClientSettingsKey.windowCycleMode, value: mode.rawValue)
+    }
+
+    /// The window-cycling mode changed. The sidebar's cycling row and the confirmation overlay hang
+    /// off this call; until they exist it records the change in the hotkey log, which is where the
+    /// shortcut that made it is already traced.
+    func windowCycleModeDidChange(_ mode: WindowCycleMode) { logHotkeyDebug("window_cycle_mode mode=\(mode.rawValue)") }
 
     /// The overview for the daemon that owns `workspaceID` (local or remote), or nil when
     /// the workspace has no known owning device or that device's section carries no
