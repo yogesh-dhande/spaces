@@ -118,11 +118,6 @@ import workspacecore
         if let openEditorShortcutSpec {
             registerHotkey(spec: openEditorShortcutSpec, id: GlobalHotkey.openEditor.rawValue, signature: signature, target: target)
         }
-        // A Carbon hotkey like next/previous rather than a local monitor entry: the cycling mode has to
-        // be switchable while the window the cycle just landed on belongs to another app.
-        if let cycleModeShortcutSpec {
-            registerHotkey(spec: cycleModeShortcutSpec, id: GlobalHotkey.cycleMode.rawValue, signature: signature, target: target)
-        }
 
         var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let status = InstallEventHandler(
@@ -168,6 +163,19 @@ import workspacecore
             if self.host.handleNewTabSessionPickerShortcut(event: event) { return nil }
             if self.host.handleClosePaneShortcut(event: event) { return nil }
             if self.host.handleFocusedTextInputShortcut(event: event) { return nil }
+            if let cycleModeShortcutSpec, self.matches(event: event, spec: cycleModeShortcutSpec) {
+                // An in-app shortcut rather than a Carbon global hotkey like next/previous: the mode
+                // is a Spaces-side setting, confirmed on the Spaces window, so it only has to fire
+                // while Spaces is the active app. It runs ahead of the text-input return below because
+                // it applies anywhere in the active app, a palette search or rename field included,
+                // and a chord that means something to a text field is already claimed by the focused
+                // text-input handler above. From a focused terminal pane it reaches here only as a
+                // Command or leader chord; rebound to a plain chord (Ctrl+K, say) it belongs to the
+                // terminal while a pane has focus, the rule the disposition above applies to every
+                // in-app shortcut.
+                self.host.windowFocus.stepWindowCycleMode()
+                return nil
+            }
             if self.host.isTextInputFocused() { return event }
             if self.handleSidebarNavigationShortcut(event: event) { return nil }
             if let openTerminalShortcutSpec, self.matches(event: event, spec: openTerminalShortcutSpec) {
@@ -222,7 +230,6 @@ import workspacecore
         case .next: host.windowFocus.focusGlobalWindowNavigation(direction: 1)
         case .previous: host.windowFocus.focusGlobalWindowNavigation(direction: -1)
         case .openEditor: host.openGlobalEditorFromHotkey()
-        case .cycleMode: host.windowFocus.stepWindowCycleMode()
         }
     }
 
