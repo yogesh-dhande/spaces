@@ -3874,8 +3874,27 @@ end tell
 APPLESCRIPT
 }
 
+# The `Cycle mode` chord is an in-app shortcut on the app's local event monitor, not a global hotkey,
+# so the keystroke only reaches it while Spaces is the active app: raise and focus the main window
+# before each send, the way the numbered window shortcuts are driven. The ack is the mode change the
+# chord causes, which nothing else in this run triggers.
 send_cycle_mode_hotkey_with_ack() {
-  send_spaces_hotkey_with_ack send_cycle_mode_hotkey "spaces: hotkey_debug handle id=6 hotkey=cycleMode "
+  local pattern="spaces: hotkey_debug window_cycle_mode mode="
+  local attempt=1
+  while (( attempt <= 3 )); do
+    ensure_single_spaces_instance "$SPACES_PID"
+    if ! wait_for_spaces_main_window_shortcut_focus "$SPACES_PID"; then
+      log_debug "main Spaces window did not become key before the cycle-mode shortcut on attempt $attempt"
+    fi
+    sleep 0.1
+    send_cycle_mode_hotkey
+    if wait_for_app_log_pattern_optional "$pattern" >/dev/null; then
+      return 0
+    fi
+    log_debug "cycle-mode shortcut was not received on attempt $attempt; retrying"
+    attempt=$((attempt + 1))
+  done
+  fail "timed out waiting for cycle-mode shortcut reception"
 }
 
 # Steps the cycling mode with its shortcut and proves the sidebar's cycling row followed, then steps
