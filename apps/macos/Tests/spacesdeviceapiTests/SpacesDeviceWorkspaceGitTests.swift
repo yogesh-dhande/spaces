@@ -15,7 +15,8 @@ import spacesterminalcore
 /// Fixture repositories must not inherit the repository-local Git environment exported by a
 /// pre-commit hook. Those variables can redirect `git init`/`git add` into the parent checkout or
 /// make an otherwise independent temporary repository use the hook's index and object database.
-private func removeGitRepositoryEnvironment(from environment: inout [String: String]) {
+/// The list is `git rev-parse --local-env-vars`. Shared by every git-spawning fixture in this target.
+func removeGitRepositoryEnvironment(from environment: inout [String: String]) {
     for key in [
         "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_COMMON_DIR", "GIT_DIR", "GIT_GRAFT_FILE",
         "GIT_IMPLICIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_NAMESPACE", "GIT_NO_REPLACE_OBJECTS", "GIT_OBJECT_DIRECTORY", "GIT_PREFIX",
@@ -45,8 +46,7 @@ private struct NestedSubmoduleFixture {
 }
 
 private func makeNestedSubmoduleSuperproject() throws -> NestedSubmoduleFixture {
-    let container = FileManager.default.temporaryDirectory.appendingPathComponent(
-        "spaces-nested-submodule-\(UUID().uuidString)", isDirectory: true)
+    let container = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-nested-submodule-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
 
     let bSource = try makeFixtureRepository(
@@ -85,11 +85,11 @@ private func makeGitInvocationRecorder(at directory: URL, log: URL, stall: (matc
     let script = directory.appendingPathComponent("recording-git")
     let stallLine = stall.map { "case \"$*\" in *\"\($0.match)\"*) sleep \($0.seconds) >/dev/null 2>&1 ;; esac" } ?? ""
     try """
-        #!/bin/sh
-        printf '%s\\n' "$*" >> '\(log.path)'
-        \(stallLine)
-        exec /usr/bin/env git "$@"
-        """.write(to: script, atomically: true, encoding: .utf8)
+    #!/bin/sh
+    printf '%s\\n' "$*" >> '\(log.path)'
+    \(stallLine)
+    exec /usr/bin/env git "$@"
+    """.write(to: script, atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
     return script
 }
@@ -1024,8 +1024,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         let client = RemoteWorkspaceGitClient()
 
         try runGit(["mv", "sub", "renamed-sub"], cwd: superRoot.path)
-        try "renamed sub - dirty edit".write(
-            to: superRoot.appendingPathComponent("renamed-sub/FILE.txt"), atomically: true, encoding: .utf8)
+        try "renamed sub - dirty edit".write(to: superRoot.appendingPathComponent("renamed-sub/FILE.txt"), atomically: true, encoding: .utf8)
 
         let result = try buildDiff(workspaceDir: superRoot.path, refName: nil, gitClient: client)
         let sub = try #require(result.files.first { $0.path == "renamed-sub" })
@@ -1141,8 +1140,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         // Neither side is an ancestor of the other, so git cannot resolve the gitlink on its own: the
         // merge is expected to stop with a conflict, not to succeed.
         let mergeStatus = try runGitAllowingFailure(
-            ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "-c", "core.editor=true", "merge", "left"],
-            cwd: superRoot.path)
+            ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "-c", "core.editor=true", "merge", "left"], cwd: superRoot.path)
         #expect(mergeStatus != 0)
         let status = try runGit(["status", "--porcelain"], cwd: superRoot.path)
         #expect(status.contains("UU sub"))
@@ -1792,8 +1790,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
 
         // The plans carry the repository each file's git commands must run in, which is what keeps a
         // submodule's patch out of the superproject's repository.
-        let snapshot = try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(
-            workspaceDir: superRoot.path, refName: nil, gitClient: client)
+        let snapshot = try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(workspaceDir: superRoot.path, refName: nil, gitClient: client)
         #expect(snapshot.plan(for: "A/FILE.txt")?.repoDir == superRoot.appendingPathComponent("A").path)
         #expect(snapshot.plan(for: "A/B/DEEP.txt")?.repoDir == superRoot.appendingPathComponent("A/B").path)
         #expect(snapshot.plan(for: "A/B/DEEP.txt")?.repoRelativePath == "DEEP.txt")
@@ -1853,8 +1850,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         // recorded as the parent's pointer: the state a shallow or partially fetched clone leaves behind.
         try "a v2".write(to: fixture.submoduleASource.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
         try commitFixtureAll(fixture.submoduleASource, message: "a v2")
-        let unfetched = try runFixtureGit(["rev-parse", "HEAD"], cwd: fixture.submoduleASource.path)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let unfetched = try runFixtureGit(["rev-parse", "HEAD"], cwd: fixture.submoduleASource.path).trimmingCharacters(in: .whitespacesAndNewlines)
         try runGit(["update-index", "--cacheinfo", "160000,\(unfetched),A"], cwd: superRoot.path)
         try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "bump A"], cwd: superRoot.path)
 
@@ -2057,8 +2053,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         defer { try? FileManager.default.removeItem(at: fixture.container) }
         let client = RemoteWorkspaceGitClient()
 
-        try runFixtureGit(
-            ["config", "-f", ".gitmodules", "submodule.packages/app/sub.ignore", "dirty"], cwd: fixture.repositoryRoot.path)
+        try runFixtureGit(["config", "-f", ".gitmodules", "submodule.packages/app/sub.ignore", "dirty"], cwd: fixture.repositoryRoot.path)
 
         let result = try buildDiff(workspaceDir: fixture.workspaceDir.path, refName: nil, gitClient: client)
         #expect(!result.files.contains { $0.path.hasPrefix("sub/") })
@@ -2293,8 +2288,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         try runFixtureGit(["init", "--initial-branch", "main"], cwd: repositoryRoot.path)
         try "root".write(to: workspaceDir.appendingPathComponent("ROOT.md"), atomically: true, encoding: .utf8)
         try commitFixtureAll(repositoryRoot, message: "initial")
-        try runFixtureGit(
-            ["-c", "protocol.file.allow=always", "submodule", "add", "-q", source.path, "packages/app/sub"], cwd: repositoryRoot.path)
+        try runFixtureGit(["-c", "protocol.file.allow=always", "submodule", "add", "-q", source.path, "packages/app/sub"], cwd: repositoryRoot.path)
         try commitFixtureAll(repositoryRoot, message: "add sub")
 
         try "sub v2".write(to: source.appendingPathComponent("FILE.txt"), atomically: true, encoding: .utf8)
@@ -2637,10 +2631,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         // tells the client that directory is a submodule rather than a plain folder, and which commit its
         // checkout sits at, which the tree labels the folder with.
         #expect(!result.paths.contains("A"))
-        #expect(
-            result.submodules == [
-                .init(path: "A", commit: fixture.submoduleAHead), .init(path: "A/B", commit: fixture.submoduleBHead),
-            ])
+        #expect(result.submodules == [.init(path: "A", commit: fixture.submoduleAHead), .init(path: "A/B", commit: fixture.submoduleBHead)])
         #expect(result.truncated == false)
     }
 
@@ -2705,8 +2696,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         try commitFixtureAll(superRoot, message: "bump sub on main")
         #expect(throws: (any Error).self) {
             try runFixtureGit(
-                ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "-c", "core.editor=true", "merge", "left"],
-                cwd: superRoot.path)
+                ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "-c", "core.editor=true", "merge", "left"], cwd: superRoot.path)
         }
         // The premise of the test: the index really does hold the gitlink more than once.
         let stages = try runFixtureGit(["ls-files", "--stage", "--", "sub"], cwd: superRoot.path)
@@ -3124,10 +3114,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         #expect(first == second)
         let status = "status --porcelain -z --untracked-files=all --ignored=matching -- ."
         // The workspace's own repository and both submodules, in the order the recursion reaches them.
-        #expect(
-            try steadyTickCommands(log: log, root: fixture.superRoot) == [
-                ". \(status)", "A \(status)", "A/B \(status)",
-            ])
+        #expect(try steadyTickCommands(log: log, root: fixture.superRoot) == [". \(status)", "A \(status)", "A/B \(status)"])
     }
 
     // A tick's budget is one window shared by every repository it walks, so a submodule whose status wedges
@@ -3144,8 +3131,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         try FileManager.default.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
         let rootClient = RemoteWorkspaceGitClient(
             gitExecutable: try makeGitInvocationRecorder(
-                at: rootDirectory, log: rootDirectory.appendingPathComponent("root-stall.log"),
-                stall: (match: "/super status", seconds: 5)
+                at: rootDirectory, log: rootDirectory.appendingPathComponent("root-stall.log"), stall: (match: "/super status", seconds: 5)
             ).path)
 
         // Most of the tick's window is already spent when these ticks start, so a five second stall outlasts

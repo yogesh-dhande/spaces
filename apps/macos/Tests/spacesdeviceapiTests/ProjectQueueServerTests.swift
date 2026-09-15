@@ -158,12 +158,17 @@
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
             process.arguments = ["git"] + arguments
-            // A committer identity the repository does not have to supply, so this fixture works under any
-            // developer's (or CI's) git configuration.
-            process.environment = ProcessInfo.processInfo.environment.merging([
-                "GIT_AUTHOR_NAME": "Spaces Tests", "GIT_AUTHOR_EMAIL": "tests@usespaces.dev", "GIT_COMMITTER_NAME": "Spaces Tests",
-                "GIT_COMMITTER_EMAIL": "tests@usespaces.dev",
-            ]) { _, new in new }
+            // With the repository-local variables a pre-commit hook exports left in place, the `git init` below
+            // re-initialises the repository being committed (flipping its core.bare) and the fixture commit lands
+            // on its branch instead of the throwaway one. A committer identity the repository does not have to
+            // supply keeps the fixture working under any git configuration.
+            var environment = ProcessInfo.processInfo.environment
+            removeGitRepositoryEnvironment(from: &environment)
+            environment["GIT_AUTHOR_NAME"] = "Spaces Tests"
+            environment["GIT_AUTHOR_EMAIL"] = "tests@usespaces.dev"
+            environment["GIT_COMMITTER_NAME"] = "Spaces Tests"
+            environment["GIT_COMMITTER_EMAIL"] = "tests@usespaces.dev"
+            process.environment = environment
             try process.run()
             process.waitUntilExit()
             guard process.terminationStatus == 0 else {
