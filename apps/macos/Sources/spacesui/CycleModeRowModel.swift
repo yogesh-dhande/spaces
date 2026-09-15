@@ -18,11 +18,11 @@ struct CycleModeRowModel: Equatable, Sendable {
 
     var isEmpty: Bool { count == 0 }
 
-    /// The count slot on the sidebar row. An empty Attention set is the one state worth spelling out
-    /// there: a bare "0" beside "Attention" reads as a broken count rather than as the good news that
-    /// nothing is waiting on the user.
+    /// The count slot on the sidebar row. An empty Alerts set is the one state worth spelling out
+    /// there: a bare "0" beside "Alerts" reads as a broken count rather than as the good news that
+    /// nothing is asking for the user.
     var countText: String {
-        if mode == .attention, isEmpty { return "nothing waiting" }
+        if mode == .alerts, isEmpty { return "no alerts" }
         return "\(count)"
     }
 
@@ -38,11 +38,11 @@ struct CycleModeRowModel: Equatable, Sendable {
             guard let workspaceName else { return "no workspace selected" }
             if isEmpty { return "no windows in \(workspaceName)" }
             return "\(count) \(Self.pluralized("window", count)) in \(workspaceName)"
-        case .attention:
-            if isEmpty { return "nothing waiting" }
-            return "\(count) waiting or done across \(deviceCount) \(Self.pluralized("device", deviceCount))"
+        case .alerts:
+            if isEmpty { return "no alerts" }
+            return "\(count) \(Self.pluralized("alert", count)) across \(deviceCount) \(Self.pluralized("device", deviceCount))"
         case .allAgents:
-            if isEmpty { return "no agents running" }
+            if isEmpty { return "no agents" }
             return "\(count) \(Self.pluralized("agent", count)) across \(deviceCount) \(Self.pluralized("device", deviceCount))"
         case .openSessions:
             if isEmpty { return "no open sessions" }
@@ -56,8 +56,8 @@ struct CycleModeRowModel: Equatable, Sendable {
     static func menuItemDescription(for mode: WindowCycleMode) -> String {
         switch mode {
         case .workspace: return "The open windows of the workspace the cycle resolves from what is focused."
-        case .attention: return "Coding agents on any device that are waiting on you or done."
-        case .allAgents: return "Coding agents on any device that are working, waiting, or done."
+        case .alerts: return "Everything in Alerts on any device that has a window: exited processes, agents waiting or done, and bells."
+        case .allAgents: return "Coding agents on any device that have been launched and have not exited."
         case .openSessions: return "Every open terminal pane and open browser session, on any device."
         }
     }

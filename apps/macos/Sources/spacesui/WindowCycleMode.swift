@@ -8,9 +8,9 @@ import Foundation
 enum WindowCycleMode: String, CaseIterable, Sendable {
     /// The windows of the one workspace the cycle resolves from what is focused.
     case workspace
-    /// Coding agents on any device that are waiting on the user or done.
-    case attention
-    /// Coding agents on any device that are working or have something to report.
+    /// Everything the Alerts pane lists that has a window to land in, on any device.
+    case alerts
+    /// Coding agents on any device that have been launched and have not exited.
     case allAgents
     /// Open terminal-backed panes and open browser sessions on any device.
     case openSessions
@@ -18,7 +18,7 @@ enum WindowCycleMode: String, CaseIterable, Sendable {
     var displayName: String {
         switch self {
         case .workspace: return "Workspace"
-        case .attention: return "Attention"
+        case .alerts: return "Alerts"
         case .allAgents: return "All agents"
         case .openSessions: return "Open sessions"
         }
