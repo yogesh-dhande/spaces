@@ -230,6 +230,13 @@ private struct DeviceSyncState {
     private var alertsRowRail: NSView?
     private var alertsRowBadge: NSTextField?
 
+    // Cycling sidebar row, pinned above the sidebar footer
+    private var cycleModeRowView: NSView?
+    private var cycleModeRowIcon: NSImageView?
+    private var cycleModeRowModeLabel: NSTextField?
+    private var cycleModeRowCountLabel: NSTextField?
+    private var cycleModeRowHintLabel: NSTextField?
+
     // Automations sidebar row
     private var automationsRowContainer: NSView?
     private var automationsHeaderStack: NSStackView?
@@ -1563,6 +1570,11 @@ private struct DeviceSyncState {
         // so it repaints from them when it is open and no-ops otherwise.
         host.devicePairing.refreshDeviceSettingsForDeviceStatusChange()
         rebuildFlatSidebarData()
+        // An agent changing state or a workspace appearing changes what the cycling row counts, so the
+        // count follows the applied data. `refreshCycleModeRow` itself starts the Chrome half of that
+        // count off the main actor, capped to once per couple of seconds: see
+        // `WindowFocusController.refreshCycleModeBrowserState`.
+        refreshCycleModeRow()
         // Until `attachOutlineView` wires the outline's data source (the window build runs on a
         // deferred launch task, so an IPC-triggered reload can get here first; issue #581), there is
         // nothing to diff or paint: `reloadData()` on an unattached outline is a silent no-op, and
@@ -2971,8 +2983,11 @@ private struct DeviceSyncState {
         case .project(let project):
             guard let workspace = visibleWorkspaces(projectID: project.id).first else { return }
             host.selectedProjectID = project.id
-            host.selectedWorkspaceID = workspace.id
+            // Written before `selectedWorkspaceID` so its `didSet`-triggered row refresh (see that
+            // property's doc comment) sees the persisted preference already caught up, in case the
+            // cycling row's Workspace-mode fallback is the tier that ends up reading it.
             AppKitController.setClientActiveWorkspaceID(workspace.id)
+            host.selectedWorkspaceID = workspace.id
             host.showingSettings = false
             // A non-git project has no workspace row to expand, but a git workspace that was only
             // transiently expanded still needs to collapse now that the selection moved to this project.
@@ -2980,8 +2995,9 @@ private struct DeviceSyncState {
             host.showWorkspaceDetail(project: project, workspace: workspace, presentation: .userNavigation)
         case .workspace(let project, let workspace):
             host.selectedProjectID = project.id
-            host.selectedWorkspaceID = workspace.id
+            // See the ordering comment in the `.project` case above.
             AppKitController.setClientActiveWorkspaceID(workspace.id)
+            host.selectedWorkspaceID = workspace.id
             host.showingSettings = false
             updateWorkspaceExpansionForSelection(newWorkspaceID: workspace.id)
             host.showWorkspaceDetail(project: project, workspace: workspace, presentation: .userNavigation)
@@ -2993,6 +3009,11 @@ private struct DeviceSyncState {
 
     func refreshSidebarSelectionRows(previousProjectID: String?, currentProjectID: String?, previousWorkspaceID: String?, currentWorkspaceID: String?)
     {
+        // Workspace mode's row counts the selected workspace, but every caller here has already
+        // assigned `host.selectedWorkspaceID` before calling in, so that setter's own `didSet` has
+        // already told the row about the change (see the doc comment on `selectedWorkspaceID` in
+        // AppKitController); this function only reloads the outline rows whose chrome (selection
+        // highlight, the ⌘-number shortcut chips) depends on which project/workspace is selected.
         var rowsToReload = IndexSet()
         if let previousProjectID, let previousRow = rowIndex(forProjectID: previousProjectID) { rowsToReload.insert(previousRow) }
         if let currentProjectID, let currentRow = rowIndex(forProjectID: currentProjectID) { rowsToReload.insert(currentRow) }
@@ -3472,5 +3493,146 @@ private struct DeviceSyncState {
         if let rail = alertsRowRail {
             bindAppearanceReactiveLayer(rail) { [weak self] view in view.layer?.backgroundColor = self?.sidebarSelectionRailColor().cgColor }
         }
+    }
+
+    /// The cycling row, pinned at the bottom of the sidebar above the app identity footer: which set
+    /// the next/previous window shortcuts rotate over, how many windows that set holds, and the
+    /// shortcut that steps the mode.
+    ///
+    /// It reports state and opens a menu, so unlike Alerts and Automations it is not a selection
+    /// destination: no selected fill, no selection rail, no keyboard focus, and no place in the
+    /// sidebar's arrow navigation, which walks the outline alone.
+    func makeCycleModeRow() -> NSView {
+        // `PressableView` (not a plain `NSView`) so `AXPress` actually opens the mode menu: the row is
+        // announced as an accessibility button below, but its only interaction is the click gesture
+        // recognizer added at the bottom of this function, which `AXPress` does not trigger on its own.
+        let row = PressableView()
+        row.setAccessibilityIdentifier("sidebar-cycle-mode")
+        // A button in the accessibility tree, because that is what it does: one press opens the mode
+        // menu. The E2E reads the mode and the count off the label this row publishes.
+        row.setAccessibilityElement(true)
+        row.setAccessibilityRole(.button)
+        row.onAccessibilityPress = { [weak self] in self?.showCycleModeMenu() }
+
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "Cycling")?.withSymbolConfiguration(
+            .init(pointSize: 11, weight: .medium))
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        icon.setContentCompressionResistancePriority(.required, for: .horizontal)
+        cycleModeRowIcon = icon
+
+        let titleLabel = NSTextField(labelWithString: "Cycling")
+        titleLabel.font = Typography.caption
+        titleLabel.textColor = .secondaryLabelColor
+        titleLabel.setContentHuggingPriority(.required, for: .horizontal)
+        titleLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let modeLabel = NSTextField(labelWithString: "")
+        modeLabel.font = Typography.metadataTitle
+        modeLabel.textColor = Theme.accent
+        modeLabel.maximumNumberOfLines = 1
+        modeLabel.lineBreakMode = .byTruncatingTail
+        // Above the hint's own compression resistance (set below) so the hint detaches before the
+        // mode name truncates, per docs/design.md. Still below the count's `.required`: if the row
+        // is squeezed past the point where detaching the hint is enough, the mode name gives way
+        // before the count does, since the number is the row's whole point and a truncated mode name
+        // still reads.
+        modeLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        cycleModeRowModeLabel = modeLabel
+
+        let countLabel = NSTextField(labelWithString: "")
+        countLabel.font = Typography.monoCaption
+        countLabel.textColor = .secondaryLabelColor
+        countLabel.maximumNumberOfLines = 1
+        countLabel.lineBreakMode = .byTruncatingTail
+        countLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        cycleModeRowCountLabel = countLabel
+
+        let hintLabel = NSTextField(labelWithString: host.shortcuts.footerShortcutHint(for: .guiCycleModeShortcut))
+        hintLabel.font = Typography.caption
+        hintLabel.textColor = .tertiaryLabelColor
+        hintLabel.maximumNumberOfLines = 1
+        hintLabel.setContentHuggingPriority(.required, for: .horizontal)
+        // Below the mode and count labels' compression resistance (set above), matching the
+        // `.detachOnlyIfNecessary` visibility priority given to this view on the stack below: a
+        // narrow sidebar keeps the state text and drops the shortcut reminder first, not the other
+        // way around.
+        hintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        cycleModeRowHintLabel = hintLabel
+
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(icon)
+        stack.addArrangedSubview(titleLabel)
+        stack.addArrangedSubview(modeLabel)
+        stack.addArrangedSubview(countLabel)
+        stack.addArrangedSubview(NSView())  // spacer
+        stack.addArrangedSubview(hintLabel)
+        // The count slot can grow to a phrase ("nothing waiting"), and a narrow sidebar has to keep
+        // the state rather than the reminder of how to change it, so the hint is what leaves.
+        stack.setVisibilityPriority(.detachOnlyIfNecessary, for: hintLabel)
+
+        row.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: row.leadingAnchor), stack.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: row.topAnchor), stack.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+        ])
+
+        row.addGestureRecognizer(NSClickGestureRecognizer(target: host, action: #selector(AppKitController.cycleModeRowClicked)))
+        cycleModeRowView = row
+        refreshCycleModeRow()
+        return row
+    }
+
+    /// Repaints the cycling row from the mode in effect and the size of its set. Called wherever that
+    /// set, the workspace Workspace mode resolves, or the hint's chord can have moved: every sidebar
+    /// data apply, every panel layout change (a pane opening or closing), every mode change, every
+    /// workspace-selection change (`refreshSidebarSelectionRows`), every shortcut-specs reload
+    /// (`ShortcutsController.loadShortcutSpecs`), and every cycle press (`WindowFocusController.cycleWindows`).
+    ///
+    /// Every one of those triggers funnels through here, so this is also the single place that starts
+    /// the throttled Chrome refresh behind the Workspace and Open sessions counts: see
+    /// `WindowFocusController.refreshCycleModeBrowserState` for the once-per-couple-of-seconds cap that
+    /// keeps a busy trigger (a live workspace applies several times a second) from putting Chrome
+    /// scripting in a loop.
+    @discardableResult func refreshCycleModeRow() -> CycleModeRowModel {
+        let model = host.windowFocus.cycleModeRowModel()
+        cycleModeRowModeLabel?.stringValue = model.mode.displayName
+        cycleModeRowCountLabel?.stringValue = model.countText
+        cycleModeRowView?.setAccessibilityLabel(model.accessibilityLabel)
+        // The hint names the chord that steps the mode, which can change out from under the row: a
+        // rebind or a leader change reloads `host.shortcuts`' specs without rebuilding the row, so the
+        // hint is repainted here rather than only once at row build time.
+        cycleModeRowHintLabel?.stringValue = host.shortcuts.footerShortcutHint(for: .guiCycleModeShortcut)
+        // An empty set is a state worth reading at a glance: the glyph goes muted so the row says
+        // "nothing to cycle" without a second label.
+        cycleModeRowIcon?.contentTintColor = model.isEmpty ? .tertiaryLabelColor : Theme.accent
+        host.windowFocus.refreshCycleModeBrowserState()
+        return model
+    }
+
+    /// The cycling row's menu: the four modes in the order the mode shortcut steps through them, the
+    /// one in effect checked. Picking one runs the same selection the shortcut does.
+    func showCycleModeMenu() {
+        guard let row = cycleModeRowView else { return }
+        let menu = NSMenu()
+        let currentMode = host.windowFocus.windowCycleMode
+        for mode in WindowCycleMode.allCases {
+            let item = NSMenuItem(title: mode.displayName, action: #selector(AppKitController.selectCycleModeFromMenu(_:)), keyEquivalent: "")
+            item.target = host
+            item.representedObject = mode.rawValue
+            item.toolTip = CycleModeRowModel.menuItemDescription(for: mode)
+            item.state = mode == currentMode ? .on : .off
+            menu.addItem(item)
+        }
+        // The row is pinned to the sidebar footer, so a menu that grows downward from its top edge
+        // (the showWorkspaceOverflowMenu pattern) would spill past the window's bottom edge.
+        // Anchoring the last item at the row's top-left corner instead makes the menu grow upward
+        // from there, keeping it above the row and inside the window.
+        menu.popUp(positioning: menu.items.last, at: NSPoint(x: row.bounds.minX, y: row.bounds.maxY), in: row)
     }
 }

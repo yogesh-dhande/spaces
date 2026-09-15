@@ -304,6 +304,20 @@ extension SidebarAttentionStatus {
     }
 }
 
+/// A container view whose `AXPress` accessibility action invokes a closure, for rows that are a plain
+/// `NSView` announced as an accessibility button (see `PressableLabel` above for the same problem on a
+/// label) but whose only interaction is an `NSClickGestureRecognizer`, which `AXPress` never triggers
+/// since a click gesture recognizer is not an accessibility action.
+@MainActor final class PressableView: NSView {
+    var onAccessibilityPress: (() -> Void)?
+
+    override func accessibilityPerformPress() -> Bool {
+        guard let onAccessibilityPress else { return super.accessibilityPerformPress() }
+        onAccessibilityPress()
+        return true
+    }
+}
+
 nonisolated(unsafe) private var rowClickTargetAssocKey: UInt8 = 0
 
 /// Attach a click action to `view` by adding an `NSClickGestureRecognizer`.

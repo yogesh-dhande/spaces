@@ -20,8 +20,8 @@ import spacesdevicecore
 
     @Test func appToggleFallsBackToFocusedWindowWorkspaceWhenNoBuiltInTerminalWorkspaceExists() {
         #expect(
-            WindowFocusController.preferredWorkspaceIDForAppToggle(focusedTerminalSessionWorkspaceID: nil, focusedWindowWorkspaceID: "workspace-window")
-                == "workspace-window")
+            WindowFocusController.preferredWorkspaceIDForAppToggle(
+                focusedTerminalSessionWorkspaceID: nil, focusedWindowWorkspaceID: "workspace-window") == "workspace-window")
     }
 
     @Test func observedRemoteRoutedBrowserURLResolvesWorkspace() {
@@ -37,7 +37,7 @@ import spacesdevicecore
                     ]))
             ], sessions: [])
 
-        let workspaceID = BrowserSessionCoordinator.workspaceIDForObservedBrowserURL("http://web.feature-123.localhost:7391/docs", in: [overview])
+        let workspaceID = BrowserSessionCoordinator.workspaceIDForFrontmostBrowserURL("http://web.feature-123.localhost:7391/docs", in: [overview])
 
         #expect(workspaceID == "workspace")
     }

@@ -34,6 +34,14 @@ import workspacecore
     private var windowIssueToastActionButton: NSButton?
     private var windowIssueToastActionHandler: (() -> Void)?
     private var windowIssueToastDismissTask: Task<Void, Never>?
+    private var cycleModeHUDOverlay: NSView?
+    private var cycleModeHUDTitleLabel: NSTextField?
+    private var cycleModeHUDSummaryLabel: NSTextField?
+    private var cycleModeHUDChordLabel: NSTextField?
+    private var cycleModeHUDDismissTask: Task<Void, Never>?
+    /// How long the cycling-mode HUD stays up. Long enough to read three short lines, short enough
+    /// that it is gone before the next cycle press lands.
+    private static let cycleModeHUDVisibleSeconds: Double = 1
 
     enum OperationProgressContext: Equatable {
         case workspace(String)
@@ -121,6 +129,119 @@ import workspacecore
         detailLabel.stringValue = detail
         operationProgressContext = context
         updateOperationProgressOverlayVisibility()
+    }
+
+    // MARK: - Cycling-mode HUD
+
+    /// Confirms a window-cycling mode change: the mode's name, one line saying what its set holds,
+    /// and the chord that walks it, centered over the detail pane for a second.
+    ///
+    /// Centered rather than in the top-trailing banner slot because it confirms a change the user
+    /// just made with a keystroke and has to be read at once, and because it is not about the pane
+    /// underneath it: the banner slot carries facts about that pane. It is a subview of the window's
+    /// content view constrained to the detail container's center rather than a child of that
+    /// container, because the detail container is emptied wholesale whenever a placeholder or a block
+    /// replaces its content, which would take the HUD with it mid-display.
+    ///
+    /// Only a mode change shows it, so it never appears at launch, and a second change while it is up
+    /// replaces the text and restarts the timer instead of stacking a second overlay.
+    func showCycleModeHUD(model: CycleModeRowModel) {
+        // `host.window` is always the main Spaces window. The HUD shows there whenever that window is
+        // on screen, key or not: a detached panel or another app being frontmost is no reason to hide
+        // a confirmation the user can see. Only a main window that is off screen (hidden, minimized,
+        // another Space) leaves the row and the next press as the confirmation, an accepted rule.
+        guard let contentView = host.window?.contentView else { return }
+        // The cycle-mode hotkey is registered before the main window content exists: during the
+        // setup flow, `contentView` is the setup flow's own view and `detailContainer` is not yet
+        // attached to any window (it is installed in `buildMainWindowContent()`). Constraining the
+        // HUD to a detail-container anchor while the two views share no window would throw an
+        // AppKit auto layout exception, so skip showing anything until the main content is in place.
+        guard host.detailContainer.window === host.window else { return }
+        let overlay: NSView
+        let titleLabel: NSTextField
+        let summaryLabel: NSTextField
+        let chordLabel: NSTextField
+        if let existingOverlay = cycleModeHUDOverlay, let existingTitleLabel = cycleModeHUDTitleLabel,
+            let existingSummaryLabel = cycleModeHUDSummaryLabel, let existingChordLabel = cycleModeHUDChordLabel
+        {
+            overlay = existingOverlay
+            titleLabel = existingTitleLabel
+            summaryLabel = existingSummaryLabel
+            chordLabel = existingChordLabel
+        } else {
+            overlay = CycleModeHUDView()
+            overlay.wantsLayer = true
+            overlay.translatesAutoresizingMaskIntoConstraints = false
+            bindAppearanceReactiveLayer(overlay) { view in
+                view.layer?.cornerRadius = UIRadius.large
+                view.layer?.borderWidth = 1
+                view.layer?.borderColor = Theme.border.cgColor
+                view.layer?.backgroundColor = Theme.paletteSurface.cgColor
+            }
+
+            let stack = NSStackView()
+            stack.orientation = .vertical
+            stack.alignment = .centerX
+            stack.spacing = 4
+            stack.translatesAutoresizingMaskIntoConstraints = false
+
+            titleLabel = NSTextField(labelWithString: "")
+            titleLabel.font = Typography.cardTitle
+            titleLabel.textColor = .labelColor
+            titleLabel.maximumNumberOfLines = 1
+            stack.addArrangedSubview(titleLabel)
+
+            summaryLabel = NSTextField(labelWithString: "")
+            summaryLabel.font = Typography.metadata
+            summaryLabel.textColor = .secondaryLabelColor
+            summaryLabel.maximumNumberOfLines = 1
+            stack.addArrangedSubview(summaryLabel)
+
+            chordLabel = NSTextField(labelWithString: "")
+            chordLabel.font = Typography.caption
+            chordLabel.textColor = .tertiaryLabelColor
+            chordLabel.maximumNumberOfLines = 1
+            stack.addArrangedSubview(chordLabel)
+
+            overlay.addSubview(stack)
+            contentView.addSubview(overlay)
+            NSLayoutConstraint.activate([
+                stack.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 18),
+                stack.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -18),
+                stack.topAnchor.constraint(equalTo: overlay.topAnchor, constant: 14),
+                stack.bottomAnchor.constraint(equalTo: overlay.bottomAnchor, constant: -14),
+
+                overlay.centerXAnchor.constraint(equalTo: host.detailContainer.centerXAnchor),
+                overlay.centerYAnchor.constraint(equalTo: host.detailContainer.centerYAnchor),
+                overlay.widthAnchor.constraint(lessThanOrEqualTo: host.detailContainer.widthAnchor, constant: -48),
+            ])
+
+            cycleModeHUDOverlay = overlay
+            cycleModeHUDTitleLabel = titleLabel
+            cycleModeHUDSummaryLabel = summaryLabel
+            cycleModeHUDChordLabel = chordLabel
+        }
+
+        titleLabel.stringValue = model.mode.displayName
+        summaryLabel.stringValue = model.hudSummary
+        chordLabel.stringValue =
+            "Next \(host.shortcuts.footerShortcutHint(for: .guiNextShortcut))   Previous \(host.shortcuts.footerShortcutHint(for: .guiPreviousShortcut))"
+        // A pane installed after the HUD was built would otherwise cover it.
+        contentView.addSubview(overlay, positioned: .above, relativeTo: nil)
+        overlay.isHidden = false
+
+        cycleModeHUDDismissTask?.cancel()
+        cycleModeHUDDismissTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.cycleModeHUDVisibleSeconds))
+            guard !Task.isCancelled else { return }
+            self?.hideCycleModeHUD()
+        }
+    }
+
+    private func hideCycleModeHUD() {
+        cycleModeHUDDismissTask?.cancel()
+        cycleModeHUDDismissTask = nil
+        cycleModeHUDOverlay?.isHidden = true
     }
 
     func hideOperationProgressOverlay() {
@@ -298,3 +419,7 @@ import workspacecore
         try? payload.write(to: url, atomically: true, encoding: .utf8)
     }
 }
+
+/// The cycling-mode HUD's own view. It is a confirmation, not a control: every click goes to the
+/// pane underneath, so a press that lands while it is up is never swallowed.
+private final class CycleModeHUDView: NSView { override func hitTest(_ point: NSPoint) -> NSView? { nil } }

@@ -441,6 +441,12 @@ import workspacecore
         openFinderShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenFinderShortcut)
         openSettingsShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenSettingsShortcut)
         windowShortcutSpec = loadShortcutSpec(resolver, setting: .guiWindowShortcut)
+        // The cycling row's hint label is drawn once from `cycleModeShortcutSpec`/the leader chord at
+        // row build time and otherwise never updated on its own, so a rebind (or a leader change) here
+        // would leave it stale until some unrelated repaint happened to run. Every load pass, not just
+        // a user-triggered rebind, lands here: the extra repaint is cheap (label text only), and it
+        // keeps the row from needing to know when a load pass actually changed anything.
+        host.sidebar.refreshCycleModeRow()
     }
 
     private func loadShortcutSpec(_ resolver: ShortcutSettingResolver, setting: ShortcutSetting) -> HotkeySpec? {

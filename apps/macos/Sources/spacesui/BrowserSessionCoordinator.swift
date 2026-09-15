@@ -218,9 +218,12 @@ import workspacecore
     /// API, or another device). Idempotent: it clears the tracking rows, so a later reload that
     /// re-observes the same stopped workspace finds nothing to close.
     func closeLocalBrowserSessionWindows(workspaceID: String, configuredBrowserSessionTargetURLs: [String]) {
-        Task.detached(priority: .utility) {
+        Task.detached(priority: .utility) { [weak host] in
             Self.closeLocalBrowserSessionWindowsSynchronously(
                 workspaceID: workspaceID, configuredBrowserSessionTargetURLs: configuredBrowserSessionTargetURLs)
+            // Tabs just closed drop out of the cached Chrome snapshot the cycling row reads; invalidate
+            // it instead of waiting out the refresh interval.
+            await host?.windowFocus.invalidateBrowserCycleState()
         }
     }
 
@@ -382,6 +385,10 @@ import workspacecore
                 focused: true, path: "opened_window", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
                 chromeAppleScriptMS: chromeAppleScriptMS)
         }.value
+        // Every success path leaves the cached Chrome snapshot stale: opening or adopting a tab writes a
+        // window id the open-session set has to count, and re-focusing a tracked tab moves Chrome's
+        // frontmost window and URL, which Workspace mode resolves its scope from.
+        if result.focused { host.windowFocus.invalidateBrowserCycleState() }
         host.logPerfMetric(
             "browser_focus", target: URL(string: targetURL)?.host ?? targetURL, elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: result.focused,
@@ -391,11 +398,20 @@ import workspacecore
         return result.focused
     }
 
-    /// Resolves the workspace of the focused desktop window when it is a Chrome browser window, by
-    /// matching the frontmost tab URL to a configured browser session in the overview. Called from
-    /// `AppKitController.clientWorkspaceIDForFocusedWindow`.
-    nonisolated static func workspaceIDForObservedBrowserURL(_ activeURL: String, in overviews: [SpacesDeviceOverviewPayload]) -> String? {
-        var best: (workspaceID: String, prefixLength: Int)?
+    /// Resolves the workspace of a focused/frontmost Chrome window by matching its active tab URL
+    /// against every workspace's configured browser sessions, the same rule for a live press and for
+    /// `WindowFocusController.cycleModeRowModel`'s cached repaint: `clientWorkspaceIDForFocusedWindow`
+    /// calls this with a freshly-scripted URL, and the row calls it with `cachedBrowserCycleState`'s
+    /// snapshot's URL. Both apply the same URL rule with no tie-break, so they cannot disagree over
+    /// which workspace a shared target URL belongs to.
+    ///
+    /// When more than one workspace's session matches the URL at the same (longest) prefix length, the
+    /// first one encountered wins; there is no signal here (a window id or otherwise) to prefer one
+    /// tied match over another.
+    nonisolated static func workspaceIDForFrontmostBrowserURL(_ frontmostURL: String?, in overviews: [SpacesDeviceOverviewPayload]) -> String? {
+        guard let frontmostURL, !frontmostURL.isEmpty else { return nil }
+        var bestPrefixLength = -1
+        var bestWorkspaceID: String?
         for overview in overviews {
             for workspace in overview.workspaces {
                 let configuredTargetURLs = browserSessionTargetURLs(resolvedSessions: workspace.config.resolvedBrowserSessions)
@@ -404,13 +420,16 @@ import workspacecore
                     let siblingTargetURLs = browserSessionSiblingTargetURLs(targetURL: url, targetURLs: configuredTargetURLs)
                     guard
                         let matchLength = browserObservedURLMatchLength(
-                            activeURL, targetURL: url, siblingTargetURLs: siblingTargetURLs, assignedPorts: workspace.assignedPorts)
+                            frontmostURL, targetURL: url, siblingTargetURLs: siblingTargetURLs, assignedPorts: workspace.assignedPorts)
                     else { continue }
-                    if best == nil || matchLength > best!.prefixLength { best = (workspace.id, matchLength) }
+                    if matchLength > bestPrefixLength {
+                        bestPrefixLength = matchLength
+                        bestWorkspaceID = workspace.id
+                    }
                 }
             }
         }
-        return best?.workspaceID
+        return bestWorkspaceID
     }
 
     /// Builds the tracked-window/frontmost-tab snapshot `WindowFocusController.cycleWindows` needs to

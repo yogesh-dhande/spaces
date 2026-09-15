@@ -176,6 +176,56 @@ on run argv
 end run
 APPLESCRIPT
 }
+# Reads one element's accessibility description (the AppKit accessibility label) by identifier.
+# Used to assert what a status row says without scraping pixels or depending on row geometry.
+ui_accessibility_description_for_identifier() {
+  local identifier="$1"
+  osascript - "$SPACES_PID" "$identifier" <<'APPLESCRIPT'
+on elementMatchesIdentifier(targetElement, targetID)
+  tell application "System Events"
+    try
+      if ((value of attribute "AXIdentifier" of targetElement) as text) is targetID then return true
+    end try
+  end tell
+  return false
+end elementMatchesIdentifier
+
+on descriptionForIdentifier(targetElement, targetID)
+  if my elementMatchesIdentifier(targetElement, targetID) then
+    tell application "System Events"
+      try
+        return (value of attribute "AXDescription" of targetElement) as text
+      end try
+    end tell
+    return ""
+  end if
+  tell application "System Events"
+    try
+      repeat with childElement in UI elements of targetElement
+        set found to my descriptionForIdentifier(childElement, targetID)
+        if found is not missing value then return found
+      end repeat
+    end try
+  end tell
+  return missing value
+end descriptionForIdentifier
+
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  set targetID to item 2 of argv
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      repeat with targetWindow in windows of proc
+        set found to my descriptionForIdentifier(targetWindow, targetID)
+        if found is not missing value then return found
+      end repeat
+    end repeat
+  end tell
+  error "identifier not found: " & targetID
+end run
+APPLESCRIPT
+}
+
 wait_for_ui_identifier() {
   local identifier="$1"
   local description="${2:-$identifier}"

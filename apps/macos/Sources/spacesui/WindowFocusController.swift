@@ -6,6 +6,7 @@ import spacesdeviceapi
 import spacesdevicecore
 import spacesterminalcore
 import spacesterminalui
+import systembridge
 import workspacecore
 
 /// Owns window-focus and window-shortcut dispatch: the numbered Cmd-1…Cmd-0 shortcuts, by-name and
@@ -304,11 +305,279 @@ import workspacecore
     /// `AppKitController.applicationDidFinishLaunching`, before any shortcut can fire.
     func loadStoredWindowCycleMode() { windowCycleMode = host.clientWindowCycleMode() }
 
-    /// Steps to the next cycling mode and persists it. Bound to the `Cycle mode` shortcut.
-    func stepWindowCycleMode() {
-        windowCycleMode = windowCycleMode.next
-        AppKitController.setClientWindowCycleMode(windowCycleMode)
-        host.windowCycleModeDidChange(windowCycleMode)
+    /// Steps to the next cycling mode. Bound to the `Cycle mode` shortcut.
+    func stepWindowCycleMode() { selectWindowCycleMode(windowCycleMode.next) }
+
+    /// Adopts a cycling mode and persists it. The mode shortcut and the sidebar cycling row's menu
+    /// both land here, so picking a mode by hand is the same change as stepping to it, down to the
+    /// confirmation the host shows.
+    func selectWindowCycleMode(_ mode: WindowCycleMode) {
+        windowCycleMode = mode
+        AppKitController.setClientWindowCycleMode(mode)
+        // `windowCycleModeDidChange` repaints the row for the HUD (`sidebar.refreshCycleModeRow()`),
+        // and the row's own refresh funnel starts the throttled Chrome refresh, so entering a
+        // browser-backed mode with no cached Chrome snapshot yet (freshly launched, or switching in
+        // from a mode that never needed one) is caught up by that same call, without a separate one
+        // here. `refreshCycleModeBrowserState` republishes the row itself once the snapshot lands; if
+        // that lands within the HUD's one-second life, it repaints only the row, by design (accepted
+        // behavior: the HUD confirms the keystroke with what was known at the keystroke, the row is
+        // the durable readout).
+        host.windowCycleModeDidChange(mode)
+    }
+
+    // MARK: - Cycling-mode contents, for the sidebar row and the mode HUD
+
+    /// The last Chrome/browser-tracking snapshot a cycle step or a row-count refresh obtained, the
+    /// workspace set it covers, and when it was taken.
+    ///
+    /// Building that snapshot is an AppleScript round trip to Chrome, and the sidebar applies new
+    /// data several times a second under a live workspace, so the cycling row's count must never ask
+    /// for a fresh one on the apply path: it reuses this one and lets `refreshCycleModeBrowserState`
+    /// replace it out of band. Cheap for the count to read (it is already in memory) and correct for
+    /// what the count is: how many windows the next cycle press could land on, which is what the
+    /// previous press saw plus whatever changed since. `workspaceIDs` is the same set
+    /// `startBrowserCycleStateRefresh` (or a cross-device cycle step) passed to
+    /// `trackedBrowserCycleState`, empty for the `.noBrowserState` placeholder (nothing was actually
+    /// queried for it, so it cannot claim to answer any particular set); `BrowserCycleStateRefreshDecision`
+    /// compares it against the current set to decide whether the cache still answers a new request.
+    private var cachedBrowserCycleState: (state: BrowserSessionCoordinator.BrowserCycleState, workspaceIDs: Set<String>, takenAt: Date) = (
+        .noBrowserState, [], .distantPast
+    )
+    private var browserCycleStateRefreshInFlight = false
+    /// The workspace set the in-flight round trip captured at its own start (see
+    /// `startBrowserCycleStateRefresh`'s snapshot), meaningful only while `browserCycleStateRefreshInFlight`
+    /// is `true`. A device's overview that arrives mid-round-trip is invisible to that round trip, so
+    /// a request landing with a different current set cannot be answered by it; `refreshCycleModeBrowserState`
+    /// compares against this to decide whether to mark `browserCycleStateRefreshPending` instead of
+    /// silently dropping the request.
+    private var browserCycleStateRefreshInFlightWorkspaceIDs: Set<String> = []
+    /// Set when a refresh is requested while one is already in flight for a different workspace set,
+    /// and cleared once the rerun it requested has started. Without this, a request that arrives
+    /// mid-round-trip for a set the round trip does not cover would be dropped outright, and the
+    /// completion would stamp its (still-mismatched) snapshot with a fresh `takenAt`; the next request
+    /// for the same, still-uncovered set would then read as a same-set, within-age cache hit and skip
+    /// too, leaving the row stuck on stale data until something else changes the set again. See
+    /// `refreshCycleModeBrowserState`. Also set by `invalidateBrowserCycleState` when a forced
+    /// invalidation (a browser open, adopt, or close) lands while a round trip is already in flight,
+    /// so that round trip's about-to-be-stale result gets superseded by a rerun instead of standing
+    /// as the cache until the next unrelated trigger ages it out.
+    private var browserCycleStateRefreshPending = false
+    /// How stale the cached Chrome snapshot may get before a sidebar apply refreshes it. The apply
+    /// rate is the sidebar's, not the user's, so refreshing on every apply would put Chrome
+    /// scripting in a continuous loop behind a busy workspace.
+    private static let browserCycleStateRefreshInterval: TimeInterval = 2
+
+    /// What the sidebar's cycling row and the mode HUD report: the mode in effect and the size of the
+    /// set it would rotate over. Built from the same builders a cycle press walks, so the row cannot
+    /// disagree with what the next press does.
+    func cycleModeRowModel() -> CycleModeRowModel {
+        let mode = windowCycleMode
+        switch mode {
+        case .workspace:
+            // Mirrors `globalWindowNavigationWorkspaceID`'s precedence (focused built-in terminal, then
+            // focused Chrome window, then the persisted active workspace) so the row and the HUD cannot
+            // name a different workspace than the one the next cycle press actually lands in (for
+            // example, a terminal pane focused in a global panel window that belongs to a workspace
+            // other than the one selected in the sidebar, or the Alerts/Automations view showing with
+            // no workspace selected at all, where `host.selectedWorkspaceID` is nil but a press still
+            // cycles the active workspace). Unlike a keypress, this model is rebuilt on every sidebar
+            // apply (several times a second under a live workspace; see `refreshCycleModeRow`'s
+            // callers), so the middle tier is served from `cachedBrowserCycleState` instead of running
+            // `globalWindowNavigationWorkspaceID`'s AppleScript-backed `clientWorkspaceIDForFocusedWindow`:
+            // no extra Chrome round trip on this path, at the cost of the tier being up to
+            // `browserCycleStateRefreshInterval` stale. It applies the same URL-matching rule
+            // `clientWorkspaceIDForFocusedWindow` uses against the live press
+            // (`BrowserSessionCoordinator.workspaceIDForFrontmostBrowserURL`) to the cached snapshot's
+            // frontmost URL, so the row cannot disagree with the press over which workspace a shared
+            // target URL belongs to; neither path tie-breaks, so a URL matching two workspaces'
+            // sessions at the same prefix length resolves to the first one encountered on both. The
+            // final fallback reads `host.clientActiveWorkspaceID()`, a stored client-database value.
+            // Accepted gap: the snapshot samples Chrome only while some workspace has a tracked window
+            // (see `trackedBrowserCycleState`), so a matching tab the user opened outside Spaces on a
+            // profile with nothing tracked is invisible to this tier, and the row falls through to the
+            // active workspace while the press, which asks Chrome directly, may resolve that tab's
+            // workspace. Sampling Chrome on every cadence with nothing tracked would cost an
+            // AppleScript round trip every couple of seconds for a case the next press corrects.
+            let focusedTerminalSessionWorkspaceID = focusedBuiltInTerminalSessionIDForGlobalNavigation().flatMap {
+                host.clientWorkspaceID(forTerminalSession: $0)
+            }
+            let cachedFrontmostBrowserWorkspaceID = BrowserSessionCoordinator.workspaceIDForFrontmostBrowserURL(
+                cachedBrowserCycleState.state.frontmostURL, in: host.deviceModel.deviceSections.compactMap(\.overview))
+            guard let workspaceID = focusedTerminalSessionWorkspaceID ?? cachedFrontmostBrowserWorkspaceID ?? host.clientActiveWorkspaceID(),
+                let overview = host.overview(forWorkspaceID: workspaceID), let detail = AppKitController.workspaceDetail(workspaceID, in: overview)
+            else { return CycleModeRowModel(mode: mode, count: 0, deviceCount: 0, workspaceName: nil) }
+            let targets = Self.cycleWindowTargets(
+                detail: detail, browserSessions: cachedBrowserCycleState.state.openBrowserSessions(workspaceID: workspaceID),
+                openTerminalSessionIDs: Set(host.panelCoordinator.openTerminalSessionIDs(workspaceID: workspaceID)))
+            return CycleModeRowModel(mode: mode, count: targets.count, deviceCount: 1, workspaceName: detail.title)
+        case .attention, .allAgents, .openSessions:
+            let devices = host.deviceModel.deviceSections.compactMap { section in
+                section.overview.map { WindowCycleDeviceSnapshot(deviceID: section.deviceID, overview: $0) }
+            }
+            let browserState = cachedBrowserCycleState.state
+            // A frozen cycle session (a burst still within `WorkspaceWindowCycle.cycleSessionTimeout`)
+            // keeps rotating over the cursors it landed on, not over a freshly filtered set, so a
+            // target that left the mode's filter mid-burst (an agent that stopped waiting, say) is
+            // still something the next press in that burst can land on. Retaining the same cursors
+            // here, exactly as the next press would via `cycleWindows`, keeps the row's count matching
+            // what the rotation actually holds instead of undercounting it. Outside a valid session
+            // there is nothing to retain. Accepted: nothing repaints when the session expires on its
+            // own, so a count painted mid-burst that retained a departed target stands until the next
+            // trigger (a sidebar apply lands within a second under any live workspace); a timer per
+            // burst is not worth a count that is at most one high for that gap.
+            let targets = WindowCycleModeTargets.targets(
+                mode: mode, devices: devices,
+                openTerminalSessionIDsByWorkspace: mode == .openSessions ? openTerminalSessionIDsForCycleModes(devices: devices) : [:],
+                openBrowserSessionsByWorkspace: mode == .openSessions ? browserState.openBrowserSessionsByWorkspace : [:],
+                trackedBrowserWindowIDsByWorkspace: mode == .openSessions ? browserState.trackedWindowIDsByWorkspace : [:],
+                recentCursors: windowCycleState.recentCursors(for: .mode(mode)),
+                retaining: windowCycleState.validCycleSession(for: .mode(mode))?.orderedCursors ?? [])
+            return CycleModeRowModel(mode: mode, count: targets.count, deviceCount: Set(targets.map(\.deviceID)).count, workspaceName: nil)
+        }
+    }
+
+    /// Refreshes the cached Chrome snapshot off the main actor, for the modes whose set can hold a
+    /// browser target. `SidebarController.refreshCycleModeRow()` calls this on every repaint, which is
+    /// every documented row trigger (sidebar data apply, panel layout change, workspace selection,
+    /// mode change, shortcut reload, cycle press), so this is the single place that starts the
+    /// refresh; `BrowserCycleStateRefreshDecision` still caps the real work to once per couple of
+    /// seconds for an unchanging workspace set, regardless of how many triggers land in that window.
+    /// It runs at most once at a time (the decision is made synchronously here, before any Chrome
+    /// work) and skips only when the cache's workspace set matches the current one and has not aged
+    /// past `browserCycleStateRefreshInterval`; a changed set bypasses the age guard and refreshes
+    /// immediately; see `BrowserCycleStateRefreshDecision` for the full rule, including how it treats
+    /// a request that lands while a round trip for a different set is already in flight.
+    /// `trackedBrowserCycleState` does its client-database read and its Chrome scripting on a detached
+    /// task, so nothing here blocks the main actor; the recount runs when it returns.
+    ///
+    /// `startBrowserCycleStateRefresh`'s completion starts any pending rerun before it calls
+    /// `refreshCycleModeRow()`, which calls this function again: by the time that repaint-driven call
+    /// runs, the rerun it might have started is already marked in flight for the current set, or, when
+    /// nothing was pending, the cache was just stamped with that set and a fresh `takenAt`. Either way
+    /// the decision resolves to `.skip` immediately, so the repaint's call here is always a no-op and
+    /// the two calls never leave more than one round trip in flight.
+    func refreshCycleModeBrowserState() {
+        let mode = windowCycleMode
+        guard mode == .workspace || mode == .openSessions else { return }
+        let currentWorkspaceIDs = Self.browserCycleWorkspaceIDs(deviceSections: host.deviceModel.deviceSections)
+        // The set is keyed by workspace ids alone. Accepted: a browser-session or port edit inside the
+        // same workspaces does not bypass the age guard, so a snapshot captured just before such an
+        // edit stands until the next trigger after `browserCycleStateRefreshInterval` (the edit's own
+        // overview apply, or any apply after it). Settings edits are rare and the gap is a couple of
+        // seconds; fingerprinting the browser configuration per apply would cost more than it saves.
+        let decision = BrowserCycleStateRefreshDecision.decide(
+            inFlight: browserCycleStateRefreshInFlight, inFlightWorkspaceIDs: browserCycleStateRefreshInFlightWorkspaceIDs,
+            cachedWorkspaceIDs: cachedBrowserCycleState.workspaceIDs, cachedAge: Date().timeIntervalSince(cachedBrowserCycleState.takenAt),
+            currentWorkspaceIDs: currentWorkspaceIDs, maxAge: Self.browserCycleStateRefreshInterval)
+        switch decision {
+        case .skip: return
+        case .markPending:
+            // The in-flight round trip does not cover this request's set; ask it to rerun once it
+            // lands instead of dropping this request outright (see `browserCycleStateRefreshPending`).
+            browserCycleStateRefreshPending = true
+        case .refresh: startBrowserCycleStateRefresh()
+        }
+    }
+
+    /// Runs the actual Chrome round trip and republish. Split out of `refreshCycleModeBrowserState` so
+    /// the pending rerun it schedules can start this directly: that rerun's request arrived while this
+    /// round trip was already in flight, so `BrowserCycleStateRefreshDecision`'s in-flight branch,
+    /// not its age/set branch, is what let it through, and the in-flight guard here still applies to
+    /// it as normal. Never guarded against being called while a round trip is already in flight
+    /// (beyond that in-flight branch): the completion below starts the pending rerun before it
+    /// repaints, so at most one round trip is ever in flight and a reentrancy guard here would be
+    /// dead code.
+    private func startBrowserCycleStateRefresh() {
+        // Snapshot the workspace set synchronously, before any suspension point, so the in-flight
+        // capture other requests compare against always matches what this round trip actually queries.
+        let workspaces = host.deviceModel.deviceSections.compactMap(\.overview).flatMap { overview in
+            overview.workspaces.map {
+                BrowserSessionCoordinator.BrowserCycleWorkspace(workspaceID: $0.id, detail: SpacesDeviceWorkspaceDetailViewModel(workspace: $0))
+            }
+        }
+        let workspaceIDs = Set(workspaces.map(\.workspaceID))
+        browserCycleStateRefreshInFlight = true
+        browserCycleStateRefreshInFlightWorkspaceIDs = workspaceIDs
+        Task { [weak self] in
+            guard let self else { return }
+            // `trackedBrowserCycleState`'s Chrome tab snapshot runs `tell application "Google
+            // Chrome"`, which launches Chrome via Apple Events when it is not already running. This
+            // refresh fires on every sidebar apply, including app launch, so it must never be what
+            // launches Chrome on a machine where the user has not opened it: publish the empty state
+            // instead and let the next refresh, once Chrome is running, pick up real sessions.
+            let state: BrowserSessionCoordinator.BrowserCycleState
+            if ChromeAdapter().isRunning() {
+                state = await host.browserSessions.trackedBrowserCycleState(workspaces: workspaces)
+            } else {
+                state = .noBrowserState
+            }
+            // Tag even the no-Chrome placeholder with `workspaceIDs`, the set this round trip queried
+            // for, rather than an empty set: the placeholder covers that set for this cadence window,
+            // so the next refresh only re-checks whether Chrome is running once the cadence elapses or
+            // the workspace set changes. Tagging it empty instead would make every subsequent request
+            // for a non-empty set see a cache/current mismatch and refresh immediately, looping without
+            // bound for as long as Chrome stays closed.
+            noteBrowserCycleState(state, workspaceIDs: workspaceIDs)
+            browserCycleStateRefreshInFlight = false
+            // A pending rerun means this round trip's inputs changed under it (the workspace set moved,
+            // or a browser open, adopt, or close landed), so the state just cached is already stale:
+            // start the rerun and let its completion repaint, rather than painting a count this code
+            // knows is wrong for the length of another Chrome round trip. With nothing pending, repaint
+            // here; that repaint's call back into `refreshCycleModeBrowserState` sees the fresh cache
+            // for the current set and skips, so the completion never starts a second round trip.
+            if browserCycleStateRefreshPending {
+                browserCycleStateRefreshPending = false
+                startBrowserCycleStateRefresh()
+                return
+            }
+            host.sidebar.refreshCycleModeRow()
+        }
+    }
+
+    /// Every workspace every device's overview currently reports, mirroring the set
+    /// `startBrowserCycleStateRefresh` builds `BrowserCycleWorkspace`s from. Shared so
+    /// `refreshCycleModeBrowserState`'s guard compares against exactly the set the round trip it may
+    /// start would capture.
+    private static func browserCycleWorkspaceIDs(deviceSections: [AppKitController.DeviceSection]) -> Set<String> {
+        Set(deviceSections.compactMap(\.overview).flatMap { overview in overview.workspaces.map(\.id) })
+    }
+
+    /// Records a snapshot a cycle step or a refresh just obtained, tagged with the workspace set it
+    /// covers, so the next request's guard can tell whether the cache actually answers it.
+    private func noteBrowserCycleState(_ state: BrowserSessionCoordinator.BrowserCycleState, workspaceIDs: Set<String>) {
+        cachedBrowserCycleState = (state, workspaceIDs, Date())
+    }
+
+    /// Ages out the cached Chrome snapshot and asks the row to repaint, for a caller that just
+    /// changed what the snapshot would report (a browser focus that opened or adopted a tab, a
+    /// teardown that closed tracked tabs) rather than leaving the row on stale data until something
+    /// else trips `browserCycleStateRefreshInterval`. Backdating `takenAt` instead of clearing the set
+    /// keeps `BrowserCycleStateRefreshDecision`'s same-set/aged-cache branch in play, so the repaint
+    /// below funnels through the normal refresh path rather than a special one.
+    ///
+    /// A round trip already in flight for the current workspace set is a different case: that
+    /// request was decided, and possibly issued, before this invalidation's change happened, so its
+    /// result cannot reflect it. Backdating `takenAt` here would let its completion overwrite the
+    /// backdate with a fresh-but-still-stale snapshot and repaint the row on it, same as the race
+    /// `browserCycleStateRefreshPending` already exists to close for a differing workspace set.
+    /// Marking pending instead defers to that same mechanism: the in-flight completion reruns before
+    /// its own repaint, so the row's next paint is always built from a snapshot taken after this call.
+    func invalidateBrowserCycleState() {
+        if browserCycleStateRefreshInFlight {
+            browserCycleStateRefreshPending = true
+            return
+        }
+        cachedBrowserCycleState.takenAt = .distantPast
+        host.sidebar.refreshCycleModeRow()
+    }
+
+    /// The open-pane map a cross-device mode is built from, including the panes the persisted layout
+    /// of an unvisited workspace holds, exactly as a cycle press builds it.
+    private func openTerminalSessionIDsForCycleModes(devices: [WindowCycleDeviceSnapshot]) -> [String: [String]] {
+        host.panelCoordinator.openTerminalSessionIDsByWorkspace(
+            includingPersistedLayoutsFor: devices.flatMap { device in
+                device.overview.workspaces.map { PanelLayoutEngine.WorkspaceKey(deviceID: device.deviceID, workspaceID: $0.id) }
+            })
     }
 
     /// The world one cycle step walks: its candidate targets, the overview each candidate resolves
@@ -331,6 +600,12 @@ import workspacecore
     ///
     /// Private because every entry point reaches a step through `windowCycleSteps`, never directly.
     private func cycleWindows(scope: WindowCycleScope, delta: Int, preferredTerminalSessionID: String?, requestID: String? = nil) async {
+        // A cycle press can change what the row counts, whichever scope it walks: a workspace rotation
+        // reads its workspace's live pane/browser state, and a mode rotation can refresh the shared
+        // Chrome snapshot. `cycleWindows` is the one function both scopes run through, so repainting
+        // here, once, regardless of how the press ends (landed, found nothing, failed to focus), is
+        // the single place for it, instead of a call buried in one scope's snapshot builder.
+        defer { host.sidebar.refreshCycleModeRow() }
         let cycleStartedAt = Date()
         let direction = delta > 0 ? "next" : "previous"
         // A cross-device rotation has no workspace until it lands on one; the landed (or first
@@ -484,15 +759,22 @@ import workspacecore
                 includingPersistedLayoutsFor: devices.flatMap { device in
                     device.overview.workspaces.map { PanelLayoutEngine.WorkspaceKey(deviceID: device.deviceID, workspaceID: $0.id) }
                 }) : [:]
-        let browserCycleState =
-            needsBrowserState
-            ? await host.browserSessions.trackedBrowserCycleState(
-                workspaces: devices.flatMap { device in
-                    device.overview.workspaces.map {
-                        BrowserSessionCoordinator.BrowserCycleWorkspace(
-                            workspaceID: $0.id, detail: SpacesDeviceWorkspaceDetailViewModel(workspace: $0))
-                    }
-                }) : .noBrowserState
+        // Captured synchronously, before the round trip's suspension point, so the tag below names
+        // exactly the set this round trip queried, not whatever `host.deviceModel.deviceSections`
+        // reports once it returns: a workspace added or removed elsewhere during that await would
+        // otherwise mis-tag the cache with a set the round trip never actually covered.
+        let workspaces = devices.flatMap { device in
+            device.overview.workspaces.map {
+                BrowserSessionCoordinator.BrowserCycleWorkspace(workspaceID: $0.id, detail: SpacesDeviceWorkspaceDetailViewModel(workspace: $0))
+            }
+        }
+        let browserCycleState = needsBrowserState ? await host.browserSessions.trackedBrowserCycleState(workspaces: workspaces) : .noBrowserState
+        // Only the cross-device snapshot is cached for the cycling row's count. A workspace
+        // rotation's snapshot covers one workspace, and caching a partial map would make the Open
+        // sessions count silently drop every other workspace's browser sessions. `cycleWindows`
+        // repaints the row once the step finishes, so this only needs to update the cache, tagged
+        // with the workspace set actually queried above.
+        if needsBrowserState { noteBrowserCycleState(browserCycleState, workspaceIDs: Set(workspaces.map(\.workspaceID))) }
         let targets = WindowCycleModeTargets.targets(
             mode: mode, devices: devices, openTerminalSessionIDsByWorkspace: openTerminalSessionIDsByWorkspace,
             openBrowserSessionsByWorkspace: browserCycleState.openBrowserSessionsByWorkspace,

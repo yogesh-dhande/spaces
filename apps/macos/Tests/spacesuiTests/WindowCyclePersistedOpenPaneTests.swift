@@ -141,5 +141,58 @@ extension ProcessProfileEnvironmentSuites {
 
             #expect(byWorkspace["workspace-1"] == ["session-a"])
         }
+
+        /// The count is read on every sidebar apply, so an unrestored workspace's persisted layout is
+        /// read once and cached. A rewrite of that layout, which is what putting a restored session back
+        /// in its predecessor's slot does, has to reach the next count.
+        @Test func aRewrittenPersistedLayoutIsReportedByTheNextRead() throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, sessionIDs: ["session-a", "session-b"])]
+            controller.rebuildFlatSidebarData()
+            try persist(
+                splitLayout(first: "session-a", second: "session-b", deviceID: deviceID), deviceID: deviceID, workspaceID: "workspace-1",
+                in: controller)
+            let keys = [PanelLayoutEngine.WorkspaceKey(deviceID: deviceID, workspaceID: "workspace-1")]
+            #expect(
+                controller.panelCoordinator.openTerminalSessionIDsByWorkspace(includingPersistedLayoutsFor: keys)["workspace-1"] == [
+                    "session-a", "session-b",
+                ])
+
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, sessionIDs: ["session-a", "session-restored"])]
+            controller.rebuildFlatSidebarData()
+            #expect(
+                controller.retargetPersistedWorkspacePanelLayoutPane(
+                    deviceID: deviceID, workspaceID: "workspace-1", replacing: "session-b",
+                    with: .terminalSession(deviceID: deviceID, sessionID: "session-restored")))
+
+            #expect(
+                controller.panelCoordinator.openTerminalSessionIDsByWorkspace(includingPersistedLayoutsFor: keys)["workspace-1"] == [
+                    "session-a", "session-restored",
+                ])
+        }
+
+        /// A session stops being retained without anything writing the layout it is named in, so the
+        /// pruning has to run on every read rather than once with the layout: a cycle press must never
+        /// be offered a pane a relaunch would not reopen.
+        @Test func aPaneWhoseSessionStopsBeingRetainedDropsWithoutALayoutWrite() throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, sessionIDs: ["session-a", "session-b"])]
+            controller.rebuildFlatSidebarData()
+            try persist(
+                splitLayout(first: "session-a", second: "session-b", deviceID: deviceID), deviceID: deviceID, workspaceID: "workspace-1",
+                in: controller)
+            let keys = [PanelLayoutEngine.WorkspaceKey(deviceID: deviceID, workspaceID: "workspace-1")]
+            #expect(
+                controller.panelCoordinator.openTerminalSessionIDsByWorkspace(includingPersistedLayoutsFor: keys)["workspace-1"] == [
+                    "session-a", "session-b",
+                ])
+
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, sessionIDs: ["session-a"])]
+            controller.rebuildFlatSidebarData()
+
+            #expect(controller.panelCoordinator.openTerminalSessionIDsByWorkspace(includingPersistedLayoutsFor: keys)["workspace-1"] == ["session-a"])
+        }
     }
 }
