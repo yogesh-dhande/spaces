@@ -15,15 +15,13 @@ import workspacecore
 /// (`SidebarController`, `WorkspaceDeletionCoordinator`, `AppKitController+WorkspaceSettingsDialog`,
 /// `AppKitController+StopAllQuit`, `CommandPaletteItems`) that reconcile forwards, read the
 /// Services display, or close a workspace's browser windows. The window-cycle and numbered-shortcut
-/// focus dispatch (`cycleWorkspaceWindow`, `executeWindowFocusResolution`, `cycleCurrentIndex`) live
+/// focus dispatch (`cycleWindows`, `executeWindowFocusResolution`, `cycleCurrentIndex`) live
 /// on `WindowFocusController`, routing their browser-session-specific work through this type's instance
 /// methods and pure static helpers.
 @MainActor final class BrowserSessionCoordinator {
     unowned let host: AppKitController
 
-    init(host: AppKitController) {
-        self.host = host
-    }
+    init(host: AppKitController) { self.host = host }
 
     private let browserSSHForwardManager = BrowserSSHForwardManager()
     private var remoteBrowserForwardRevisions: [String: Int] = [:]
@@ -44,15 +42,43 @@ import workspacecore
     /// Stops every live SSH forward. Called from `AppKitController.applicationWillTerminate`.
     func stopAllForwards() { browserSSHForwardManager.stopAll() }
 
-    /// Internal rather than `private`: `WindowFocusController.cycleWorkspaceWindow` reads this result of
+    /// One workspace a cycle asks about: its id and the detail its configured browser sessions and
+    /// assigned ports are read from.
+    struct BrowserCycleWorkspace: Sendable {
+        let workspaceID: String
+        let detail: SpacesDeviceWorkspaceDetailViewModel
+    }
+
+    /// Internal rather than `private`: `WindowFocusController.cycleWindows` reads this result of
     /// `trackedBrowserCycleState` to resolve the window-cycle target and log its metric.
     struct BrowserCycleState: Sendable {
-        let openBrowserSessions: [BrowserSession]
+        let openBrowserSessionsByWorkspace: [String: [BrowserSession]]
+        /// The Chrome windows tracked for each workspace's browser sessions. The cycle carries these
+        /// onto its browser targets so the frontmost window id can say which workspace the user is
+        /// standing in when two of them configured the same target URL.
+        let trackedWindowIDsByWorkspace: [String: Set<Int>]
         let frontmostURL: String?
+        let frontmostWindowID: Int?
         let clientDBLookupMS: Int
         let chromeAppleScriptMS: Int
         let trackedWindowCount: Int
         let trackedTabCount: Int
+
+        /// The state a cycle that cannot contain a browser target runs with: no Chrome scripting, no
+        /// browser-tracking read, and the zeroed counters its perf line still reports.
+        static let noBrowserState = BrowserCycleState(
+            openBrowserSessionsByWorkspace: [:], trackedWindowIDsByWorkspace: [:], frontmostURL: nil, frontmostWindowID: nil, clientDBLookupMS: 0,
+            chromeAppleScriptMS: 0, trackedWindowCount: 0, trackedTabCount: 0)
+
+        func openBrowserSessions(workspaceID: String) -> [BrowserSession] { openBrowserSessionsByWorkspace[workspaceID] ?? [] }
+
+        func trackedWindowIDs(workspaceID: String) -> Set<Int> { trackedWindowIDsByWorkspace[workspaceID] ?? [] }
+
+        /// The browser fields of the `window_cycle` perf line, in the order that line has always
+        /// carried them.
+        var perfDetail: String {
+            "client_db_lookup_ms=\(clientDBLookupMS) chrome_applescript_ms=\(chromeAppleScriptMS) tracked_browser_windows=\(trackedWindowCount) tracked_browser_tabs=\(trackedTabCount)"
+        }
     }
 
     private struct BrowserFocusResult: Sendable {
@@ -192,9 +218,12 @@ import workspacecore
     /// API, or another device). Idempotent: it clears the tracking rows, so a later reload that
     /// re-observes the same stopped workspace finds nothing to close.
     func closeLocalBrowserSessionWindows(workspaceID: String, configuredBrowserSessionTargetURLs: [String]) {
-        Task.detached(priority: .utility) {
+        Task.detached(priority: .utility) { [weak host] in
             Self.closeLocalBrowserSessionWindowsSynchronously(
                 workspaceID: workspaceID, configuredBrowserSessionTargetURLs: configuredBrowserSessionTargetURLs)
+            // Tabs just closed drop out of the cached Chrome snapshot the cycling row reads; invalidate
+            // it instead of waiting out the refresh interval.
+            await host?.windowFocus.invalidateBrowserCycleState()
         }
     }
 
@@ -356,6 +385,10 @@ import workspacecore
                 focused: true, path: "opened_window", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
                 chromeAppleScriptMS: chromeAppleScriptMS)
         }.value
+        // Every success path leaves the cached Chrome snapshot stale: opening or adopting a tab writes a
+        // window id the open-session set has to count, and re-focusing a tracked tab moves Chrome's
+        // frontmost window and URL, which Workspace mode resolves its scope from.
+        if result.focused { host.windowFocus.invalidateBrowserCycleState() }
         host.logPerfMetric(
             "browser_focus", target: URL(string: targetURL)?.host ?? targetURL, elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: result.focused,
@@ -365,11 +398,20 @@ import workspacecore
         return result.focused
     }
 
-    /// Resolves the workspace of the focused desktop window when it is a Chrome browser window, by
-    /// matching the frontmost tab URL to a configured browser session in the overview. Called from
-    /// `AppKitController.clientWorkspaceIDForFocusedWindow`.
-    nonisolated static func workspaceIDForObservedBrowserURL(_ activeURL: String, in overviews: [SpacesDeviceOverviewPayload]) -> String? {
-        var best: (workspaceID: String, prefixLength: Int)?
+    /// Resolves the workspace of a focused/frontmost Chrome window by matching its active tab URL
+    /// against every workspace's configured browser sessions, the same rule for a live press and for
+    /// `WindowFocusController.cycleModeRowModel`'s cached repaint: `clientWorkspaceIDForFocusedWindow`
+    /// calls this with a freshly-scripted URL, and the row calls it with `cachedBrowserCycleState`'s
+    /// snapshot's URL. Both apply the same URL rule with no tie-break, so they cannot disagree over
+    /// which workspace a shared target URL belongs to.
+    ///
+    /// When more than one workspace's session matches the URL at the same (longest) prefix length, the
+    /// first one encountered wins; there is no signal here (a window id or otherwise) to prefer one
+    /// tied match over another.
+    nonisolated static func workspaceIDForFrontmostBrowserURL(_ frontmostURL: String?, in overviews: [SpacesDeviceOverviewPayload]) -> String? {
+        guard let frontmostURL, !frontmostURL.isEmpty else { return nil }
+        var bestPrefixLength = -1
+        var bestWorkspaceID: String?
         for overview in overviews {
             for workspace in overview.workspaces {
                 let configuredTargetURLs = browserSessionTargetURLs(resolvedSessions: workspace.config.resolvedBrowserSessions)
@@ -378,49 +420,90 @@ import workspacecore
                     let siblingTargetURLs = browserSessionSiblingTargetURLs(targetURL: url, targetURLs: configuredTargetURLs)
                     guard
                         let matchLength = browserObservedURLMatchLength(
-                            activeURL, targetURL: url, siblingTargetURLs: siblingTargetURLs, assignedPorts: workspace.assignedPorts)
+                            frontmostURL, targetURL: url, siblingTargetURLs: siblingTargetURLs, assignedPorts: workspace.assignedPorts)
                     else { continue }
-                    if best == nil || matchLength > best!.prefixLength { best = (workspace.id, matchLength) }
+                    if matchLength > bestPrefixLength {
+                        bestPrefixLength = matchLength
+                        bestWorkspaceID = workspace.id
+                    }
                 }
             }
         }
-        return best?.workspaceID
+        return bestWorkspaceID
     }
 
-    /// Builds the tracked-window/frontmost-tab snapshot `WindowFocusController.cycleWorkspaceWindow` needs
-    /// to decide which of a workspace's configured browser sessions count as open for the cycle: a
-    /// session counts only when both a tracked Chrome window and an open tab still match its target
-    /// URL, so a session whose window the user closed by hand drops out of the cycle order.
+    /// Builds the tracked-window/frontmost-tab snapshot `WindowFocusController.cycleWindows` needs to
+    /// decide which of the given workspaces' configured browser sessions count as open for the cycle:
+    /// a session counts only when both a tracked Chrome window and an open tab in that window still
+    /// match its target URL, so a session whose window the user closed by hand drops out of the cycle
+    /// order.
     ///
-    /// Internal rather than `private`: `WindowFocusController.cycleWorkspaceWindow` calls this before
-    /// building the cycle's target list.
-    func trackedBrowserCycleState(workspaceID: String, detail: SpacesDeviceWorkspaceDetailViewModel) async -> BrowserCycleState {
-        let resolvedSessions = detail.config.resolvedBrowserSessions
-        guard !resolvedSessions.isEmpty else {
-            return BrowserCycleState(
-                openBrowserSessions: [], frontmostURL: nil, clientDBLookupMS: 0, chromeAppleScriptMS: 0, trackedWindowCount: 0, trackedTabCount: 0)
-        }
+    /// Every workspace is answered from one Chrome tab snapshot rather than one per workspace: the
+    /// snapshot is an AppleScript round trip, and a rotation spanning devices would otherwise pay one
+    /// per workspace on every keypress. Tabs carry their window id, so each workspace is still matched
+    /// only against tabs in its own tracked windows.
+    ///
+    /// Internal rather than `private`: `WindowFocusController.cycleWindows` calls this before building
+    /// the cycle's target list.
+    func trackedBrowserCycleState(workspaces: [BrowserCycleWorkspace]) async -> BrowserCycleState {
+        let configured = workspaces.filter { !$0.detail.config.resolvedBrowserSessions.isEmpty }
+        guard !configured.isEmpty else { return .noBrowserState }
         return await Task.detached(priority: .userInitiated) {
             let dbStartedAt = Date()
-            let trackedWindows = ((try? ClientBrowserWindowIDStore().windowIDs(workspaceID: workspaceID)) ?? []).filter { $0.windowID > 0 }
+            let store = ClientBrowserWindowIDStore()
+            let trackedWindowsByWorkspace = ((try? store.windowIDs(workspaceIDs: configured.map(\.workspaceID))) ?? [:]).mapValues { windows in
+                windows.filter { $0.windowID > 0 }
+            }
             let clientDBLookupMS = TerminalPerformance.elapsedMS(since: dbStartedAt)
-            guard !trackedWindows.isEmpty else {
+            let trackedWindowIDs = Set(trackedWindowsByWorkspace.values.flatMap { $0.map(\.windowID) })
+            // Tracked rows, not distinct window ids: two of a workspace's sessions can share one Chrome
+            // window, and this field has always counted the rows the cycle read.
+            let trackedWindowCount = trackedWindowsByWorkspace.values.reduce(0) { $0 + $1.count }
+            guard !trackedWindowIDs.isEmpty else {
                 return BrowserCycleState(
-                    openBrowserSessions: [], frontmostURL: nil, clientDBLookupMS: clientDBLookupMS, chromeAppleScriptMS: 0, trackedWindowCount: 0,
-                    trackedTabCount: 0)
+                    openBrowserSessionsByWorkspace: [:], trackedWindowIDsByWorkspace: [:], frontmostURL: nil, frontmostWindowID: nil,
+                    clientDBLookupMS: clientDBLookupMS, chromeAppleScriptMS: 0, trackedWindowCount: 0, trackedTabCount: 0)
             }
 
             let chrome = ChromeAdapter()
             let chromeStartedAt = Date()
-            let snapshot =
-                (try? chrome.tabSnapshot(inWindowIDs: trackedWindows.map(\.windowID))) ?? ChromeTabSnapshot(tabs: [], frontmostActiveTabURL: nil)
+            // `tabSnapshot` runs `tell application "Google Chrome"`, which launches Chrome via Apple
+            // Events when it is not running. Tracked rows outlive a Chrome quit, so every reader of
+            // this state (a cycle press in any mode that reads browser state, and the cycling row's
+            // refresh) would otherwise relaunch Chrome only to learn its tabs are gone. With Chrome
+            // not running no tracked tab is open, which is exactly what the empty snapshot says.
+            let snapshot: ChromeTabSnapshot
+            if chrome.isRunning() {
+                snapshot =
+                    (try? chrome.tabSnapshot(inWindowIDs: Array(trackedWindowIDs)))
+                    ?? ChromeTabSnapshot(tabs: [], frontmostActiveTabURL: nil, frontmostWindowID: nil)
+            } else {
+                snapshot = ChromeTabSnapshot(tabs: [], frontmostActiveTabURL: nil, frontmostWindowID: nil)
+            }
             let chromeAppleScriptMS = TerminalPerformance.elapsedMS(since: chromeStartedAt)
-            let openBrowserSessions = Self.openBrowserSessionsForCycle(
-                resolvedSessions: resolvedSessions, assignedPorts: detail.assignedPorts, trackedTargetURLs: trackedWindows.map(\.targetURL),
-                openTabURLs: snapshot.tabs.map(\.url))
+            var openBrowserSessionsByWorkspace: [String: [BrowserSession]] = [:]
+            var trackedWindowIDsByWorkspace: [String: Set<Int>] = [:]
+            for workspace in configured {
+                let trackedWindows = trackedWindowsByWorkspace[workspace.workspaceID] ?? []
+                guard !trackedWindows.isEmpty else { continue }
+                let workspaceWindowIDs = Set(trackedWindows.map(\.windowID))
+                // Accepted: this set is per workspace, not per session. A Chrome window holding tabs from two
+                // workspaces that configured the same target URL and both have it open matches both sets, so
+                // WindowFocusController.cycleCurrentIndex's front-window tie-break falls back to the rotation's
+                // cursor instead of the window's true owner. It takes duplicate target URLs across workspaces
+                // plus a hand-mixed window (tabs dragged between them) to hit; per-session window tracking would
+                // carry the tab-to-window association through every snapshot just for this case.
+                trackedWindowIDsByWorkspace[workspace.workspaceID] = workspaceWindowIDs
+                let openSessions = Self.openBrowserSessionsForCycle(
+                    resolvedSessions: workspace.detail.config.resolvedBrowserSessions, assignedPorts: workspace.detail.assignedPorts,
+                    trackedTargetURLs: trackedWindows.map(\.targetURL),
+                    openTabURLs: snapshot.tabs.filter { workspaceWindowIDs.contains($0.windowID) }.map(\.url))
+                if !openSessions.isEmpty { openBrowserSessionsByWorkspace[workspace.workspaceID] = openSessions }
+            }
             return BrowserCycleState(
-                openBrowserSessions: openBrowserSessions, frontmostURL: snapshot.frontmostActiveTabURL, clientDBLookupMS: clientDBLookupMS,
-                chromeAppleScriptMS: chromeAppleScriptMS, trackedWindowCount: trackedWindows.count, trackedTabCount: snapshot.tabs.count)
+                openBrowserSessionsByWorkspace: openBrowserSessionsByWorkspace, trackedWindowIDsByWorkspace: trackedWindowIDsByWorkspace,
+                frontmostURL: snapshot.frontmostActiveTabURL, frontmostWindowID: snapshot.frontmostWindowID, clientDBLookupMS: clientDBLookupMS,
+                chromeAppleScriptMS: chromeAppleScriptMS, trackedWindowCount: trackedWindowCount, trackedTabCount: snapshot.tabs.count)
         }.value
     }
 

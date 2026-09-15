@@ -3865,6 +3865,52 @@ end run
 APPLESCRIPT
 }
 
+send_cycle_mode_hotkey() {
+  # Leader plus backslash, the `Cycle mode` shortcut's default.
+  osascript <<'APPLESCRIPT'
+tell application "System Events"
+  key code 42 using {command down, option down}
+end tell
+APPLESCRIPT
+}
+
+send_cycle_mode_hotkey_with_ack() {
+  send_spaces_hotkey_with_ack send_cycle_mode_hotkey "spaces: hotkey_debug handle id=6 hotkey=cycleMode "
+}
+
+# Steps the cycling mode with its shortcut and proves the sidebar's cycling row followed, then steps
+# the rest of the way round so the profile the rest of the suite runs on keeps the mode it started
+# in.
+assert_cycle_mode_row_follows_mode_shortcut() {
+  local before after deadline step
+  before="$(ui_accessibility_description_for_identifier "sidebar-cycle-mode")"
+  [[ "$before" == Cycling\ * ]] || fail "cycling row did not report a mode: $before"
+  send_cycle_mode_hotkey_with_ack
+  after=""
+  deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    after="$(ui_accessibility_description_for_identifier "sidebar-cycle-mode" 2>/dev/null || true)"
+    if [[ -n "$after" && "$after" != "$before" ]]; then
+      break
+    fi
+    sleep 0.2
+  done
+  [[ -n "$after" && "$after" != "$before" ]] || fail "cycling row kept reporting '$before' after the cycle-mode shortcut"
+  [[ "$after" == Cycling\ * ]] || fail "cycling row lost its mode after the cycle-mode shortcut: $after"
+  # Four modes, so three more steps wrap back to the mode the row started in.
+  for step in 1 2 3; do
+    send_cycle_mode_hotkey_with_ack
+  done
+  deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ "$(ui_accessibility_description_for_identifier "sidebar-cycle-mode" 2>/dev/null || true)" == "$before" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "cycling row did not wrap back to '$before' after stepping through every mode"
+}
+
 send_cycle_hotkey_with_ack() {
   local direction="$1"
   local hotkey=""
@@ -5681,6 +5727,11 @@ run_window_cycle_small_assertions() {
   begin_case "$host: small workspace window cycling profile"
   ensure_single_spaces_instance "$SPACES_PID"
   run_window_cycle_profile_loop "$host" "single" "$workspace_dir" "$docs_window_id" "$KNOWN_SPACES_ADHOC_NAME"
+  pass_case
+
+  begin_case "$host: cycling row follows the cycle-mode shortcut"
+  activate_spaces_pid "$SPACES_PID"
+  assert_cycle_mode_row_follows_mode_shortcut
   pass_case
 }
 

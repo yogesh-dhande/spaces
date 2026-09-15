@@ -121,7 +121,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private(set) var visibleCompatibilityBlockRemedy: CompatibilityBlockView.BlockRemedy?
 
     var selectedProjectID: String? { didSet { overlays.updateOperationProgressOverlayVisibility() } }
-    var selectedWorkspaceID: String? { didSet { overlays.updateOperationProgressOverlayVisibility() } }
+    /// Every selection path (sidebar clicks, project/workspace creation, deletion, hide, and
+    /// `applyDeviceOverview`'s preferred-workspace apply) funnels through this setter, so it is the
+    /// one place Workspace mode's cycling row needs to hear about a selection change; `refreshCycleModeRow`
+    /// is cheap (an in-memory rebuild, no Chrome/daemon round trip) so running it here on every actual
+    /// change costs nothing a caller-by-caller trigger would have avoided.
+    var selectedWorkspaceID: String? {
+        didSet {
+            overlays.updateOperationProgressOverlayVisibility()
+            if oldValue != selectedWorkspaceID { sidebar.refreshCycleModeRow() }
+        }
+    }
     var lastSelectedRow: Int = -1
     var suppressOutlineSelectionChanges = false
     var showingSettings = false
@@ -138,7 +148,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     lazy var commandPalette = CommandPaletteController(host: self, deviceModel: deviceModel, alerts: alerts)
     lazy var panelCoordinator: PanelCoordinator = {
         let coordinator = PanelCoordinator(host: self)
-        coordinator.onLayoutChanged = { [weak self] scope, layout in self?.persistPanelLayout(scope: scope, layout: layout) }
+        // Every pane open, close, and move lands here, which is also every change to the set the
+        // cycling row counts, so the row is recounted alongside the layout write.
+        coordinator.onLayoutChanged = { [weak self] scope, layout in
+            self?.persistPanelLayout(scope: scope, layout: layout)
+            self?.sidebar.refreshCycleModeRow()
+        }
         return coordinator
     }()
     /// Persisted `panel_windows` rows not yet reopened this launch (nil until first
@@ -166,6 +181,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Thin forwarder to `windowFocus`, kept so `PanelCoordinator` (which already reaches every other
     /// terminal-pane callback through `host.`) does not need a second cross-controller import.
     func noteWindowNavigationTerminalFocus(sessionID: String) { windowFocus.noteWindowNavigationTerminalFocus(sessionID: sessionID) }
+
+    /// Thin forwarder to `windowFocus`, for the same reason as `noteWindowNavigationTerminalFocus`.
+    func noteWindowNavigationContentVisit(sessionID: String) { windowFocus.noteWindowNavigationContentVisit(sessionID: sessionID) }
 
     /// Thin forwarder to `windowFocus`, kept so `SidebarController` and `AlertsController` (which
     /// already reach the rest of their shortcut-badge state through `host.`) do not need a second
@@ -330,6 +348,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // all render in the chosen light/dark variant from the first frame.
         applyStoredAppAppearance()
         loadStoredTerminalTextSize()
+        windowFocus.loadStoredWindowCycleMode()
         logStartupProfile(
             "did_finish_launching",
             details:
@@ -559,11 +578,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         Task { @MainActor [weak self, object, workspaceID, delta, preferredFocusedBuiltInTerminalSessionID] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
-            let preferredTerminalSessionID =
-                (preferredFocusedBuiltInTerminalSessionID?.isEmpty == false)
-                ? preferredFocusedBuiltInTerminalSessionID : self.windowFocus.focusedBuiltInTerminalSessionIDForGlobalNavigation()
-            await self.windowFocus.cycleWorkspaceWindow(
-                workspaceID: workspaceID, delta: delta, preferredTerminalSessionID: preferredTerminalSessionID)
+            // This entry point names the workspace to cycle, so it always cycles that workspace's own
+            // windows: the caller asked for a workspace, not for whichever mode the shortcut is in.
+            self.windowFocus.enqueueWorkspaceWindowCycleStep(
+                workspaceID: workspaceID, delta: delta, preferredTerminalSessionID: preferredFocusedBuiltInTerminalSessionID)
         }
     }
 
@@ -1220,6 +1238,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 self.attemptDesktopControlRecoveryIfNeeded()
                 self.logHotkeyDebug("app_did_become_active \(self.hotkeyWindowStateSummary())")
                 self.windowFocus.noteAppDidBecomeActive()
+                // Workspace mode's focused-terminal count only counts while the app is active, so
+                // becoming active can change it with no key-window or content-focus event of its own.
+                self.sidebar.refreshCycleModeRow()
                 self.flushDeferredSidebarReloadsIfNeeded()
                 // Catch up on any database change whose IPC signal was missed while
                 // the app was suspended in the background. Reactivation is the one
@@ -1236,6 +1257,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 self.logHotkeyDebug("app_did_resign_active \(self.hotkeyWindowStateSummary())")
                 if self.commandPalette.commandPalettePanel?.isVisible == true { self.commandPalette.dismissCommandPalette() }
                 self.windowFocus.noteAppDidResignActive()
+                // `focusedSessionID()` can still return the same session while inactive (the key
+                // window's first responder does not change), so a bare `noteKeyWindowChanged()` here
+                // would see no change and skip the repaint the row actually needs.
+                self.sidebar.refreshCycleModeRow()
             }
         }
     }
@@ -2781,6 +2806,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let automationsRow = sidebar.makeAutomationsSidebarRow()
         automationsRow.translatesAutoresizingMaskIntoConstraints = false
 
+        // The cycling row is pinned to the bottom of the scrolling content, just above the
+        // footer separator: it reports a state that applies to the whole sidebar, so it stays
+        // put while projects scroll past it.
+        let cycleModeRow = sidebar.makeCycleModeRow()
+        cycleModeRow.translatesAutoresizingMaskIntoConstraints = false
+
         // The app identity row (logo, name, devices/settings/reload) is the sidebar's
         // footer; the Alerts row leads the content, which starts just below the
         // titlebar strip.
@@ -2792,6 +2823,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         container.addSubview(automationsRow)
         container.addSubview(sectionHeader)
         container.addSubview(scroll)
+        container.addSubview(cycleModeRow)
         container.addSubview(footerSeparator)
         container.addSubview(topBarRow)
 
@@ -2810,7 +2842,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: sectionHeader.bottomAnchor, constant: 6),
-            scroll.bottomAnchor.constraint(equalTo: footerSeparator.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: cycleModeRow.topAnchor),
+
+            cycleModeRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            cycleModeRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            cycleModeRow.bottomAnchor.constraint(equalTo: footerSeparator.topAnchor), cycleModeRow.heightAnchor.constraint(equalToConstant: 26),
 
             footerSeparator.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             footerSeparator.trailingAnchor.constraint(equalTo: container.trailingAnchor),
@@ -2834,6 +2870,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc func alertsRowClicked() { alerts.showAlertsDetail(presentation: .userNavigation) }
+
+    @objc func cycleModeRowClicked() { sidebar.showCycleModeMenu() }
+
+    /// Picks a cycling mode from the sidebar row's menu. `representedObject` carries the mode's
+    /// stored raw value, which is the same string the persisted setting holds.
+    @objc func selectCycleModeFromMenu(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String, let mode = WindowCycleMode(rawValue: rawValue) else { return }
+        windowFocus.selectWindowCycleMode(mode)
+    }
 
     // MARK: - Automations
 
@@ -3534,7 +3579,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         rebuildFlatSidebarData()
         if let preferredWorkspaceID, findWorkspace(id: preferredWorkspaceID) != nil {
             selectedWorkspaceID = preferredWorkspaceID
+            // `selectedWorkspaceID`'s didSet already refreshed the row above when the selection itself
+            // moved; the row's Workspace-mode fallback also reads this persisted preference directly
+            // (`clientActiveWorkspaceID()`, the value it falls back to with no selection at all, e.g.
+            // Alerts showing), so a write that changes it needs its own trigger even on a call where
+            // the selection above did not move (this device's own preferred workspace re-asserted).
+            let activeWorkspaceIDChanged = clientActiveWorkspaceID() != preferredWorkspaceID
             Self.setClientActiveWorkspaceID(preferredWorkspaceID)
+            if activeWorkspaceIDChanged { sidebar.refreshCycleModeRow() }
             selectedProjectID = findWorkspace(id: preferredWorkspaceID)?.0.id ?? preferredProjectID
         } else if let preferredProjectID, deviceModel.projects.contains(where: { $0.id == preferredProjectID }) {
             selectedProjectID = preferredProjectID
@@ -3563,8 +3615,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 overview, deviceID: deviceID, epoch: epoch, selectedProjectID: preferredProjectID, selectedWorkspaceID: preferredWorkspaceID,
                 preserveDetailPane: false)
         } else {
-            if let preferredWorkspaceID { selectedWorkspaceID = preferredWorkspaceID }
-            if let preferredWorkspaceID { Self.setClientActiveWorkspaceID(preferredWorkspaceID) }
+            if let preferredWorkspaceID {
+                selectedWorkspaceID = preferredWorkspaceID
+                // See the matching comment in `applyDeviceOverview`: the persisted preference is a
+                // second input the row reads, independent of whether the selection above just moved.
+                let activeWorkspaceIDChanged = clientActiveWorkspaceID() != preferredWorkspaceID
+                Self.setClientActiveWorkspaceID(preferredWorkspaceID)
+                if activeWorkspaceIDChanged { sidebar.refreshCycleModeRow() }
+            }
             if let preferredProjectID { selectedProjectID = preferredProjectID }
             requestSidebarReload()
         }
@@ -6429,6 +6487,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         try? SpacesClientDatabase.setDefaultSetting(key: ClientSettingsKey.activeWorkspaceID, value: workspaceID)
     }
 
+    /// The profile's persisted window-cycling mode. Read once at launch by `WindowFocusController`,
+    /// which owns the mode in effect from then on.
+    // Not private: WindowFocusController calls this from a different file in the same module
+    // (cross-file 'private' isn't visible).
+    func clientWindowCycleMode() -> WindowCycleMode {
+        WindowCycleMode.resolved(persistedRawValue: (try? clientDatabase().setting(key: ClientSettingsKey.windowCycleMode)) ?? nil)
+    }
+
+    nonisolated static func setClientWindowCycleMode(_ mode: WindowCycleMode) {
+        try? SpacesClientDatabase.setDefaultSetting(key: ClientSettingsKey.windowCycleMode, value: mode.rawValue)
+    }
+
+    /// The window-cycling mode changed, from the mode shortcut or from the sidebar row's menu. The
+    /// row repaints and the confirmation HUD names the mode it landed on. The hotkey log keeps the
+    /// change, which is where the shortcut that made it is already traced.
+    func windowCycleModeDidChange(_ mode: WindowCycleMode) {
+        logHotkeyDebug("window_cycle_mode mode=\(mode.rawValue)")
+        overlays.showCycleModeHUD(model: sidebar.refreshCycleModeRow())
+    }
+
     /// The overview for the daemon that owns `workspaceID` (local or remote), or nil when
     /// the workspace has no known owning device or that device's section carries no
     /// overview. Callers must treat nil as "we cannot describe this workspace" and do
@@ -6495,11 +6573,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// Resolves the workspace of the focused desktop window when it is a Chrome browser
     /// window, by matching the frontmost tab URL to a configured browser session in the
-    /// overview. A focused built-in terminal is resolved earlier by its session id.
+    /// overview. A focused built-in terminal is resolved earlier by its session id. This AppleScript
+    /// round trip gets only the URL; `WindowFocusController.cycleModeRowModel` calls the same helper
+    /// with `cachedBrowserCycleState`'s snapshot URL instead of paying for another round trip on every
+    /// repaint, and both apply the same URL rule with no tie-break. With Chrome not running there is no
+    /// Chrome window to resolve, and the running check comes first because `isAvailable` scripts Chrome,
+    /// which launches it; a Workspace-mode cycle press with no Spaces terminal focused reaches this on
+    /// every press, and `docs/spec.md` promises a cycle press never launches Chrome.
     func clientWorkspaceIDForFocusedWindow() -> String? {
         let chrome = ChromeAdapter()
-        guard chrome.isAvailable(), let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil, !activeURL.isEmpty else { return nil }
-        return BrowserSessionCoordinator.workspaceIDForObservedBrowserURL(activeURL, in: deviceModel.deviceSections.compactMap(\.overview))
+        guard chrome.isRunning(), chrome.isAvailable(), let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil, !activeURL.isEmpty else {
+            return nil
+        }
+        return BrowserSessionCoordinator.workspaceIDForFrontmostBrowserURL(activeURL, in: deviceModel.deviceSections.compactMap(\.overview))
     }
 
     /// Validates a process template before it is saved. Pure, client-local string
@@ -6601,6 +6687,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             logHotkeyDebug("window_did_become_key class=\(type(of: focusedWindow)) title=\(focusedWindow.title) \(hotkeyWindowStateSummary())")
             if focusedWindow === commandPalette.commandPalettePanel { commandPalette.completePendingCommandPalettePresentationIfNeeded() }
         }
+        // The main window becoming key can change what `focusedSessionID()` reports (a terminal pane
+        // here regaining key status over a detached panel window's pane), which the sidebar's cycling
+        // row resolves Workspace mode from; see `PanelCoordinator.noteKeyWindowChanged`.
+        panelCoordinator.noteKeyWindowChanged()
         guard !hasAppliedSplitViewWidth else { return }
         hasAppliedSplitViewWidth = true
         applySplitViewWidth()

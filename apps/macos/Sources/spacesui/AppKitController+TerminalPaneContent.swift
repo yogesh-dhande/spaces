@@ -73,6 +73,7 @@ extension AppKitController {
             let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
             switch scope {
             case .workspace(let deviceID, let workspaceID):
+                panelCoordinator.noteStoredWorkspacePanelLayoutChanged(deviceID: deviceID, workspaceID: workspaceID)
                 if layout.isEmpty {
                     try clientDatabase().deleteWorkspacePanelLayout(deviceID: deviceID, workspaceID: workspaceID)
                 } else {
@@ -99,10 +100,24 @@ extension AppKitController {
         Self.deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: sessionID, overview: overview(forWorkspaceID: workspaceID))
     }
 
-    /// Loads a workspace panel's persisted layout, pruned against the owning daemon's retained
-    /// terminal-session keep-set so dead sessions drop before the panel materializes. Uses the same
-    /// contract as live pruning (`OpenPanePruning.restorationKeepSet`), so an ended-but-retained shell
-    /// survives relaunch exactly as it survives a live overview refresh.
+    /// A workspace panel's stored layout exactly as it was written: read, decoded, and version
+    /// checked, with no pruning applied.
+    ///
+    /// Split out from `restoredWorkspacePanelLayout` because the two halves change on different
+    /// events, and `PanelCoordinator` caches only this one (`storedWorkspacePanelLayouts`): the read
+    /// and decode are the expensive half and change only when the row is written, while pruning
+    /// depends on the live keep-set and has to run on every read.
+    func storedWorkspacePanelLayout(deviceID: String, workspaceID: String) -> PanelLayout? {
+        guard let json = try? clientDatabase().workspacePanelLayout(deviceID: deviceID, workspaceID: workspaceID),
+            let layout = try? JSONDecoder().decode(PanelLayout.self, from: Data(json.utf8)), layout.version == PanelLayout.currentVersion
+        else { return nil }
+        return layout
+    }
+
+    /// Prunes a stored workspace layout against the owning daemon's retained terminal-session
+    /// keep-set, so dead sessions drop before the panel materializes. Uses the same contract as live
+    /// pruning (`OpenPanePruning.restorationKeepSet`), so an ended-but-retained shell survives
+    /// relaunch exactly as it survives a live overview refresh.
     ///
     /// Also unconditionally drops every code pane (`keepingWorkspaceKeys: []`): the editor's only
     /// legitimate placement is the global singleton window (`.globalWindow` scope), so a code pane
@@ -115,14 +130,17 @@ extension AppKitController {
     ///   it protects the pane it is about to claim whichever order the two messages arrive in. Scoped to
     ///   the call rather than recorded, so `panesHeldForReplacement` keeps meaning only what the daemon
     ///   asked the client to hold.
-    func restoredWorkspacePanelLayout(deviceID: String, workspaceID: String, additionalKeepSessionIDs: Set<String> = []) -> PanelLayout? {
-        guard let json = try? clientDatabase().workspacePanelLayout(deviceID: deviceID, workspaceID: workspaceID),
-            let layout = try? JSONDecoder().decode(PanelLayout.self, from: Data(json.utf8)), layout.version == PanelLayout.currentVersion
-        else { return nil }
+    func prunedWorkspacePanelLayout(_ layout: PanelLayout, workspaceID: String, additionalKeepSessionIDs: Set<String> = []) -> PanelLayout {
         let retainedSessionIDs = OpenPanePruning.restorationKeepSet(
-            overview: overview(forWorkspaceID: workspaceID),
-            heldOpenSessionIDs: panelCoordinator.sessionIDsHeldOpen.union(additionalKeepSessionIDs))
+            overview: overview(forWorkspaceID: workspaceID), heldOpenSessionIDs: panelCoordinator.sessionIDsHeldOpen.union(additionalKeepSessionIDs))
         return PanelLayoutEngine.prunedLayout(layout, keepingSessionIDs: retainedSessionIDs, keepingWorkspaceKeys: [])
+    }
+
+    /// Loads a workspace panel's persisted layout, pruned for restoration: the two halves above, in
+    /// the order a panel materialization needs them.
+    func restoredWorkspacePanelLayout(deviceID: String, workspaceID: String, additionalKeepSessionIDs: Set<String> = []) -> PanelLayout? {
+        guard let layout = storedWorkspacePanelLayout(deviceID: deviceID, workspaceID: workspaceID) else { return nil }
+        return prunedWorkspacePanelLayout(layout, workspaceID: workspaceID, additionalKeepSessionIDs: additionalKeepSessionIDs)
     }
 }
 
@@ -234,6 +252,7 @@ extension AppKitController {
         guard let database = try? clientDatabase(), let stored = try? database.workspacePanelLayout(deviceID: deviceID, workspaceID: workspaceID),
             let layoutJSON = Self.retargetedLayoutJSON(stored, replacing: oldSessionID, with: content)
         else { return false }
+        panelCoordinator.noteStoredWorkspacePanelLayoutChanged(deviceID: deviceID, workspaceID: workspaceID)
         try? database.writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: workspaceID, layoutJSON: layoutJSON)
         return true
     }

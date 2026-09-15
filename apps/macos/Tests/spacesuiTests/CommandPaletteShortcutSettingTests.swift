@@ -20,6 +20,30 @@ import spacesclientcore
         #expect(commandPaletteIndex == hotkeyIndex.map { $0 + 1 })
     }
 
+    @Test func cycleModeShortcutMapsToClientSettingsKeyAndDefaultsToBackslash() {
+        #expect(ShortcutsController.ShortcutSetting(settingKey: ClientSettingsKey.guiCycleModeShortcut) == .guiCycleModeShortcut)
+        #expect(ShortcutsController.ShortcutSetting.guiCycleModeShortcut.settingKey == ClientSettingsKey.guiCycleModeShortcut)
+        #expect(ShortcutsController.ShortcutSetting.guiCycleModeShortcut.defaultSpec == "\\")
+        #expect(ShortcutsController.ShortcutSetting.guiCycleModeShortcut.label == "Cycle mode")
+    }
+
+    @Test func cycleModeShortcutSitsAfterPreviousWindowInTheSettingsPanel() {
+        let cases = ShortcutsController.ShortcutSetting.settingsPanelCases
+        let previousIndex = cases.firstIndex(of: .guiPreviousShortcut)
+
+        #expect(previousIndex != nil)
+        #expect(cases.firstIndex(of: .guiCycleModeShortcut) == previousIndex.map { $0 + 1 })
+    }
+
+    /// The mode toggle is leader-backed like the cycling shortcuts it belongs with, so an unset
+    /// setting resolves to the leader plus backslash rather than a bare backslash.
+    @Test func cycleModeShortcutComposesWithTheLeader() throws {
+        let resolver = ShortcutsController.ShortcutSettingResolver { _ in nil }
+
+        #expect(ShortcutsController.ShortcutSetting.guiCycleModeShortcut.usesLeader)
+        #expect(try resolver.rawValue(for: .guiCycleModeShortcut) == "cmd+alt+\\")
+    }
+
     @Test func sidebarNavigationShortcutsAreConfigurableInSettingsPanel() {
         // Sidebar selection moves only via leader+up/down, so those shortcuts must be user-overridable
         // from the settings panel rather than hidden functional-only bindings.

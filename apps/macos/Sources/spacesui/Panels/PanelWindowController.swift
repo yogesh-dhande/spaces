@@ -15,6 +15,9 @@ import AppKit
     /// Move/resize hook; the coordinator re-persists the panel so the frame survives
     /// relaunch.
     var onFrameChanged: (() -> Void)?
+    /// Key-window hook; the coordinator repaints the sidebar's cycling row when this
+    /// changes what its focused-terminal-session lookup would answer.
+    var onDidBecomeKey: (() -> Void)?
 
     init(panelWindowID: String, panelView: WorkspacePanelView, frame: NSRect?) {
         self.panelWindowID = panelWindowID
@@ -50,4 +53,6 @@ import AppKit
     public func windowDidMove(_ notification: Notification) { onFrameChanged?() }
 
     public func windowDidEndLiveResize(_ notification: Notification) { onFrameChanged?() }
+
+    public func windowDidBecomeKey(_ notification: Notification) { onDidBecomeKey?() }
 }

@@ -45,6 +45,7 @@ import workspacecore
     private var openSettingsShortcutSpec: HotkeySpec?
     private var nextShortcutSpec: HotkeySpec?
     private var previousShortcutSpec: HotkeySpec?
+    private var cycleModeShortcutSpec: HotkeySpec?
     private var sidebarNextShortcutSpec: HotkeySpec?
     private var sidebarPreviousShortcutSpec: HotkeySpec?
     // Not private: `WindowFocusController.windowShortcutIndex`/`windowShortcutBadgeText` read this from
@@ -61,7 +62,8 @@ import workspacecore
             event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID)
         if status != noErr { return status }
         controller.host.logHotkeyDebug(
-            "event_received id=\(hotKeyID.id) status=\(status) main_thread=\(Thread.isMainThread ? 1 : 0) \(controller.host.hotkeyWindowStateSummary())")
+            "event_received id=\(hotKeyID.id) status=\(status) main_thread=\(Thread.isMainThread ? 1 : 0) \(controller.host.hotkeyWindowStateSummary())"
+        )
         if Thread.isMainThread {
             MainActor.assumeIsolated {
                 controller.host.logHotkeyDebug("event_dispatch_direct id=\(hotKeyID.id)")
@@ -115,6 +117,11 @@ import workspacecore
         if let previous { registerHotkey(spec: previous, id: GlobalHotkey.previous.rawValue, signature: signature, target: target) }
         if let openEditorShortcutSpec {
             registerHotkey(spec: openEditorShortcutSpec, id: GlobalHotkey.openEditor.rawValue, signature: signature, target: target)
+        }
+        // A Carbon hotkey like next/previous rather than a local monitor entry: the cycling mode has to
+        // be switchable while the window the cycle just landed on belongs to another app.
+        if let cycleModeShortcutSpec {
+            registerHotkey(spec: cycleModeShortcutSpec, id: GlobalHotkey.cycleMode.rawValue, signature: signature, target: target)
         }
 
         var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -215,6 +222,7 @@ import workspacecore
         case .next: host.windowFocus.focusGlobalWindowNavigation(direction: 1)
         case .previous: host.windowFocus.focusGlobalWindowNavigation(direction: -1)
         case .openEditor: host.openGlobalEditorFromHotkey()
+        case .cycleMode: host.windowFocus.stepWindowCycleMode()
         }
     }
 
@@ -424,6 +432,7 @@ import workspacecore
         reloadShortcutSpec = loadShortcutSpec(resolver, setting: .guiReloadShortcut)
         nextShortcutSpec = loadShortcutSpec(resolver, setting: .guiNextShortcut)
         previousShortcutSpec = loadShortcutSpec(resolver, setting: .guiPreviousShortcut)
+        cycleModeShortcutSpec = loadShortcutSpec(resolver, setting: .guiCycleModeShortcut)
         sidebarNextShortcutSpec = loadShortcutSpec(resolver, setting: .guiSidebarNextShortcut)
         sidebarPreviousShortcutSpec = loadShortcutSpec(resolver, setting: .guiSidebarPreviousShortcut)
         openEditorShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenEditorShortcut)
@@ -432,6 +441,12 @@ import workspacecore
         openFinderShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenFinderShortcut)
         openSettingsShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenSettingsShortcut)
         windowShortcutSpec = loadShortcutSpec(resolver, setting: .guiWindowShortcut)
+        // The cycling row's hint label is drawn once from `cycleModeShortcutSpec`/the leader chord at
+        // row build time and otherwise never updated on its own, so a rebind (or a leader change) here
+        // would leave it stale until some unrelated repaint happened to run. Every load pass, not just
+        // a user-triggered rebind, lands here: the extra repaint is cheap (label text only), and it
+        // keeps the row from needing to know when a load pass actually changed anything.
+        host.sidebar.refreshCycleModeRow()
     }
 
     private func loadShortcutSpec(_ resolver: ShortcutSettingResolver, setting: ShortcutSetting) -> HotkeySpec? {
@@ -485,6 +500,7 @@ import workspacecore
         case .guiReloadShortcut: return reloadShortcutSpec
         case .guiNextShortcut: return nextShortcutSpec
         case .guiPreviousShortcut: return previousShortcutSpec
+        case .guiCycleModeShortcut: return cycleModeShortcutSpec
         case .guiSidebarNextShortcut: return sidebarNextShortcutSpec
         case .guiSidebarPreviousShortcut: return sidebarPreviousShortcutSpec
         case .guiOpenEditorShortcut: return openEditorShortcutSpec

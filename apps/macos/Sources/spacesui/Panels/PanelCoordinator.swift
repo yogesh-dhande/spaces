@@ -209,19 +209,83 @@ import spacesterminalcore
     /// Ordered open session ids for a workspace across all panels: its workspace panel
     /// first (tab order), then panes of that workspace hosted in global panel windows.
     /// This is the "open targets" source for window cycling.
-    func openTerminalSessionIDs(workspaceID: String) -> [String] {
-        var ordered: [String] = []
+    func openTerminalSessionIDs(workspaceID: String) -> [String] { openTerminalSessionIDsByWorkspace()[workspaceID] ?? [] }
+
+    /// The same ordered open session ids for every workspace at once, gathered in one pass. The
+    /// window cycle's cross-device modes need all of them on every keypress.
+    func openTerminalSessionIDsByWorkspace() -> [String: [String]] {
+        var ordered: [String: [String]] = [:]
         for (scope, state) in panels.sorted(by: { scopeSortKey($0.key) < scopeSortKey($1.key) }) {
-            switch scope {
-            case .workspace(_, let scopeWorkspaceID):
-                guard scopeWorkspaceID == workspaceID else { continue }
-                ordered.append(contentsOf: PanelLayoutEngine.orderedTerminalSessionIDs(in: state.layout))
-            case .globalWindow:
-                for sessionID in PanelLayoutEngine.orderedTerminalSessionIDs(in: state.layout)
-                where contentControllers[sessionID]?.workspaceID == workspaceID { ordered.append(sessionID) }
+            for sessionID in PanelLayoutEngine.orderedTerminalSessionIDs(in: state.layout) {
+                let sessionWorkspaceID: String?
+                switch scope {
+                case .workspace(_, let scopeWorkspaceID): sessionWorkspaceID = scopeWorkspaceID
+                case .globalWindow: sessionWorkspaceID = contentControllers[sessionID]?.workspaceID
+                }
+                guard let sessionWorkspaceID else { continue }
+                ordered[sessionWorkspaceID, default: []].append(sessionID)
             }
         }
         return ordered
+    }
+
+    /// The same map as the cycle sees it: the in-memory pass above, completed out of the persisted
+    /// layouts of the workspaces in `workspaceKeys` whose panel this launch has not restored.
+    ///
+    /// A workspace panel's layout is materialized lazily, the first time the workspace is selected or
+    /// one of its panes is opened, so after a relaunch `panels` holds only the workspaces reached so
+    /// far. A pane's openness is its persisted layout until its workspace is visited, and the cycle
+    /// counts it either way, so a fresh launch enumerates what the user left open instead of what
+    /// happens to have been restored. Reading a layout restores nothing: no panel state, view, or
+    /// content controller is created here. A workspace whose panel is restored keeps reading memory,
+    /// which is the truth once restored because it can hold layout changes not yet written back.
+    func openTerminalSessionIDsByWorkspace(includingPersistedLayoutsFor workspaceKeys: [PanelLayoutEngine.WorkspaceKey]) -> [String: [String]] {
+        var ordered = openTerminalSessionIDsByWorkspace()
+        for key in workspaceKeys where panels[.workspace(deviceID: key.deviceID, workspaceID: key.workspaceID)] == nil {
+            let stored = cachedStoredWorkspacePanelLayout(key)
+            guard !stored.isEmpty else { continue }
+            let layout = host.prunedWorkspacePanelLayout(stored, workspaceID: key.workspaceID)
+            // Whatever the in-memory pass already found for this workspace is hosted in a global panel
+            // window, since its own panel is not restored. Those panes come second, as they do in that
+            // pass, and one of them still named by the stale persisted row is not counted twice.
+            let hostedInPanelWindows = ordered[key.workspaceID] ?? []
+            let persisted = PanelLayoutEngine.orderedTerminalSessionIDs(in: layout).filter { !hostedInPanelWindows.contains($0) }
+            guard !persisted.isEmpty else { continue }
+            ordered[key.workspaceID] = persisted + hostedInPanelWindows
+        }
+        return ordered
+    }
+
+    /// Stored workspace panel layouts as written, keyed by workspace, for the workspaces the read
+    /// above has had to reach into the client database for. An empty layout is the cached answer for
+    /// "this workspace has no stored layout", so a workspace the user left with nothing open costs one
+    /// database read for the whole launch rather than one per read.
+    ///
+    /// The cache exists because that read is on the sidebar's apply path: the cycling row recounts on
+    /// every data apply (several times a second under a live workspace), and each unrestored workspace
+    /// otherwise costs a database read plus a JSON decode on the main actor. Same reason, and same
+    /// shape, as `WindowFocusController.cachedBrowserCycleState` for the browser half of that count.
+    ///
+    /// Only the stored layout is cached, never the pruned result: pruning is re-run on every read
+    /// against the current keep-set, so a session the daemon has stopped retaining leaves the count
+    /// with the overview that drops it, with no write to notice. What the cache holds changes only
+    /// when the stored row is written, and `noteStoredWorkspacePanelLayoutChanged` is called from every
+    /// site that writes one.
+    private var storedWorkspacePanelLayouts: [PanelLayoutEngine.WorkspaceKey: PanelLayout] = [:]
+
+    /// Drops a workspace's cached stored layout, so the next read loads the row again. Called from
+    /// every site that writes the row (`AppKitController.persistPanelLayout` and the persisted-pane
+    /// retarget) and from the restore below, after which the panel is in memory and the entry would
+    /// only be a stale copy of what `panels` now owns.
+    func noteStoredWorkspacePanelLayoutChanged(deviceID: String, workspaceID: String) {
+        storedWorkspacePanelLayouts[PanelLayoutEngine.WorkspaceKey(deviceID: deviceID, workspaceID: workspaceID)] = nil
+    }
+
+    private func cachedStoredWorkspacePanelLayout(_ key: PanelLayoutEngine.WorkspaceKey) -> PanelLayout {
+        if let cached = storedWorkspacePanelLayouts[key] { return cached }
+        let layout = host.storedWorkspacePanelLayout(deviceID: key.deviceID, workspaceID: key.workspaceID) ?? PanelLayout()
+        storedWorkspacePanelLayouts[key] = layout
+        return layout
     }
 
     func closeTerminalPanes(workspaceID: String, sessionIsTerminating: Bool = false) {
@@ -412,6 +476,28 @@ import spacesterminalcore
     /// session id for the palette to remember, so it remembers this instead.
     func focusedCodePaneID() -> String? { (contentOwning(responder: NSApp.keyWindow?.firstResponder) as? CodePaneContentController)?.paneID }
 
+    /// `focusedSessionID()` as of the last cycling-row repaint decision, so `repaintCycleRowIfFocusedSessionChanged`
+    /// can gate its repaint on an actual change instead of firing on every focus or key-window event.
+    private var lastFocusedSessionIDForCycleRow: String?
+
+    /// Repaints the sidebar's cycling row when the key window's focused terminal session actually
+    /// changed. `WindowFocusController.cycleModeRowModel()` resolves Workspace mode from
+    /// `focusedBuiltInTerminalSessionIDForGlobalNavigation()`, itself backed by `focusedSessionID()`,
+    /// so a changed answer here is a changed answer there. Two call sites feed this: `noteContentFocused`
+    /// (a click or keystroke inside a pane's content) and `noteKeyWindowChanged` (the key window itself
+    /// changing with no content event, e.g. clicking a panel window's titlebar); `focusedSessionID()`
+    /// reads `NSApp.keyWindow`, so either can change what it returns.
+    private func repaintCycleRowIfFocusedSessionChanged() {
+        let current = focusedSessionID()
+        guard current != lastFocusedSessionIDForCycleRow else { return }
+        lastFocusedSessionIDForCycleRow = current
+        host.sidebar.refreshCycleModeRow()
+    }
+
+    /// The key-window change handler for the main window and every global panel window calls this:
+    /// see `repaintCycleRowIfFocusedSessionChanged`.
+    func noteKeyWindowChanged() { repaintCycleRowIfFocusedSessionChanged() }
+
     /// Syncs the layout's focused pane to the content that actually has keyboard focus (clicks inside
     /// pane content bypass the pane chrome's mouse handling, so the app's mouse-down and key-down
     /// monitors call this to sync focus after a click or a keystroke). Works for either content kind:
@@ -419,6 +505,17 @@ import spacesterminalcore
     /// found by scanning for which paneID's controller this is.
     func noteContentFocused(_ content: any PaneContentHosting) {
         guard let (scope, paneID) = placement(forContent: content) else { return }
+        // Reaching a pane by hand is a visit for window cycling, exactly as focusing it through
+        // `activateFocusedPane` is. Recorded ahead of the guard below, because that guard asks
+        // whether this pane is its own panel's focused pane: clicking into a pane in another
+        // workspace's panel, which already calls it focused, is still the visit that makes that pane
+        // the most recent target.
+        if let sessionID = (content as? any TerminalPaneContentHosting)?.sessionID { host.noteWindowNavigationContentVisit(sessionID: sessionID) }
+        // Checked ahead of the guard below too: a pane that is already its layout's focused pane (the
+        // early return just below) can still be a change in what the cycling row reports, when it is
+        // reached by the key window changing to a different window that already had this pane focused
+        // (e.g. a terminal pane in a detached panel window belonging to another workspace).
+        repaintCycleRowIfFocusedSessionChanged()
         guard layout(for: scope).focusedPaneID != paneID else { return }
         focusPane(scope: scope, paneID: paneID, moveKeyboardFocus: false)
     }
@@ -684,6 +781,9 @@ import spacesterminalcore
         host.showPanelScope(placement.scope)
         host.noteWindowNavigationTerminalFocus(sessionID: sessionID)
         content.makeContentFirstResponder()
+        // This shortcut bypasses `activateFocusedPane` and the click/key-window monitors, so it is
+        // its own funnel for the cycling row's focused-terminal count.
+        repaintCycleRowIfFocusedSessionChanged()
         return true
     }
 
@@ -769,6 +869,11 @@ import spacesterminalcore
                 deviceID: deviceID, workspaceID: workspaceID, additionalKeepSessionIDs: protectingSessionID.map { [$0] } ?? []), !layout.isEmpty
         else { return }
         panels[scope] = PanelState(layout: layout, view: nil)
+        noteStoredWorkspacePanelLayoutChanged(deviceID: deviceID, workspaceID: workspaceID)
+        // Adoption assigns `panels[scope]` directly rather than through `onLayoutChanged` (nothing to
+        // persist: the layout was just read back), so the cycling row, which the workspace selection
+        // already repainted before this ran, is recounted here to pick up the restored panes.
+        host.sidebar.refreshCycleModeRow()
         for pane in PanelLayoutEngine.allPanes(in: layout) {
             switch pane.content {
             case .terminalSession:
@@ -892,6 +997,7 @@ import spacesterminalcore
             guard let self else { return }
             self.onLayoutChanged?(scope, self.layout(for: scope))
         }
+        controller.onDidBecomeKey = { [weak self] in self?.noteKeyWindowChanged() }
         panelWindows[panelWindowID] = controller
         syncPanelWindowTitle(scope: scope)
         // Re-persist now that a frame exists (a fresh window's first layout write
@@ -944,6 +1050,7 @@ import spacesterminalcore
         guard let controller = panelWindows.removeValue(forKey: panelWindowID) else { return }
         controller.onUserClose = nil
         controller.onFrameChanged = nil
+        controller.onDidBecomeKey = nil
         controller.window.delegate = nil
         controller.window.close()
     }
@@ -1003,6 +1110,10 @@ import spacesterminalcore
         else { return }
         if let sessionID = pane.content.terminalSessionID { host.noteWindowNavigationTerminalFocus(sessionID: sessionID) }
         content.activate(focus: true)
+        // Every programmatic pane activation (tab select, split focus, palette/alert jump) funnels
+        // through here, so the cycling row's focused-terminal count needs a repaint here too, not
+        // just on the mouse/key-window events `noteContentFocused`/`noteKeyWindowChanged` cover.
+        repaintCycleRowIfFocusedSessionChanged()
     }
 
     private func activateContentIfVisible(scope: PanelScope, pane: Pane) {
@@ -1305,9 +1416,7 @@ import spacesterminalcore
         case .codePane(let paneDeviceID, let paneWorkspaceID): needsRetarget = paneDeviceID != deviceID || paneWorkspaceID != workspaceID
         default: needsRetarget = false
         }
-        if needsRetarget {
-            retargetCodePane(paneID: placement.paneID, scope: placement.scope, toDeviceID: deviceID, workspaceID: workspaceID)
-        }
+        if needsRetarget { retargetCodePane(paneID: placement.paneID, scope: placement.scope, toDeviceID: deviceID, workspaceID: workspaceID) }
         focus(placement: placement)
     }
 
@@ -1315,11 +1424,9 @@ import spacesterminalcore
     /// creation arm `openOrFocusGlobalEditorWindow` reaches once `anyGlobalCodePanePlacement` finds
     /// nothing to reuse.
     @discardableResult func openCodePaneInNewTab(
-        deviceID: String, workspaceID: String, initialMode: CodePaneMode,
-        initialModePolicy: CodePaneInitialModePolicy = .restoreWorkspaceMode, in scope: PanelScope? = nil
-    )
-        -> Bool
-    {
+        deviceID: String, workspaceID: String, initialMode: CodePaneMode, initialModePolicy: CodePaneInitialModePolicy = .restoreWorkspaceMode,
+        in scope: PanelScope? = nil
+    ) -> Bool {
         guard let resolvedScope = scope ?? workspaceScope(forWorkspaceID: workspaceID) else { return false }
         guard mayCreateCodePane(workspaceID: workspaceID) else { return false }
         let paneID = UUID().uuidString

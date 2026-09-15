@@ -29,6 +29,20 @@ public struct ClientBrowserWindowIDStore: Sendable {
         try SpacesClientDatabase.withDefaultDatabase { try $0.browserSessionWindowIDs(deviceID: deviceID, workspaceID: workspaceID) }
     }
 
+    /// Tracked browser-session tab locations for several workspaces at once, read through one
+    /// database handle. The window cycle's cross-device modes ask about every workspace on every
+    /// keypress, so they read them together rather than opening the database per workspace.
+    public func windowIDs(workspaceIDs: [String]) throws -> [String: [(targetURL: String, windowID: Int)]] {
+        try SpacesClientDatabase.withDefaultDatabase { database in
+            var windowIDsByWorkspace: [String: [(targetURL: String, windowID: Int)]] = [:]
+            for workspaceID in workspaceIDs {
+                let windowIDs = try database.browserSessionWindowIDs(deviceID: deviceID, workspaceID: workspaceID)
+                if !windowIDs.isEmpty { windowIDsByWorkspace[workspaceID] = windowIDs }
+            }
+            return windowIDsByWorkspace
+        }
+    }
+
     public func clearAll(workspaceID: String) throws {
         try SpacesClientDatabase.withDefaultDatabase { try $0.clearBrowserSessionWindowIDs(deviceID: deviceID, workspaceID: workspaceID) }
     }

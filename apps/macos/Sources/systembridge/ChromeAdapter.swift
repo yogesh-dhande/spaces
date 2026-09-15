@@ -166,17 +166,19 @@ public final class ChromeAdapter {
         return (Int(output) ?? 0) > 0
     }
 
-    /// Returns the requested-window tab list and the frontmost active tab URL from one Chrome
-    /// AppleScript invocation. Window cycling needs both values to build the open target set and
-    /// locate the current browser target, so keeping them together avoids an extra Apple Events round trip.
+    /// Returns the requested-window tab list plus the frontmost active tab's URL and its window id,
+    /// from one Chrome AppleScript invocation. Window cycling needs all three values to build the open
+    /// target set and locate the current browser target, so keeping them together avoids extra Apple
+    /// Events round trips.
     public func tabSnapshot(inWindowIDs windowIDs: [Int]) throws -> ChromeTabSnapshot {
         let uniqueWindowIDs = Array(Set(windowIDs.filter { $0 > 0 })).sorted()
-        guard !uniqueWindowIDs.isEmpty else { return ChromeTabSnapshot(tabs: [], frontmostActiveTabURL: nil) }
+        guard !uniqueWindowIDs.isEmpty else { return ChromeTabSnapshot(tabs: [], frontmostActiveTabURL: nil, frontmostWindowID: nil) }
         let requestedIDs = uniqueWindowIDs.map { "\"\($0)\"" }.joined(separator: ", ")
         let separator = "__SPACES_FRONTMOST_TABS__"
         let script = """
             set requestedWindowIDs to {\(requestedIDs)}
             set frontmostURL to ""
+            set frontmostWindowID to ""
             set output to ""
             tell application "Google Chrome"
               if (count of windows) is not 0 then
@@ -184,6 +186,7 @@ public final class ChromeAdapter {
                 if frontmostURL is missing value then
                   set frontmostURL to ""
                 end if
+                set frontmostWindowID to (id of front window) as string
               end if
               repeat with w in windows
                 set wid to id of w
@@ -199,13 +202,19 @@ public final class ChromeAdapter {
                 end if
               end repeat
             end tell
-            return frontmostURL & "\\n\(separator)\\n" & output
+            return frontmostURL & "\\n" & frontmostWindowID & "\\n\(separator)\\n" & output
             """
         let output = try runChromeScript(script)
         let split = output.components(separatedBy: separator)
-        let frontmostURL = split.first?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The header is two lines, the frontmost tab's URL then its window id, so a URL containing
+        // whatever it likes stays on its own line.
+        let headerLines = (split.first ?? "").components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let frontmostURL = headerLines.first
+        let frontmostWindowID = headerLines.dropFirst().first.flatMap { Int($0) }
         let tabRows = split.dropFirst().joined(separator: separator)
-        return ChromeTabSnapshot(tabs: Self.parseTabRows(tabRows), frontmostActiveTabURL: frontmostURL?.isEmpty == false ? frontmostURL : nil)
+        return ChromeTabSnapshot(
+            tabs: Self.parseTabRows(tabRows), frontmostActiveTabURL: frontmostURL?.isEmpty == false ? frontmostURL : nil,
+            frontmostWindowID: (frontmostWindowID ?? 0) > 0 ? frontmostWindowID : nil)
     }
 
     /// Focuses the tab matching `urlPrefix` within a specific window, raising that window.
