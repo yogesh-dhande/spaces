@@ -56,6 +56,12 @@ final class SpacesMobileBaselineUITests: XCTestCase {
         // defaults argument domain for the paired-devices key, which shadows the device the seed writes
         // to the persistent domain, and the app then lands on "Pair This Device".
         let app = XCUIApplication()
+        // Demo Mode persists in the app's defaults, and a demo-mode UI test or screenshot staging run
+        // on the same simulator leaves it on. A lane app in Demo Mode reads sample data instead of the
+        // seeded lane daemon and never lists the scenario's session, so the launch shadows that one
+        // key through the argument domain. Only that key: the paired-devices key must stay untouched
+        // so the device the seed writes to the persistent domain is the one the app connects to.
+        app.launchArguments += ["-spaces.mobile.demo-mode-enabled", "0"]
         app.launchEnvironment["SPACES_MOBILE_PAYWALL_BYPASS"] = "1"
         for (key, value) in environment { app.launchEnvironment[key] = value }
         app.launch()
