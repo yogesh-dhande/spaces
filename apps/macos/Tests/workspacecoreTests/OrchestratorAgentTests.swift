@@ -79,22 +79,59 @@ extension OrchestratorTests {
         let orchestrator = makeTestOrchestrator(store: store)
 
         let registered = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Claude Code", terminalTrackingID: "agent-session", sessionKey: "conversation-1",
-            status: .idle, eventType: "init", eventSource: "spaces_agent_signal")
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code", terminalTrackingID: "agent-session",
+            sessionKey: .set("conversation-1"), status: .idle, eventType: "init", eventSource: "spaces_agent_signal")
         XCTAssertEqual(registered.sessionKey, "conversation-1")
 
         let working = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", sessionKey: nil, label: "Claude Code",
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", sessionKey: .keep, label: "Claude Code",
             status: .spinning, eventType: "working", eventSource: "spaces_agent_signal")
         XCTAssertEqual(working.sessionKey, "conversation-1", "a signal carrying no id keeps the stored one")
 
         // Forking a conversation gives the running agent a new id, and resuming it later must address
         // the fork, not the conversation it was forked from.
         let forked = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", sessionKey: "conversation-2", label: "Claude Code",
-            status: .idle, eventType: "done", eventSource: "spaces_agent_signal")
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", sessionKey: .set("conversation-2"),
+            label: "Claude Code", status: .idle, eventType: "done", eventSource: "spaces_agent_signal")
         XCTAssertEqual(forked.sessionKey, "conversation-2")
         XCTAssertEqual(try store.agentWindow(id: registered.id)?.sessionKey, "conversation-2")
+    }
+
+    /// `/clear` in Claude Code leaves the agent running and opens a conversation that has written nothing
+    /// yet, so the id it reports names something no resume can find while the id the row holds names the
+    /// conversation the user deliberately left. The signal reports that as `pending`, and the row must end
+    /// keyless: a restore taken before the new conversation's first turn brings the agent back fresh
+    /// rather than resuming the abandoned one. The new conversation's first completed turn names it. The
+    /// updates are taken from the reports themselves, so the whole chain from what a hook says to what the
+    /// row stores is under test.
+    func testAConversationThatIsNotResumableYetClearsTheStoredOne() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        let orchestrator = makeTestOrchestrator(store: store)
+
+        let registered = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code", terminalTrackingID: "agent-session",
+            sessionKey: AgentHookSessionKeyReport.resumable("conversation-A").sessionKeyUpdate, status: .idle, eventType: "init",
+            eventSource: "spaces_agent_signal")
+        XCTAssertEqual(registered.sessionKey, "conversation-A")
+
+        let cleared = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code", terminalTrackingID: "agent-session",
+            sessionKey: AgentHookSessionKeyReport.pending.sessionKeyUpdate, status: registered.status, eventType: "init",
+            eventSource: "spaces_agent_signal")
+        XCTAssertNil(cleared.sessionKey, "the stored conversation is the one the agent walked away from")
+        XCTAssertNil(try store.agentWindow(id: registered.id)?.sessionKey)
+
+        let finishedATurn = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session",
+            sessionKey: AgentHookSessionKeyReport.resumable("conversation-B").sessionKeyUpdate, label: "Claude Code", status: .idle,
+            eventType: "done", eventSource: "spaces_agent_signal")
+        XCTAssertEqual(finishedATurn.sessionKey, "conversation-B")
+        XCTAssertEqual(try store.agentWindow(id: registered.id)?.sessionKey, "conversation-B")
     }
 
     /// Stopping a watched coding agent (macOS sidebar / Device API stop) routes through the shared stop
@@ -1184,8 +1221,8 @@ extension OrchestratorTests {
             XCTAssertEqual(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail, "codex --model gpt-5")
 
             _ = try orchestrator.updateAgentWindowStatus(
-                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, sessionKey: "thread-1", label: "Codex", status: .spinning
-            )
+                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, sessionKey: .set("thread-1"), label: "Codex",
+                status: .spinning)
 
             let window = try XCTUnwrap(store.windows(workspaceID: workspace.id).first)
             XCTAssertEqual(window.name, "shell-1")
@@ -1325,7 +1362,7 @@ extension OrchestratorTests {
         let sessionID = "reused-shell-session"
 
         let started = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Claude", terminalTrackingID: sessionID, sessionKey: "conversation-1",
+            workspaceID: workspace.id, provider: .spaces, label: "Claude", terminalTrackingID: sessionID, sessionKey: .set("conversation-1"),
             status: .spinning)
         XCTAssertTrue(
             try orchestrator.refreshPersistedForegroundAgentDetails(
@@ -1351,7 +1388,7 @@ extension OrchestratorTests {
 
         // The new agent's first hook signal names its own conversation.
         let signaled = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, sessionKey: "conversation-2", status: .spinning)
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, sessionKey: .set("conversation-2"), status: .spinning)
         XCTAssertEqual(signaled.sessionKey, "conversation-2")
         XCTAssertEqual(try store.agentWindowByTerminalSession(terminalSessionID: sessionID)?.sessionKey, "conversation-2")
     }

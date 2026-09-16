@@ -862,8 +862,14 @@ struct AgentSignalCommand: ParsableCommand {
         let cliContext = CLIContext()
         // An explicit `--agent-session` is how the opencode plugin reports the id, since a plugin runs
         // inside opencode and receives a JavaScript event rather than a payload on stdin. It also means
-        // stdin holds nothing to read, so the payload is only consulted when the option is absent.
-        let agentSessionKey = normalizedNonEmpty(agentSession) ?? AgentHookSessionKey.sessionKey(inHookPayload: Self.hookPayloadFromStandardInput())
+        // stdin holds nothing to read, so the payload is only consulted when the option is absent. The
+        // option names a conversation opencode already holds, so it is reported resumable as it stands.
+        let agentSessionKey: AgentHookSessionKeyReport
+        if let explicit = normalizedNonEmpty(agentSession) {
+            agentSessionKey = .resumable(explicit)
+        } else {
+            agentSessionKey = AgentHookSessionKey.report(inHookPayload: Self.hookPayloadFromStandardInput())
+        }
         _ = try TerminalService.sendProfileCommand(
             .agentSignal(
                 .init(workspaceID: context.workspaceID, terminalSessionID: context.sessionID, event: type.rawValue, agentSessionKey: agentSessionKey))

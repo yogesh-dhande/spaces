@@ -570,8 +570,9 @@ extension WorkspaceOrchestrator {
     }
 
     @discardableResult public func registerAgentWindow(
-        workspaceID: String, provider: AgentProvider, label: String? = nil, terminalTrackingID: String? = nil, sessionKey: String? = nil,
-        status: AgentWindowStatus = .idle, eventType: String = "register", eventSource: String = "orchestrator", environmentKeys: [String]? = nil
+        workspaceID: String, provider: AgentProvider, label: String? = nil, terminalTrackingID: String? = nil,
+        sessionKey: AgentSessionKeyUpdate = .keep, status: AgentWindowStatus = .idle, eventType: String = "register",
+        eventSource: String = "orchestrator", environmentKeys: [String]? = nil
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
         let existingAgentWindows = try store.agentWindows(workspaceID: workspaceID)
@@ -588,15 +589,17 @@ extension WorkspaceOrchestrator {
         // The stored conversation id is dropped in the same breath, because it belongs to the lifecycle
         // that ended: the restorable capture reads an agent's kind and conversation id off this row, so a
         // fresh agent left holding its predecessor's key would be offered back as that older conversation
-        // until its own first hook signal replaced it. A signal that carries a key of its own supplies the
-        // replacement here; the foreground reconciler's relaunch carries none, so the row waits keyless
-        // for the new agent's hooks, which is the same state a newly detected agent starts in. The
-        // relaunch command is not dropped with it: `refreshPersistedForegroundAgentDetails` has already
-        // sampled the new agent's command onto the row by the time this runs, so `existing` carries the
-        // command the reused terminal is running now.
+        // until its own first hook signal replaced it. A signal that reports a resumable conversation
+        // supplies the replacement here; the foreground reconciler's relaunch reports nothing (`.keep`),
+        // so the row waits keyless for the new agent's hooks, which is the same state a newly detected
+        // agent starts in. The relaunch command is not dropped with it:
+        // `refreshPersistedForegroundAgentDetails` has already sampled the new agent's command onto the
+        // row by the time this runs, so `existing` carries the command the reused terminal is running now.
         let isReusedAfterExit = status == .exited
         let resolvedStatus: AgentWindowStatus = isReusedAfterExit ? .idle : status
-        if let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey) {
+        if let existing = try matchingAgentWindow(
+            workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey.matchableKey)
+        {
             // The default heals a row stored without a label before materialization existed, so every
             // signal leaves the row addressable by the one name its surfaces display.
             let resolvedLabel = try uniqueAgentFocusLabel(
@@ -606,7 +609,7 @@ extension WorkspaceOrchestrator {
                 runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
                 terminalTarget: TerminalTargetRecord(
                     runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
-                sessionKey: sessionKey ?? (isReusedAfterExit ? nil : existing.sessionKey), status: resolvedStatus, note: existing.note,
+                sessionKey: sessionKey.applied(to: isReusedAfterExit ? nil : existing.sessionKey), status: resolvedStatus, note: existing.note,
                 detectedAgentKind: liveDetectedAgentKind(terminalSessionID: terminalTrackingID ?? existing.terminalTrackingID)
                     ?? existing.detectedAgentKind, launchCommand: existing.launchCommand, createdAt: existing.createdAt, updatedAt: now)
             try validateWorkspaceFocusNames(
@@ -627,8 +630,9 @@ extension WorkspaceOrchestrator {
         let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspaceID, preferredLabel: sanitizedFocusName(label) ?? Self.defaultAgentLabel)
         let record = AgentWindowRecord(
             id: UUID().uuidString, workspaceID: workspaceID, provider: provider, label: resolvedLabel, runtimeTargetID: trackedWindow?.id,
-            terminalTarget: TerminalTargetRecord(runtimeTargetID: trackedWindow?.id, trackingID: terminalTrackingID), sessionKey: sessionKey,
-            status: resolvedStatus, detectedAgentKind: liveDetectedAgentKind(terminalSessionID: terminalTrackingID), createdAt: now, updatedAt: now)
+            terminalTarget: TerminalTargetRecord(runtimeTargetID: trackedWindow?.id, trackingID: terminalTrackingID),
+            sessionKey: sessionKey.applied(to: nil), status: resolvedStatus,
+            detectedAgentKind: liveDetectedAgentKind(terminalSessionID: terminalTrackingID), createdAt: now, updatedAt: now)
         try validateWorkspaceFocusNames(
             workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
             browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID), agentWindows: existingAgentWindows + [record])
@@ -642,14 +646,17 @@ extension WorkspaceOrchestrator {
     }
 
     @discardableResult public func updateAgentWindowStatus(
-        workspaceID: String, provider: AgentProvider, terminalTrackingID: String? = nil, sessionKey: String? = nil, label: String? = nil,
-        status: AgentWindowStatus, eventType: String? = nil, eventSource: String = "orchestrator", environmentKeys: [String]? = nil
+        workspaceID: String, provider: AgentProvider, terminalTrackingID: String? = nil, sessionKey: AgentSessionKeyUpdate = .keep,
+        label: String? = nil, status: AgentWindowStatus, eventType: String? = nil, eventSource: String = "orchestrator",
+        environmentKeys: [String]? = nil
     ) throws -> AgentWindowRecord {
-        let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey)
+        let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey.matchableKey)
         // Per-tool hooks make an active agent signal `working` on every tool call. A signal that would
         // keep the row spinning is a pure no-op: no `agent_session_events` row (the event log records
         // state transitions, not tool calls) and no row rewrite — `updated_at` deliberately stays the
         // time the agent *entered* working, so it reads as the transition time, not tool-call recency.
+        // The conversation report rides along and is dropped with the rest: every signal of a run reports
+        // the same conversation, so the next real transition carries it.
         if let existing, status == .spinning, existing.status == .spinning { return existing }
         let now = nowISO8601()
         let allAgentWindows = try store.agentWindows(workspaceID: workspaceID)
@@ -665,7 +672,7 @@ extension WorkspaceOrchestrator {
                 runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
                 terminalTarget: TerminalTargetRecord(
                     runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
-                sessionKey: sessionKey ?? existing.sessionKey, status: status, note: existing.note,
+                sessionKey: sessionKey.applied(to: existing.sessionKey), status: status, note: existing.note,
                 detectedAgentKind: liveDetectedAgentKind(terminalSessionID: terminalTrackingID ?? existing.terminalTrackingID)
                     ?? existing.detectedAgentKind, launchCommand: existing.launchCommand, createdAt: existing.createdAt, updatedAt: now)
             try validateWorkspaceFocusNames(

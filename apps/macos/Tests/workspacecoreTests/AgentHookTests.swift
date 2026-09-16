@@ -19,7 +19,7 @@ final class AgentHookTests: XCTestCase {
         try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "workspace-session")
 
         let record = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "workspace-session", sessionKey: "thread-1",
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "workspace-session", sessionKey: .set("thread-1"),
             status: .idle)
 
         XCTAssertEqual(record.provider, .spaces)
@@ -52,11 +52,11 @@ final class AgentHookTests: XCTestCase {
         try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "workspace-session-2")
 
         let first = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "workspace-session-1", sessionKey: "thread-1",
-            status: .idle)
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "workspace-session-1",
+            sessionKey: .set("thread-1"), status: .idle)
         let second = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "workspace-session-2", sessionKey: "thread-2",
-            status: .idle)
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "workspace-session-2",
+            sessionKey: .set("thread-2"), status: .idle)
 
         XCTAssertEqual(first.label, "Claude Code CLI")
         XCTAssertEqual(second.label, "Claude Code CLI-2")
@@ -94,11 +94,11 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "workspace-session", sessionKey: "thread-1",
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "workspace-session", sessionKey: .set("thread-1"),
             status: .idle)
 
         let updated = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", sessionKey: "thread-1", label: "Codex CLI",
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", sessionKey: .set("thread-1"), label: "Codex CLI",
             status: .done)
 
         XCTAssertEqual(updated.status, .done)
@@ -112,12 +112,12 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let existing = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "workspace-session", sessionKey: "thread-1",
-            status: .idle)
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "workspace-session",
+            sessionKey: .set("thread-1"), status: .idle)
 
         let updated = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", sessionKey: "thread-1", label: "Claude Code CLI",
-            status: .spinning)
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", sessionKey: .set("thread-1"),
+            label: "Claude Code CLI", status: .spinning)
 
         XCTAssertEqual(updated.id, existing.id)
         XCTAssertEqual(updated.label, "Claude Code CLI")
@@ -131,10 +131,10 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", sessionKey: "thread-xyz", status: .idle)
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", sessionKey: .set("thread-xyz"), status: .idle)
 
         let updated = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", sessionKey: "thread-xyz", label: "Codex CLI",
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", sessionKey: .set("thread-xyz"), label: "Codex CLI",
             status: .spinning)
 
         XCTAssertEqual(updated.id, try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first).id)
@@ -165,7 +165,7 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let record = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Claude Code", terminalTrackingID: "spaces-terminal-1", sessionKey: "thread-1",
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code", terminalTrackingID: "spaces-terminal-1", sessionKey: .set("thread-1"),
             status: .waiting)
 
         XCTAssertEqual(record.provider, .spaces)
@@ -178,7 +178,7 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         _ = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "workspace-session", sessionKey: "thread-1",
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "workspace-session", sessionKey: .set("thread-1"),
             status: .idle)
 
         let windows = try store.windows(workspaceID: workspace.id)
@@ -193,7 +193,7 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let agent = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "workspace-session", sessionKey: "thread-1",
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "workspace-session", sessionKey: .set("thread-1"),
             status: .done)
 
         let result = try orchestrator.handleAgentExit(agent)
@@ -219,7 +219,8 @@ final class AgentHookTests: XCTestCase {
         }
 
         let agent = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: sessionID, sessionKey: "thread-1", status: .done)
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: sessionID, sessionKey: .set("thread-1"),
+            status: .done)
 
         let result = try withSpacesProfileEnvironment(dbPath: dbPath) { try orchestrator.handleAgentExit(agent) }
 
@@ -245,13 +246,13 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let agent = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "reused-session", sessionKey: "thread-1",
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "reused-session", sessionKey: .set("thread-1"),
             status: .spinning)
         try store.updateAgentWindowStatus(id: agent.id, status: .exited, updatedAt: "now")
 
         // The init path re-registers preserving the existing (now `.exited`) status.
         let reinit = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "reused-session", sessionKey: "thread-1",
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "reused-session", sessionKey: .set("thread-1"),
             status: .exited, eventType: "init")
 
         XCTAssertEqual(reinit.status, .idle)
@@ -271,11 +272,11 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         _ = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "live-session", sessionKey: "thread-1",
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "live-session", sessionKey: .set("thread-1"),
             status: .spinning)
         // A reconnecting init re-registers preserving the existing (still `.spinning`) status.
         let reinit = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "live-session", sessionKey: "thread-1",
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "live-session", sessionKey: .set("thread-1"),
             status: .spinning, eventType: "init")
 
         XCTAssertEqual(reinit.status, .spinning)
@@ -330,7 +331,7 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let agent = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "dead-session", sessionKey: "thread-1",
+            workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "dead-session", sessionKey: .set("thread-1"),
             status: .idle)
 
         let result = try orchestrator.handleAgentExit(agent)
@@ -374,8 +375,8 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         _ = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "spaces-terminal-202", sessionKey: "thread-1",
-            status: .idle)
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "spaces-terminal-202",
+            sessionKey: .set("thread-1"), status: .idle)
 
         let didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
 

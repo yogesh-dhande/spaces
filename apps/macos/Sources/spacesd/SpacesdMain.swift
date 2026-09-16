@@ -2507,12 +2507,13 @@ enum SpacesDaemonErrorClassification {
         }
 
         let environmentKeys = [WorkspaceOrchestrator.terminalTrackingIDEnvVar]
-        // The agent's own conversation id, when its hook payload carried one. It rides every signal that
-        // reaches the store, and the orchestrator keeps the stored value when a signal carries none, so
-        // the newest reported id wins. The duplicate-`working` suppression above can swallow one, which
-        // costs nothing: the id an agent reports is the same on every signal of a run, so the next
-        // transition stores it.
-        let agentSessionKey = payload.agentSessionKey
+        // What this signal reports about the agent's own conversation, turned into the row update it asks
+        // for: keep the stored id when the signal names no conversation, drop it when the signal names one
+        // that is not resumable yet (a fresh Claude Code session, including the one `/clear` opens), and
+        // replace it when the signal names a resumable conversation, so the newest resumable id wins. The
+        // duplicate-`working` suppression above can swallow one, which costs nothing: an agent reports the
+        // same conversation on every signal of a run, so the next transition applies it.
+        let agentSessionKey = payload.agentSessionKey.sessionKeyUpdate
         let engine = makeAgentNotificationEngine(orchestrator: orchestrator)
         // Whether this signal leaves the signaling terminal's own agent row idle/done, the single
         // authority for the flush decision below. Gated on the RESULTING row status, not the event type:

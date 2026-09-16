@@ -115,8 +115,8 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 hasResumeKey: false, generation: "generation-1"),
         ]
         let status = TerminalServiceDaemonStatus(
-            version: "1.2.3", installedVersion: "1.2.3", certificateFingerprint: "SHA256:abcdef", activeSessionCount: 2,
-            restorableSessions: summaries)
+            version: "1.2.3", installedVersion: "1.2.3", certificateFingerprint: "SHA256:abcdef", activeSessionCount: 2, restorableSessions: summaries
+        )
 
         let decoded = try JSONDecoder().decode(TerminalServiceDaemonStatus.self, from: try JSONEncoder().encode(status))
 
@@ -128,8 +128,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
     /// and report an empty list rather than throwing `keyNotFound`, matching every other field on this
     /// status.
     func testDaemonStatusDecodesEmptyRestorableSessionsWhenFieldIsAbsentFromJSON() throws {
-        let json = Data(
-            #"{"version":"1.2.3","installedVersion":null,"certificateFingerprint":null,"activeSessionCount":0}"#.utf8)
+        let json = Data(#"{"version":"1.2.3","installedVersion":null,"certificateFingerprint":null,"activeSessionCount":0}"#.utf8)
 
         let decoded = try JSONDecoder().decode(TerminalServiceDaemonStatus.self, from: json)
 
@@ -238,7 +237,8 @@ final class TerminalServiceProtocolTests: XCTestCase {
             .workspaceStart(.init(cwd: "/tmp")), .workspaceStop(.init(cwd: "/tmp", workspaceID: "workspace-1")), .workspaceStop(.init(cwd: "/tmp")),
             .workspaceRestart(.init(cwd: "/tmp", workspaceID: "workspace-1")),
             .agentSignal(.init(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "blocked")),
-            .agentSignal(.init(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "working", agentSessionKey: "thread-9")),
+            .agentSignal(
+                .init(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "working", agentSessionKey: .resumable("thread-9"))),
             .agentList(.init(workspaceID: "workspace-1", sessionID: "session-1")), .agentList(.init()),
             .agentAnnotate(.init(sessionID: "session-1", note: "review the auth flow")), .agentAnnotate(.init(sessionID: "session-1", note: "")),
             .agentSpawn(.init(cwd: "/tmp/work", workspaceID: "workspace-1", command: "claude", title: "Claude Code")),
@@ -260,23 +260,33 @@ final class TerminalServiceProtocolTests: XCTestCase {
         }
     }
 
-    /// A signal raised outside a hook, or by an agent whose payload carries no conversation id, reports
-    /// no key, and that must not be read as "clear the stored key".
-    func testAgentSignalPayloadTreatsBlankAgentSessionKeyAsAbsent() throws {
+    /// The three things a signal can say about the agent's conversation have to survive the wire intact:
+    /// the daemon keeps the stored id for one, drops it for another, and replaces it for the third, so a
+    /// payload that blurred them would leave a restored agent resuming the wrong conversation.
+    func testAgentSignalPayloadCarriesEachConversationReport() throws {
+        let encoder = JSONEncoder()
         let decoder = JSONDecoder()
-        XCTAssertNil(
+        for report in [AgentHookSessionKeyReport.unreported, .pending, .resumable("conversation-1")] {
+            let payload = TerminalServiceProfileAgentSignalPayload(
+                workspaceID: "workspace-1", terminalSessionID: "session-1", event: "done", agentSessionKey: report)
+            XCTAssertEqual(try decoder.decode(TerminalServiceProfileAgentSignalPayload.self, from: encoder.encode(payload)).agentSessionKey, report)
+        }
+    }
+
+    /// A signal raised outside a hook, or by an agent whose payload carries no conversation id, names no
+    /// conversation, and that must not be read as "the conversation I hold cannot be resumed".
+    func testAgentSignalPayloadTreatsBlankAgentSessionKeyAsUnreported() throws {
+        let decoder = JSONDecoder()
+        XCTAssertEqual(
             try decoder.decode(
                 TerminalServiceProfileAgentSignalPayload.self,
                 from: Data(#"{"workspaceID":"workspace-1","terminalSessionID":"session-1","event":"done","agentSessionKey":"  "}"#.utf8)
-            ).agentSessionKey)
-        XCTAssertNil(
+            ).agentSessionKey, .unreported)
+        XCTAssertEqual(
             try decoder.decode(
                 TerminalServiceProfileAgentSignalPayload.self,
                 from: Data(#"{"workspaceID":"workspace-1","terminalSessionID":"session-1","event":"done"}"#.utf8)
-            ).agentSessionKey)
-        XCTAssertEqual(
-            TerminalServiceProfileAgentSignalPayload(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "done", agentSessionKey: "")
-                .agentSessionKey, nil)
+            ).agentSessionKey, .unreported)
     }
 
     func testAgentSessionRowResponseRoundTrips() throws {
