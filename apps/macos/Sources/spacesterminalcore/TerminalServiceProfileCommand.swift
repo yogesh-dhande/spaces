@@ -116,16 +116,19 @@ public struct TerminalServiceProfileAgentSignalPayload: Codable, Sendable, Equat
     public let workspaceID: String
     public let terminalSessionID: String
     public let event: String
-    /// The signaling agent's own conversation id, read out of the hook payload by the CLI. Optional
-    /// because only some signals carry one: an agent whose hook payload has no id, or a signal raised
-    /// outside a hook, reports nothing here and leaves whatever the row already stores.
-    public let agentSessionKey: String?
+    /// What the signaling agent reports about its own conversation, read out of the hook payload by the
+    /// CLI. It is the report rather than a nullable id because the daemon has to act differently on
+    /// "this signal names no conversation" (keep the stored id) and "this signal names a conversation
+    /// that cannot be resumed yet" (drop it). The wire carries the two as separate keys — the id under
+    /// `agentSessionKey`, the not-yet-resumable state as `agentSessionKeyPending` — so neither can be
+    /// mistaken for the other, and the property is an enum so no caller can claim both at once.
+    public let agentSessionKey: AgentHookSessionKeyReport
 
-    public init(workspaceID: String, terminalSessionID: String, event: String, agentSessionKey: String? = nil) {
+    public init(workspaceID: String, terminalSessionID: String, event: String, agentSessionKey: AgentHookSessionKeyReport = .unreported) {
         self.workspaceID = workspaceID
         self.terminalSessionID = terminalSessionID
         self.event = event
-        self.agentSessionKey = normalizedNonEmpty(agentSessionKey)
+        self.agentSessionKey = agentSessionKey
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -133,6 +136,19 @@ public struct TerminalServiceProfileAgentSignalPayload: Codable, Sendable, Equat
         case terminalSessionID
         case event
         case agentSessionKey
+        case agentSessionKeyPending
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(workspaceID, forKey: .workspaceID)
+        try container.encode(terminalSessionID, forKey: .terminalSessionID)
+        try container.encode(event, forKey: .event)
+        switch agentSessionKey {
+        case .unreported: break
+        case .pending: try container.encode(true, forKey: .agentSessionKeyPending)
+        case .resumable(let key): try container.encode(key, forKey: .agentSessionKey)
+        }
     }
 
     public init(from decoder: any Decoder) throws {
@@ -140,7 +156,15 @@ public struct TerminalServiceProfileAgentSignalPayload: Codable, Sendable, Equat
         workspaceID = try container.decodeRequiredNonEmpty(forKey: .workspaceID)
         terminalSessionID = try container.decodeRequiredNonEmpty(forKey: .terminalSessionID)
         event = try container.decodeRequiredNonEmpty(forKey: .event)
-        agentSessionKey = normalizedNonEmpty(try container.decodeIfPresent(String.self, forKey: .agentSessionKey))
+        // The pending flag is read first so the three states stay total over anything that decodes: the
+        // encoder above writes at most one of the two keys, and a blank id is the same as no id at all.
+        if try container.decodeIfPresent(Bool.self, forKey: .agentSessionKeyPending) == true {
+            agentSessionKey = .pending
+        } else if let key = normalizedNonEmpty(try container.decodeIfPresent(String.self, forKey: .agentSessionKey)) {
+            agentSessionKey = .resumable(key)
+        } else {
+            agentSessionKey = .unreported
+        }
     }
 }
 
@@ -626,8 +650,7 @@ extension TerminalServiceProfileCommand: Codable {
         case .parkAgentSessionsForRestore:
             _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
             self = .parkAgentSessionsForRestore
-        case .reconcileParkedAgentSessions:
-            self = .reconcileParkedAgentSessions(generation: try container.decodeRequiredNonEmpty(forKey: key))
+        case .reconcileParkedAgentSessions: self = .reconcileParkedAgentSessions(generation: try container.decodeRequiredNonEmpty(forKey: key))
         }
     }
 
