@@ -2,6 +2,10 @@ import XCTest
 
 @testable import spacesterminalcore
 
+// The test methods are `async throws` even though their bodies never suspend: this suite also runs on
+// Linux, where the generated XCTest discovery list aborted the whole test binary on a synchronous
+// main-actor-isolated test method (a failed cast from `@MainActor () -> ()` to `() -> ()` in
+// `--dump-tests-json`), while the async form is discovered without that cast.
 @MainActor final class TerminalScrollCoalescerTests: XCTestCase {
     @MainActor private final class Recorder: @unchecked Sendable {
         var batches: [TerminalScrollCoalescer.Batch] = []
@@ -20,7 +24,7 @@ import XCTest
 
     /// The first delta of a gesture is the one the user is waiting on, so it leaves synchronously: no
     /// await, no timer turn.
-    func testFirstScrollSendsWithoutWaiting() {
+    func testFirstScrollSendsWithoutWaiting() async throws {
         let recorder = Recorder()
         let coalescer = TerminalScrollCoalescer { batch, finish in recorder.enqueue(batch, finish: finish) }
 
@@ -29,7 +33,7 @@ import XCTest
         XCTAssertEqual(recorder.batches, [.init(horizontal: 1, vertical: 2, scrollMods: 7)])
     }
 
-    func testScrollEventsMergeWhileABatchIsInFlight() {
+    func testScrollEventsMergeWhileABatchIsInFlight() async throws {
         let recorder = Recorder()
         let coalescer = TerminalScrollCoalescer { batch, finish in recorder.enqueue(batch, finish: finish) }
 
@@ -43,7 +47,7 @@ import XCTest
         XCTAssertEqual(recorder.batches, [.init(horizontal: 1, vertical: 2, scrollMods: 7), .init(horizontal: 8, vertical: 10, scrollMods: 15)])
     }
 
-    func testMergedScrollRetainsLatestPointerPosition() {
+    func testMergedScrollRetainsLatestPointerPosition() async throws {
         let recorder = Recorder()
         let coalescer = TerminalScrollCoalescer { batch, finish in recorder.enqueue(batch, finish: finish) }
 
@@ -55,7 +59,7 @@ import XCTest
         XCTAssertEqual(recorder.batches.last, .init(horizontal: 0, vertical: 6, scrollMods: 15, pointerPosition: .init(x: 0.75, y: 0.8, mods: 8)))
     }
 
-    func testCompletedBatchWithNothingPendingSendsNothing() {
+    func testCompletedBatchWithNothingPendingSendsNothing() async throws {
         let recorder = Recorder()
         let coalescer = TerminalScrollCoalescer { batch, finish in recorder.enqueue(batch, finish: finish) }
 
@@ -65,7 +69,7 @@ import XCTest
         XCTAssertEqual(recorder.batches, [.init(horizontal: 0, vertical: 5, scrollMods: 7)])
     }
 
-    func testFlushSendsPendingScrollImmediatelyForInputOrdering() {
+    func testFlushSendsPendingScrollImmediatelyForInputOrdering() async throws {
         let recorder = Recorder()
         let coalescer = TerminalScrollCoalescer { batch, finish in recorder.enqueue(batch, finish: finish) }
 
@@ -76,7 +80,7 @@ import XCTest
         XCTAssertEqual(recorder.batches, [.init(horizontal: 2, vertical: 3, scrollMods: 7), .init(horizontal: 1, vertical: 1, scrollMods: 7)])
     }
 
-    func testCancelDropsPendingScroll() {
+    func testCancelDropsPendingScroll() async throws {
         let recorder = Recorder()
         let coalescer = TerminalScrollCoalescer { batch, finish in recorder.enqueue(batch, finish: finish) }
 
