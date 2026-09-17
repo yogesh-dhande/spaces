@@ -122,7 +122,7 @@ import spacesterminalcore
         var rawSnapshot = SpacesGhosttyVtSnapshot()
         XCTAssertTrue(spaces_ghostty_vt_session_copy_snapshot(session, &rawSnapshot))
         defer { spaces_ghostty_vt_snapshot_free(&rawSnapshot) }
-        let exported = GhosttyVtSessionBridge.snapshot(from: rawSnapshot, mouseReportingActive: false)
+        let exported = GhosttyVtSessionBridge.snapshot(from: rawSnapshot, mouseReportingActive: false, alternateScreenActive: false)
 
         let blank = GhosttyTerminalSnapshot(
             columns: Int(columns), rows: Int(rows), cursorColumn: 0, cursorRow: 0, cursorVisible: false,

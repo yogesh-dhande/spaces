@@ -2,18 +2,25 @@
     import AppKit
     import Foundation
 
-    /// Floating circular control shown over a terminal pane's mirror view whenever the rendered viewport
-    /// sits above the session's live bottom row. Clicking it asks the session to jump back to the bottom.
+    /// Floating circular control shown over a terminal pane's mirror view whenever the pane is showing
+    /// anything other than the session's live bottom row: the session's own viewport scrolled back, or the
+    /// pane's client-local scrollback replay. Clicking it returns the pane to the live bottom.
     ///
     /// Owned by `GhosttyMirrorTerminalView`, which drives `setScrolledIntoScrollback` from each applied
-    /// frame's own scrollbar state and wires `onActivate` to the session's scroll-to-bottom control
-    /// request (see `RemoteGhosttySessionHost.sendRemoteScrollToBottom`).
+    /// frame's own scrollbar state and from whether a replay frame is on screen, and wires `onActivate` to
+    /// `RemoteGhosttySessionHost.handleJumpToBottom`, which jumps locally or asks the session.
+    ///
+    /// `setHasNewOutput` marks it while the session produces output the pane is not showing, which is the
+    /// only way a user reading back learns something new arrived.
     @MainActor final class TerminalJumpToBottomControl: NSView {
         private static let diameter: CGFloat = 34
         private static let cornerRadius: CGFloat = 17
         private static let fadeDuration: CFTimeInterval = 0.12
 
+        private static let newOutputMarkDiameter: CGFloat = 9
+
         private let iconView = NSImageView()
+        private let newOutputMark = NSView()
         private let clickRecognizer = NSClickGestureRecognizer()
 
         var onActivate: (@MainActor () -> Void)?
@@ -21,6 +28,8 @@
         /// What the control was last told, so a repeat call with the same value is a no-op: a fade that
         /// keeps restarting under a stream of identical frames would never settle.
         private var isScrolledIntoScrollback = false
+        /// What the new-output mark was last told, for the same reason.
+        private var hasNewOutput = false
 
         init() {
             super.init(frame: .zero)
@@ -49,6 +58,14 @@
             iconView.imageScaling = .scaleProportionallyUpOrDown
             addSubview(iconView)
 
+            // A filled dot on the control's upper trailing edge, outside the chevron so the control still
+            // reads as one button. Hidden until there is output to come back to.
+            newOutputMark.translatesAutoresizingMaskIntoConstraints = false
+            newOutputMark.wantsLayer = true
+            newOutputMark.layer?.cornerRadius = Self.newOutputMarkDiameter / 2
+            newOutputMark.isHidden = true
+            addSubview(newOutputMark)
+
             toolTip = "Jump to bottom"
             setAccessibilityRole(.button)
             setAccessibilityLabel("Jump to bottom")
@@ -61,6 +78,9 @@
             NSLayoutConstraint.activate([
                 widthAnchor.constraint(equalToConstant: Self.diameter), heightAnchor.constraint(equalToConstant: Self.diameter),
                 iconView.centerXAnchor.constraint(equalTo: centerXAnchor), iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
+                newOutputMark.widthAnchor.constraint(equalToConstant: Self.newOutputMarkDiameter),
+                newOutputMark.heightAnchor.constraint(equalToConstant: Self.newOutputMarkDiameter),
+                newOutputMark.topAnchor.constraint(equalTo: topAnchor), newOutputMark.trailingAnchor.constraint(equalTo: trailingAnchor),
             ])
         }
 
@@ -79,6 +99,9 @@
             effectiveAppearance.performAsCurrentDrawingAppearance { [self] in
                 layer?.backgroundColor = NSColor.activeTheme(\.surface).cgColor
                 layer?.borderColor = NSColor.activeTheme(\.borderStrong).cgColor
+                newOutputMark.layer?.backgroundColor = NSColor.activeTheme(\.accent).cgColor
+                newOutputMark.layer?.borderColor = NSColor.activeTheme(\.surface).cgColor
+                newOutputMark.layer?.borderWidth = 1.5
             }
         }
 
@@ -113,11 +136,21 @@
                 })
         }
 
+        /// Shows or hides the new-output mark. Independent of the fade above: the mark rides whatever the
+        /// control is already doing, so a pane that gathers output while the user reads back does not
+        /// restart the control's animation on every frame.
+        func setHasNewOutput(_ hasNewOutput: Bool) {
+            guard hasNewOutput != self.hasNewOutput else { return }
+            self.hasNewOutput = hasNewOutput
+            newOutputMark.isHidden = !hasNewOutput
+        }
+
         // MARK: - Debug
 
         /// What the control is currently showing, asked of the real AppKit state rather than the
         /// last-set flag, so a test proves the view and not a mirrored bool.
         var debugIsVisible: Bool { !isHidden && alphaValue > 0 }
+        var debugShowsNewOutput: Bool { !newOutputMark.isHidden }
         func debugActivate() { handleClick() }
     }
 #endif

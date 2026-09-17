@@ -32,7 +32,7 @@ import ghosttyvtshim
         var raw = SpacesGhosttyVtSnapshot()
         #expect(spaces_ghostty_vt_session_copy_snapshot(session, &raw))
         defer { spaces_ghostty_vt_snapshot_free(&raw) }
-        let snapshot = GhosttyVtSessionBridge.snapshot(from: raw, mouseReportingActive: false)
+        let snapshot = GhosttyVtSessionBridge.snapshot(from: raw, mouseReportingActive: false, alternateScreenActive: false)
         try #require(snapshot.columns > 0)
         return snapshot
     }

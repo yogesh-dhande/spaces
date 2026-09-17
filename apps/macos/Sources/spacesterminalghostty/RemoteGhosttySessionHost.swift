@@ -40,25 +40,54 @@
             _ onDisconnect: @escaping @Sendable ((any Error)?) -> Void
         ) throws -> any TerminalRemoteStateStreamClient
 
-    /// A fetched ended-session transcript plus the run identity the server reported it was read from.
+    /// A fetched transcript range, inflated, with where it sits in `output.log` and the run identity the
+    /// server reported it was read from.
+    ///
+    /// `startByteOffset` and `endByteOffset` bracket the file bytes the payload covers: the replay built
+    /// from it holds the transcript from `startByteOffset` (zero means the whole file) through
+    /// `endByteOffset`. A capped suffix's payload is longer than that range, because the state preamble in
+    /// front of it exists nowhere in the file.
+    ///
     /// The host validates `runIdentity` against the run its replay was armed against, so a fetch that
     /// straddles a relaunch (which truncates `output.log`) cannot install the new run's bytes under the
     /// old run's final frame. `runIdentity` is nil when the server did not report one (the
     /// missing-output error path maps to an empty transcript with no identity).
+    ///
+    /// `isSuffixRebuild` answers a continuation the daemon could not serve as one (a head-trim moved the
+    /// bytes the offset named, or the gap is wider than the page asked for): the payload is then a fresh
+    /// replayable suffix, so the caller rebuilds its replay from it instead of appending it.
     public struct RemoteGhosttyTranscript: Sendable {
         public let data: Data
+        public let startByteOffset: UInt64
+        public let endByteOffset: UInt64
+        /// The `output.log` these bytes were read from, which the next continuation sends back so the
+        /// daemon can tell an appended transcript from one a head-trim rewrote. Nil when the server
+        /// served no file at all (the missing-output error path, which carries no bytes either).
+        public let fileIdentity: UInt64?
         public let runIdentity: String?
+        public let isSuffixRebuild: Bool
 
-        public init(data: Data, runIdentity: String?) {
+        public init(
+            data: Data, startByteOffset: UInt64, endByteOffset: UInt64, fileIdentity: UInt64?, runIdentity: String?, isSuffixRebuild: Bool = false
+        ) {
             self.data = data
+            self.startByteOffset = startByteOffset
+            self.endByteOffset = endByteOffset
+            self.fileIdentity = fileIdentity
             self.runIdentity = runIdentity
+            self.isSuffixRebuild = isSuffixRebuild
         }
     }
 
-    /// Fetches a suffix of the session's persisted output transcript (capped at `maxBytes`) for the
-    /// ended-session scrollback replay. Read-only; the caller invokes it once, lazily, on the first
-    /// scroll of an ended pane.
-    public typealias RemoteGhosttyTranscriptProvider = @Sendable (_ maxBytes: Int) async throws -> RemoteGhosttyTranscript
+    /// Reads a range of the session's persisted output transcript for the pane's client-local scrollback
+    /// replay. Read-only.
+    ///
+    /// Without `fromByteOffset` the daemon serves the newest `maxBytes` as a replayable suffix, which is
+    /// what builds a replay. With it (accompanied by `fileIdentity`, the transcript file the replay's
+    /// bytes were read from, which proves the offset still names them), it serves exactly what the
+    /// session has appended since, which is what keeps a replay current without rebuilding it.
+    public typealias RemoteGhosttyTranscriptProvider =
+        @Sendable (_ maxBytes: Int, _ fromByteOffset: UInt64?, _ fileIdentity: UInt64?) async throws -> RemoteGhosttyTranscript
 
     @MainActor public final class RemoteGhosttySessionHost: TerminalGhosttySessionHosting {
         private let launchConfiguration: TerminalSessionLaunchConfiguration
@@ -153,32 +182,106 @@
         private var pendingViewportSettleForce = false
         private var resizeSerial: UInt64 = 0
         private let inputQueue = TerminalInputSerialQueue()
-        /// Lazy state for scrolling an ended pane's scrollback: `idle` until the first scroll, `loading`
-        /// while the transcript is fetched and the replay model is built off the main actor (accumulating
-        /// deltas), `ready` once the model exists, `unavailable` when there is no transcript to replay.
-        private enum EndedScrollbackState {
+        /// State of this pane's client-local scrollback replay, for live and ended panes alike: `idle`
+        /// until a page is read, `loading` while one is read and the replay is built or extended off the
+        /// main actor (accumulating the rows scrolled meanwhile), `ready` once the replay is back on the
+        /// main actor, `unavailable` when there is no transcript to replay.
+        ///
+        /// `loading`'s `model` is the replay that load holds, and a load holding one owns it outright: the
+        /// main actor neither scrolls nor appends it until the install hands it back, which is what lets
+        /// the work run off the main actor. A whole-budget read holds the replay it is deepening, so the
+        /// rebuilt replay can restore its distance above the newest row; a continuation read holds the
+        /// replay it is appending its bytes to. It is nil for the first read of a pane, which has no
+        /// replay yet. Its `grid` is the grid the read was started at, which is the grid the replay it
+        /// builds will wrap its rows at: a resize landing while it is in flight compares against it
+        /// exactly as it compares against a built replay's own grid.
+        private enum LocalScrollbackState {
             case idle
-            case loading(pendingDeltaRows: Int)
-            case ready(TerminalEndedSessionScrollbackModel)
+            case loading(pendingDeltaRows: Int, model: TerminalLocalScrollbackModel?, grid: (columns: Int, rows: Int))
+            case ready(TerminalLocalScrollbackModel)
             case unavailable
         }
-        private var endedScrollbackState: EndedScrollbackState = .idle
-        /// Invalidates in-flight transcript loads across a relaunch. A fetch started for one ended run
-        /// (`.loading`) can still be resolving when the session relaunches and exits again; the second
-        /// exit starts a fresh `.loading` in the same enum case, so an enum-only guard would install the
-        /// first run's transcript/model under the second run. `discardEndedScrollbackIfActive` bumps this,
-        /// and every post-suspension check in `beginLoadingEndedScrollbackModel` requires an unchanged
-        /// generation before applying its result.
-        private var endedScrollbackGeneration: UInt64 = 0
-        /// Identifies the ended run the current replay/verdict belongs to, so an ended->ended transition
-        /// to a *different* run (the session relaunched and exited again unobserved by this client) still
-        /// discards the stale replay state. `nil` whenever no replay is armed.
-        private var endedScrollbackRunIdentity: String?
+        private var localScrollbackState: LocalScrollbackState = .idle
+        /// Invalidates in-flight transcript reads across a discard. A read started for one run can still
+        /// be resolving when the session relaunches (or the user types, or the grid moves) and a fresh
+        /// read starts in the same enum case, so an enum-only guard would install the first read's bytes
+        /// under the second. `discardLocalScrollback` bumps this, and every post-suspension check
+        /// requires an unchanged generation before applying its result.
+        private var localScrollbackGeneration: UInt64 = 0
+        /// The run the current replay (or `.unavailable` verdict) belongs to: the child process that
+        /// wrote the bytes, see `TerminalSessionRuntimeState.runKey(for:)`. `nil` whenever no replay is armed.
+        private var localScrollbackRunKey: String?
+        /// The appearance the replay was built at, so a theme switch under a built replay rebuilds it
+        /// rather than leaving the pane scrolling rows painted in the other appearance's colors.
+        private var localScrollbackAppearance: ThemeAppearance?
         /// Monotonic local revision for replay frames, so the mirror's frame-dedupe never drops a
         /// scrolled viewport that happens to match a prior revision.
-        private var endedScrollbackRevision: UInt64 = 0
-        private var endedScrollDeltaNormalizer = TerminalScrollDeltaNormalizer()
-        private lazy var scrollCoalescer = TerminalScrollCoalescer(frameInterval: Self.scrollCoalescingInterval) { [weak self] batch, finish in
+        private var localScrollbackRevision: UInt64 = 0
+        private var localScrollDeltaNormalizer = TerminalScrollDeltaNormalizer()
+        /// Whether the pane is currently painting a replay frame instead of the session's own. Distinct
+        /// from holding a model: every pane prefetches one after its first paint, and a pane that has not
+        /// been scrolled shows the live screen.
+        private var isShowingLocalScrollbackFrame = false
+        /// Whether this pane has already asked for its prefetch page. One read per armed run: a read that
+        /// fails leaves the state `.idle` so the next gesture retries, without every later frame paying
+        /// for another attempt.
+        private var hasRequestedLocalScrollbackPrefetch = false
+        /// The continuation read in flight, if any. A continuation appends below the replay's viewport,
+        /// which Ghostty keeps pinned, so the gesture that triggered it keeps scrolling while it flies;
+        /// this is what keeps a later gesture from stacking a second read on the first and appending the
+        /// same range twice.
+        ///
+        /// It records which read is in flight rather than merely that one is: discarding and reopening a
+        /// replay (a keystroke, a resize, a relaunch) leaves the previous read running, and a bare flag
+        /// let that stale read's completion clear the mark the current replay's read had set. The
+        /// identity is the pair the completion is already checked against: the load generation it
+        /// started under, and the replay it extends.
+        private struct LocalScrollbackContinuationRead {
+            let generation: UInt64
+            let model: TerminalLocalScrollbackModel
+        }
+        private var localScrollbackContinuationRead: LocalScrollbackContinuationRead?
+        /// A rewind owed to a replay a load is holding. Leaving the replay rewinds it to its newest row so
+        /// the next gesture starts where the user is looking, but a load that holds the replay owns it
+        /// until it installs, so the rewind is recorded here and applied there. Without it the install
+        /// would hand back a replay parked at the offset the user just left, and their next gesture would
+        /// jump straight back into the history they walked away from.
+        private var pendingLocalScrollbackRewind = false
+        /// The newest complete frame the session's own stream produced, kept whether or not it was
+        /// painted. A pane showing a replay frame keeps reducing live frames underneath it (the session's
+        /// viewport never moved), and leaving the replay repaints this, which is what lets the jump
+        /// control return to the live screen without asking the daemon for anything.
+        private var latestLiveRenderFrame: GhosttyRenderFrame?
+        /// Where `output.log` ended as of the newest state payload that reported it. Compared against the
+        /// replay's own end offset at a gesture's start, so a gesture pays for a continuation read only
+        /// when the session has actually written something since the replay was last brought up to date.
+        private var latestTranscriptEndByteOffset: UInt64?
+        /// Where one wheel gesture's events go, decided at its first event and held for the rest of it.
+        /// Latching is what keeps a frame landing mid-gesture (a program entering the alternate screen,
+        /// say) from splitting one flick between the local replay and the daemon.
+        private enum ScrollRoute {
+            case daemon
+            case localReplay
+        }
+        private var latchedScrollRoute: ScrollRoute?
+        /// Whether the gesture in flight was cancelled by the user leaving history on purpose: typing, or
+        /// the jump-to-bottom control. Its remaining deltas are dropped rather than routed. Sending them
+        /// to the replay would paint the history the user just left back over the live screen the moment
+        /// the flick's next momentum event arrives, and sending them to the daemon would move the shared
+        /// viewport a local gesture never touches. Cleared wherever the route latch is, so the gesture's
+        /// own end (its momentum report, or the idle boundary a phase-less gesture gets instead) is what
+        /// lets the next gesture scroll again.
+        private var isScrollGestureCancelled = false
+        /// When the latched gesture last saw an event. A trackpad flick ends with a momentum phase, but a
+        /// mouse wheel's discrete clicks carry no phase at all, so a pause is what separates two turns of
+        /// the wheel into two gestures.
+        private var lastScrollEventAt: Date?
+        private static let scrollGestureIdleInterval: TimeInterval = 0.25
+        /// The clock gesture timing is measured against. It is a seam so a test can hold a flick's deltas
+        /// inside the idle interval, or cross that boundary on purpose, instead of depending on how long
+        /// the run loop happened to take.
+        var scrollGestureClock: @MainActor () -> Date = { Date() }
+        private lazy var scrollCoalescer = TerminalScrollCoalescer { [weak self] batch, finish in
             guard let self else {
                 finish()
                 return
@@ -186,7 +289,6 @@
             self.enqueueRemoteScrollBatch(batch, onFinished: finish)
         }
 
-        private static let scrollCoalescingInterval: Duration = .milliseconds(16)
         public init(
             launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
             terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil,
@@ -255,7 +357,7 @@
             terminalView.onSendScroll = { [weak self] horizontal, vertical, scrollMods, pointerPosition in
                 self?.sendRemoteScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
             }
-            terminalView.onJumpToBottom = { [weak self] in self?.sendRemoteScrollToBottom() }
+            terminalView.onJumpToBottom = { [weak self] in self?.handleJumpToBottom() }
             terminalView.onSendMouseButton = { [weak self] button, pressed, pointerPosition in
                 self?.sendRemoteMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
             }
@@ -265,6 +367,7 @@
                     startColumn: startColumn, startRow: startRow, endColumn: endColumn, endRow: endRow, isRectangle: isRectangle)
             }
             terminalView.onViewportSizeChanged = { [weak self] columns, rows in self?.handleViewportSizeChange(columns: columns, rows: rows) }
+            terminalView.onAppearanceChanged = { [weak self] in self?.discardLocalScrollbackIfAppearanceChanged() }
 
             if let container, terminalView.superview !== container {
                 terminalView.removeFromSuperview()
@@ -281,11 +384,11 @@
                 container.needsLayout = true
                 container.layoutSubtreeIfNeeded()
             }
-            // Same rule as applyReducedState: while the ended-session replay is showing a scrolled
-            // viewport, a re-attach must not clobber it with the daemon's final frame. But if the
-            // surface was released and recreated between detach and this attach, repaint the replay
-            // viewport so the recreated surface is not left blank.
-            if !isEndedScrollbackReplayActive {
+            // Same rule as applyReducedState: while the pane's own replay is showing a scrolled
+            // viewport, a re-attach must not clobber it with the session's frame. But if the surface was
+            // released and recreated between detach and this attach, repaint the replay viewport so the
+            // recreated surface is not left blank.
+            if !isLocalScrollbackReplayActive {
                 let frame = currentRenderFrameForRenderUpdate()
                 terminalView.update(frame: frame, renderStateKey: currentRenderStateKey())
                 // Attaching with no frame, and none on the way, leaves nothing to paint and no baseline for
@@ -301,7 +404,7 @@
                 // Owed by no particular update: this attach found no frame at all, so any frame closes it.
                 if frame == nil, !pendingFullFrameSubmission.isPending { requestRenderUpdateStateResync(owedBy: .anyFrame) }
             } else {
-                repaintEndedReplayViewportIfSurfaceEmpty()
+                repaintLocalReplayViewportIfSurfaceEmpty()
             }
             if isInteractive && mode == .owner { sendViewportResizeForOwnerAttach() }
         }
@@ -354,12 +457,12 @@
 
         public func requestSurfaceRefresh() {
             requestDirectStateRefresh(reason: TerminalRemoteSessionStateReason.stateChange.rawValue)
-            // Same rule as applyReducedState: a refresh must not clobber a scrolled ended viewport, but
+            // Same rule as applyReducedState: a refresh must not clobber a scrolled replay viewport, but
             // it must repaint the replay when the surface was released and recreated underneath it.
-            if !isEndedScrollbackReplayActive {
+            if !isLocalScrollbackReplayActive {
                 terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey())
             } else {
-                repaintEndedReplayViewportIfSurfaceEmpty()
+                repaintLocalReplayViewportIfSurfaceEmpty()
             }
         }
 
@@ -396,6 +499,12 @@
         /// regardless of what any one viewer can currently see.
         public func copySharedSelectionToPasteboard(completion: @escaping @MainActor (Bool) -> Void) {
             guard isInteractiveRuntimeStateForControl(), let client = attachedClient else {
+                completion(false)
+                return
+            }
+            // The daemon-owned selection is anchored in the session's own screen, which the pane is not
+            // showing while its replay is on screen; copying it would hand back text the user cannot see.
+            guard !isShowingLocalScrollbackFrame else {
                 completion(false)
                 return
             }
@@ -442,14 +551,11 @@
             return terminalView.performBindingAction(action)
         }
 
+        /// One wheel event, delivered exactly as the mirror view delivers a real one: the host routes it
+        /// per gesture to the daemon or to this pane's own replay (see `routeScroll`).
         @discardableResult public func sendScroll(
             horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?
-        ) -> Bool {
-            guard isInteractiveRuntimeStateForControl() else {
-                return scrollEndedSession(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
-            }
-            return terminalView.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
-        }
+        ) -> Bool { terminalView.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition) }
 
         @discardableResult public func clearScreenAndScrollback() -> Bool {
             guard isInteractiveRuntimeStateForControl(), attachedClient != nil, attachedMode == .owner else { return false }
@@ -470,6 +576,29 @@
         public func debugSurfaceSelectionText() -> String? { terminalView.debugSurfaceSelectionText }
 
         func debugSetBindingActionHandler(_ handler: (@MainActor (String) -> Bool)?) { terminalView.debugBindingActionHandler = handler }
+
+        /// Whether the pane is painting its own scrollback replay rather than the session's frames.
+        var debugIsShowingLocalScrollbackFrame: Bool { isShowingLocalScrollbackFrame }
+        /// Where `output.log` ended as of the newest state payload this host has applied, which is what a
+        /// gesture compares its replay against before reading a continuation.
+        var debugLatestTranscriptEndByteOffset: UInt64? { latestTranscriptEndByteOffset }
+        /// Whether a load is holding the pane's replay off the main actor, which is the window a gesture's
+        /// rows buffer in rather than scrolling the replay.
+        var debugLoadHoldsLocalScrollbackReplay: Bool {
+            guard case .loading(_, let model, _) = localScrollbackState else { return false }
+            return model != nil
+        }
+        /// Fires on the main actor the moment a continuation load takes the pane's replay off it, for both
+        /// hand-overs a continuation has (appending its bytes, and rebuilding from a served suffix), so a
+        /// test can act inside that window. The pane's state is already the state it holds for the whole
+        /// hop, and the hop itself is microseconds of libghostty-vt work on a test's page, far too narrow
+        /// for a test to aim an enqueued gesture at.
+        var debugOnLocalScrollbackReplayHandedToLoad: (@MainActor () -> Void)?
+        var debugJumpToBottomControlIsVisible: Bool { terminalView.debugJumpToBottomControlIsVisible }
+        var debugJumpToBottomControlShowsNewOutput: Bool { terminalView.debugJumpToBottomControlShowsNewOutput }
+        /// Activates the jump-to-bottom control the way a click does, through the control itself, so a
+        /// test exercises the wiring the user's click travels.
+        func debugActivateJumpToBottom() { terminalView.debugActivateJumpToBottomControl() }
         var debugRecordedBindingActions: [String] { terminalView.debugRecordedBindingActions }
 
         /// Awaits the serial input queue's current tail, so a test can observe every send enqueued so far
@@ -636,9 +765,11 @@
                 guard let self, !Task.isCancelled else { return }
                 self.pendingRenderUpdateResyncTask = nil
                 // An ended pane showing its own scrollback replay renders from the transcript, not from
-                // session state, so a fetch here would repair nothing it displays: the request is abandoned
-                // rather than re-armed, and the debt goes with it.
-                guard !self.isEndedScrollbackReplayActive else {
+                // session state, so a fetch here would repair nothing it will ever display: the request is
+                // abandoned rather than re-armed, and the debt goes with it. A live pane's replay is
+                // different - the session's frames keep arriving underneath it and are what the pane shows
+                // again the moment the user leaves the replay - so it keeps asking.
+                guard self.isInteractiveRuntimeStateForControl() || !self.isLocalScrollbackReplayActive else {
                     self.owedRenderUpdateResyncOrdering = nil
                     return
                 }
@@ -823,32 +954,79 @@
                 cancelTrailingRenderUpdateResync()
             }
             let applyStartedAt = Date()
-            // A relaunch resurrects the live renderer, so drop any ended-session replay and let live
-            // frames render again. While a replay is still active for an ended session, a re-served
-            // final payload for the *same* run must not clobber the locally scrolled viewport.
-            //
-            // A relaunch+exit unobserved by this client (disconnected, or between refreshes) surfaces as
-            // another *ended* payload rather than an interactive one, so the interactive check alone would
-            // keep replaying the previous run's transcript and suppressing the new run's final frame.
-            // Detect it by run identity: when the armed replay belongs to a different ended run than the
-            // one now observed, discard so the new run's final frame renders and its transcript re-fetches.
-            if isInteractiveRuntimeStateForControl() {
-                discardEndedScrollbackIfActive()
-            } else if let armedRunIdentity = endedScrollbackRunIdentity, currentEndedRunIdentity() != armedRunIdentity {
-                discardEndedScrollbackIfActive()
+            // A relaunch truncates `output.log`, so a replay built from the previous run's bytes describes
+            // a transcript that is gone: discard it and let the new run's frames render. Detected by run
+            // rather than by the session becoming interactive, because a relaunch-and-exit unobserved by
+            // this client (disconnected, or between refreshes) surfaces as another *ended* payload, which
+            // an interactive check alone would miss.
+            if let armedRunKey = localScrollbackRunKey, TerminalSessionRuntimeState.runKey(for: currentRunIdentity()) != armedRunKey {
+                discardLocalScrollback()
             }
-            if !isEndedScrollbackReplayActive, frameForUpdate != nil || !terminalView.hasRenderedSurfaceContent {
+            // Kept whether or not it is painted: a pane showing its replay repaints this when the user
+            // leaves the replay, which is what makes that jump cost no request (see `handleJumpToBottom`).
+            if let frameForUpdate { latestLiveRenderFrame = frameForUpdate }
+            discardLocalScrollbackIfGridChanged(frame: frameForUpdate)
+            // Covers a clear issued by any other client, whose only news of it is this payload: the daemon
+            // records the clear in the transcript and broadcasts it under this reason, stamping no
+            // transcript end, so the offset and `.output` rules below would leave a replay holding the very
+            // rows the clear removed until the next payload that does report output. Asked of the union of
+            // this apply and everything the mailbox folded into it, because a clear the main actor was too
+            // busy to apply on its own arrives folded into the next full frame, whose own reason says
+            // nothing about it.
+            if output.reportsClearScreen { discardLocalScrollback() }
+            // Two things at once, both from this payload's own report of where `output.log` ends.
+            //
+            // That offset is what a gesture compares its replay against before paying for a continuation
+            // read, and the newest payload's report wins outright, decreases included: a head-trim
+            // rewrites the file and moves its end backwards, and a gesture has to hear about that to read
+            // again (the transcript file the read names is what turns it into a rebuild).
+            //
+            // Its moving is also what proves the session printed, which is what the jump control's
+            // new-output mark reports. A frame's mere arrival is not proof: a resize, an appearance
+            // repaint, and another viewer's shared-selection change all export a fresh full frame with
+            // nothing new in the transcript, and counting those would tell a reader scrolled into history
+            // there is new output to come back to when there is none. Only `.output` payloads stamp the
+            // offset, so a payload carrying none is read by its reason instead, which is the same rule
+            // the phone reads a payload by (`TerminalViewerModel.outputCarriesNewLocalScrollbackOutput`),
+            // since both clients are answering the same question about the same apply.
+            //
+            // Both halves are asked of the union of this apply and everything the mailbox folded into it
+            // (`reportedOutputEndByteOffset`, `reportsTranscriptOutput`). A main actor that fell behind
+            // leaves the `.output` payload folded into a later full frame that stamps no offset and
+            // carries another reason, and reading only the survivor's own fields would leave a replay
+            // built before that output never asking for the bytes it is missing.
+            //
+            // A reported offset of zero is read as no report: the daemon stamps the offset by seeking to
+            // the end of `output.log` after appending the bytes it just wrote, so a real `.output` report
+            // always lands past zero. Requiring a positive value is also what makes the unsigned
+            // conversion below total.
+            let reportsNewOutput: Bool
+            if let outputEndByteOffset = output.reportedOutputEndByteOffset, outputEndByteOffset > 0 {
+                reportsNewOutput = UInt64(outputEndByteOffset) != latestTranscriptEndByteOffset
+                latestTranscriptEndByteOffset = UInt64(outputEndByteOffset)
+            } else {
+                reportsNewOutput = output.reportsTranscriptOutput
+            }
+            if !isLocalScrollbackReplayActive, frameForUpdate != nil || !terminalView.hasRenderedSurfaceContent {
                 terminalView.update(frame: frameForUpdate, renderStateKey: currentRenderStateKey())
-            } else if isEndedScrollbackReplayActive {
-                // The replay guard above suppresses this state's frame; repaint the replay viewport when
-                // the state update arrives on a surface that was released and recreated underneath it.
-                repaintEndedReplayViewportIfSurfaceEmpty()
+            } else if isLocalScrollbackReplayActive {
+                // The pane is committed to its replay, so this state's frame is kept rather than painted.
+                // Output that arrived while the pane is committed is marked on the jump control even before
+                // a replay frame is on screen (a gesture can still be waiting on its first page), because
+                // that page's install is what will show the rows this output landed beneath.
+                if reportsNewOutput { terminalView.setLocalScrollbackHasNewOutput(true) }
+                // Repaint the replay viewport when the state update arrives on a surface that was released
+                // and recreated underneath it.
+                repaintLocalReplayViewportIfSurfaceEmpty()
             }
             let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
             // An off-screen pane starts holding its screen updates as soon as it has a frame to show, and
             // this apply is what can have given it one.
             updateHeldScreenUpdates()
             if attachedMode == .owner { sendCurrentViewportResizeIfNeeded(force: false) }
+            // The pane has a frame, so it has a grid to build a replay at: read its first page now so the
+            // user's first wheel event scrolls instead of waiting out a round trip.
+            prefetchLocalScrollbackIfNeeded()
             // The attribute dictionary below is ~20 string conversions per payload on a path that runs
             // at the session's flush rate, so it is built only when something is listening. `emittedAt`
             // is parsed inside the same gate for the same reason: it feeds nothing but these metrics.
@@ -964,6 +1142,7 @@
                 TerminalPerformance.logLine("spaces: input_trace point=send_input_no_client session=\(launchConfiguration.sessionID)\n")
                 return
             }
+            leaveLocalScrollbackForInput()
             scrollCoalescer.flush()
             let socketPath = paths.controlSocketPath
             let clientID = client.id
@@ -998,6 +1177,7 @@
                 TerminalPerformance.logLine("spaces: input_trace point=send_key_no_client session=\(launchConfiguration.sessionID)\n")
                 return
             }
+            leaveLocalScrollbackForInput()
             scrollCoalescer.flush()
             let socketPath = paths.controlSocketPath
             let clientID = client.id
@@ -1052,6 +1232,7 @@
         /// other client set.
         private func sendRemoteClearSelection() {
             guard isInteractiveRuntimeStateForControl(), let client = attachedClient else { return }
+            guard !isShowingLocalScrollbackFrame else { return }
             let socketPath = paths.controlSocketPath
             let clientID = client.id
             let sessionID = launchConfiguration.sessionID
@@ -1077,6 +1258,10 @@
         /// inside it wins over the response via the change-count guard below.
         private func sendRemoteSetSelection(startColumn: UInt16, startRow: UInt32, endColumn: UInt16, endRow: UInt32, isRectangle: Bool) {
             guard isInteractiveRuntimeStateForControl(), let client = attachedClient else { return }
+            // A drag over the replay selects rows out of the pane's own copy of the transcript, whose
+            // coordinates mean nothing to the session: the shared selection stays where the session put it,
+            // and the drag is the mirror surface's own local selection, copyable on its own.
+            guard !isShowingLocalScrollbackFrame else { return }
             let socketPath = paths.controlSocketPath
             let clientID = client.id
             let sessionID = launchConfiguration.sessionID
@@ -1125,6 +1310,15 @@
         private func sendRemoteClearScreenAndScrollback() {
             guard isInteractiveRuntimeStateForControl() else { return }
             guard let client = attachedClient else { return }
+            leaveLocalScrollbackForInput()
+            // The daemon records the clear in the transcript, so a fresh read reproduces it while the
+            // replay already built predates it: discarded unconditionally, not just when a replay is on
+            // screen the way `leaveLocalScrollbackForInput` is, because a clear sent from the live bottom
+            // leaves the prefetched replay holding the very rows the clear removed.
+            //
+            // Discarded here at the send rather than left to the `.clearScreen` payload the daemon
+            // broadcasts back, so a gesture made during the round trip cannot scroll the stale rows.
+            discardLocalScrollback()
             scrollCoalescer.flush()
             let socketPath = paths.controlSocketPath
             let clientID = client.id
@@ -1173,167 +1367,659 @@
         }
 
         private func sendRemoteScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?) {
-            guard isInteractiveRuntimeStateForControl() else {
-                _ = scrollEndedSession(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
-                return
-            }
-            guard attachedClient != nil, attachedMode == .owner else { return }
-            scrollCoalescer.append(
-                horizontal: Double(horizontal), vertical: Double(vertical), scrollMods: scrollMods, pointerPosition: pointerPosition)
+            routeScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
         }
 
-        // MARK: - Ended-session scrollback replay
+        // MARK: - Client-local scrollback replay
 
-        /// Scrolls an ended pane's persisted-transcript replay. The live daemon renderer is gone once
-        /// the process exits, so scrolling can no longer be forwarded; instead the transcript is
-        /// replayed into a client-local vt session and scrolled locally. Runs under the ended pane's
-        /// forced `.viewer` final-render attach. Returns true when the scroll is accepted (routed into
-        /// the replay), false when there is nothing to scroll (no attach, or no transcript to replay).
-        @discardableResult private func scrollEndedSession(horizontal _: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
-            guard attachedClient != nil else { return false }
-            let deltaRows = endedScrollDeltaNormalizer.terminalViewportDeltaRows(vertical: Double(vertical), scrollMods: scrollMods)
-            switch endedScrollbackState {
-            case .unavailable: return false
+        /// Where one wheel gesture's events go, decided at the gesture's first event from the session's
+        /// own newest frame and held for the rest of the gesture (`routeScroll` expires the latch, so a
+        /// latched route here is by definition still the current gesture's):
+        ///
+        /// - An ended session has no live renderer left to scroll, so its gesture is always local.
+        /// - A session on the alternate screen has no scrollback of its own (the gesture belongs to the
+        ///   full-screen program), and one tracking the mouse wants the wheel as a mouse report. Both
+        ///   forward every event to the daemon.
+        /// - Everything else scrolls this pane's own replay of the session's transcript. The daemon is
+        ///   never told, so the session's viewport stays where it is for every client watching it, and no
+        ///   wheel event costs a round trip (issue #693).
+        ///
+        /// A pane watching a session another device owns never gets here: it holds no mirror surface at
+        /// all, because the pane controller shows the takeover status UI in place of terminal content, so
+        /// this routing only ever runs for the pane that owns the session or for an ended session's final
+        /// frame.
+        ///
+        /// Read from the session's frame, never from the replay's: the replay's flags describe the bytes
+        /// it has replayed, while the question here is what the session the user is scrolling is doing.
+        private func scrollRoute() -> ScrollRoute {
+            if let latchedScrollRoute { return latchedScrollRoute }
+            guard isInteractiveRuntimeStateForControl() else { return .localReplay }
+            // A pane with no frame yet cannot say what the session is doing, and has no replay to scroll
+            // either (a replay is read only once a frame has been painted), so its gesture goes where every
+            // gesture went before panes had a local viewport at all.
+            guard let snapshot = latestLiveRenderFrame?.snapshot else { return .daemon }
+            return snapshot.alternateScreenActive || snapshot.mouseReportingActive ? .daemon : .localReplay
+        }
+
+        /// Routes one wheel event, latching the gesture on its first and ending the latch when the
+        /// trackpad reports the momentum is over or the wheel has gone quiet.
+        private func routeScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?) {
+            let now = scrollGestureClock()
+            // Ending the idle gesture BEFORE the route is decided is what makes the first event after a
+            // pause a gesture *start*. A mouse wheel's clicks and a slow trackpad drag never report a
+            // momentum phase, so the pause is the only thing that ends those gestures, and a latch left
+            // standing across it would leave every later burst mid-gesture: the route would never be
+            // re-decided and no burst would pay for the continuation read that brings the replay up to
+            // date with what the session wrote in between.
+            expireLatchedScrollRouteIfIdle(now: now)
+            // A gesture the user cancelled by leaving history goes nowhere for the rest of its life: not
+            // to the replay, and not to the daemon either. The clock keeps running so the idle boundary
+            // measures from this gesture's last event, and a momentum report ends it as it ends any other.
+            guard !isScrollGestureCancelled else {
+                lastScrollEventAt = now
+                endScrollGestureIfMomentumFinished(scrollMods: scrollMods)
+                return
+            }
+            let route = scrollRoute()
+            let isGestureStart = latchedScrollRoute == nil
+            latchedScrollRoute = route
+            lastScrollEventAt = now
+            switch route {
+            case .daemon:
+                // A gesture rerouted to the daemon must not drive a hidden screen: leave the stale replay
+                // before its wheel reaches the program that changed screens underneath it.
+                if isGestureStart, isShowingLocalScrollbackFrame { returnToLiveScreenFromLocalScrollback() }
+                if isInteractiveRuntimeStateForControl(), attachedClient != nil, attachedMode == .owner {
+                    scrollCoalescer.append(
+                        horizontal: Double(horizontal), vertical: Double(vertical), scrollMods: scrollMods, pointerPosition: pointerPosition)
+                }
+            case .localReplay:
+                if isGestureStart { loadLocalScrollbackContinuationIfBehind() }
+                scrollLocalReplay(vertical: vertical, scrollMods: scrollMods)
+            }
+            endScrollGestureIfMomentumFinished(scrollMods: scrollMods)
+        }
+
+        /// A flick's last event says the momentum is over, which ends the gesture without waiting out the
+        /// idle pause, so the next flick starts a fresh one and pays for its own continuation read.
+        private func endScrollGestureIfMomentumFinished(scrollMods: Int32) {
+            switch TerminalScrollModifiers.momentumPhase(scrollMods) {
+            case .ended, .cancelled: endScrollGesture()
+            case .none, .changed, .mayBegin: break
+            }
+        }
+
+        /// Ends a latched gesture that has gone quiet for `scrollGestureIdleInterval`, which is the only
+        /// end a phase-less wheel gesture ever gets.
+        private func expireLatchedScrollRouteIfIdle(now: Date) {
+            guard let lastScrollEventAt, now.timeIntervalSince(lastScrollEventAt) >= Self.scrollGestureIdleInterval else { return }
+            endScrollGesture()
+        }
+
+        /// Forgets everything that belongs to the gesture that just ended, so the next event is a gesture
+        /// start: it re-decides its route, pays for its own continuation read, and scrolls even when the
+        /// gesture before it was cancelled.
+        private func endScrollGesture() {
+            latchedScrollRoute = nil
+            lastScrollEventAt = nil
+            isScrollGestureCancelled = false
+        }
+
+        /// Marks the gesture in flight cancelled, for the two things that leave history on purpose while
+        /// one is running: typing, and the jump-to-bottom control. Only a gesture actually in flight can
+        /// be cancelled, since with no latch there is nothing whose remaining deltas could paint history
+        /// back over the screen the user just returned to.
+        private func cancelActiveScrollGesture() {
+            guard latchedScrollRoute != nil else { return }
+            isScrollGestureCancelled = true
+            // The rows this gesture put on a load that has not installed yet go with it, for the reason the
+            // rest of its deltas do: the pane is leaving the replay, and applying them at the install would
+            // paint history back over the screen the user just returned to.
+            guard case .loading(let pendingDeltaRows, let model, let grid) = localScrollbackState, pendingDeltaRows != 0 else { return }
+            localScrollbackState = .loading(pendingDeltaRows: 0, model: model, grid: grid)
+        }
+
+        /// Scrolls the replay by one wheel event's worth of rows, reading the first page if this pane has
+        /// none yet.
+        private func scrollLocalReplay(vertical: CGFloat, scrollMods: Int32) {
+            guard attachedClient != nil else { return }
+            discardLocalScrollbackIfAppearanceChanged()
+            let deltaRows = localScrollDeltaNormalizer.terminalViewportDeltaRows(vertical: Double(vertical), scrollMods: scrollMods)
+            switch localScrollbackState {
+            case .unavailable: return
             case .ready(let model):
-                if deltaRows != 0 { applyEndedScroll(deltaRows: deltaRows, model: model) }
-                return true
-            case .loading(let pendingDeltaRows):
-                endedScrollbackState = .loading(pendingDeltaRows: pendingDeltaRows + deltaRows)
-                return true
+                guard deltaRows != 0 else { return }
+                applyLocalScroll(deltaRows: deltaRows, model: model)
+            case .loading(let pendingDeltaRows, let model, let grid):
+                // The replay belongs to the load while it is held, so the rows wait here and are applied
+                // when the install hands it back.
+                localScrollbackState = .loading(pendingDeltaRows: pendingDeltaRows + deltaRows, model: model, grid: grid)
             case .idle:
-                // A sub-cell nudge normalizes to zero rows; wait for a real scroll before paying to
-                // fetch and replay the transcript, but still report it as accepted.
-                guard deltaRows != 0 else { return true }
-                // Arm the replay against the current ended run. Every non-idle state descends from this
-                // single idle->loading transition, so recording identity once here covers the `.loading`,
-                // `.ready`, and `.unavailable` outcomes; `applyReducedState` compares it to later payloads
-                // to discard a stale replay when a different ended run is observed.
-                endedScrollbackRunIdentity = currentEndedRunIdentity()
-                endedScrollbackState = .loading(pendingDeltaRows: deltaRows)
-                beginLoadingEndedScrollbackModel()
-                return true
+                // A sub-cell nudge normalizes to zero rows; wait for a real scroll before paying to read
+                // and replay the transcript.
+                guard deltaRows != 0 else { return }
+                loadLocalScrollbackPage(
+                    maxBytes: TerminalScrollbackBudget.initialLocalScrollbackPageBytes, deepening: nil, pendingDeltaRows: deltaRows, kind: .gesture)
             }
         }
 
-        private func beginLoadingEndedScrollbackModel() {
-            guard let transcriptProvider else {
-                endedScrollbackState = .unavailable
+        /// Applies one scroll to the replay and paints what it produced. A gesture that runs into the
+        /// oldest row the replay holds reads the whole scrollback budget once and rebuilds from it,
+        /// carrying the rows the replay could not apply onto the deeper replay so a flick that crosses the
+        /// boundary does not lose everything past it.
+        private func applyLocalScroll(deltaRows: Int, model: TerminalLocalScrollbackModel) {
+            let scroll = model.scroll(deltaRows: deltaRows)
+            showLocalScrollbackPosition(model, snapshot: scroll.snapshot)
+            guard deltaRows < 0, model.isAtTop, model.hasDeeperHistory else { return }
+            loadLocalScrollbackPage(
+                maxBytes: TerminalScrollbackBudget.defaultMaxBytes, deepening: model, pendingDeltaRows: scroll.unappliedRows, kind: .full)
+        }
+
+        /// Paints where the replay now sits, or hands the pane back to the session's own frame when the
+        /// replay sits on its newest row. At the bottom the live frame *is* the current screen, while the
+        /// replay's newest row is only as fresh as the transcript page it was read from: painting the
+        /// replay there would hide everything the session has written since and leave the jump control
+        /// offering a return the user has already made by hand.
+        ///
+        /// The gesture that got here is left running rather than cancelled. Its remaining downward deltas
+        /// find the replay already at the bottom and do nothing, and an upward one re-enters the replay
+        /// the handback rewound, with no read to pay for.
+        private func showLocalScrollbackPosition(_ model: TerminalLocalScrollbackModel, snapshot: GhosttyTerminalSnapshot?) {
+            guard model.rowsFromBottom > 0 else {
+                // A load that lands here still owes the live paints it suppressed while it held the
+                // gesture's rows, and the return below paints only a pane that was showing a replay frame,
+                // so a pane that was not gets that paint from the repaint above it.
+                repaintLiveFrameUnlessShowingReplay()
+                returnToLiveScreenFromLocalScrollback()
                 return
             }
-            // Build at the final frame's grid so the replay wraps exactly as the daemon's final frame
-            // did; fall back to the runtime-state grid when the final frame is unavailable.
-            //
-            // The replay seeds at the transcript bottom. The persisted final frame is viewport-only with
-            // no scrollback offset, so a process that exited while the user was scrolled above the bottom
-            // jumps bottom-relative (or clamps) on the first scroll gesture. Accepted until a scroll
-            // offset is persisted with the final frame.
-            let finalFrame = latestState?.decodedRenderUpdate?.fullFrame
-            let columns = finalFrame?.columns ?? latestState?.runtimeState?.columns ?? 80
-            let rows = finalFrame?.rows ?? latestState?.runtimeState?.rows ?? 24
-            let appearance: ThemeAppearance = terminalView.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+            guard let snapshot else { return }
+            presentLocalScrollbackFrame(snapshot, offsetRows: model.rowsFromBottom)
+        }
+
+        /// Paints one replay frame. It carries a local revision so the mirror's frame-dedupe never drops a
+        /// scrolled viewport, and the session's current owner epoch so it is applied like any other frame.
+        private func presentLocalScrollbackFrame(_ snapshot: GhosttyTerminalSnapshot, offsetRows: Int) {
+            localScrollbackRevision &+= 1
+            let frame = GhosttyRenderFrame(
+                sessionRevision: localScrollbackRevision, ownerEpoch: latestState?.renderOwnerEpoch ?? 0, snapshot: snapshot)
+            isShowingLocalScrollbackFrame = true
+            terminalView.isShowingLocalScrollbackFrame = true
+            terminalView.update(frame: frame, renderStateKey: currentRenderStateKey())
+            SpacesDeviceTerminalPerformanceLogger.emit(
+                .init(
+                    sessionID: launchConfiguration.sessionID, source: "mac-mirror", name: "scroll_local_frame",
+                    attributes: ["offset_rows": String(offsetRows)]))
+        }
+
+        /// Returns the pane to the session's own screen, with no request to the daemon: the session's
+        /// viewport never moved, so the live frame this host already holds *is* the current screen. The
+        /// replay survives, rewound to its newest row, because its bytes are still this session's
+        /// transcript: the next gesture continues from there instead of paying for the page again.
+        private func returnToLiveScreenFromLocalScrollback() {
+            guard isShowingLocalScrollbackFrame else { return }
+            switch localScrollbackState {
+            case .ready(let model): model.scrollToRowsFromBottom(0)
+            // A load holds the replay until it installs, so the rewind is owed rather than done here.
+            case .loading(_, let model, _) where model != nil: pendingLocalScrollbackRewind = true
+            case .idle, .loading, .unavailable: break
+            }
+            clearLocalScrollbackDisplay()
+            terminalView.update(frame: latestLiveRenderFrame, renderStateKey: currentRenderStateKey())
+        }
+
+        /// Drops the pane out of the replay without repainting, for the callers that paint something else
+        /// themselves (a live frame landing after a discard) or that discard the replay outright.
+        private func clearLocalScrollbackDisplay() {
+            isShowingLocalScrollbackFrame = false
+            localScrollDeltaNormalizer = TerminalScrollDeltaNormalizer()
+            terminalView.isShowingLocalScrollbackFrame = false
+            terminalView.setLocalScrollbackHasNewOutput(false)
+        }
+
+        /// Typing returns the pane to the live screen: what the user types appears at the session's own
+        /// bottom row, and a replay left on screen would hide it. The replay is discarded rather than
+        /// rewound because the input itself changes the transcript it was read from; the next painted
+        /// frame reads a fresh page.
+        ///
+        /// A replay still reading its first page counts as owning the pane too, which is what
+        /// `isLocalScrollbackReplayActive` says: it holds the rows the user has scrolled onto it, and
+        /// without the discard the read would land after the keystroke and paint that history over the
+        /// live screen the keystroke belongs to. Discarding drops those rows with it. A pane with no gesture
+        /// in flight and no movement on it is untouched, so ordinary typing at the live bottom costs nothing.
+        private func leaveLocalScrollbackForInput() {
+            // A gesture scrolling this pane's own replay is cancelled whether or not it has painted
+            // anything yet, because a latch that has not crossed a whole row still has the rest of its
+            // deltas and its momentum behind it, and routing those after the keystroke would paint history
+            // over the live screen it belongs to. A gesture forwarded to the daemon keeps every delta: the
+            // program receiving the wheel decides what typing means for it, and none of those events paint
+            // this pane's history over anything.
+            if case .localReplay? = latchedScrollRoute { cancelActiveScrollGesture() }
+            guard isLocalScrollbackReplayActive else { return }
+            returnToLiveScreenFromLocalScrollback()
+            discardLocalScrollback()
+        }
+
+        /// The jump-to-bottom control's action. A pane showing its replay jumps locally, with no request
+        /// to the daemon at all; a pane whose live frame is itself scrolled back (the daemon's own
+        /// viewport, moved by whoever owns it) asks the session to jump, exactly as before.
+        private func handleJumpToBottom() {
+            if isShowingLocalScrollbackFrame {
+                // Jumping during a flick's momentum has to end that flick too: the replay survives the
+                // jump, so its remaining deltas would scroll the user straight back off the live screen.
+                cancelActiveScrollGesture()
+                returnToLiveScreenFromLocalScrollback()
+                return
+            }
+            sendRemoteScrollToBottom()
+        }
+
+        /// Reads the pane's first page of transcript once it has painted a frame. The frame is what says
+        /// the session is worth a replay and at which grid to build it, and reading now is what lets the
+        /// user's first wheel event scroll instead of waiting out a round trip.
+        private func prefetchLocalScrollbackIfNeeded() {
+            guard !hasRequestedLocalScrollbackPrefetch, transcriptProvider != nil else { return }
+            guard case .idle = localScrollbackState else { return }
+            guard terminalView.hasRenderedSurfaceContent else { return }
+            hasRequestedLocalScrollbackPrefetch = true
+            loadLocalScrollbackPage(
+                maxBytes: TerminalScrollbackBudget.initialLocalScrollbackPageBytes, deepening: nil, pendingDeltaRows: 0, kind: .prefetch)
+        }
+
+        /// What a page read was started for. It names the read in the performance log, and it is what tells
+        /// a read that a gesture is waiting on from the prefetch that runs on its own: the two
+        /// gesture-initiated reads take the gesture down with them when they install nothing.
+        private enum LocalScrollbackPageReadKind: String {
+            case prefetch
+            case gesture
+            case full
+
+            var isGestureInitiated: Bool { self != .prefetch }
+        }
+
+        /// Reads a page of transcript and installs it as this pane's replay: the prefetch after the first
+        /// painted frame, the first read a gesture on a pane whose prefetch failed pays for, and the
+        /// whole-budget read a gesture that reaches the replay's oldest row asks for. `deepening` is the
+        /// replay being replaced, whose distance above the newest row the rebuilt replay restores so the
+        /// rows on screen do not move across the rebuild.
+        private func loadLocalScrollbackPage(
+            maxBytes: Int, deepening: TerminalLocalScrollbackModel?, pendingDeltaRows: Int, kind: LocalScrollbackPageReadKind
+        ) {
+            guard let transcriptProvider else {
+                localScrollbackState = .unavailable
+                return
+            }
+            let grid = localScrollbackGrid()
+            let appearance = currentTerminalAppearance()
             let theme = ActiveTheme.descriptor.terminal(for: appearance)
-            let maxBytes = TerminalScrollbackBudget.defaultMaxBytes
-            // Pin this load to the current run. If the session relaunches and exits again while the
-            // fetch is in flight, `discardEndedScrollbackIfActive` bumps the generation, so the checks
-            // below reject this stale result instead of installing it under the newer run's `.loading`.
-            let generation = endedScrollbackGeneration
+            let rowsFromBottom = deepening?.rowsFromBottom
+            localScrollbackState = .loading(pendingDeltaRows: pendingDeltaRows, model: deepening, grid: grid)
+            // Arm the replay against the run these bytes are read from. Every non-idle state descends from
+            // this one transition, so recording the run once here covers the `.loading`, `.ready`, and
+            // `.unavailable` outcomes; `applyReducedState` compares it against later payloads to discard a
+            // replay whose run is gone.
+            let armedRunKey = TerminalSessionRuntimeState.runKey(for: currentRunIdentity())
+            localScrollbackRunKey = armedRunKey
+            localScrollbackAppearance = appearance
+            // Pin this read to the current generation. A relaunch, a typed key, or a grid change discards
+            // the replay and bumps the generation, so the checks below reject a stale result instead of
+            // installing it under a later state. The in-flight read itself is not cancelled: it runs on
+            // this pane's dedicated `DeviceAPIRequestClientBox.transcriptClient`, so an obsolete page can
+            // only delay the next scrollback page, never keystrokes or controls, which travel on the
+            // separate control client. `SpacesDeviceAPIRequestSessionClient.send` is a blocking round trip
+            // that Swift task cancellation cannot interrupt, and `cancel()` takes the same request lock
+            // the send holds, so aborting it would mean tearing the connection down mid-send. The accepted
+            // cost is a discard (resize, relaunch, keystroke) landing while a deep page is in flight on a
+            // slow link: the next page waits behind the stale one for as long as that read's own
+            // size-derived deadline allows (10s plus a second per 64 KiB the read asked for, see
+            // `SpacesDeviceAPICommandDescriptor`), while live frames keep painting on the unaffected
+            // control path.
+            let generation = localScrollbackGeneration
+            let startedAt = Date()
             Task { @MainActor [weak self] in
-                guard let self else { return }
                 let transcript: RemoteGhosttyTranscript
-                do { transcript = try await transcriptProvider(maxBytes) } catch {
-                    // A transport failure (timeout, daemon restarting, remote device offline) is
-                    // transient: return to idle so the next scroll gesture retries the fetch.
-                    if generation == self.endedScrollbackGeneration, case .loading = self.endedScrollbackState { self.endedScrollbackState = .idle }
+                do { transcript = try await transcriptProvider(maxBytes, nil, nil) } catch {
+                    // A transport failure (timeout, daemon restarting, remote device offline) is transient:
+                    // return to idle so the next gesture retries the read. The gesture this read was started
+                    // for is cancelled with it, because idle is where a delta starts a read: without the
+                    // cancel every remaining delta of one flick at an unreachable device would start another
+                    // read that fails the same way, so the rest of the flick is absorbed and the gesture
+                    // after the idle boundary is the retry.
+                    guard let self, generation == self.localScrollbackGeneration, case .loading = self.localScrollbackState else { return }
+                    self.localScrollbackState = .idle
+                    if kind.isGestureInitiated { self.cancelActiveScrollGesture() }
+                    self.repaintLiveFrameUnlessShowingReplay()
                     return
                 }
-                // A relaunch (session went interactive again) discards the loading state mid-fetch,
-                // bumping the generation; a stale-run result is rejected here.
-                guard generation == self.endedScrollbackGeneration, case .loading = self.endedScrollbackState else { return }
-                // The transcript response carries the run identity the server read it from. A relaunch
-                // that lands after the fetch started but before this client observes a new state payload
-                // leaves the generation and armed identity unchanged, yet truncates `output.log` — so the
-                // fetched bytes can belong to the new run. When the response identity differs from the
-                // armed one, the armed run's transcript is definitively gone: latch `.unavailable` (cleared
-                // only by a later discard through the interactive or run-identity path). Skip the check
-                // when either identity is unknown (nil) and behave as before.
-                if let responseIdentity = transcript.runIdentity, let armedIdentity = self.endedScrollbackRunIdentity,
-                    responseIdentity != armedIdentity
-                {
-                    self.endedScrollbackState = .unavailable
+                guard let self, generation == self.localScrollbackGeneration, case .loading = self.localScrollbackState else { return }
+                self.logScrollbackPageRead(byteCount: transcript.data.count, kind: kind.rawValue, startedAt: startedAt)
+                guard self.transcriptBelongsToArmedRun(transcript, armedRunKey: armedRunKey) else {
+                    // The identity in the response can lag the relaunch by one write-behind commit of the
+                    // runtime state, so a mismatch is a stale label to retry, not a verdict: the replay is
+                    // discarded back to `.idle` and the next painted frame or gesture reads again.
+                    self.discardLocalScrollback()
+                    self.repaintLiveFrameUnlessShowingReplay()
                     return
                 }
                 guard !transcript.data.isEmpty else {
-                    // An empty transcript is definitive — there is nothing to replay.
-                    self.endedScrollbackState = .unavailable
+                    // Nothing to replay yet, which is definitive only for a session that has ended: its
+                    // transcript is complete, so an empty one means that run wrote nothing and never will.
+                    // A live session is merely ahead of its own output (a first frame painted before the
+                    // child wrote a byte, and the `.sessionNotAvailable` read of an `output.log` that does
+                    // not exist yet, which the client maps to an empty transcript), so latching there would
+                    // absorb every scroll for the rest of the run. It returns to `.idle` instead, the same
+                    // retryable state a transport failure leaves, and the next gesture reads again. `.idle`
+                    // rather than a `.ready` empty replay keeps one path: every replay this host holds was
+                    // built from transcript bytes. The prefetch flag stays set, so the retry is the
+                    // gesture's, not every later frame's. That retry is the *next* gesture: a live session's
+                    // empty page cancels the gesture its read was started for, for the reason a failed read
+                    // does, so one flick cannot spend a read per delta on a transcript that has no bytes yet.
+                    self.localScrollbackState = self.isInteractiveRuntimeStateForControl() ? .idle : .unavailable
+                    if case .idle = self.localScrollbackState, kind.isGestureInitiated { self.cancelActiveScrollGesture() }
+                    self.repaintLiveFrameUnlessShowingReplay()
                     return
                 }
-                let model = await Task.detached(priority: .userInitiated) {
-                    TerminalEndedSessionScrollbackModel(
-                        columns: columns, rows: rows, theme: theme, appearance: appearance, transcript: transcript.data)
-                }.value
-                guard generation == self.endedScrollbackGeneration, case .loading(let pendingDeltaRows) = self.endedScrollbackState else { return }
+                let model = await self.buildLocalScrollbackModel(
+                    transcript: transcript, requestedByteCount: maxBytes, grid: grid, theme: theme, appearance: appearance,
+                    rowsFromBottom: rowsFromBottom)
+                guard generation == self.localScrollbackGeneration, case .loading(let pendingRows, _, _) = self.localScrollbackState else { return }
                 guard let model else {
-                    self.endedScrollbackState = .unavailable
+                    self.localScrollbackState = .unavailable
+                    self.repaintLiveFrameUnlessShowingReplay()
                     return
                 }
-                self.endedScrollbackState = .ready(model)
-                if pendingDeltaRows != 0 { self.applyEndedScroll(deltaRows: pendingDeltaRows, model: model) }
+                self.localScrollbackState = .ready(model)
+                self.applyPendingLocalScrollbackRewind(to: model)
+                if pendingRows != 0 {
+                    self.applyLocalScroll(deltaRows: pendingRows, model: model)
+                } else if self.isShowingLocalScrollbackFrame {
+                    // A deepening read that consumed its whole delta still has to repaint: the rebuilt
+                    // replay is a different vt session showing the same rows. A rebuild that lands on the
+                    // newest row hands the pane back to the live frame instead, by the same rule a gesture
+                    // that reaches the bottom follows.
+                    self.showLocalScrollbackPosition(model, snapshot: model.currentSnapshot())
+                }
             }
         }
 
-        private func applyEndedScroll(deltaRows: Int, model: TerminalEndedSessionScrollbackModel) {
-            guard let snapshot = model.scroll(deltaRows: deltaRows) else { return }
-            endedScrollbackRevision &+= 1
-            let frame = GhosttyRenderFrame(
-                sessionRevision: endedScrollbackRevision, ownerEpoch: latestState?.renderOwnerEpoch ?? 0, snapshot: snapshot)
-            terminalView.update(frame: frame, renderStateKey: currentRenderStateKey())
-        }
-
-        private var isEndedScrollbackReplayActive: Bool {
-            switch endedScrollbackState {
-            case .loading, .ready: true
-            case .idle, .unavailable: false
+        /// Brings the replay up to date with what the session has written since it was built, once per
+        /// gesture. Skipped entirely when the session has written nothing since: an ended pane never
+        /// writes again, so it never asks twice.
+        private func loadLocalScrollbackContinuationIfBehind() {
+            guard case .ready(let model) = localScrollbackState, localScrollbackContinuationRead == nil else { return }
+            guard let latestTranscriptEndByteOffset, latestTranscriptEndByteOffset != model.transcriptEndByteOffset else { return }
+            guard let transcriptProvider else { return }
+            let maxBytes = TerminalScrollbackBudget.initialLocalScrollbackPageBytes
+            let fromByteOffset = model.transcriptEndByteOffset
+            let fileIdentity = model.transcriptFileIdentity
+            let armedRunKey = localScrollbackRunKey
+            let generation = localScrollbackGeneration
+            localScrollbackContinuationRead = LocalScrollbackContinuationRead(generation: generation, model: model)
+            let startedAt = Date()
+            Task { @MainActor [weak self] in
+                let transcript: RemoteGhosttyTranscript
+                do { transcript = try await transcriptProvider(maxBytes, fromByteOffset, fileIdentity) } catch {
+                    // Transient, like any other read: the replay keeps the bytes it has and the next
+                    // gesture asks again.
+                    self?.finishLocalScrollbackContinuationRead(generation: generation, model: model)
+                    return
+                }
+                guard let self else { return }
+                self.finishLocalScrollbackContinuationRead(generation: generation, model: model)
+                guard generation == self.localScrollbackGeneration, case .ready(let currentModel) = self.localScrollbackState, currentModel === model
+                else { return }
+                self.logScrollbackPageRead(byteCount: transcript.data.count, kind: "continuation", startedAt: startedAt)
+                guard self.transcriptBelongsToArmedRun(transcript, armedRunKey: armedRunKey) else {
+                    // Retryable for the reason the first page's mismatch is: the label can be one
+                    // write-behind commit behind the relaunch. The replay is dropped rather than kept,
+                    // because bytes from another run cannot be appended to it.
+                    self.discardLocalScrollback()
+                    self.repaintLiveFrameUnlessShowingReplay()
+                    return
+                }
+                guard !transcript.data.isEmpty else { return }
+                // The daemon could not serve a continuation (a head-trim moved the bytes the offset named,
+                // or the session outran the page), so the payload is a fresh replayable suffix and the
+                // replay is rebuilt from it rather than appended to.
+                if transcript.isSuffixRebuild {
+                    await self.rebuildLocalScrollback(from: model, transcript: transcript, requestedByteCount: maxBytes, generation: generation)
+                    return
+                }
+                // Replaying a page of transcript through libghostty-vt is tens of milliseconds of work, so
+                // the append runs off the main actor exactly as the first build does, and the replay belongs
+                // to that hop alone while it runs (the model is `@unchecked Sendable` for this handover).
+                // `.loading` is what parks the pane meanwhile: a gesture arriving accumulates its rows
+                // instead of scrolling a replay that is not here, and the install applies them.
+                let bytes = transcript.data
+                let endByteOffset = transcript.endByteOffset
+                self.localScrollbackState = .loading(pendingDeltaRows: 0, model: model, grid: (columns: model.columns, rows: model.rows))
+                self.debugOnLocalScrollbackReplayHandedToLoad?()
+                let appended = await Task.detached(priority: .userInitiated) { model.append(bytes, transcriptEndByteOffset: endByteOffset) }.value
+                // The same checks the build's install makes, for the same reason: a discard (a keystroke, a
+                // resize, a relaunch) can have landed while the append ran, and its bytes must not come back
+                // under the state that replaced it.
+                guard generation == self.localScrollbackGeneration, case .loading(let pendingRows, let held, _) = self.localScrollbackState,
+                    held === model
+                else { return }
+                guard appended else {
+                    // A replay that cannot take the bytes is no longer a faithful continuation of the
+                    // transcript, so it stops rather than showing a screen the session never had.
+                    self.localScrollbackState = .unavailable
+                    self.repaintLiveFrameUnlessShowingReplay()
+                    return
+                }
+                self.localScrollbackState = .ready(model)
+                self.applyPendingLocalScrollbackRewind(to: model)
+                // Ghostty keeps the viewport pinned while output appends below it, so an append moves
+                // nothing on screen and needs no repaint; only the rows a gesture scrolled while the replay
+                // was away have anything to paint.
+                if pendingRows != 0 { self.applyLocalScroll(deltaRows: pendingRows, model: model) }
             }
         }
 
-        /// Repaints the ended-replay viewport after the mirror surface was released and recreated
-        /// (the pane controller releases the surface before reattaching an ended viewer). The
-        /// replay guard suppresses live-frame repaints, so without this the recreated surface
-        /// stays blank until the next scroll gesture.
-        private func repaintEndedReplayViewportIfSurfaceEmpty() {
+        /// Applies a rewind the pane owed a replay a load was holding (see `pendingLocalScrollbackRewind`),
+        /// at the install that hands that replay back.
+        private func applyPendingLocalScrollbackRewind(to model: TerminalLocalScrollbackModel) {
+            guard pendingLocalScrollbackRewind else { return }
+            pendingLocalScrollbackRewind = false
+            model.scrollToRowsFromBottom(0)
+        }
+
+        /// Retires a continuation read, and only the one that is actually in flight. A read whose replay
+        /// was discarded and reopened underneath it resolves against a mark that belongs to the current
+        /// replay's own read, and clearing that would let the next gesture start a second read of the
+        /// same range while the first is still running.
+        private func finishLocalScrollbackContinuationRead(generation: UInt64, model: TerminalLocalScrollbackModel) {
+            guard let read = localScrollbackContinuationRead, read.generation == generation, read.model === model else { return }
+            localScrollbackContinuationRead = nil
+        }
+
+        /// Replaces the replay with one built from a served suffix, at the rows the user is looking at.
+        ///
+        /// The pane is parked in `.loading` holding the replay across the build, exactly as the append
+        /// parks it: the rebuilt replay is put the distance above its newest row that the replay it
+        /// replaces sat at when the build started, so rows scrolled onto the old replay meanwhile would be
+        /// thrown away by the install. They buffer in `pendingDeltaRows` instead and are applied to the
+        /// replay that comes back, and a jump or a keystroke meanwhile is the rewind the install pays.
+        private func rebuildLocalScrollback(
+            from model: TerminalLocalScrollbackModel, transcript: RemoteGhosttyTranscript, requestedByteCount: Int, generation: UInt64
+        ) async {
+            let grid = localScrollbackGrid()
+            let appearance = currentTerminalAppearance()
+            let theme = ActiveTheme.descriptor.terminal(for: appearance)
+            let rowsFromBottom = model.rowsFromBottom
+            localScrollbackState = .loading(pendingDeltaRows: 0, model: model, grid: grid)
+            debugOnLocalScrollbackReplayHandedToLoad?()
+            let rebuilt = await buildLocalScrollbackModel(
+                transcript: transcript, requestedByteCount: requestedByteCount, grid: grid, theme: theme, appearance: appearance,
+                rowsFromBottom: rowsFromBottom)
+            guard generation == localScrollbackGeneration, case .loading(let pendingRows, let held, _) = localScrollbackState, held === model else {
+                return
+            }
+            guard let rebuilt else {
+                localScrollbackState = .unavailable
+                repaintLiveFrameUnlessShowingReplay()
+                return
+            }
+            localScrollbackAppearance = appearance
+            localScrollbackState = .ready(rebuilt)
+            applyPendingLocalScrollbackRewind(to: rebuilt)
+            if pendingRows != 0 {
+                applyLocalScroll(deltaRows: pendingRows, model: rebuilt)
+            } else if isShowingLocalScrollbackFrame {
+                // The rebuilt replay is a different vt session showing the same rows, so a pane already
+                // painting the replay it replaces has to be repainted from it even with no rows of its own
+                // to apply.
+                showLocalScrollbackPosition(rebuilt, snapshot: rebuilt.currentSnapshot())
+            }
+        }
+
+        /// Builds a replay off the main actor (replaying a page of transcript through a vt session is
+        /// slow enough to drop frames if it ran on it) and puts its viewport `rowsFromBottom` rows above
+        /// the newest row, which is what keeps the rows on screen still across a rebuild.
+        private func buildLocalScrollbackModel(
+            transcript: RemoteGhosttyTranscript, requestedByteCount: Int, grid: (columns: Int, rows: Int), theme: GhosttyThemeExport,
+            appearance: ThemeAppearance, rowsFromBottom: Int?
+        ) async -> TerminalLocalScrollbackModel? {
+            await Task.detached(priority: .userInitiated) {
+                let model = TerminalLocalScrollbackModel(
+                    columns: grid.columns, rows: grid.rows, theme: theme, appearance: appearance, transcript: transcript.data,
+                    transcriptStartByteOffset: transcript.startByteOffset, transcriptEndByteOffset: transcript.endByteOffset,
+                    requestedByteCount: requestedByteCount, transcriptFileIdentity: transcript.fileIdentity, runIdentity: transcript.runIdentity)
+                if let rowsFromBottom { model?.scrollToRowsFromBottom(rowsFromBottom) }
+                return model
+            }.value
+        }
+
+        /// Whether a read's bytes belong to the run the replay is armed against. The response carries the
+        /// run the server read it from: a relaunch that lands after a read started but before this client
+        /// observes a new state payload leaves the generation and the armed run unchanged, yet truncates
+        /// `output.log`, so the bytes can belong to the new run. A read the server could not attribute
+        /// (`runIdentity` nil, the missing-output path) is accepted, since it carries no evidence either
+        /// way and its emptiness is handled on its own.
+        ///
+        /// A mismatch is transient, never a verdict. The identity the endpoint reports is read from the
+        /// runtime state SQLite holds, which a relaunch updates write-behind, so a pane that paints before
+        /// that commit lands gets the new run's bytes under the previous run's label. Callers discard the
+        /// replay instead of latching `.unavailable`, which returns the pane to `.idle` and lets the next
+        /// painted frame or gesture read again once the labels agree.
+        private func transcriptBelongsToArmedRun(_ transcript: RemoteGhosttyTranscript, armedRunKey: String?) -> Bool {
+            guard let responseRunKey = TerminalSessionRuntimeState.runKey(for: transcript.runIdentity), let armedRunKey else { return true }
+            return responseRunKey == armedRunKey
+        }
+
+        /// The grid a replay is built at: the grid the pane's own frames carry, so the replay wraps every
+        /// row exactly as the session did. A pane with no frame yet falls back to the session's reported
+        /// runtime grid, and then to the conventional 80x24 every grid-less reader assumes.
+        private func localScrollbackGrid() -> (columns: Int, rows: Int) {
+            let snapshot = latestLiveRenderFrame?.snapshot
+            return (snapshot?.columns ?? latestState?.runtimeState?.columns ?? 80, snapshot?.rows ?? latestState?.runtimeState?.rows ?? 24)
+        }
+
+        private func currentTerminalAppearance() -> ThemeAppearance {
+            terminalView.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+        }
+
+        private var isLocalScrollbackReplayActive: Bool {
+            if isShowingLocalScrollbackFrame { return true }
+            // A gesture whose first page is still being read owns the pane too: its rows are accumulating,
+            // and a live frame painted in the meantime would be replaced the moment the page lands.
+            if case .loading(let pendingDeltaRows, _, _) = localScrollbackState, pendingDeltaRows != 0 { return true }
+            return false
+        }
+
+        /// Repaints the replay viewport after the mirror surface was released and recreated (the pane
+        /// controller releases the surface before reattaching). Live-frame repaints are suppressed while
+        /// the replay owns the pane, so without this the recreated surface stays blank until the next
+        /// scroll gesture.
+        private func repaintLocalReplayViewportIfSurfaceEmpty() {
             guard !terminalView.hasRenderedSurfaceContent else { return }
-            switch endedScrollbackState {
-            case .ready(let model):
-                endedScrollbackRevision &+= 1
-                let frame = GhosttyRenderFrame(
-                    sessionRevision: endedScrollbackRevision, ownerEpoch: latestState?.renderOwnerEpoch ?? 0, snapshot: model.currentSnapshot())
-                terminalView.update(frame: frame, renderStateKey: currentRenderStateKey())
-            case .loading:
-                // No replay model yet — show the daemon's final frame until the load completes.
+            switch localScrollbackState {
+            case .ready(let model) where isShowingLocalScrollbackFrame:
+                presentLocalScrollbackFrame(model.currentSnapshot(), offsetRows: model.rowsFromBottom)
+            case .idle, .loading, .ready, .unavailable:
+                // No replay frame to restore - show the session's own frame until one exists.
                 terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey())
-            case .idle, .unavailable: break
             }
         }
 
-        /// Resets ended-scrollback state when the session becomes interactive again (a relaunch): the
-        /// live render takes over, so the model is dropped (freeing its vt session), the accumulated
-        /// scroll delta is reset, and a previous `.unavailable` verdict is cleared — the relaunched
-        /// session will write a fresh transcript, so a later exit must get a fresh replay attempt. The
-        /// generation bump invalidates any transcript load still in flight for the run being discarded,
-        /// so its result cannot install under a later run's `.loading`.
-        private func discardEndedScrollbackIfActive() {
-            if case .idle = endedScrollbackState { return }
-            endedScrollbackGeneration &+= 1
-            endedScrollbackState = .idle
-            endedScrollbackRunIdentity = nil
-            endedScrollDeltaNormalizer = TerminalScrollDeltaNormalizer()
+        /// Repaints the session's own frame wherever a page load ends with no replay frame to show, which
+        /// is every exit that installs no replay and the install that lands the replay on its newest row.
+        /// The rows that load held suppressed live paints while it ran (`isLocalScrollbackReplayActive`),
+        /// leaving the frames that landed meanwhile cached in `latestLiveRenderFrame` and unpainted. A live
+        /// session would repaint on its next frame, but one that ended during the load never sends another,
+        /// so the pane would sit on the frame it had when the load started for good. A pane showing a
+        /// replay frame keeps showing it: those rows are the ones the user is reading.
+        private func repaintLiveFrameUnlessShowingReplay() {
+            guard !isShowingLocalScrollbackFrame else { return }
+            // A load that ends here can have marked new output while a gesture waited on it (see the mark
+            // above); the live frame this paints already carries that output, so the mark would otherwise
+            // outlive the reason it existed.
+            terminalView.setLocalScrollbackHasNewOutput(false)
+            terminalView.update(frame: latestLiveRenderFrame, renderStateKey: currentRenderStateKey())
         }
 
-        /// Run identity for the ended run currently described by `latestState`, delegating to the shared
-        /// `TerminalSessionRuntimeState.runIdentity` format so the armed replay identity matches the one
-        /// the transcript response carries. `nil` when there is no runtime state yet. Used to detect an
-        /// ended->ended transition to a different run and to validate transcript responses.
-        private func currentEndedRunIdentity() -> String? { latestState?.runtimeState?.runIdentity }
+        /// Drops the replay and everything armed with it: the model (freeing its vt session), the run it
+        /// was armed against, the accumulated scroll delta, and any `.unavailable` verdict, which a later
+        /// state may well contradict. The generation bump invalidates every read still in flight for the
+        /// replay being dropped, so none of their results can install under a later one.
+        private func discardLocalScrollback() {
+            localScrollbackGeneration &+= 1
+            localScrollbackState = .idle
+            localScrollbackRunKey = nil
+            localScrollbackAppearance = nil
+            hasRequestedLocalScrollbackPrefetch = false
+            // The read this drops is still running: it resolves against a generation this bump has left
+            // behind, so it retires nothing and installs nothing.
+            localScrollbackContinuationRead = nil
+            // The replay the rewind was owed to is gone with everything else armed for it.
+            pendingLocalScrollbackRewind = false
+            clearLocalScrollbackDisplay()
+        }
+
+        /// A theme switch under a built replay: its rows are painted in the other appearance's colors, so
+        /// it is rebuilt at the current one rather than kept.
+        private func discardLocalScrollbackIfAppearanceChanged() {
+            guard let localScrollbackAppearance, localScrollbackAppearance != currentTerminalAppearance() else { return }
+            returnToLiveScreenFromLocalScrollback()
+            discardLocalScrollback()
+        }
+
+        /// A resize reflows every row, so a replay built at the previous grid wraps its transcript
+        /// differently from the session that produced it. It is dropped and read again at the new grid.
+        ///
+        /// A read still in flight is dropped for the same reason and by the same comparison: it was
+        /// started at the pane's grid at the time and would install a replay wrapped at a grid the session
+        /// has left. The generation bump the discard carries is what rejects its result when it lands, and
+        /// the rows scrolled onto it go with it, exactly as a built replay's scroll position does. The
+        /// read is not reissued here: the discard returns the pane to `.idle`, and this payload's own
+        /// `prefetchLocalScrollbackIfNeeded` reads again at the grid the frame just established.
+        private func discardLocalScrollbackIfGridChanged(frame: GhosttyRenderFrame?) {
+            guard let frame else { return }
+            let grid: (columns: Int, rows: Int)
+            switch localScrollbackState {
+            case .ready(let model): grid = (model.columns, model.rows)
+            case .loading(_, _, let loadingGrid): grid = loadingGrid
+            case .idle, .unavailable: return
+            }
+            guard grid.columns != frame.snapshot.columns || grid.rows != frame.snapshot.rows else { return }
+            discardLocalScrollback()
+        }
+
+        /// Run identity for the run `latestState` describes, in the shared
+        /// `TerminalSessionRuntimeState.runIdentity` format the transcript response also carries. `nil`
+        /// when there is no runtime state yet.
+        private func currentRunIdentity() -> String? { latestState?.runtimeState?.runIdentity }
+
+        /// Mirrors the phone's client-local scrollback events so a shaped run on either client produces
+        /// comparable lines. Rides the same sink as `render_frame_payload_receive`, whose autoclosure
+        /// builds nothing while the logger is off.
+        private func logScrollbackPageRead(byteCount: Int, kind: String, startedAt: Date) {
+            SpacesDeviceTerminalPerformanceLogger.emit(
+                .init(
+                    sessionID: launchConfiguration.sessionID, source: "mac-mirror", name: "scrollback_page_fetch",
+                    elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: byteCount, attributes: ["kind": kind]))
+        }
 
         private func enqueueRemoteScrollBatch(_ batch: TerminalScrollCoalescer.Batch, onFinished: @escaping TerminalScrollCoalescer.FinishHandler) {
             guard isInteractiveRuntimeStateForControl(), let client = attachedClient, attachedMode == .owner else {

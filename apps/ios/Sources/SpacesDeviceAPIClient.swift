@@ -697,6 +697,44 @@ struct SpacesDeviceAPIClient: Sendable {
         return selectionText
     }
 
+    /// Reads a range of the session's persisted output transcript, which the phone replays into its
+    /// client-local scrollback model. `fromByteOffset` continues a replay the phone already holds (the
+    /// daemon then returns exactly `[fromByteOffset, total)`); without it the daemon returns a `maxBytes`
+    /// suffix, cut at a parser-safe boundary and carrying a state preamble. A continuation carries
+    /// `fileIdentity`, the transcript file the phone's bytes were read from, which is what lets the
+    /// daemon answer a continuation it cannot serve (a head-trimmed transcript, or a gap wider than
+    /// `maxBytes`) with a fresh suffix in the same round trip.
+    func terminalTranscript(
+        sessionID: String, maxBytes: Int, fromByteOffset: Int? = nil, fileIdentity: UInt64? = nil,
+        commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> SpacesDeviceTerminalTranscriptResult {
+        let request = SpacesDeviceAPIRequest(
+            command: .terminalTranscript(.init(sessionID: sessionID, maxBytes: maxBytes, fromByteOffset: fromByteOffset, fileIdentity: fileIdentity)),
+            authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
+        // The deadline scales with the page size asked for; it comes from the shared per-command policy in
+        // `spacesdevicecore` so the phone and the Mac budget the identical read identically.
+        let response = try await sendRequest(request, timeout: .seconds(request.command.descriptor.timeoutSeconds), commandChannel: commandChannel)
+        guard response.ok else {
+            // A missing `output.log` is not a failure to retry through the error path: the server reports
+            // `.sessionNotAvailable`, which means there is nothing to replay. Return an empty transcript,
+            // which the viewer reads as the verdict it is: definitive for an ended session, and a live
+            // session that has not written yet, whose next gesture reads again (see
+            // `TerminalViewerModel.finishLoadingLocalScrollback`). `fileIdentity` is zero because no file
+            // was read, and nothing stores it: an empty read installs no replay to carry it. Every other
+            // failure stays transient and throws so a later gesture retries. The server reports no run
+            // identity on an error response, so it is nil here.
+            if response.errorCode == .sessionNotAvailable {
+                return SpacesDeviceTerminalTranscriptResult(
+                    compressedData: Data(), byteCount: 0, startByteOffset: 0, totalBytes: 0, fileIdentity: 0, runIdentity: nil)
+            }
+            throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode)
+        }
+        guard let transcript = response.terminalTranscript else {
+            throw SpacesDeviceAPIClientError.requestFailed("The Device API did not return a terminal transcript.")
+        }
+        return transcript
+    }
+
     func resize(
         context: TerminalCommandContext, columns: Int, rows: Int, resizeSerial: UInt64?, timeout: Duration = .seconds(3),
         commandChannel: SpacesDeviceAPICommandChannel? = nil

@@ -2198,7 +2198,8 @@
             let selection = resolvedSelection(
                 session: vtSession, viewportRowOffset: scrollbarOffset, columns: Int(rawSnapshot.columns), rows: Int(rawSnapshot.rows))
             let snapshot = GhosttyVtSessionBridge.snapshot(
-                from: rawSnapshot, mouseReportingActive: GhosttyLinuxMouseEncoder.trackingIsActive(session: vtSession), selection: selection,
+                from: rawSnapshot, mouseReportingActive: GhosttyLinuxMouseEncoder.trackingIsActive(session: vtSession),
+                alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: vtSession), selection: selection,
                 scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset)
             let (scrollRects, scrollRectsOverflowed) = takeScrollRects(session: vtSession)
             let frame = GhosttyRenderFrame(sessionRevision: screenStateRevision, ownerEpoch: ownerEpoch, snapshot: snapshot)

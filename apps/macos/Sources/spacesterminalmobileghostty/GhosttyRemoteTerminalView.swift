@@ -86,6 +86,7 @@ import Foundation
         public let isBusy: Bool
         public let fontSize: TerminalFontSize
         public let onInputReadinessChanged: @MainActor (Bool) -> Void
+        public let onScrollGestureBegan: (@MainActor () -> Void)?
         public let onScrollGestureApplied: (@MainActor () -> Void)?
         public let onRenderedTextChanged: (@MainActor (String) -> Void)?
         public let onViewportSizeChanged: @MainActor (Int, Int) -> Void
@@ -110,11 +111,11 @@ import Foundation
         public init(
             ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil, fallbackText: String,
             isVisible: Bool, acceptsInput: Bool, isBusy: Bool, fontSize: TerminalFontSize,
-            onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in }, onScrollGestureApplied: (@MainActor () -> Void)? = nil,
-            onRenderedTextChanged: (@MainActor (String) -> Void)? = nil, onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void,
+            onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in }, onScrollGestureBegan: (@MainActor () -> Void)? = nil,
+            onScrollGestureApplied: (@MainActor () -> Void)? = nil, onRenderedTextChanged: (@MainActor (String) -> Void)? = nil,
+            onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void,
             onRenderedViewportChanged: (@MainActor (GhosttyTerminalSnapshotViewport.Window) -> Void)? = nil,
-            onSendText: @escaping @MainActor (String, Bool) -> Void,
-            onSendKey: @escaping @MainActor (String) -> Void,
+            onSendText: @escaping @MainActor (String, Bool) -> Void, onSendKey: @escaping @MainActor (String) -> Void,
             onSendScroll: @escaping @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void = { _, _, _, _ in },
             onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil,
             onPasteClipboardImage: (@MainActor () -> Bool)? = nil, onClearSelectionTapped: (@MainActor () -> Void)? = nil
@@ -127,6 +128,7 @@ import Foundation
             self.isBusy = isBusy
             self.fontSize = fontSize
             self.onInputReadinessChanged = onInputReadinessChanged
+            self.onScrollGestureBegan = onScrollGestureBegan
             self.onScrollGestureApplied = onScrollGestureApplied
             self.onRenderedTextChanged = onRenderedTextChanged
             self.onViewportSizeChanged = onViewportSizeChanged
@@ -144,7 +146,12 @@ import Foundation
 
         public func updateUIView(_ hostView: GhosttyRemoteTerminalHostView, context: Context) {
             hostView.onInputReadinessChanged = { ready in _ = Task { @MainActor in onInputReadinessChanged(ready) } }
-            hostView.onScrollGestureApplied = onScrollGestureApplied.map { callback in { _ = Task { @MainActor in callback() } } }
+            // Both synchronous, like the viewport reports below: a gesture beginning is what latches the
+            // routing the deltas that follow take and re-arms a client whose last gesture input cancelled,
+            // and UIKit delivers both on the main thread, so a hop would only put a turn between the finger
+            // and the app.
+            hostView.onScrollGestureBegan = onScrollGestureBegan.map { callback in { MainActor.assumeIsolated { callback() } } }
+            hostView.onScrollGestureApplied = onScrollGestureApplied.map { callback in { MainActor.assumeIsolated { callback() } } }
             // UIKit delivers layout on the main thread. Keeping viewport delivery synchronous preserves
             // the order a pane resize measures in: a grid measured mid-rotation must not overwrite the
             // final one after the model has already resized the owner runtime to it.
@@ -156,8 +163,11 @@ import Foundation
             }
             hostView.onSendText = { text, asPaste in _ = Task { @MainActor in onSendText(text, asPaste) } }
             hostView.onSendKey = { key in _ = Task { @MainActor in onSendKey(key) } }
+            // Synchronous: every scroll event of a gesture goes through here, and on the local-scrollback
+            // path the answer is a frame this client draws itself, so a hop per event would put a turn
+            // between the finger and the screen.
             hostView.onSendScroll = { horizontal, vertical, scrollMods, pointerPosition in
-                _ = Task { @MainActor in onSendScroll(horizontal, vertical, scrollMods, pointerPosition) }
+                MainActor.assumeIsolated { onSendScroll(horizontal, vertical, scrollMods, pointerPosition) }
             }
             hostView.onOpenLink = { link in _ = Task { @MainActor in onOpenLink(link) } }
             hostView.onOpenComposer = onOpenComposer.map { callback in { _ = Task { @MainActor in callback() } } }
@@ -325,6 +335,10 @@ import Foundation
         private var fallbackText = ""
         private var lastScrollTranslation = CGPoint.zero
         private var didScrollDuringCurrentPan = false
+        /// Set when the user typed while a gesture was still moving, and cleared by the next gesture's
+        /// `.began`. While it is set every scroll delta is dropped rather than forwarded: see
+        /// `cancelScrollGestureForInput()`.
+        private var scrollGestureCancelledByInput = false
         private var scrollInteractionDepth = 0
         private var deferredViewportSizeReport = false
         /// `nonisolated(unsafe)` so `deinit` can read the link it has to invalidate: a `deinit` is
@@ -368,6 +382,7 @@ import Foundation
 
         public private(set) var acceptsTerminalInput = false
         public var onInputReadinessChanged: ((Bool) -> Void)?
+        public var onScrollGestureBegan: (() -> Void)?
         public var onScrollGestureApplied: (() -> Void)?
         public var onViewportSizeChanged: ((Int, Int) -> Void)?
         /// Reports the exact window this view renders out of the daemon's grid. Distinct from
@@ -689,7 +704,7 @@ import Foundation
                 return
             }
             if sendPendingAccessoryModifiersIfNeeded(for: text) { return }
-            onSendText?(text, false)
+            forwardSendText(text, asPaste: false)
         }
 
         public override func paste(_ sender: Any?) { pasteFromClipboard() }
@@ -718,7 +733,7 @@ import Foundation
         private func pasteText(_ text: String) {
             guard !text.isEmpty else { return }
             clearAccessoryModifiers()
-            onSendText?(text, true)
+            forwardSendText(text, asPaste: true)
         }
 
         public func deleteBackward() { sendAccessoryKey("backspace") }
@@ -834,50 +849,77 @@ import Foundation
 
         @objc private func handleScrollPan(_ recognizer: UIPanGestureRecognizer) {
             switch recognizer.state {
-            case .began:
-                didScrollDuringCurrentPan = false
-                lastScrollTranslation = recognizer.translation(in: self)
-                stopMomentum()
-                lastScrollPointerPosition = scrollPointerPosition(for: recognizer.location(in: self))
-                beginScrollInteraction()
-            case .changed:
-                let translation = recognizer.translation(in: self)
-                let delta = CGPoint(x: translation.x - lastScrollTranslation.x, y: translation.y - lastScrollTranslation.y)
-                lastScrollTranslation = translation
-                let scrollDelta = GhosttyRemoteTerminalScrollMapper.scrollDelta(forPanDelta: delta, scaleFactor: Double(window?.screen.scale ?? 1))
-                let scrollMods = Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .changed)
-                lastScrollPointerPosition = scrollPointerPosition(for: recognizer.location(in: self))
-                if sendScroll(horizontal: scrollDelta.x, vertical: scrollDelta.y, scrollMods: scrollMods, pointerPosition: lastScrollPointerPosition)
-                {
-                    didScrollDuringCurrentPan = true
-                }
-            case .ended:
-                lastScrollPointerPosition = scrollPointerPosition(for: recognizer.location(in: self)) ?? lastScrollPointerPosition
-                if didScrollDuringCurrentPan {
-                    _ = sendScroll(
-                        horizontal: 0, vertical: 0, scrollMods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .ended),
-                        pointerPosition: lastScrollPointerPosition)
-                }
-                if didScrollDuringCurrentPan { onScrollGestureApplied?() }
-                let velocity = GhosttyRemoteTerminalScrollMapper.clampedMomentumVelocity(recognizer.velocity(in: self))
-                if GhosttyRemoteTerminalScrollMapper.shouldContinueMomentum(velocity: velocity) {
-                    startMomentum(velocity: velocity)
-                } else {
-                    lastScrollPointerPosition = nil
-                    endScrollInteraction()
-                }
-            case .cancelled, .failed:
-                if didScrollDuringCurrentPan {
-                    _ = sendScroll(
-                        horizontal: 0, vertical: 0, scrollMods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .cancelled),
-                        pointerPosition: lastScrollPointerPosition)
-                }
-                if didScrollDuringCurrentPan { onScrollGestureApplied?() }
-                stopMomentum()
-                endScrollInteraction()
+            case .began: beginScrollGesture(translation: recognizer.translation(in: self), location: recognizer.location(in: self))
+            case .changed: continueScrollGesture(translation: recognizer.translation(in: self), location: recognizer.location(in: self))
+            case .ended: endScrollGesture(location: recognizer.location(in: self), velocity: recognizer.velocity(in: self))
+            case .cancelled, .failed: cancelScrollGesture()
             default: break
             }
         }
+
+        /// Starts a scroll gesture: a fresh pan is what re-arms scrolling after input cancelled the last
+        /// gesture, and it is the one point the app layer is told a gesture is under way, so the routing
+        /// the gesture's deltas take is decided once, from the frame on screen when the finger lands.
+        private func beginScrollGesture(translation: CGPoint, location: CGPoint) {
+            didScrollDuringCurrentPan = false
+            scrollGestureCancelledByInput = false
+            lastScrollTranslation = translation
+            stopMomentum()
+            lastScrollPointerPosition = scrollPointerPosition(for: location)
+            beginScrollInteraction()
+            onScrollGestureBegan?()
+        }
+
+        /// One step of a pan in progress: the movement since the last step, forwarded as a scroll delta.
+        private func continueScrollGesture(translation: CGPoint, location: CGPoint) {
+            let delta = CGPoint(x: translation.x - lastScrollTranslation.x, y: translation.y - lastScrollTranslation.y)
+            lastScrollTranslation = translation
+            let scrollDelta = GhosttyRemoteTerminalScrollMapper.scrollDelta(forPanDelta: delta, scaleFactor: Double(window?.screen.scale ?? 1))
+            let scrollMods = Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .changed)
+            lastScrollPointerPosition = scrollPointerPosition(for: location)
+            if sendScroll(horizontal: scrollDelta.x, vertical: scrollDelta.y, scrollMods: scrollMods, pointerPosition: lastScrollPointerPosition) {
+                didScrollDuringCurrentPan = true
+            }
+        }
+
+        /// The finger lifted. A lift fast enough to carry the content hands the gesture to momentum, which
+        /// is still the same gesture; any other lift ends the interaction here.
+        private func endScrollGesture(location: CGPoint, velocity: CGPoint) {
+            lastScrollPointerPosition = scrollPointerPosition(for: location) ?? lastScrollPointerPosition
+            if didScrollDuringCurrentPan {
+                _ = sendScroll(
+                    horizontal: 0, vertical: 0, scrollMods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .ended),
+                    pointerPosition: lastScrollPointerPosition)
+            }
+            if didScrollDuringCurrentPan { onScrollGestureApplied?() }
+            let momentumVelocity = GhosttyRemoteTerminalScrollMapper.clampedMomentumVelocity(velocity)
+            if !scrollGestureCancelledByInput, GhosttyRemoteTerminalScrollMapper.shouldContinueMomentum(velocity: momentumVelocity) {
+                startMomentum(velocity: momentumVelocity)
+            } else {
+                lastScrollPointerPosition = nil
+                endScrollInteraction()
+            }
+        }
+
+        /// The system took the gesture away (a competing recognizer, a view teardown).
+        private func cancelScrollGesture() {
+            if didScrollDuringCurrentPan {
+                _ = sendScroll(
+                    horizontal: 0, vertical: 0, scrollMods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .cancelled),
+                    pointerPosition: lastScrollPointerPosition)
+            }
+            if didScrollDuringCurrentPan { onScrollGestureApplied?() }
+            stopMomentum()
+            endScrollInteraction()
+        }
+
+        func debugBeginScrollGestureForTesting() { beginScrollGesture(translation: .zero, location: .zero) }
+
+        func debugContinueScrollGestureForTesting(translation: CGPoint) { continueScrollGesture(translation: translation, location: .zero) }
+
+        func debugEndScrollGestureForTesting(velocity: CGPoint) { endScrollGesture(location: .zero, velocity: velocity) }
+
+        var debugIsMomentumRunningForTesting: Bool { momentumDisplayLink != nil }
 
         @objc private func handleMomentumFrame(_ displayLink: CADisplayLink) {
             let timestamp = displayLink.timestamp
@@ -891,6 +933,31 @@ import Foundation
             momentumVelocity = GhosttyRemoteTerminalScrollMapper.decayedMomentumVelocity(
                 momentumVelocity, elapsed: elapsed, decelerationRate: UIScrollView.DecelerationRate.normal.rawValue)
             if !GhosttyRemoteTerminalScrollMapper.shouldContinueMomentum(velocity: momentumVelocity) { stopMomentum() }
+        }
+
+        /// Ends the scroll gesture in progress because the user typed. Input jumps the session to its own
+        /// bottom and hands the screen back to the daemon's live frames, so the gesture that was still
+        /// moving has nothing left to show: without this, the momentum display link keeps firing and the
+        /// next delta paints the client's scrolled replay back over the frames the keystroke produced.
+        ///
+        /// The momentum is stopped here, synchronously, rather than by the app layer reacting to the send:
+        /// input is forwarded to the app through a main-actor hop while scroll deltas are forwarded
+        /// synchronously, so a delta from the cancelled gesture would otherwise reach the app first.
+        /// The flag outlives the display link because the rest of this gesture is over too, including the
+        /// pan that may still have a finger down; the next gesture clears it in `beginScrollGesture`.
+        private func cancelScrollGestureForInput() {
+            stopMomentum()
+            scrollGestureCancelledByInput = true
+        }
+
+        private func forwardSendText(_ text: String, asPaste: Bool) {
+            cancelScrollGestureForInput()
+            onSendText?(text, asPaste)
+        }
+
+        private func forwardSendKey(_ key: String) {
+            cancelScrollGestureForInput()
+            onSendKey?(key)
         }
 
         private func startMomentum(velocity: CGPoint) {
@@ -1536,6 +1603,7 @@ import Foundation
         @discardableResult private func sendScroll(
             horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?
         ) -> Bool {
+            guard !scrollGestureCancelledByInput else { return false }
             onSendScroll?(Double(horizontal), Double(vertical), scrollMods, pointerPosition)
             return horizontal != 0 || vertical != 0
         }
@@ -1568,7 +1636,7 @@ import Foundation
                 return true
             }
             guard let keySpec = modifiedKeySpec(for: key) else { return false }
-            onSendKey?(keySpec)
+            forwardSendKey(keySpec)
             return true
         }
 
@@ -1576,14 +1644,14 @@ import Foundation
             guard acceptsTerminalInput, !text.isEmpty else { return }
             if sendPendingAccessoryModifiersIfNeeded(for: text) { return }
             clearAccessoryModifiers()
-            onSendText?(text, false)
+            forwardSendText(text, asPaste: false)
         }
 
         private func sendAccessoryKey(_ key: String) {
             guard acceptsTerminalInput else { return }
             let keySpec = modifiedKeySpec(for: key) ?? key
             clearAccessoryModifiers()
-            onSendKey?(keySpec)
+            forwardSendKey(keySpec)
         }
 
         private func modifiedKeySpec(for key: String) -> String? {

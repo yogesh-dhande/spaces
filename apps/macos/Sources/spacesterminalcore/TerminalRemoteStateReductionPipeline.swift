@@ -25,10 +25,19 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
     /// survivor still post the notification a collapsed-away `runtime_state`, `attachment_state`, or
     /// `session_metadata` owed its consumer.
     public let coalescedReasons: [String]
+    /// The `outputEndByteOffset` the NEWEST collapsed-away output carried, nil when none of them carried
+    /// one. Read through `reportedOutputEndByteOffset`, never on its own: a survivor that carries its own
+    /// offset has the newer report, and this one is only what the survivor would otherwise have lost.
+    ///
+    /// Newest rather than largest, because the offset's rule is that the newest report wins outright,
+    /// decreases included: a head-trim rewrites `output.log` and moves its end backwards, and a client
+    /// that kept the larger offset would compare its replay against bytes that no longer exist and never
+    /// read again.
+    public let coalescedOutputEndByteOffset: Int?
 
     public init(
         incomingPayload: GhosttyRemoteSessionStatePayload, reduction: TerminalRemoteStateReductionResult?, reduceMS: Int, coalescedAwayCount: Int = 0,
-        inheritedResyncRequest: Bool = false, isOutOfBand: Bool = false, coalescedReasons: [String] = []
+        inheritedResyncRequest: Bool = false, isOutOfBand: Bool = false, coalescedReasons: [String] = [], coalescedOutputEndByteOffset: Int? = nil
     ) {
         self.incomingPayload = incomingPayload
         self.reduction = reduction
@@ -37,6 +46,38 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
         self.inheritedResyncRequest = inheritedResyncRequest
         self.isOutOfBand = isOutOfBand
         self.coalescedReasons = coalescedReasons
+        self.coalescedOutputEndByteOffset = coalescedOutputEndByteOffset
+    }
+
+    /// Where `output.log` ends as of this apply: the surviving payload's own report when it carries one,
+    /// otherwise the newest report any payload folded into it carried.
+    ///
+    /// Both clients compare this against where their replay ends to decide whether a gesture pays for a
+    /// continuation read, and both record it as the transcript end they have observed. Reading the
+    /// surviving payload's field directly instead would lose the offset entirely whenever the mailbox
+    /// folded an `.output` payload into a later full-frame one that stamps no offset of its own
+    /// (`terminated`, `resize`, `state_change`), leaving a replay built before that output permanently
+    /// behind the session with nothing later to heal it.
+    public var reportedOutputEndByteOffset: Int? { incomingPayload.outputEndByteOffset ?? coalescedOutputEndByteOffset }
+
+    /// True when this output, or any payload folded into it, was an `.output` payload.
+    ///
+    /// This is the reason-shaped half of the same question `reportedOutputEndByteOffset` answers by
+    /// offset, for the payload that carries no offset at all. Frame arrival is deliberately not part of
+    /// it: a resize, an appearance repaint, and another viewer's selection change all export a fresh full
+    /// frame with nothing new in the transcript.
+    public var reportsTranscriptOutput: Bool { unionCarriesReason(.output) }
+
+    /// True when this output, or any payload folded into it, was a `clear_screen` payload. A clear
+    /// removes rows a replay built before it still holds, so both clients discard the replay on it, and a
+    /// clear the mailbox folded into a later full frame has to reach them the same way an unfolded one
+    /// does.
+    public var reportsClearScreen: Bool { unionCarriesReason(.clearScreen) }
+
+    /// Whether `kind` is this output's own reason or the reason of anything folded into it.
+    /// `coalescedReasons` never repeats the survivor's own reason, so both halves have to be asked.
+    private func unionCarriesReason(_ kind: TerminalRemoteSessionStateReason) -> Bool {
+        incomingPayload.reasonKind == kind || coalescedReasons.contains(kind.rawValue)
     }
 
     /// Whether applying this output must ask the session for a full frame: because its own reduction
@@ -112,7 +153,13 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
     /// `coalescedReasons` gains `skipped`'s own reason and everything `skipped` itself had already
     /// absorbed, ahead of what this output had already absorbed — arrival order, oldest first — with
     /// this output's own reason filtered out and duplicates dropped; `notificationNames` reads this to
-    /// post the union of every reason folded into the survivor. `scrollRects` is different: the mirror's
+    /// post the union of every reason folded into the survivor, and `reportsTranscriptOutput` /
+    /// `reportsClearScreen` read it to tell both clients' local scrollback that an `.output` or a
+    /// `clear_screen` happened inside the fold. `coalescedOutputEndByteOffset` keeps the newest transcript
+    /// end any folded payload reported, which is what a replay built before a folded `.output` compares
+    /// itself against; the first non-nil of this output's own inherited value, `skipped`'s own report, and
+    /// `skipped`'s inherited value is the newest, since this output is never older than `skipped` and
+    /// `skipped` is never older than what it absorbed. `scrollRects` is different: the mirror's
     /// drag-carry buffer (`GhosttyMirrorTerminalView`)
     /// accumulates rects only from frames that actually get applied, so a coalesced-away frame's rects
     /// would otherwise vanish with no trace, and the surviving frame would still report
@@ -164,7 +211,9 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
             incomingPayload: incomingPayload, reduction: mergedReduction, reduceMS: reduceMS,
             coalescedAwayCount: coalescedAwayCount + skipped.coalescedAwayCount + 1,
             inheritedResyncRequest: inheritedResyncRequest || skipped.requestsResync, isOutOfBand: isOutOfBand,
-            coalescedReasons: mergedCoalescedReasons)
+            coalescedReasons: mergedCoalescedReasons,
+            coalescedOutputEndByteOffset: coalescedOutputEndByteOffset ?? skipped.incomingPayload.outputEndByteOffset
+                ?? skipped.coalescedOutputEndByteOffset)
     }
 }
 
@@ -212,7 +261,10 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
 /// reducer chained through every skipped payload, the one-shot effects (`requestsResync`) of the outputs
 /// that were dropped, and the union of the notifications every dropped output would have posted on its
 /// own (`notificationNames`) — a collapsed-away `runtime_state` still owes its consumer's refresh even
-/// though only the survivor's apply runs. Their per-payload metrics do not survive; the surviving apply
+/// though only the survivor's apply runs. The transcript effects of every dropped output survive too
+/// (`reportedOutputEndByteOffset`, `reportsTranscriptOutput`, `reportsClearScreen`), which is how a
+/// client's local scrollback learns that the session printed or cleared inside a fold whose survivor
+/// says neither. Their per-payload metrics do not survive; the surviving apply
 /// reports how many were folded into it (`coalescedAwayCount`).
 ///
 /// **A pane that is off screen holds its screen updates.** `setHoldsScreenUpdates(true)` stops the

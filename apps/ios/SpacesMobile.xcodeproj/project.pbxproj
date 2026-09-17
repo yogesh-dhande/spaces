@@ -39,6 +39,7 @@
 		3A856B3C563D5D2DEB3746F0 /* SpacesMobileUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 160A1AE591A4376DA6C06AE7 /* SpacesMobileUITests.swift */; };
 		3D417F1537E3550BBDA8FE2D /* SpacesMobileDeviceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38B8B376D14D9A659066191F /* SpacesMobileDeviceStore.swift */; };
 		3D691170263C2A5F76423B40 /* markdown-it.min.js in Resources */ = {isa = PBXBuildFile; fileRef = AC409090FBD5BEF19069F34E /* markdown-it.min.js */; };
+		3F157495460FF06E60545078 /* XCTestCaseWaitUntilAsync.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C21874887569B54357A2847 /* XCTestCaseWaitUntilAsync.swift */; };
 		40160922469ECF357BFCF05D /* BaselineLaneConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C309F3F3FB565542BD0E2BF /* BaselineLaneConfiguration.swift */; };
 		4073E59B929A6A3937DC57A8 /* GhosttyMobileAppServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89218A663F7CADB785794197 /* GhosttyMobileAppServiceTests.swift */; };
 		4355CACDAE422CEBF60D1B73 /* BrowserProxyServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55BFAAD9082D6C3066858C3D /* BrowserProxyServer.swift */; };
@@ -128,6 +129,7 @@
 		D26F853567EBC3D143DD54F2 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99364D0D95BDF6680EFCD26D /* Theme.swift */; };
 		D62D7FC7CC07A6CCA4EF6772 /* BrowserProxyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2F28C5039F8DB58738D4EEC /* BrowserProxyTests.swift */; };
 		D678F5742B641547A7EED9CE /* SubscriptionSettingsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = FECD63B029F4A187893C7082 /* SubscriptionSettingsSection.swift */; };
+		D731549CCFC7537D4FAF6326 /* DeviceAPIRequestRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8826712DFFED25046E10D933 /* DeviceAPIRequestRecorder.swift */; };
 		D9779D2EE653AD02A715A6CE /* SpacesDeviceAPIBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9AE7E061996534CE9D4C699 /* SpacesDeviceAPIBackendTests.swift */; };
 		D9A8FF7C4854B8D25C82F7E0 /* AgentsTabSmokeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D925730FD9D0D38D85DAAFA9 /* AgentsTabSmokeUITests.swift */; };
 		DF409C0DEEF5DCBD7552FF95 /* SpacesMobileDemoModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48C23068DC0BCEFED66259E6 /* SpacesMobileDemoModeTests.swift */; };
@@ -226,6 +228,7 @@
 		573064C6726817E7F264E9C5 /* RootTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabView.swift; sourceTree = "<group>"; };
 		5746D7B660E9B5038B0DDEAF /* SpacesMobileAlertsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileAlertsTests.swift; sourceTree = "<group>"; };
 		5B16B0331923D686A4D0AEE5 /* SpacesMobileUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SpacesMobileUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		5C21874887569B54357A2847 /* XCTestCaseWaitUntilAsync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XCTestCaseWaitUntilAsync.swift; sourceTree = "<group>"; };
 		5C920538A76B1EF14F680074 /* WorkspaceControlBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceControlBar.swift; sourceTree = "<group>"; };
 		5E02383690BCB874939E2463 /* PinnedTLSLoopbackServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinnedTLSLoopbackServer.swift; sourceTree = "<group>"; };
 		62FF73FDCE8A0B4AAFF043E4 /* DaemonCompatibilityPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonCompatibilityPresentation.swift; sourceTree = "<group>"; };
@@ -252,6 +255,7 @@
 		8537C45368370160E674233B /* TerminalAttachAcknowledgementFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalAttachAcknowledgementFixture.swift; sourceTree = "<group>"; };
 		8558FA040BF164F6A5B8023F /* BrowserProxySmokeTestView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserProxySmokeTestView.swift; sourceTree = "<group>"; };
 		860FB18D54BADD35ECB29BD9 /* AutomationDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationDetailView.swift; sourceTree = "<group>"; };
+		8826712DFFED25046E10D933 /* DeviceAPIRequestRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceAPIRequestRecorder.swift; sourceTree = "<group>"; };
 		88E7B08D6033170F0AB8DF17 /* DemoDeviceBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoDeviceBackendTests.swift; sourceTree = "<group>"; };
 		89218A663F7CADB785794197 /* GhosttyMobileAppServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyMobileAppServiceTests.swift; sourceTree = "<group>"; };
 		895AC546F077905FD8E53CF9 /* AlertsTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlertsTabView.swift; sourceTree = "<group>"; };
@@ -475,6 +479,7 @@
 				9EE032F140BCCC7196186C4F /* TerminalSelectionCopyTests.swift */,
 				BBE1C9B8E2B76EC07A3F5722 /* TerminalViewerModelTests.swift */,
 				67E1D4AB372BA78781DFCC3B /* TerminalViewerOpenPaintTests.swift */,
+				99B3293647C0BF9D73C0524F /* TestSupport */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -586,6 +591,15 @@
 				B8E05F8671F750CBD22F18BA /* AutomationsTabView.swift */,
 			);
 			path = Automations;
+			sourceTree = "<group>";
+		};
+		99B3293647C0BF9D73C0524F /* TestSupport */ = {
+			isa = PBXGroup;
+			children = (
+				8826712DFFED25046E10D933 /* DeviceAPIRequestRecorder.swift */,
+				5C21874887569B54357A2847 /* XCTestCaseWaitUntilAsync.swift */,
+			);
+			path = TestSupport;
 			sourceTree = "<group>";
 		};
 		9C0244DCE0AEB3C1E1778333 /* Demo */ = {
@@ -894,6 +908,7 @@
 			files = (
 				D62D7FC7CC07A6CCA4EF6772 /* BrowserProxyTests.swift in Sources */,
 				34037882505238F6789EFE22 /* DemoDeviceBackendTests.swift in Sources */,
+				D731549CCFC7537D4FAF6326 /* DeviceAPIRequestRecorder.swift in Sources */,
 				97C94F004F2B01CCDC2EF33A /* DevicePerformanceEventsTests.swift in Sources */,
 				4073E59B929A6A3937DC57A8 /* GhosttyMobileAppServiceTests.swift in Sources */,
 				A689FBD78BB4F03E56B97D3C /* GhosttyRemoteTerminalSelectionMarshallingTests.swift in Sources */,
@@ -926,6 +941,7 @@
 				F9AEE7C0D522D97538AE730D /* TerminalSelectionCopyTests.swift in Sources */,
 				0D2537C0E12CE016A95980EF /* TerminalViewerModelTests.swift in Sources */,
 				E1B51E88DBCFC9E4BBDFE32D /* TerminalViewerOpenPaintTests.swift in Sources */,
+				3F157495460FF06E60545078 /* XCTestCaseWaitUntilAsync.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1147,12 +1163,70 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = BEMDA62NB6;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
 				GENERATE_INFOPLIST_FILE = NO;
+				"GHOSTTY_VT_LIBRARY[sdk=iphoneos*]" = "$(SRCROOT)/../macos/.local/ghosttyvt/lib/ghostty-vt.xcframework/ios-arm64/libghostty-vt-fat.a";
+				"GHOSTTY_VT_LIBRARY[sdk=iphonesimulator*]" = "$(SRCROOT)/../macos/.local/ghosttyvt/lib/ghostty-vt.xcframework/ios-arm64-simulator/libghostty-vt-fat.a";
 				INFOPLIST_FILE = Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"-Wl,-force_load,$(GHOSTTY_VT_LIBRARY)",
+					"-Wl,-u,_ghostty_terminal_new",
+					"-Wl,-u,_ghostty_terminal_free",
+					"-Wl,-u,_ghostty_terminal_vt_write",
+					"-Wl,-u,_ghostty_terminal_scroll_viewport",
+					"-Wl,-u,_ghostty_terminal_resize",
+					"-Wl,-u,_ghostty_terminal_get",
+					"-Wl,-u,_ghostty_terminal_set",
+					"-Wl,-u,_ghostty_paste_encode",
+					"-Wl,-u,_ghostty_key_encoder_new",
+					"-Wl,-u,_ghostty_key_encoder_free",
+					"-Wl,-u,_ghostty_key_encoder_setopt_from_terminal",
+					"-Wl,-u,_ghostty_key_encoder_encode",
+					"-Wl,-u,_ghostty_key_event_new",
+					"-Wl,-u,_ghostty_key_event_free",
+					"-Wl,-u,_ghostty_key_event_set_action",
+					"-Wl,-u,_ghostty_key_event_set_key",
+					"-Wl,-u,_ghostty_key_event_set_mods",
+					"-Wl,-u,_ghostty_key_event_set_utf8",
+					"-Wl,-u,_ghostty_key_event_set_unshifted_codepoint",
+					"-Wl,-u,_ghostty_mouse_encoder_new",
+					"-Wl,-u,_ghostty_mouse_encoder_free",
+					"-Wl,-u,_ghostty_mouse_encoder_setopt",
+					"-Wl,-u,_ghostty_mouse_encoder_setopt_from_terminal",
+					"-Wl,-u,_ghostty_mouse_encoder_encode",
+					"-Wl,-u,_ghostty_mouse_event_new",
+					"-Wl,-u,_ghostty_mouse_event_free",
+					"-Wl,-u,_ghostty_mouse_event_set_action",
+					"-Wl,-u,_ghostty_mouse_event_set_button",
+					"-Wl,-u,_ghostty_mouse_event_set_mods",
+					"-Wl,-u,_ghostty_mouse_event_set_position",
+					"-Wl,-u,_ghostty_formatter_terminal_new",
+					"-Wl,-u,_ghostty_formatter_format_alloc",
+					"-Wl,-u,_ghostty_formatter_free",
+					"-Wl,-u,_ghostty_free",
+					"-Wl,-u,_ghostty_render_state_new",
+					"-Wl,-u,_ghostty_render_state_free",
+					"-Wl,-u,_ghostty_render_state_update",
+					"-Wl,-u,_ghostty_render_state_get",
+					"-Wl,-u,_ghostty_render_state_row_iterator_new",
+					"-Wl,-u,_ghostty_render_state_row_iterator_free",
+					"-Wl,-u,_ghostty_render_state_row_iterator_next",
+					"-Wl,-u,_ghostty_render_state_row_get",
+					"-Wl,-u,_ghostty_render_state_row_cells_new",
+					"-Wl,-u,_ghostty_render_state_row_cells_free",
+					"-Wl,-u,_ghostty_render_state_row_cells_next",
+					"-Wl,-u,_ghostty_render_state_row_cells_get",
+					"-Wl,-u,_ghostty_cell_get",
+					"-Wl,-u,_ghostty_row_get",
+					"-Wl,-u,_ghostty_terminal_grid_ref",
+					"-Wl,-u,_ghostty_terminal_point_from_grid_ref",
+					"-Wl,-u,_ghostty_terminal_selection_format_alloc",
+					"-Wl,-u,_ghostty_terminal_take_render_scroll_rects",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.usespaces.spacesmobile;
 				PRODUCT_NAME = SpacesMobile;
@@ -1169,12 +1243,70 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = BEMDA62NB6;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
 				GENERATE_INFOPLIST_FILE = NO;
+				"GHOSTTY_VT_LIBRARY[sdk=iphoneos*]" = "$(SRCROOT)/../macos/.local/ghosttyvt/lib/ghostty-vt.xcframework/ios-arm64/libghostty-vt-fat.a";
+				"GHOSTTY_VT_LIBRARY[sdk=iphonesimulator*]" = "$(SRCROOT)/../macos/.local/ghosttyvt/lib/ghostty-vt.xcframework/ios-arm64-simulator/libghostty-vt-fat.a";
 				INFOPLIST_FILE = Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"-Wl,-force_load,$(GHOSTTY_VT_LIBRARY)",
+					"-Wl,-u,_ghostty_terminal_new",
+					"-Wl,-u,_ghostty_terminal_free",
+					"-Wl,-u,_ghostty_terminal_vt_write",
+					"-Wl,-u,_ghostty_terminal_scroll_viewport",
+					"-Wl,-u,_ghostty_terminal_resize",
+					"-Wl,-u,_ghostty_terminal_get",
+					"-Wl,-u,_ghostty_terminal_set",
+					"-Wl,-u,_ghostty_paste_encode",
+					"-Wl,-u,_ghostty_key_encoder_new",
+					"-Wl,-u,_ghostty_key_encoder_free",
+					"-Wl,-u,_ghostty_key_encoder_setopt_from_terminal",
+					"-Wl,-u,_ghostty_key_encoder_encode",
+					"-Wl,-u,_ghostty_key_event_new",
+					"-Wl,-u,_ghostty_key_event_free",
+					"-Wl,-u,_ghostty_key_event_set_action",
+					"-Wl,-u,_ghostty_key_event_set_key",
+					"-Wl,-u,_ghostty_key_event_set_mods",
+					"-Wl,-u,_ghostty_key_event_set_utf8",
+					"-Wl,-u,_ghostty_key_event_set_unshifted_codepoint",
+					"-Wl,-u,_ghostty_mouse_encoder_new",
+					"-Wl,-u,_ghostty_mouse_encoder_free",
+					"-Wl,-u,_ghostty_mouse_encoder_setopt",
+					"-Wl,-u,_ghostty_mouse_encoder_setopt_from_terminal",
+					"-Wl,-u,_ghostty_mouse_encoder_encode",
+					"-Wl,-u,_ghostty_mouse_event_new",
+					"-Wl,-u,_ghostty_mouse_event_free",
+					"-Wl,-u,_ghostty_mouse_event_set_action",
+					"-Wl,-u,_ghostty_mouse_event_set_button",
+					"-Wl,-u,_ghostty_mouse_event_set_mods",
+					"-Wl,-u,_ghostty_mouse_event_set_position",
+					"-Wl,-u,_ghostty_formatter_terminal_new",
+					"-Wl,-u,_ghostty_formatter_format_alloc",
+					"-Wl,-u,_ghostty_formatter_free",
+					"-Wl,-u,_ghostty_free",
+					"-Wl,-u,_ghostty_render_state_new",
+					"-Wl,-u,_ghostty_render_state_free",
+					"-Wl,-u,_ghostty_render_state_update",
+					"-Wl,-u,_ghostty_render_state_get",
+					"-Wl,-u,_ghostty_render_state_row_iterator_new",
+					"-Wl,-u,_ghostty_render_state_row_iterator_free",
+					"-Wl,-u,_ghostty_render_state_row_iterator_next",
+					"-Wl,-u,_ghostty_render_state_row_get",
+					"-Wl,-u,_ghostty_render_state_row_cells_new",
+					"-Wl,-u,_ghostty_render_state_row_cells_free",
+					"-Wl,-u,_ghostty_render_state_row_cells_next",
+					"-Wl,-u,_ghostty_render_state_row_cells_get",
+					"-Wl,-u,_ghostty_cell_get",
+					"-Wl,-u,_ghostty_row_get",
+					"-Wl,-u,_ghostty_terminal_grid_ref",
+					"-Wl,-u,_ghostty_terminal_point_from_grid_ref",
+					"-Wl,-u,_ghostty_terminal_selection_format_alloc",
+					"-Wl,-u,_ghostty_terminal_take_render_scroll_rects",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.usespaces.spacesmobile;
 				PRODUCT_NAME = SpacesMobile;

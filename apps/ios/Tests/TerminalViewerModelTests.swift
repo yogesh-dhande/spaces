@@ -2,11 +2,13 @@
     import Darwin
     import Foundation
     import Network
+    import UIKit
     import XCTest
     import dnssd
     import spacesdevicecore
     import spacesterminalcore
     @testable import SpacesMobile
+    @testable import spacesterminalmobileghostty
 
     @MainActor final class TerminalViewerModelTests: XCTestCase {
         private actor LinkPreviewGate {
@@ -360,47 +362,6 @@
             func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse { await backend.send(request) }
 
             func close() async {}
-        }
-
-        private actor DeviceAPIRequestRecorder {
-            private var requests: [SpacesDeviceAPIRequest] = []
-
-            func append(_ request: SpacesDeviceAPIRequest) { requests.append(request) }
-
-            func snapshot() -> [SpacesDeviceAPIRequest] { requests }
-
-            func containsTerminalControlAction(_ action: SpacesDeviceTerminalControlAction) -> Bool {
-                requests.contains { request in
-                    if case .terminalControl(let payload) = request.command { return payload.action == action }
-                    return false
-                }
-            }
-
-            func countTerminalControlAction(_ action: SpacesDeviceTerminalControlAction) -> Int {
-                requests.filter { request in
-                    if case .terminalControl(let payload) = request.command { return payload.action == action }
-                    return false
-                }.count
-            }
-
-            func countStateRequests() -> Int { stateRequests().count }
-
-            /// The `.state` reads in the order they were sent, so a test can inspect what each one asked
-            /// the daemon for.
-            func stateRequests() -> [SpacesDeviceTerminalSessionRequest] {
-                requests.compactMap { request in
-                    guard case .state(let payload) = request.command else { return nil }
-                    return payload
-                }
-            }
-
-            func lastAttachedClient() -> TerminalClient? {
-                for request in requests.reversed() {
-                    guard case .terminalControl(let payload) = request.command, payload.action == .attach else { continue }
-                    return payload.client
-                }
-                return nil
-            }
         }
 
         private actor AuthenticationPromptRecorder {
@@ -3744,7 +3705,12 @@
             XCTAssertTrue(didHeartbeat, "the resume must send its state-carrying heartbeat")
             try await Task.sleep(for: .milliseconds(100))
 
-            let requests = await recorder.snapshot()
+            // A painted frame arms this client's own copy of the history, which is a read of its own and not
+            // part of what a resume costs. The round trip counted here is the screen confirmation.
+            let requests = await recorder.snapshot().filter {
+                if case .terminalTranscript = $0.command { return false }
+                return true
+            }
             XCTAssertEqual(requests.count, 1, "an unchanged screen costs exactly one round trip")
             guard case .terminalControl(let heartbeatPayload) = requests[0].command else {
                 return XCTFail("the resume's only request must be the heartbeat")
@@ -7142,12 +7108,11 @@
             // 120 ms retry (see `ScrollAfterKeyFailureRequestTransport`), so it reaches
             // `handleInputSendError` as connection-level evidence and escalates through
             // `tearDownStream(reportingLoss:)` + `cancelQueuedInputSends()`. The scroll sent right behind
-            // it never calls `flushPendingScroll()` (only `sendKey` does that): it relies on
-            // `TerminalScrollCoalescer`'s own automatic frame-interval flush, which chains the batch onto
-            // the input queue a few milliseconds later, behind the still-running key send, so it is still
-            // queued (not yet run) when the key's failure discards it.
+            // it chains its batch onto the input queue behind the still-running key send, so it is still
+            // queued (not yet run) when the key's failure discards it. This viewer holds no frame, so the
+            // gesture routes to the daemon rather than to a replay it has no grid to build.
             await model.sendKey("a")
-            await model.sendScroll(horizontal: 0, vertical: 5, scrollMods: 0, pointerPosition: nil)
+            model.sendScroll(horizontal: 0, vertical: 5, scrollMods: 0, pointerPosition: nil)
 
             // Give the key send's synchronous attempt, its 120 ms retry, and the failure handling that
             // follows time to run to completion and discard the queued scroll batch.
@@ -7163,7 +7128,7 @@
             await waitForRedialBootstrapToLand(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 2)
 
-            await model.sendScroll(horizontal: 0, vertical: 7, scrollMods: 0, pointerPosition: nil)
+            model.sendScroll(horizontal: 0, vertical: 7, scrollMods: 0, pointerPosition: nil)
             await waitUntil("the post-recovery scroll to reach the transport", timeout: .seconds(3)) { tracker.currentScrollRequestCount() == 1 }
         }
 
@@ -9627,12 +9592,1452 @@
             }
         }
 
-        /// `waitUntil` for a condition that has to be read off an actor.
-        private func waitUntilAsync(_ description: String, timeout: Duration = .seconds(5), _ condition: () async -> Bool) async {
+        // MARK: - Client-local scrollback
+
+        /// A transcript the test can grow between gestures, answering reads the way the daemon does: a
+        /// suffix capped at `maxBytes` and advanced to a line boundary, or exactly the bytes after
+        /// `fromByteOffset` while the read names the file those bytes are in and the gap fits the page.
+        private actor GrowingTranscript {
+            private var data: Data
+            private var runIdentity: String?
+            /// The transcript file these bytes sit in. An append leaves it alone; a head-trim rewrites the
+            /// transcript and renames the rewrite into its place, which is what `headTrim` models.
+            private var fileIdentity: UInt64 = 91
+
+            init(_ data: Data, runIdentity: String? = nil) {
+                self.data = data
+                self.runIdentity = runIdentity
+            }
+
+            func byteCount() -> Int { data.count }
+
+            func currentFileIdentity() -> UInt64 { fileIdentity }
+
+            func append(_ more: Data) { data.append(more) }
+
+            /// A daemon head-trim: the oldest bytes are dropped and the rewrite is renamed over
+            /// `output.log`, so every offset in the file names different content and the file a client
+            /// read its replay from is gone.
+            func headTrim(droppingFirst byteCount: Int) {
+                data = Data(data.dropFirst(byteCount))
+                fileIdentity += 1
+            }
+
+            func response(for payload: SpacesDeviceTerminalTranscriptRequest) -> SpacesDeviceAPIResponse {
+                var body: Data
+                var isSuffixRebuild = false
+                if let fromByteOffset = payload.fromByteOffset, let continuation = continuationBody(from: fromByteOffset, payload: payload) {
+                    body = continuation
+                } else {
+                    body = suffixBody(cap: payload.maxBytes)
+                    isSuffixRebuild = payload.fromByteOffset != nil
+                }
+                let startByteOffset = UInt64(data.count - body.count)
+                let compressed = body.isEmpty ? Data() : (try? GhosttyRenderUpdateBodyCompression.deflate(body)) ?? Data()
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "ok",
+                    result: .terminalTranscript(
+                        SpacesDeviceTerminalTranscriptResult(
+                            compressedData: compressed, byteCount: body.count, startByteOffset: startByteOffset, totalBytes: UInt64(data.count),
+                            fileIdentity: fileIdentity, runIdentity: runIdentity, isSuffixRebuild: isSuffixRebuild)))
+            }
+
+            private func continuationBody(from fromByteOffset: Int, payload: SpacesDeviceTerminalTranscriptRequest) -> Data? {
+                guard payload.fileIdentity == fileIdentity else { return nil }
+                guard fromByteOffset <= data.count else { return nil }
+                guard data.count - fromByteOffset <= payload.maxBytes else { return nil }
+                return Data(data[fromByteOffset...])
+            }
+
+            private func suffixBody(cap: Int) -> Data {
+                var body = Data(data.suffix(cap))
+                guard data.count > cap, let newlineIndex = body.firstIndex(of: 0x0A), newlineIndex < body.endIndex - 1 else { return body }
+                body = body.subdata(in: (newlineIndex + 1)..<body.endIndex)
+                return body
+            }
+        }
+
+        /// Holds the reads a gesture starts, a continuation and the deeper full-budget page alike, open
+        /// until the test releases it, so a gesture can be driven while the page it asked for is still on
+        /// the wire.
+        private actor TranscriptReadGate {
+            private var isReleased = false
+            private var waiters: [CheckedContinuation<Void, Never>] = []
+
+            func wait() async {
+                guard !isReleased else { return }
+                await withCheckedContinuation { waiters.append($0) }
+            }
+
+            func release() {
+                isReleased = true
+                let waiting = waiters
+                waiters.removeAll()
+                for waiter in waiting { waiter.resume() }
+            }
+        }
+
+        /// The session's first painted frame reads a page of history before anyone asks for it, so the
+        /// first flick is answered out of memory. Nothing about that gesture reaches the daemon: no
+        /// transcript read of its own, and no wheel delta, because the session's own viewport is not what
+        /// the phone is scrolling.
+        func testTheFirstPaintedFrameReadsAPageSoTheFirstFlickCostsNoRoundTrip() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+            let pageReads = await Self.transcriptRequests(in: recorder.snapshot())
+            let prefetch = try XCTUnwrap(pageReads.first)
+            XCTAssertEqual(prefetch.maxBytes, TerminalScrollbackBudget.initialLocalScrollbackPageBytes)
+            XCTAssertNil(prefetch.fromByteOffset, "the first read is a suffix of the transcript, not a continuation of anything")
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+
+            XCTAssertTrue(model.isShowingLocalScrollFrame, "a flick over history paints this client's own replay")
+            try await Task.sleep(for: .milliseconds(100))
+            let readsAfterFlick = await Self.transcriptRequests(in: recorder.snapshot()).count
+            XCTAssertEqual(readsAfterFlick, 1, "one flick reads nothing more than the page it started with")
+            let wheelCount = await recorder.countTerminalControlAction(.scroll)
+            XCTAssertEqual(wheelCount, 0, "a local history scroll must not send wheel deltas to the daemon")
+        }
+
+        /// The session prints while the user is reading the live screen, so the replay falls behind it. The
+        /// next gesture takes that in, once, as a continuation read from where the replay's bytes end, and
+        /// then scrolls from memory for the rest of the flick.
+        func testAGestureTakesInTheOutputPrintedSinceTheLastOne() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+
+            await transcript.append(Self.numberedTranscript(lineCount: 20, startingAt: 400))
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, outputEndByteOffset: 1), isOutOfBand: false)
+
+            model.noteScrollGestureBegan()
+            await waitUntilAsync("the gesture to read the output printed since the page") {
+                await Self.transcriptRequests(in: recorder.snapshot()).count == 2
+            }
+            let gestureReads = await Self.transcriptRequests(in: recorder.snapshot())
+            let continuation = try XCTUnwrap(gestureReads.last)
+            XCTAssertNotNil(continuation.fromByteOffset, "the gesture continues the replay it holds rather than re-reading the whole page")
+            let servedFileIdentity = await transcript.currentFileIdentity()
+            XCTAssertEqual(
+                continuation.fileIdentity, servedFileIdentity,
+                "a continuation names the transcript file the replay was built from, which proves the offset still names its bytes")
+
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+            try await Task.sleep(for: .milliseconds(100))
+            let readsAfterTopUp = await Self.transcriptRequests(in: recorder.snapshot()).count
+            XCTAssertEqual(readsAfterTopUp, 2, "the rest of the flick is served from the replay it just topped up")
+        }
+
+        /// The daemon head-trims the transcript while the replay holds bytes from the file it replaced, so
+        /// the offset the replay ends at names different content now. The daemon answers the continuation
+        /// with a flagged suffix instead, and the phone rebuilds its replay from it rather than appending
+        /// bytes that do not follow its own. The transcript here repeats one line, which is the case a
+        /// byte comparison around the offset cannot decide.
+        func testAHeadTrimUnderTheReplayIsAnsweredAsARebuild() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let line = "progress\r\n"
+            let transcript = GrowingTranscript(Data(String(repeating: line, count: 400).utf8))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+            await waitUntil("the page to be replayed") { model.hasReadyLocalScrollbackForTesting }
+            let readFileIdentity = await transcript.currentFileIdentity()
+
+            // The trim drops the oldest half and renames the rewrite into place, which is what changes the
+            // file the offsets belong to.
+            await transcript.headTrim(droppingFirst: line.utf8.count * 200)
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, outputEndByteOffset: 1), isOutOfBand: false)
+
+            model.noteScrollGestureBegan()
+            await waitUntilAsync("the gesture to read past the trim") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+            let gestureReads = await Self.transcriptRequests(in: recorder.snapshot())
+            let continuation = try XCTUnwrap(gestureReads.last)
+            let trimmedFileIdentity = await transcript.currentFileIdentity()
+            XCTAssertNotNil(continuation.fromByteOffset, "the gesture asks for a continuation; only the daemon can know the file is gone")
+            XCTAssertEqual(continuation.fileIdentity, readFileIdentity, "it names the file the replay was built from, which the trim replaced")
+            XCTAssertNotEqual(trimmedFileIdentity, readFileIdentity)
+
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the rebuilt replay to paint the gesture") { model.isShowingLocalScrollFrame }
+            XCTAssertTrue(model.hasReadyLocalScrollbackForTesting, "the replay is rebuilt from the served suffix rather than left unusable")
+        }
+
+        /// Reaching the oldest row the first page holds reads the rest of the retained history, once, at
+        /// the daemon's whole transcript budget. The gesture continues into what the deeper page adds, and
+        /// scrolling further up afterwards reads nothing more: paging stops once a read has asked for the
+        /// budget.
+        func testReachingTheOldestRowReadTheRestOfTheHistoryOnce() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            // Larger than the first page, so the page the prefetch reads is a suffix with history above it.
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 120_000))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history", timeout: .seconds(20)) {
+                await Self.transcriptRequests(in: recorder.snapshot()).count == 1
+            }
+            await waitUntil("the page to be replayed", timeout: .seconds(20)) { model.hasReadyLocalScrollbackForTesting }
+
+            // Far enough up to run past everything the first page holds.
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 40_000, scrollMods: 0, pointerPosition: nil)
+
+            await waitUntilAsync("the deeper read", timeout: .seconds(20)) { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+            let deeperReads = await Self.transcriptRequests(in: recorder.snapshot())
+            let deeper = try XCTUnwrap(deeperReads.last)
+            XCTAssertEqual(deeper.maxBytes, TerminalScrollbackBudget.defaultMaxBytes, "reaching the oldest row read reads the rest of the history")
+            XCTAssertNil(deeper.fromByteOffset, "deeper history is a fresh suffix, not a continuation forward")
+
+            await waitUntil("the deeper page to be replayed", timeout: .seconds(30)) { model.hasReadyLocalScrollbackForTesting }
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 40_000, scrollMods: 0, pointerPosition: nil)
+            try await Task.sleep(for: .milliseconds(200))
+            let readsAfterDeepest = await Self.transcriptRequests(in: recorder.snapshot()).count
+            XCTAssertEqual(readsAfterDeepest, 2, "a read at the whole budget is the deepest there is, so further gestures read nothing more")
+        }
+
+        /// An ended pane has no daemon renderer left to scroll, so the replay is the only scrollback it
+        /// has. A pan over its frozen final frame scrolls it.
+        func testAnEndedPaneScrollsItsOwnReplay() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let bridgeClient = Self.transcriptServingClient(settings: settings(), recorder: recorder, transcript: transcript)
+            let model = TerminalViewerModel(
+                session: session(state: .exited), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:31Z", state: .exited, exitedAt: "2026-06-04T14:23:31Z"), isOutOfBand: false)
+            XCTAssertNotNil(model.endedRender, "the ended pane shows its frozen final frame")
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+
+            await waitUntil("the ended pane's replay to paint the gesture", timeout: .seconds(10)) { model.isShowingLocalScrollFrame }
+            let wheelCount = await recorder.countTerminalControlAction(.scroll)
+            XCTAssertEqual(wheelCount, 0, "an ended session has nothing left to send a wheel event to")
+        }
+
+        /// A tap on an ended pane scrolled into its replay must leave the replay on screen. The host heals
+        /// an ended surface by pushing the frozen final frame back after the tap's link probe, so the model
+        /// publishes no ended render while the replay holds the screen and the host has nothing to reapply.
+        func testATapOnAnEndedPanesReplayLeavesTheReplayOnScreen() async throws {
+            let model = try await endedModelShowingItsFinalFrame()
+            defer { model.stop() }
+            XCTAssertNotNil(model.endedRender, "setup: the ended pane starts on its frozen final frame")
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the ended pane's replay to paint the gesture", timeout: .seconds(10)) { model.isShowingLocalScrollFrame }
+
+            XCTAssertNil(model.endedRender, "the frozen final frame steps aside while the replay is the screen")
+            XCTAssertEqual(model.ownerRenderEpoch?.id.hasPrefix("local-scroll|"), true, "the published frame is the replay's own")
+
+            let hostView = tapProbingHostView()
+            defer { GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true }
+            hostView.update(ownerEpoch: model.ownerRenderEpoch, endedRender: model.endedRender, fallbackText: model.visibleText)
+            let reappliedBeforeTap = hostView.reappliedEndedRenderFrameCountForTesting
+
+            _ = hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18))
+
+            XCTAssertEqual(
+                hostView.reappliedEndedRenderFrameCountForTesting, reappliedBeforeTap,
+                "a tap must not repaint the session's final bottom rows over the history being read")
+            XCTAssertTrue(model.isShowingLocalScrollFrame, "the replay is still the screen after the tap")
+            XCTAssertNil(model.endedRender)
+        }
+
+        /// Leaving the replay is what puts an ended pane back on its frozen final frame: no live epoch ever
+        /// arrives to repaint it, so the returning `endedRender` is the only thing the host can paint.
+        func testLeavingAnEndedPanesReplayPublishesTheFinalFrameAgain() async throws {
+            let model = try await endedModelShowingItsFinalFrame()
+            defer { model.stop() }
+            let finalFrameID = try XCTUnwrap(model.endedRender?.id)
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the ended pane's replay to paint the gesture", timeout: .seconds(10)) { model.isShowingLocalScrollFrame }
+
+            await model.scrollToBottom()
+
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "the jump returns the ended pane to its own frame")
+            XCTAssertNil(model.ownerRenderEpoch, "an ended pane has no live epoch to fall back to")
+            XCTAssertEqual(model.endedRender?.id, finalFrameID, "the frozen final frame is published again")
+
+            let hostView = tapProbingHostView()
+            defer { GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true }
+            hostView.update(ownerEpoch: model.ownerRenderEpoch, endedRender: model.endedRender, fallbackText: model.visibleText)
+            let reappliedBeforeTap = hostView.reappliedEndedRenderFrameCountForTesting
+
+            _ = hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18))
+
+            XCTAssertEqual(
+                hostView.reappliedEndedRenderFrameCountForTesting, reappliedBeforeTap + 1,
+                "the host holds the final frame again and heals the surface with it after a tap's link probe")
+        }
+
+        /// An ended pane showing the frozen final frame its own transcript can replay.
+        private func endedModelShowingItsFinalFrame() async throws -> TerminalViewerModel {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let bridgeClient = Self.transcriptServingClient(settings: settings(), recorder: recorder, transcript: transcript)
+            let model = TerminalViewerModel(
+                session: session(state: .exited), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:31Z", state: .exited, exitedAt: "2026-06-04T14:23:31Z"), isOutOfBand: false)
+            return model
+        }
+
+        /// A host view wired for the tap path with no mirror behind it: the link probe is stubbed, and the
+        /// column-coverage gate that would otherwise skip the probe entirely is satisfied by hand.
+        private func tapProbingHostView() -> GhosttyRemoteTerminalHostView {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = false
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            hostView.debugAppliedFrameCoversHostColumnsForTesting = true
+            hostView.debugTapLinkHandlerForTesting = { _ in false }
+            return hostView
+        }
+
+        /// A full-screen application drawing on the alternate screen has no scrollback for a replay to
+        /// stand in for: the swipe is that application's input and goes to the daemon exactly as it always
+        /// has.
+        func testAGestureOnTheAlternateScreenGoesToTheDaemon() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript, alternateScreenActive: true)
+            defer { model.stop() }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+
+            let reachedDaemon = try await waitForTerminalControlAction(.scroll, count: 1, recorder: recorder)
+            XCTAssertTrue(reachedDaemon, "an alternate-screen swipe belongs to the application drawing it")
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "the phone paints no replay over an application's own screen")
+        }
+
+        /// A replay left showing from an earlier gesture must not survive the program switching into the
+        /// alternate screen underneath it: a fresh gesture that resolves to the daemon has to drop the
+        /// stale replay before forwarding, or the swipe would drive a hidden screen the phone still paints
+        /// over with old history. `isShowingLocalScrollFrame` is the public read of the replay this fix
+        /// clears, so it stands in for asserting the private state directly.
+        func testAGestureRoutedToTheDaemonDropsAStaleReplayFirst() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+
+            // The program enables the alternate screen while the replay is still on screen, mid-read.
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, alternateScreenActive: true), isOutOfBand: false)
+            XCTAssertTrue(model.isShowingLocalScrollFrame, "a live frame landing under the replay must not snatch the rows being read")
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+
+            let reachedDaemon = try await waitForTerminalControlAction(.scroll, count: 1, recorder: recorder)
+            XCTAssertTrue(reachedDaemon, "the rerouted gesture forwards to the application now driving the alternate screen")
+            XCTAssertFalse(
+                model.isShowingLocalScrollFrame, "a rerouted gesture must clear the stale replay rather than leave it over a hidden screen")
+        }
+
+        /// An application enabling or disabling mouse tracking mid-flick must not split one gesture across
+        /// both paths, so the routing is decided when the finger lands and held for the whole gesture. The
+        /// next gesture decides again.
+        func testTheRoutingDecidedWhenTheFingerLandsHoldsForTheWholeGesture() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript, mouseReportingActive: true)
+            defer { model.stop() }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            let forwardedWheel = try await waitForTerminalControlAction(.scroll, count: 1, recorder: recorder)
+            XCTAssertTrue(forwardedWheel, "a gesture begun while the application tracks the mouse forwards wheel deltas")
+
+            // The application releases the mouse mid-flick. The gesture that is already moving keeps going
+            // to the daemon; only the next one scrolls the replay.
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, mouseReportingActive: false), isOutOfBand: false)
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "a gesture that began under the application stays with it for its whole length")
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the next gesture to scroll the replay", timeout: .seconds(10)) { model.isShowingLocalScrollFrame }
+        }
+
+        /// The jump-to-bottom control over a local replay returns the phone to the session's own screen,
+        /// which is already on this client: nothing is sent, and no viewer of the session is moved. The
+        /// control is also what tells the reader the session printed while they were reading history.
+        func testJumpingToTheBottomDropsTheReplayWithNoRequest() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+            XCTAssertTrue(model.isScrolledIntoScrollback, "a client reading its own history is offered the jump")
+            XCTAssertFalse(model.hasNewOutputBelowScrollback, "a quiet session has printed nothing to mark")
+
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, outputEndByteOffset: 1), isOutOfBand: false)
+            XCTAssertTrue(model.isShowingLocalScrollFrame, "the session printing under a flick must not snatch the rows being read")
+            XCTAssertTrue(model.hasNewOutputBelowScrollback, "the control marks that there is newer output below")
+
+            await model.scrollToBottom()
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "the jump returns the phone to the session's own screen")
+            XCTAssertFalse(model.hasNewOutputBelowScrollback)
+            let jumpCount = await recorder.countTerminalControlAction(.scrollToBottom)
+            XCTAssertEqual(jumpCount, 0, "the session's own screen is already on this client, so the jump costs no request")
+
+            // A flick's momentum is still delivering deltas after the tap; none of them may paint the
+            // replay back over the screen the jump returned to.
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "a gesture the jump ended must not republish the replay")
+        }
+
+        /// Scrolling by hand back down onto the replay's newest row hands the screen back to the session's
+        /// own frames, the same return the jump control makes and the one a reader reaches without it. The
+        /// replay's bottom row is only as fresh as the page it was read from, so parking there would hide
+        /// live output behind a control offering a return the reader has already made. The gesture is not
+        /// cancelled: scrolling straight back up re-enters the replay it rewound, with no read to pay for.
+        func testScrollingBackDownToTheBottomShowsTheLiveScreenAgain() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntil("the page to be replayed") { model.hasReadyLocalScrollbackForTesting }
+            let liveEpochID = try XCTUnwrap(model.ownerRenderEpoch?.id, "the session's own epoch, which the pane starts on")
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+            let scrolledRows = Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))
+            let readsWhileReadingBack = await Self.transcriptRequests(in: recorder.snapshot()).count
+
+            // The session prints under the reader, which is what marks the control.
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, outputEndByteOffset: 1), isOutOfBand: false)
+            XCTAssertTrue(model.hasNewOutputBelowScrollback, "setup: the reader is told there is newer output below them")
+
+            // The same flick reverses and runs past the replay's newest row.
+            model.sendScroll(horizontal: 0, vertical: -30, scrollMods: 0, pointerPosition: nil)
+
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "the replay's bottom is not the current screen, the session's own frame is")
+            XCTAssertEqual(model.ownerRenderEpoch?.id, liveEpochID, "scrolling back down by hand must draw the session's own frames again")
+            XCTAssertFalse(model.isScrolledIntoScrollback, "a client back on the session's screen has nothing to jump to")
+            XCTAssertFalse(model.hasNewOutputBelowScrollback, "coming back to the live screen clears the new-output mark")
+
+            // Nothing cancelled the gesture, so the next upward delta reads the history off the replay that
+            // survived rather than paying for a fresh page.
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+
+            XCTAssertTrue(model.isShowingLocalScrollFrame, "an upward delta re-enters the replay the return rewound")
+            XCTAssertEqual(
+                Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot)), scrolledRows,
+                "re-entering starts from the replay's newest row, the rows the first delta of the gesture reached")
+            let readsAfterReturning = await Self.transcriptRequests(in: recorder.snapshot()).count
+            XCTAssertEqual(readsAfterReturning, readsWhileReadingBack, "the replay survived the return, so re-entering it reads nothing")
+        }
+
+        /// A gesture that begins before the first page of history resolves is already committed to
+        /// showing the replay once that page installs, even though `isShowingLocalScrollFrame` reads
+        /// false for the whole wait. A live frame that prints new output during that wait must still mark
+        /// the jump-to-bottom control once history lands on screen.
+        func testGestureBegunBeforeTheFirstPageResolvesStillMarksNewOutputBelowScrollback() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let heldFirstPage = TranscriptReadGate()
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript, pageReadGate: heldFirstPage,
+                holdInitialPageRead: true)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame's prefetch read to be issued") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+
+            // The gesture latches to the replay and scrolls it while the prefetch page is still on the
+            // wire, ahead of anything installing.
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "setup: no replay has installed yet, the page is still held")
+
+            // The session prints while that first page is still loading.
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, outputEndByteOffset: 1), isOutOfBand: false)
+
+            await heldFirstPage.release()
+            await waitUntil("the replay to paint the gesture once the page installs") { model.isShowingLocalScrollFrame }
+            XCTAssertTrue(
+                model.hasNewOutputBelowScrollback, "output printed while the first page loaded must still mark the control once history is shown")
+        }
+
+        /// A metadata-only payload (title, attachment, a heartbeat: runtime state and nothing else, the
+        /// shape `runState` builds) still lands on `latestState.renderSnapshot` through the merge, but the
+        /// session printed nothing, so it must not mark the jump control or make the next gesture pay for
+        /// a continuation read that would append zero bytes. A payload that does carry new output still
+        /// does both.
+        func testMetadataOnlyPayloadDoesNotMarkNewOutputOrReadAContinuation() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+            XCTAssertFalse(model.hasNewOutputBelowScrollback, "a quiet session has printed nothing to mark")
+
+            _ = await model.applyLatestState(
+                Self.runState(
+                    childPID: 200, state: .running, reason: TerminalRemoteSessionStateReason.runtimeState.rawValue, emittedAt: "2026-06-04T14:23:32Z"),
+                isOutOfBand: false)
+            XCTAssertTrue(model.isShowingLocalScrollFrame, "a metadata-only payload must not disturb the replay on screen")
+            XCTAssertFalse(model.hasNewOutputBelowScrollback, "a payload with no new render update and no new output offset marks nothing")
+
+            let requestsBeforeGesture = await Self.transcriptRequests(in: recorder.snapshot()).count
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            // Give a wrongly-triggered continuation read time to reach the recorder before asserting its
+            // absence: this is the failing half of the test without the fix, since a bare "still equal"
+            // check immediately after the gesture can pass even when a read is merely still in flight.
+            try? await Task.sleep(for: .milliseconds(200))
+            let requestsAfterGesture = await Self.transcriptRequests(in: recorder.snapshot()).count
+            XCTAssertEqual(requestsAfterGesture, requestsBeforeGesture, "with nothing new to page in, the next gesture must read nothing more")
+
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:33Z", sessionRevision: 2, outputEndByteOffset: 1), isOutOfBand: false)
+            XCTAssertTrue(model.hasNewOutputBelowScrollback, "a payload that carries new output still marks the jump control")
+
+            model.noteScrollGestureBegan()
+            await waitUntilAsync("the next gesture to read the appended bytes") {
+                await Self.transcriptRequests(in: recorder.snapshot()).count == requestsBeforeGesture + 1
+            }
+        }
+
+        /// A full frame that carries no output signal is not new output either, even though (unlike the
+        /// metadata-only payload above) it does carry a render update: another viewer changing the shared
+        /// selection broadcasts a fresh full frame under reason `.selection`, and only `.output` payloads
+        /// stamp `outputEndByteOffset` (see `outputCarriesNewLocalScrollbackOutput`). Repainting the
+        /// highlight must not mark the jump control or make the next gesture pay for a continuation read
+        /// that would append zero bytes. A payload that does carry new output still does both.
+        func testSelectionBroadcastFullFrameDoesNotMarkNewOutputOrReadAContinuation() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+            XCTAssertFalse(model.hasNewOutputBelowScrollback, "a quiet session has printed nothing to mark")
+
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, reason: .selection), isOutOfBand: false)
+            XCTAssertTrue(model.isShowingLocalScrollFrame, "a repaint-only full frame must not disturb the replay on screen")
+            XCTAssertFalse(model.hasNewOutputBelowScrollback, "a selection broadcast carries no offset and is not new output")
+
+            let requestsBeforeGesture = await Self.transcriptRequests(in: recorder.snapshot()).count
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            // Give a wrongly-triggered continuation read time to reach the recorder before asserting its
+            // absence: this is the failing half of the test without the fix, since a bare "still equal"
+            // check immediately after the gesture can pass even when a read is merely still in flight.
+            try? await Task.sleep(for: .milliseconds(200))
+            let requestsAfterGesture = await Self.transcriptRequests(in: recorder.snapshot()).count
+            XCTAssertEqual(requestsAfterGesture, requestsBeforeGesture, "with nothing new to page in, the next gesture must read nothing more")
+
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:33Z", sessionRevision: 3, outputEndByteOffset: 1), isOutOfBand: false)
+            XCTAssertTrue(model.hasNewOutputBelowScrollback, "an output payload still marks the jump control")
+
+            model.noteScrollGestureBegan()
+            await waitUntilAsync("the next gesture to read the appended bytes") {
+                await Self.transcriptRequests(in: recorder.snapshot()).count == requestsBeforeGesture + 1
+            }
+        }
+
+        /// Typing jumps a session to its own bottom, so the replay's viewport stops describing anything the
+        /// user is looking at. Input hands the screen back before the keystroke's echo arrives, and the
+        /// deltas a flick's momentum keeps delivering afterwards do not bring it back.
+        func testTypingLeavesTheReplayAndItsMomentumDoesNotPaintItBack() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+
+            await model.sendKey("a")
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "input must leave the local screen at once")
+
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "a cancelled gesture's momentum must not republish the local screen")
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the next gesture to scroll again") { model.isShowingLocalScrollFrame }
+        }
+
+        /// Cmd+K clears the session's screen and scrollback, and the daemon records that clear in the
+        /// transcript. The page this client read before the clear still holds the rows the clear removed,
+        /// so the replay is dropped outright: the next gesture reads again, replays the recorded clear, and
+        /// scrolls only what the session has printed since.
+        func testTheClearActionDropsTheReplayThatPredatesIt() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+            let lineBeforeTheClear = try XCTUnwrap(
+                Self.transcriptLineNumber(of: Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))))
+            XCTAssertLessThan(lineBeforeTheClear, 400, "setup: the gesture must be reading the history printed before the clear")
+
+            // The daemon performs the clear, appends it to the transcript so anyone replaying those bytes
+            // reproduces it, and the session prints its next prompt under it. The bytes are the ones the
+            // daemon appends as `GhosttyTerminalTranscriptMutation.clearScreenAndScrollback`, spelled out
+            // here because that type lives in the macOS-only session-host module.
+            await transcript.append(Data("\u{001B}[H\u{001B}[2J\u{001B}[3J".utf8))
+            await transcript.append(Self.numberedTranscript(lineCount: 200, startingAt: 900_000))
+
+            await model.sendKey("cmd+k")
+
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "the clear must leave the local screen")
+            await waitUntilAsync("the clear to reach the daemon") { await recorder.countTerminalControlAction(.clearScreen) == 1 }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the gesture after the clear to paint a replay") { model.isShowingLocalScrollFrame }
+            let readsAfterTheClear = await Self.transcriptRequests(in: recorder.snapshot()).count
+            XCTAssertEqual(readsAfterTheClear, 2, "the gesture after the clear must read the transcript again")
+            // The whole history the replay holds is what the session printed after the clear: the same
+            // flick carries on far up, and it never reaches a row the clear removed.
+            model.sendScroll(horizontal: 0, vertical: 30, scrollMods: 0, pointerPosition: nil)
+            let lineAfterTheClear = try XCTUnwrap(
+                Self.transcriptLineNumber(of: Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))))
+            XCTAssertGreaterThanOrEqual(
+                lineAfterTheClear, 900_000, "the rows the clear removed came back from the replay read before it: line \(lineAfterTheClear)")
+        }
+
+        /// A clear another client sent reaches this one as a `.clearScreen` state payload, which stamps no
+        /// transcript end and so carries no new output by the rule `outputCarriesNewLocalScrollbackOutput`
+        /// reads. The replay this client cached predates that clear all the same, so the payload's reason is
+        /// what drops it: without that, the next gesture scrolls the rows the clear removed.
+        func testAClearBroadcastByAnotherClientDropsTheReplayThatPredatesIt() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+            let lineBeforeTheClear = try XCTUnwrap(
+                Self.transcriptLineNumber(of: Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))))
+            XCTAssertLessThan(lineBeforeTheClear, 400, "setup: the gesture must be reading the history printed before the clear")
+
+            // Back to the session's own screen, so the replay is cached rather than on screen when the
+            // other client's clear arrives.
+            await model.scrollToBottom()
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "setup: the phone is back on the session's own screen")
+
+            // The other client's clear: the daemon performs it, appends it to the transcript so anyone
+            // replaying those bytes reproduces it, and the session prints its next prompt under it. The
+            // bytes are the ones the daemon appends as `GhosttyTerminalTranscriptMutation
+            // .clearScreenAndScrollback`, spelled out here because that type lives in the macOS-only
+            // session-host module.
+            await transcript.append(Data("\u{001B}[H\u{001B}[2J\u{001B}[3J".utf8))
+            await transcript.append(Self.numberedTranscript(lineCount: 200, startingAt: 900_000))
+            // Broadcast the way the daemon broadcasts it: the screen the clear left behind, under reason
+            // `.clearScreen`, with no transcript end stamped on it.
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, reason: .clearScreen), isOutOfBand: false)
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the gesture after the clear to paint a replay") { model.isShowingLocalScrollFrame }
+            let readsAfterTheClear = await Self.transcriptRequests(in: recorder.snapshot()).count
+            XCTAssertEqual(readsAfterTheClear, 2, "the clear broadcast must leave the phone reading the transcript again")
+            // The whole history the replay holds is what the session printed after the clear: the same
+            // flick carries on far up, and it never reaches a row the clear removed.
+            model.sendScroll(horizontal: 0, vertical: 30, scrollMods: 0, pointerPosition: nil)
+            let lineAfterTheClear = try XCTUnwrap(
+                Self.transcriptLineNumber(of: Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))))
+            XCTAssertGreaterThanOrEqual(
+                lineAfterTheClear, 900_000, "the rows the clear removed came back from the replay read before it: line \(lineAfterTheClear)")
+        }
+
+        /// A main actor that falls behind leaves the apply mailbox folding the `.output` payload that
+        /// reported where `output.log` now ends into a later full frame whose reason stamps no offset at
+        /// all. Only the survivor applies, so a phone that read the survivor's own fields would never learn
+        /// the session printed: the jump control would stay unmarked and the next gesture would scroll a
+        /// replay that is behind the session, with nothing later to heal it.
+        func testAnOutputFoldedIntoALaterApplyStillPagesInWhatTheSessionPrinted() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+            XCTAssertFalse(model.hasNewOutputBelowScrollback, "a quiet session has printed nothing to mark")
+            let requestsBeforeGesture = await Self.transcriptRequests(in: recorder.snapshot()).count
+
+            // The apply that replaced the session's `.output` payload: a full frame under a reason that
+            // stamps no transcript end, carrying the folded-away payload's reason and offset.
+            let survivor = try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, reason: .stateChange)
+            let stored = try XCTUnwrap(model.latestState).merged(with: survivor)
+            model.applyReducedStateForTesting(
+                TerminalRemoteStateReductionOutput(
+                    incomingPayload: survivor,
+                    reduction: TerminalRemoteStateReductionResult(
+                        payload: survivor, storedPayload: stored, decodedUpdate: nil, frameToApply: nil, dropReason: nil, didRequestResync: false),
+                    reduceMS: 0, coalescedAwayCount: 1, coalescedReasons: [TerminalRemoteSessionStateReason.output.rawValue],
+                    coalescedOutputEndByteOffset: 1))
+
+            XCTAssertTrue(model.isShowingLocalScrollFrame, "a repaint-only survivor must not disturb the replay on screen")
+            XCTAssertTrue(model.hasNewOutputBelowScrollback, "the folded-away output must still mark the jump control")
+
+            model.noteScrollGestureBegan()
+            await waitUntilAsync("the next gesture to read the appended bytes") {
+                await Self.transcriptRequests(in: recorder.snapshot()).count == requestsBeforeGesture + 1
+            }
+        }
+
+        /// The same fold, carrying a clear instead: another client's `.clearScreen` broadcast is folded
+        /// into the next full frame. The clear removed rows the cached replay still holds, so the apply
+        /// that replaces it has to drop that replay even though its own reason says nothing about a clear.
+        func testAClearFoldedIntoALaterApplyDropsTheReplayThatPredatesIt() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+            let lineBeforeTheClear = try XCTUnwrap(
+                Self.transcriptLineNumber(of: Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))))
+            XCTAssertLessThan(lineBeforeTheClear, 400, "setup: the gesture must be reading the history printed before the clear")
+
+            // Back to the session's own screen, so the replay is cached rather than on screen when the
+            // other client's clear arrives.
+            await model.scrollToBottom()
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "setup: the phone is back on the session's own screen")
+
+            // The daemon performs the other client's clear, appends it to the transcript so anyone
+            // replaying those bytes reproduces it, and the session prints its next prompt under it.
+            await transcript.append(Data("\u{001B}[H\u{001B}[2J\u{001B}[3J".utf8))
+            await transcript.append(Self.numberedTranscript(lineCount: 200, startingAt: 900_000))
+
+            // The apply that replaced the `.clearScreen` broadcast: a full frame under a reason that says
+            // nothing about a clear, carrying the folded-away payload's reason.
+            let survivor = try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, reason: .stateChange)
+            let stored = try XCTUnwrap(model.latestState).merged(with: survivor)
+            model.applyReducedStateForTesting(
+                TerminalRemoteStateReductionOutput(
+                    incomingPayload: survivor,
+                    reduction: TerminalRemoteStateReductionResult(
+                        payload: survivor, storedPayload: stored, decodedUpdate: nil, frameToApply: nil, dropReason: nil, didRequestResync: false),
+                    reduceMS: 0, coalescedAwayCount: 1, coalescedReasons: [TerminalRemoteSessionStateReason.clearScreen.rawValue]))
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the gesture after the clear to paint a replay") { model.isShowingLocalScrollFrame }
+            let readsAfterTheClear = await Self.transcriptRequests(in: recorder.snapshot()).count
+            XCTAssertEqual(readsAfterTheClear, 2, "the folded-away clear must leave the phone reading the transcript again")
+            // The whole history the replay holds is what the session printed after the clear: the same
+            // flick carries on far up, and it never reaches a row the clear removed.
+            model.sendScroll(horizontal: 0, vertical: 30, scrollMods: 0, pointerPosition: nil)
+            let lineAfterTheClear = try XCTUnwrap(
+                Self.transcriptLineNumber(of: Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))))
+            XCTAssertGreaterThanOrEqual(
+                lineAfterTheClear, 900_000, "the rows the clear removed came back from the replay read before it: line \(lineAfterTheClear)")
+        }
+
+        /// Leaving the replay rewinds it to its newest row, so the gesture after a jump to the bottom
+        /// starts at the session's live bottom. A replay left parked where the previous gesture ended
+        /// would answer the next one's first delta out of the history the user already left, dragging
+        /// them back into it.
+        func testTheJumpToTheBottomRewindsTheReplayForTheNextGesture() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntil("the page to be replayed") { model.hasReadyLocalScrollbackForTesting }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 1, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+            let oneStepAboveTheBottom = Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))
+
+            // The same flick carries on far up into the history.
+            model.sendScroll(horizontal: 0, vertical: 30, scrollMods: 0, pointerPosition: nil)
+            let deepInTheHistory = Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))
+            XCTAssertNotEqual(deepInTheHistory, oneStepAboveTheBottom, "setup: the flick must end well above the rows it started on")
+
+            await model.scrollToBottom()
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "the jump returns the phone to the session's own screen")
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 1, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the gesture after the jump to paint the replay") { model.isShowingLocalScrollFrame }
+            XCTAssertEqual(
+                Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot)), oneStepAboveTheBottom,
+                "a gesture after the jump scrolls one step up from the live bottom, not from the region the previous gesture ended in")
+        }
+
+        /// Typing leaves the replay the same way the jump does, so the gesture after a keystroke also
+        /// starts at the session's live bottom rather than in the history the previous gesture ended in.
+        func testTypingRewindsTheReplayForTheNextGesture() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntil("the page to be replayed") { model.hasReadyLocalScrollbackForTesting }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 1, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+            let oneStepAboveTheBottom = Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))
+            model.sendScroll(horizontal: 0, vertical: 30, scrollMods: 0, pointerPosition: nil)
+            XCTAssertNotEqual(
+                Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot)), oneStepAboveTheBottom,
+                "setup: the flick must end well above the rows it started on")
+
+            await model.sendKey("a")
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "input must leave the local screen at once")
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 1, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the gesture after the keystroke to paint the replay") { model.isShowingLocalScrollFrame }
+            XCTAssertEqual(
+                Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot)), oneStepAboveTheBottom,
+                "a gesture after a keystroke scrolls one step up from the live bottom, not from the region the previous gesture ended in")
+        }
+
+        /// The same rewind is owed when the reader leaves while a continuation page is installing. The
+        /// replay is off the main actor for that append, so the leave cannot rewind it where it stands and
+        /// records the rewind instead; the install pays it. Without that, the replay comes back parked at
+        /// the offset the interrupted gesture ended in and the next gesture jumps straight back into
+        /// history the reader already left.
+        func testAJumpToTheBottomWhileAPageInstallsStillRewindsTheReplay() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let heldContinuation = TranscriptReadGate()
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript, pageReadGate: heldContinuation)
+            defer { model.stop() }
+            await waitUntil("the page to be replayed") { model.hasReadyLocalScrollbackForTesting }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 1, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+            let oneStepAboveTheBottom = Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))
+            // The same flick carries on far up into the history, which is the offset the replay must not
+            // come back parked at.
+            model.sendScroll(horizontal: 0, vertical: 10, scrollMods: 0, pointerPosition: nil)
+            let deepInTheHistory = Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))
+            XCTAssertNotEqual(deepInTheHistory, oneStepAboveTheBottom, "setup: the flick must end well above the rows it started on")
+
+            // The session prints while the reader is up there, so the next gesture owes a continuation read.
+            // It prints enough to make the replay's own append of those bytes a measurable piece of work,
+            // which is the window this test drives the jump into.
+            let printedLineCount = 20_000
+            await transcript.append(Self.numberedTranscript(lineCount: printedLineCount, startingAt: 400))
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, outputEndByteOffset: 1), isOutOfBand: false)
+
+            model.noteScrollGestureBegan()
+            await waitUntilAsync("the gesture to start its continuation read") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+            await heldContinuation.release()
+
+            // The replay leaves `.ready` for exactly as long as the install owns it off the main actor,
+            // which is where the jump has to land for this to be about anything.
+            await waitUntilYielding("the page to take the replay off the main actor") { !model.hasReadyLocalScrollbackForTesting }
+            await model.scrollToBottom()
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "the jump returns the phone to the session's own screen")
+
+            let grownTranscript = UInt64(await transcript.byteCount())
+            await waitUntil("the continuation to install") { model.localScrollbackTranscriptEndForTesting == grownTranscript }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 1, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the gesture after the jump to paint the replay") { model.isShowingLocalScrollFrame }
+            // One step above the live bottom is the line the first gesture reached, carried down by
+            // everything the session printed since.
+            let firstStepLine = try XCTUnwrap(Self.transcriptLineNumber(of: oneStepAboveTheBottom))
+            let lineAfterTheJump = try XCTUnwrap(
+                Self.transcriptLineNumber(of: Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))))
+            XCTAssertEqual(
+                lineAfterTheJump, firstStepLine + printedLineCount,
+                "a gesture after the jump scrolls one step up from the live bottom, not from the region the interrupted gesture ended in")
+        }
+
+        /// The deeper page a gesture reads when it runs past the replay's oldest row restores the viewport
+        /// itself as it installs, so a leave while that read is on the wire is the same case as a leave
+        /// during a continuation: the rewind is recorded, and the install applies it rather than parking
+        /// the replay at the oldest row the interrupted gesture reached.
+        func testAJumpToTheBottomWhileTheDeeperPageIsOnTheWireStillRewindsTheReplay() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            // Larger than the first page, so running past its oldest row has the rest of the history to read.
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 95_000))
+            let heldDeeperPage = TranscriptReadGate()
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript, pageReadGate: heldDeeperPage)
+            defer { model.stop() }
+            await waitUntil("the page to be replayed", timeout: .seconds(30)) { model.hasReadyLocalScrollbackForTesting }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 1, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+            let oneStepAboveTheBottom = Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))
+
+            // The same flick carries on past the oldest row the first page holds, which reads the rest of
+            // the history at the whole budget. The gate holds that read on the wire.
+            model.sendScroll(horizontal: 0, vertical: 40_000, scrollMods: 0, pointerPosition: nil)
+            await waitUntilAsync("the deeper read", timeout: .seconds(30)) { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+            XCTAssertNotEqual(
+                Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot)), oneStepAboveTheBottom,
+                "setup: the flick must end well above the rows it started on")
+
+            await model.scrollToBottom()
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "the jump returns the phone to the session's own screen")
+
+            await heldDeeperPage.release()
+            await waitUntil("the deeper page to be replayed", timeout: .seconds(30)) { model.hasReadyLocalScrollbackForTesting }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 1, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the gesture after the jump to paint the replay") { model.isShowingLocalScrollFrame }
+            XCTAssertEqual(
+                Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot)), oneStepAboveTheBottom,
+                "a gesture after the jump scrolls one step up from the live bottom, not from the oldest row the interrupted gesture reached")
+        }
+
+        /// A live session can be ahead of its own output: the first frame paints before the child has
+        /// written a byte, and the prefetch reads an empty transcript. That says nothing about the rest of
+        /// the run, so nothing is replayed and the next gesture reads again, once, and scrolls into the
+        /// history that arrived meanwhile. The frames in between must not each pay for a read of their own.
+        func testAnEmptyFirstReadOfALiveSessionIsRetriedByTheNextGesture() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Data())
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+            // Let the empty read finish installing whatever it is going to install before reading the state.
+            try await Task.sleep(for: .milliseconds(200))
+            XCTAssertFalse(model.hasReadyLocalScrollbackForTesting, "a session that has written nothing yet has nothing to replay")
+
+            await transcript.append(Self.numberedTranscript(lineCount: 400))
+            _ = await model.applyLatestState(try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2), isOutOfBand: false)
+            try await Task.sleep(for: .milliseconds(200))
+            let readsBeforeTheGesture = await Self.transcriptRequests(in: recorder.snapshot()).count
+            XCTAssertEqual(readsBeforeTheGesture, 1, "the frame that carried the output must not read again; the retry belongs to the next gesture")
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("one gesture to scroll into the history that arrived", timeout: .seconds(10)) { model.isShowingLocalScrollFrame }
+        }
+
+        /// An ended session's transcript is complete, so an empty one means that run wrote nothing and
+        /// never will. The verdict is latched: no later gesture reads again, and the pane absorbs the
+        /// gestures rather than moving the session's own viewport.
+        func testAnEmptyTranscriptForAnEndedSessionIsNeverReadAgain() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Data())
+            let bridgeClient = Self.transcriptServingClient(settings: settings(), recorder: recorder, transcript: transcript)
+            let model = TerminalViewerModel(
+                session: session(state: .exited), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:31Z", state: .exited, exitedAt: "2026-06-04T14:23:31Z"), isOutOfBand: false)
+            await waitUntilAsync("the frozen frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+            try await Task.sleep(for: .milliseconds(200))
+            XCTAssertFalse(model.hasReadyLocalScrollbackForTesting, "a run that wrote nothing has nothing to replay")
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            try await Task.sleep(for: .milliseconds(200))
+            let reads = await Self.transcriptRequests(in: recorder.snapshot()).count
+            XCTAssertEqual(reads, 1, "an ended run's empty transcript is complete, so no later gesture reads it again")
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "there is no replay to paint")
+            let wheelCount = await recorder.countTerminalControlAction(.scroll)
+            XCTAssertEqual(wheelCount, 0, "a gesture with no replay to scroll is absorbed, never sent to the daemon")
+        }
+
+        /// An ended session whose run never wrote an `output.log` at all is answered with
+        /// `.sessionNotAvailable` rather than an empty page. That is the same verdict, and the client maps
+        /// it to the same empty read, so it latches: no later gesture pays for the read again.
+        func testAMissingTranscriptFileForAnEndedSessionIsNeverReadAgain() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = Self.transcriptRefusingClient(settings: settings(), recorder: recorder, errorCode: .sessionNotAvailable)
+            let model = TerminalViewerModel(
+                session: session(state: .exited), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:31Z", state: .exited, exitedAt: "2026-06-04T14:23:31Z"), isOutOfBand: false)
+            await waitUntilAsync("the frozen frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+            try await Task.sleep(for: .milliseconds(200))
+            XCTAssertFalse(model.hasReadyLocalScrollbackForTesting, "a run with no transcript file has nothing to replay")
+
+            for _ in 0..<3 {
+                model.noteScrollGestureBegan()
+                model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            }
+            try await Task.sleep(for: .milliseconds(200))
+            let reads = await Self.transcriptRequests(in: recorder.snapshot()).count
+            XCTAssertEqual(reads, 1, "the daemon's `there is nothing to replay` is a verdict, not a read to try again")
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "there is no replay to paint")
+            let wheelDeltas = await recorder.countTerminalControlAction(.scroll)
+            XCTAssertEqual(wheelDeltas, 0, "a gesture with no replay to scroll is absorbed, never sent to the daemon")
+        }
+
+        /// The same refusal on a live session says only that the child has not written yet: the rest of
+        /// the run is still ahead of it, so the read stays retryable and the next gesture asks again. The
+        /// frames in between must not each pay for a read of their own.
+        func testAMissingTranscriptFileForALiveSessionIsRetriedByTheNextGesture() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = Self.transcriptRefusingClient(settings: settings(), recorder: recorder, errorCode: .sessionNotAvailable)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            _ = await model.applyLatestState(try Self.liveScreenState(emittedAt: "2026-06-04T14:23:31Z"), isOutOfBand: false)
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, outputEndByteOffset: 1), isOutOfBand: false)
+            try await Task.sleep(for: .milliseconds(200))
+            let readsBeforeTheGesture = await Self.transcriptRequests(in: recorder.snapshot()).count
+            XCTAssertEqual(readsBeforeTheGesture, 1, "the frame that carried the output must not read again; the retry belongs to the next gesture")
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntilAsync("the next gesture to read again") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+        }
+
+        /// That retryable verdict still ends the gesture that read it. An empty read leaves the state the
+        /// next gesture retries from, so the rest of the pan or its momentum would each start another read
+        /// of a transcript the child has not written yet, which is exactly where a live session is right
+        /// after its first frame paints. Only a fresh gesture asks again.
+        func testAnEmptyGestureReadAbsorbsTheRestOfThatGesture() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = Self.transcriptRefusingClient(settings: settings(), recorder: recorder, errorCode: .sessionNotAvailable)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            _ = await model.applyLatestState(try Self.liveScreenState(emittedAt: "2026-06-04T14:23:31Z"), isOutOfBand: false)
+            // The first painted frame's prefetch comes back empty too. It belongs to no gesture, so it
+            // cancels none: the flick below still gets a read of its own.
+            await waitUntilAsync("the first frame's prefetch to come back empty") {
+                await Self.transcriptRequests(in: recorder.snapshot()).count == 1
+            }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntilAsync("the gesture to start a read of its own") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+            // Let the empty read land before the rest of the flick arrives, so the deltas below are
+            // absorbed by the cancelled gesture rather than parked on a load still in flight.
+            try await Task.sleep(for: .milliseconds(200))
+            for _ in 0..<5 { model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil) }
+            try await Task.sleep(for: .milliseconds(200))
+            let readsAfterTheFlick = await Self.transcriptRequests(in: recorder.snapshot()).count
+            XCTAssertEqual(readsAfterTheFlick, 2, "the rest of the flick is absorbed rather than starting a read per delta")
+            let wheelDeltas = await recorder.countTerminalControlAction(.scroll)
+            XCTAssertEqual(wheelDeltas, 0, "the absorbed deltas are not sent to the daemon either")
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntilAsync("the next gesture to retry the read") { await Self.transcriptRequests(in: recorder.snapshot()).count == 3 }
+        }
+
+        /// A transcript read a gesture started can fail fast: a refused connection, a rejected token, a
+        /// daemon erroring out. The gesture that asked for it is still delivering deltas (the finger is
+        /// down, or its momentum is running), and each one would start another read that fails the same
+        /// way, so one flick would pay for a burst of them. The failure cancels the gesture instead, and
+        /// only a fresh gesture retries.
+        func testAFailedGestureReadAbsorbsTheRestOfThatGesture() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = Self.transcriptRefusingClient(settings: settings(), recorder: recorder, errorCode: .internalError)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            _ = await model.applyLatestState(try Self.liveScreenState(emittedAt: "2026-06-04T14:23:31Z"), isOutOfBand: false)
+            // The first painted frame's prefetch fails too. It belongs to no gesture, so it cancels none:
+            // the flick below still gets its own read.
+            await waitUntilAsync("the first frame's prefetch to be refused") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntilAsync("the gesture to start a read of its own") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+            // Let the refusal land before the rest of the flick arrives, so the deltas below are absorbed by
+            // the cancelled gesture rather than parked on a load still in flight. The retry at the end is
+            // what proves they were: a read only starts from the retryable state the failure left.
+            try await Task.sleep(for: .milliseconds(200))
+            for _ in 0..<5 { model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil) }
+            try await Task.sleep(for: .milliseconds(200))
+            let readsAfterTheFlick = await Self.transcriptRequests(in: recorder.snapshot()).count
+            XCTAssertEqual(readsAfterTheFlick, 2, "the rest of the flick is absorbed rather than starting a read per delta")
+            let wheelDeltas = await recorder.countTerminalControlAction(.scroll)
+            XCTAssertEqual(wheelDeltas, 0, "the absorbed deltas are not sent to the daemon either")
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntilAsync("the next gesture to retry the read") { await Self.transcriptRequests(in: recorder.snapshot()).count == 3 }
+        }
+
+        /// A rotation, the keyboard, or a split view lands as a frame at a different grid. The replay wraps
+        /// its rows at the grid it was replayed into, so it describes a screen the session no longer has
+        /// and is dropped; the frame that dropped it reads a fresh page at the grid the session now
+        /// carries.
+        func testAGridChangeDropsTheReplayAndReadsAFreshPage() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, columns: 40, rows: 12), isOutOfBand: false)
+
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "a replay wrapped at a grid the session has left cannot stay on screen")
+            await waitUntilAsync("the reflowed grid to read its own page") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+        }
+
+        /// The replay bakes the theme it was built with into every cell it paints, so a light/dark switch,
+        /// which re-themes the session, drops it. The next frame reads a page at the appearance the
+        /// session's own frames carry.
+        func testAnAppearanceChangeDropsTheReplay() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+
+            await model.sendAppearance(.dark)
+            await model.sendAppearance(.light)
+
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "a re-themed session cannot keep a replay painted in the previous palette")
+            XCTAssertFalse(model.hasReadyLocalScrollbackForTesting, "the replay is dropped, not repainted")
+        }
+
+        /// A relaunch truncates `output.log`, so every byte offset the replay holds stops naming the
+        /// content it was read from. The replay is dropped with the run it belonged to.
+        func testARelaunchDropsTheReplay() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+            await waitUntil("the page to be replayed") { model.hasReadyLocalScrollbackForTesting }
+
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:40Z", sessionRevision: 2, childPID: 777), isOutOfBand: false)
+
+            XCTAssertFalse(model.hasReadyLocalScrollbackForTesting, "a replay armed against the previous run holds bytes that no longer exist")
+            await waitUntilAsync("the relaunched run to read its own page") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+        }
+
+        /// A gesture that owes a continuation read must not wait for it. The replay the phone already holds
+        /// keeps scrolling while that page is on the wire, which on a remote or congested link is the
+        /// difference between a flick that moves and one that stalls for a round trip.
+        func testAGestureScrollsWhileTheOutputPrintedSinceIsStillOnTheWire() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let heldContinuation = TranscriptReadGate()
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript, pageReadGate: heldContinuation)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+            await waitUntil("the page to be replayed") { model.hasReadyLocalScrollbackForTesting }
+
+            // The session prints, so the next gesture owes a continuation read.
+            await transcript.append(Self.numberedTranscript(lineCount: 20, startingAt: 400))
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, outputEndByteOffset: 1), isOutOfBand: false)
+
+            model.noteScrollGestureBegan()
+            await waitUntilAsync("the gesture to start its continuation read") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            XCTAssertTrue(model.isShowingLocalScrollFrame, "the rows the replay already holds scroll while its continuation is still on the wire")
+            let rowsUnderTheFinger = Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))
+
+            await heldContinuation.release()
+            let grownTranscript = UInt64(await transcript.byteCount())
+            await waitUntil("the continuation to install") { model.localScrollbackTranscriptEndForTesting == grownTranscript }
+            XCTAssertEqual(
+                Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot)), rowsUnderTheFinger,
+                "output landing below the viewport must not move the rows the finger left on screen")
+            XCTAssertTrue(model.isShowingLocalScrollFrame, "the reader stays in the history they scrolled into")
+        }
+
+        /// A session's process exiting writes no transcript and truncates none, so the replay a reader is
+        /// scrolling survives it. Only a relaunch invalidates the bytes a replay holds.
+        func testTheProcessExitingKeepsTheReplay() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+            await waitUntil("the page to be replayed") { model.hasReadyLocalScrollbackForTesting }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+
+            // The same child process exits, which is a new run identity for the run that is already there,
+            // not a new run. The exit carries whatever the process printed on its way out.
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(
+                    emittedAt: "2026-06-04T14:23:40Z", sessionRevision: 2, childPID: 200, state: .exited, exitedAt: "2026-06-04T14:23:40Z",
+                    outputEndByteOffset: 1), isOutOfBand: false)
+
+            XCTAssertTrue(model.hasReadyLocalScrollbackForTesting, "an exit leaves every byte the replay holds exactly where it was")
+
+            // The ended pane hands the screen back to the session's frozen final frame, and the next
+            // gesture scrolls the very replay it was reading a moment ago.
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            XCTAssertTrue(model.isShowingLocalScrollFrame, "the ended pane scrolls the history it already read")
+            try await Task.sleep(for: .milliseconds(100))
+            let reads = await Self.transcriptRequests(in: recorder.snapshot())
+            XCTAssertEqual(reads.count, 2, "the pane takes in the bytes the session printed as it ended, once")
+            XCTAssertNotNil(reads.last?.fromByteOffset, "it continues the replay it kept rather than reading the history over again")
+        }
+
+        /// A transcript page crosses the link compressed: the daemon deflates it into
+        /// `SpacesDeviceTerminalTranscriptResult.compressedData` and the client inflates it before
+        /// replaying a row of it. The payload here is deflated in the test rather than by a fixture, so a
+        /// client that stopped inflating, or that inflated only the head of the stream, paints rows that
+        /// are not the transcript's and fails here.
+        func testAGestureReplaysRowsFromADeflatedTranscriptPayload() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = Self.numberedTranscript(lineCount: 400)
+            let compressed = try GhosttyRenderUpdateBodyCompression.deflate(transcript)
+            XCTAssertLessThan(compressed.count, transcript.count, "setup: the served payload is really a compressed stream")
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalTranscript = request.command else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "ok",
+                    result: .terminalTranscript(
+                        SpacesDeviceTerminalTranscriptResult(
+                            compressedData: compressed, byteCount: transcript.count, startByteOffset: 0, totalBytes: UInt64(transcript.count),
+                            fileIdentity: 91)))
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            _ = await model.applyLatestState(try Self.liveScreenState(emittedAt: "2026-06-04T14:23:31Z"), isOutOfBand: false)
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+            let topRow = Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))
+            let line = try XCTUnwrap(Self.transcriptLineNumber(of: topRow), "the replayed row must come from the inflated transcript: \(topRow)")
+            XCTAssertLessThan(line, 400, "the row on screen is one of the transcript's own numbered lines")
+        }
+
+        // MARK: Client-local scrollback fixtures
+
+        /// A viewer that owns a live session and has painted one frame at a known grid, which is the state
+        /// every local-scrollback gesture starts from.
+        private static func ownerModelShowingALiveScreen(
+            settings: SpacesMobileConnectionSettings, session: SpacesDeviceTerminalSessionSummary, recorder: DeviceAPIRequestRecorder,
+            transcript: GrowingTranscript, alternateScreenActive: Bool = false, mouseReportingActive: Bool = false,
+            pageReadGate: TranscriptReadGate? = nil, holdInitialPageRead: Bool = false
+        ) async throws -> TerminalViewerModel {
+            let bridgeClient = transcriptServingClient(
+                settings: settings, recorder: recorder, transcript: transcript, pageReadGate: pageReadGate, holdInitialPageRead: holdInitialPageRead)
+            let model = TerminalViewerModel(
+                session: session, settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient
+            )
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            _ = await model.applyLatestState(
+                try liveScreenState(
+                    emittedAt: "2026-06-04T14:23:31Z", alternateScreenActive: alternateScreenActive, mouseReportingActive: mouseReportingActive),
+                isOutOfBand: false)
+            return model
+        }
+
+        private static func transcriptServingClient(
+            settings: SpacesMobileConnectionSettings, recorder: DeviceAPIRequestRecorder, transcript: GrowingTranscript,
+            pageReadGate: TranscriptReadGate? = nil, holdInitialPageRead: Bool = false
+        ) -> SpacesDeviceAPIClient {
+            SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if case .terminalTranscript(let payload) = request.command {
+                    // Recorded before the hold, so a test can see the read the gesture started while it is
+                    // still outstanding. The first painted frame's own prefetch is a page-sized suffix and
+                    // is not held by default: a gate that caught it would stop every test before it had a
+                    // replay. `holdInitialPageRead` opts a test into holding that first read too, for a
+                    // gesture that must be driven while it is still outstanding.
+                    let isGestureRead = payload.fromByteOffset != nil || payload.maxBytes == TerminalScrollbackBudget.defaultMaxBytes
+                    if isGestureRead || holdInitialPageRead, let pageReadGate { await pageReadGate.wait() }
+                    return await transcript.response(for: payload)
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+        }
+
+        /// A client whose transcript reads the daemon refuses, recording each one. `.sessionNotAvailable`
+        /// is the daemon reporting there is no `output.log` to replay, which is a verdict rather than a
+        /// failure; every other code is an ordinary failure the client throws.
+        private static func transcriptRefusingClient(
+            settings: SpacesMobileConnectionSettings, recorder: DeviceAPIRequestRecorder, errorCode: SpacesDeviceErrorCode
+        ) -> SpacesDeviceAPIClient {
+            SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                guard case .terminalTranscript = request.command else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                return SpacesDeviceAPIResponse(ok: false, message: "refused", errorCode: errorCode)
+            }
+        }
+
+        /// The transcript line a replay row came from, read off the numbering `numberedTranscript` writes.
+        /// Parsed out of the row rather than compared as text because a replayed row carries the unwritten
+        /// cells after its content as nul codepoints, which no trim removes.
+        private nonisolated static func transcriptLineNumber(of rowText: String) -> Int? {
+            Int(rowText.drop(while: { !$0.isNumber }).prefix(while: { $0.isNumber }))
+        }
+
+        /// The text of a snapshot's top row, which says which part of the history is on screen.
+        private nonisolated static func topRowText(of snapshot: GhosttyTerminalSnapshot) -> String {
+            String(snapshot.cells.prefix(snapshot.columns).map { Character(UnicodeScalar($0.codepoint) ?? " ") }).trimmingCharacters(in: .whitespaces)
+        }
+
+        /// A payload carrying a full frame at a known grid, plus the runtime state the replay reads the
+        /// session's run identity from.
+        ///
+        /// - Parameter reason: `.initial` by default, the reason a fresh subscriber's own first frame and
+        ///   an out-of-band `.state` read both carry. A caller reproducing another reason's full frame
+        ///   (e.g. `.selection`, broadcast when another viewer's highlight changes) passes it explicitly.
+        /// - Parameter outputEndByteOffset: Nil by default, matching every production reason but
+        ///   `.output` (see `TerminalRemoteSessionStateReason`). A caller standing in for the session
+        ///   having printed passes a value distinct from any earlier one in the same test, the same signal
+        ///   a real `.output` broadcast carries.
+        private nonisolated static func liveScreenState(
+            emittedAt: String, sessionRevision: UInt64 = 1, columns: Int = 20, rows: Int = 8, ownerEpoch: UInt64 = 1,
+            alternateScreenActive: Bool = false, mouseReportingActive: Bool = false, childPID: Int32 = 200, state: TerminalSessionState = .running,
+            exitedAt: String? = nil, reason: TerminalRemoteSessionStateReason = .initial, outputEndByteOffset: Int? = nil
+        ) throws -> GhosttyRemoteSessionStatePayload {
+            let cells = (0..<(columns * rows)).map { _ in
+                GhosttyTerminalSnapshot.Cell(codepoint: 0x20, foregroundRGB: 0xFFFFFF, backgroundRGB: 0x000000, flags: 0)
+            }
+            let snapshot = GhosttyTerminalSnapshot(
+                columns: columns, rows: rows, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
+                defaultBackgroundRGB: 0x000000, cells: cells, mouseReportingActive: mouseReportingActive, alternateScreenActive: alternateScreenActive
+            )
+            let frame = GhosttyRenderFrame(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot)
+            return GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session", reason: reason.rawValue, emittedAt: emittedAt, sessionStateRevision: sessionRevision,
+                sessionStateFlags: 1, screenStateRevision: sessionRevision,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: "terminal-session", servicePID: 100, childPID: childPID, state: state, updatedAt: emittedAt, exitedAt: exitedAt,
+                    columns: columns, rows: rows), attachmentSnapshot: nil, title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0,
+                outputEndByteOffset: outputEndByteOffset, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
+        }
+
+        /// Numbered lines, so a replay's rows say which part of the history they came from. CRLF because a
+        /// bare newline in a terminal moves down without returning to column zero.
+        private nonisolated static func numberedTranscript(lineCount: Int, startingAt firstLine: Int = 0) -> Data {
+            var text = ""
+            text.reserveCapacity(lineCount * 12)
+            for line in firstLine..<(firstLine + lineCount) { text += "L\(String(format: "%08d", line))\r\n" }
+            return Data(text.utf8)
+        }
+
+        private nonisolated static func transcriptRequests(in requests: [SpacesDeviceAPIRequest]) -> [SpacesDeviceTerminalTranscriptRequest] {
+            DeviceAPIRequestRecorder.transcriptRequests(in: requests)
+        }
+
+        /// `waitUntil` for a window that opens and closes inside a single hop off the main actor: it yields
+        /// rather than sleeping, so the condition is read on every turn of the main actor instead of once
+        /// every few milliseconds. A page install holds the replay off the main actor only for as long as
+        /// libghostty-vt takes to replay it, which a sleeping poll steps straight over.
+        private func waitUntilYielding(_ description: String, timeout: Duration = .seconds(5), _ condition: () -> Bool) async {
             let deadline = ContinuousClock().now + timeout
             while ContinuousClock().now < deadline {
-                if await condition() { return }
-                try? await Task.sleep(for: .milliseconds(5))
+                if condition() { return }
+                await Task.yield()
             }
             XCTFail("Timed out waiting for \(description).")
         }

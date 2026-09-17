@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+    import Foundation
     import XCTest
     import spacesdevicecore
     import spacesterminalcore
@@ -131,6 +132,33 @@
         func close() async {}
     }
 
+    /// Records the deadline every request reached the wire with, so a test can assert what the client
+    /// sized it to.
+    private actor TimeoutRecordingTransport: SpacesDeviceAPIRequestTransport {
+        private(set) var seenTimeouts: [Duration] = []
+
+        func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+            seenTimeouts.append(timeout)
+            return SpacesDeviceAPIResponse(
+                ok: true, message: "ok",
+                result: .terminalTranscript(
+                    SpacesDeviceTerminalTranscriptResult(compressedData: Data(), byteCount: 0, startByteOffset: 0, totalBytes: 0, fileIdentity: 91)))
+        }
+
+        func close() async {}
+    }
+
+    private struct TimeoutRecordingBackend: SpacesDeviceAPIBackend {
+        let transport: TimeoutRecordingTransport
+
+        func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { transport }
+
+        func openSessionStream(
+            request: SpacesDeviceAPIRequest, initialEventTimeout: Duration, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+            onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
+        ) async throws -> SpacesDeviceAPIStreamHandle { SpacesDeviceAPIStreamHandle {} }
+    }
+
     private struct StubDeviceAPIBackend: SpacesDeviceAPIBackend {
         let recorder: StubDeviceAPIRequestRecorder
         let respond: @Sendable (SpacesDeviceAPIRequest) -> SpacesDeviceAPIResponse
@@ -166,6 +194,62 @@
             }
         ) -> StubDeviceAPIBackend {
             StubDeviceAPIBackend(recorder: recorder, respond: respond, subscribeRequestBox: subscribeRequestBox, streamPayload: streamPayload)
+        }
+
+        /// A transcript page's deadline is sized from the page it asks for, not fixed: a first page is
+        /// `initialLocalScrollbackPageBytes` and the deepest page the daemon serves is the whole
+        /// `defaultMaxBytes` budget, ten times larger, so one number would either cut the deep page off or
+        /// leave a shallow one hanging. The floor throughput is applied to the raw page size, which is
+        /// deliberately generous for what actually crosses the link: the page travels as a base64-encoded
+        /// DEFLATE stream, and terminal output compresses far more than base64's one-third expansion costs.
+        func testATranscriptPageDeadlineCoversItsOwnBytesAtTheFloorThroughput() async throws {
+            let transport = TimeoutRecordingTransport()
+            let client = SpacesDeviceAPIClient(settings: settings(), backend: TimeoutRecordingBackend(transport: transport))
+
+            _ = try await client.terminalTranscript(sessionID: "terminal-session", maxBytes: TerminalScrollbackBudget.initialLocalScrollbackPageBytes)
+            _ = try await client.terminalTranscript(sessionID: "terminal-session", maxBytes: TerminalScrollbackBudget.defaultMaxBytes)
+
+            let seenTimeouts = await transport.seenTimeouts
+            XCTAssertEqual(seenTimeouts.count, 2)
+            // Bracketed rather than compared exactly: the channel spends whatever of the deadline its own
+            // gate wait took before handing the rest to the transport, which shaves a fraction of a
+            // millisecond off what is recorded here.
+            //
+            // 1 MB at 64 KB/s is 16 whole seconds on top of the fixed ten-second allowance.
+            XCTAssertGreaterThan(seenTimeouts[0], .seconds(25), "a first page gets the round trip's allowance plus its own bytes")
+            XCTAssertLessThanOrEqual(seenTimeouts[0], .seconds(26), "a first page is not given more than its own bytes need at the floor")
+            // 10 MB at 64 KB/s is 153 whole seconds.
+            XCTAssertGreaterThan(seenTimeouts[1], .seconds(162), "the deepest page the daemon serves gets the whole time its bytes need")
+            XCTAssertLessThanOrEqual(seenTimeouts[1], .seconds(163), "the deepest page is not given more than its own bytes need at the floor")
+        }
+
+        /// A session with no `output.log` is refused with `.sessionNotAvailable`, which is the daemon
+        /// saying there is nothing to replay rather than asking for the read to be tried again. The client
+        /// maps it to an empty transcript, the same read an existing-but-empty transcript produces, so the
+        /// viewer latches it on an ended session and retries on the next gesture on a live one. Every other
+        /// refusal keeps throwing, because those are transient.
+        func testAMissingTranscriptFileReadsAsAnEmptyTranscriptRatherThanAnError() async throws {
+            let client = SpacesDeviceAPIClient(
+                settings: settings(),
+                backend: backend(respond: { _ in
+                    SpacesDeviceAPIResponse(
+                        ok: false, message: "Terminal session 'terminal-session' has no output yet.", errorCode: .sessionNotAvailable)
+                }))
+
+            let transcript = try await client.terminalTranscript(sessionID: "terminal-session", maxBytes: 1024)
+            XCTAssertEqual(transcript.byteCount, 0, "nothing was read")
+            XCTAssertTrue(transcript.compressedData.isEmpty)
+            XCTAssertEqual(transcript.startByteOffset, 0)
+            XCTAssertEqual(transcript.totalBytes, 0)
+            XCTAssertNil(transcript.runIdentity, "an error response names no run")
+
+            let refusingClient = SpacesDeviceAPIClient(
+                settings: settings(),
+                backend: backend(respond: { _ in SpacesDeviceAPIResponse(ok: false, message: "read failed", errorCode: .internalError) }))
+            do {
+                _ = try await refusingClient.terminalTranscript(sessionID: "terminal-session", maxBytes: 1024)
+                XCTFail("a refusal that is not `.sessionNotAvailable` must throw, so the caller treats it as transient")
+            } catch {}
         }
 
         func testOneShotRequestRoutesThroughBackendTransport() async throws {

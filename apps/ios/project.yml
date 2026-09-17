@@ -49,6 +49,92 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Info.plist
         DEVELOPMENT_ASSET_PATHS: ""
+        # libghostty-vt, linked into the app. The daemon and the Mac app dlopen the shared library next
+        # to their binary at runtime; iOS cannot dlopen a library outside the app bundle, so the phone
+        # links the xcframework's iOS slice into the app image and `ghosttyvtshim` resolves its symbols
+        # there (see SPACES_GHOSTTY_VT_STATIC_LINK in ghosttyvtshim.c).
+        # The Ghostty artifact set ships arm64-only iOS slices, so the simulator build links on Apple
+        # Silicon only (CI runs on macos-15 Apple Silicon runners) and the x86_64 simulator slice is
+        # excluded rather than left to fail on an archive that has no x86_64 members. An Intel-hosted
+        # simulator build needs an x86_64 simulator slice in the artifact; that is a Ghostty artifact
+        # build change, not an app setting.
+        EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
+        GHOSTTY_VT_LIBRARY[sdk=iphonesimulator*]: "$(SRCROOT)/../macos/.local/ghosttyvt/lib/ghostty-vt.xcframework/ios-arm64-simulator/libghostty-vt-fat.a"
+        GHOSTTY_VT_LIBRARY[sdk=iphoneos*]: "$(SRCROOT)/../macos/.local/ghosttyvt/lib/ghostty-vt.xcframework/ios-arm64/libghostty-vt-fat.a"
+        # `-force_load` pulls every member of the archive in, because nothing on the Swift side
+        # references them. `-u` then names each one a dead-strip root. Both are needed and neither
+        # substitutes for the other: this flag is the archive's only appearance on the link line, so
+        # without `-force_load` the members are never loaded and the roots below are plain undefined
+        # symbols; and without `-u` the dead-code stripping that Release and archive builds enable
+        # removes every one of them again (a Release executable relinked without these roots drops all
+        # of them from its export trie), leaving a shipped app whose `dlsym` lookups all fail and whose
+        # scrollback replay never runs.
+        # Pulling the whole archive in is safe beside GhosttyKit's `libghostty-internal.a`, which
+        # embeds the same upstream support objects (wuffs, simdutf, highway, compiler-rt) under the
+        # same member names. Each of those members defines an identical set of strong external symbols
+        # in both archives, so once the force-loaded copies are in there is nothing left for the linker
+        # to pull GhosttyKit's copies for, and the `__ubsan_handle_*` and `memset` definitions the two
+        # appear to share are private external in both, which the linker scopes to the object file that
+        # defines them. Neither archive defines the other's entry points: GhosttyKit's iOS slice carries
+        # the embedded-app API, not the `libghostty-vt` API this list names.
+        # The shim resolves these by name, which is not a reference any linker can see, so this list is
+        # the reference. Keep it in step with the symbols `spaces_ghostty_vt_load_symbols` binds. The two
+        # names its ABI-generation probe looks for belong to a library generation this build rejects, so
+        # they stay off this list: naming a symbol the archive does not define fails the link.
+        OTHER_LDFLAGS:
+          - "-Wl,-force_load,$(GHOSTTY_VT_LIBRARY)"
+          - "-Wl,-u,_ghostty_terminal_new"
+          - "-Wl,-u,_ghostty_terminal_free"
+          - "-Wl,-u,_ghostty_terminal_vt_write"
+          - "-Wl,-u,_ghostty_terminal_scroll_viewport"
+          - "-Wl,-u,_ghostty_terminal_resize"
+          - "-Wl,-u,_ghostty_terminal_get"
+          - "-Wl,-u,_ghostty_terminal_set"
+          - "-Wl,-u,_ghostty_paste_encode"
+          - "-Wl,-u,_ghostty_key_encoder_new"
+          - "-Wl,-u,_ghostty_key_encoder_free"
+          - "-Wl,-u,_ghostty_key_encoder_setopt_from_terminal"
+          - "-Wl,-u,_ghostty_key_encoder_encode"
+          - "-Wl,-u,_ghostty_key_event_new"
+          - "-Wl,-u,_ghostty_key_event_free"
+          - "-Wl,-u,_ghostty_key_event_set_action"
+          - "-Wl,-u,_ghostty_key_event_set_key"
+          - "-Wl,-u,_ghostty_key_event_set_mods"
+          - "-Wl,-u,_ghostty_key_event_set_utf8"
+          - "-Wl,-u,_ghostty_key_event_set_unshifted_codepoint"
+          - "-Wl,-u,_ghostty_mouse_encoder_new"
+          - "-Wl,-u,_ghostty_mouse_encoder_free"
+          - "-Wl,-u,_ghostty_mouse_encoder_setopt"
+          - "-Wl,-u,_ghostty_mouse_encoder_setopt_from_terminal"
+          - "-Wl,-u,_ghostty_mouse_encoder_encode"
+          - "-Wl,-u,_ghostty_mouse_event_new"
+          - "-Wl,-u,_ghostty_mouse_event_free"
+          - "-Wl,-u,_ghostty_mouse_event_set_action"
+          - "-Wl,-u,_ghostty_mouse_event_set_button"
+          - "-Wl,-u,_ghostty_mouse_event_set_mods"
+          - "-Wl,-u,_ghostty_mouse_event_set_position"
+          - "-Wl,-u,_ghostty_formatter_terminal_new"
+          - "-Wl,-u,_ghostty_formatter_format_alloc"
+          - "-Wl,-u,_ghostty_formatter_free"
+          - "-Wl,-u,_ghostty_free"
+          - "-Wl,-u,_ghostty_render_state_new"
+          - "-Wl,-u,_ghostty_render_state_free"
+          - "-Wl,-u,_ghostty_render_state_update"
+          - "-Wl,-u,_ghostty_render_state_get"
+          - "-Wl,-u,_ghostty_render_state_row_iterator_new"
+          - "-Wl,-u,_ghostty_render_state_row_iterator_free"
+          - "-Wl,-u,_ghostty_render_state_row_iterator_next"
+          - "-Wl,-u,_ghostty_render_state_row_get"
+          - "-Wl,-u,_ghostty_render_state_row_cells_new"
+          - "-Wl,-u,_ghostty_render_state_row_cells_free"
+          - "-Wl,-u,_ghostty_render_state_row_cells_next"
+          - "-Wl,-u,_ghostty_render_state_row_cells_get"
+          - "-Wl,-u,_ghostty_cell_get"
+          - "-Wl,-u,_ghostty_row_get"
+          - "-Wl,-u,_ghostty_terminal_grid_ref"
+          - "-Wl,-u,_ghostty_terminal_point_from_grid_ref"
+          - "-Wl,-u,_ghostty_terminal_selection_format_alloc"
+          - "-Wl,-u,_ghostty_terminal_take_render_scroll_rects"
     dependencies:
       - package: SpacesPackage
         product: spacesdevicecore

@@ -180,10 +180,10 @@
             self.sessionID = sessionID
             self.clientApp = clientApp
             certificateFingerprint = preparedCredentials.certificateFingerprint
+            let resolver = SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: preparedCredentials.certificateFingerprint)
             requestClientBox = DeviceAPIRequestClientBox(
-                try SpacesDeviceAPIRequestSessionClient(
-                    resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: preparedCredentials.certificateFingerprint)),
-                authToken: preparedCredentials.authToken)
+                try SpacesDeviceAPIRequestSessionClient(resolver: resolver),
+                transcriptClient: try SpacesDeviceAPIRequestSessionClient(resolver: resolver), authToken: preparedCredentials.authToken)
             currentLaunchConfiguration = launchConfiguration
             currentRuntimeState = initialRuntimeState
             // Seed the owner from the overview so an owner-seeking open sees the existing
@@ -213,6 +213,7 @@
             graceTask?.cancel()
             linkCorroborationProbe?.task.cancel()
             requestClientBox.current.client.cancel()
+            requestClientBox.currentTranscript.client.cancel()
             let attempts = Array(connectAttempts.values)
             MainThreadDeinitCleanup.run {
                 for attempt in attempts {
@@ -298,9 +299,11 @@
             }.value
         }
 
-        /// Fetches a suffix of the session's persisted output transcript for the render host's
-        /// client-local ended-session scrollback replay. Read-only; routes through the owning device's
-        /// Device API endpoint like every other request, so it serves local and remote sessions alike.
+        /// Reads a range of the session's persisted output transcript for the render host's client-local
+        /// scrollback replay. Read-only; routes through the owning device's Device API endpoint like every
+        /// other request, so it serves local and remote sessions alike. `fromByteOffset` and
+        /// `fileIdentity` ask for a continuation of a replay the host already holds; without them the
+        /// daemon serves the newest `maxBytes` as a replayable suffix.
         ///
         /// This is the only request path an ended session still exercises, so — unlike every other request
         /// path — it recovers a dead local endpoint itself. `scheduleReconnect` bails for a non-interactive
@@ -310,8 +313,8 @@
         /// daemon's current endpoint through `ensureLocalDeviceReachableForRetry` (which swings the shared
         /// box) and retries the send once; any other failure, or a failed recovery, rethrows the original
         /// error. No other request path gets this recovery — the stream side owns it for interactive sessions.
-        func fetchTranscript(maxBytes: Int) async throws -> RemoteGhosttyTranscript {
-            do { return try await sendTranscriptRequest(maxBytes: maxBytes) } catch {
+        func fetchTranscript(maxBytes: Int, fromByteOffset: UInt64? = nil, fileIdentity: UInt64? = nil) async throws -> RemoteGhosttyTranscript {
+            do { return try await sendTranscriptRequest(maxBytes: maxBytes, fromByteOffset: fromByteOffset, fileIdentity: fileIdentity) } catch {
                 // A certificate pin mismatch is accepted as a recovery trigger here, unlike everywhere else.
                 // `isLocalDaemonUnreachableError` deliberately excludes pin mismatch because for a REMOTE
                 // device a rotated identity can only be re-established by re-pairing. For the LOCAL device it
@@ -336,20 +339,24 @@
                     isLocalPinMismatch || isLocalUnauthorizedRejection || SpacesDeviceClient.isLocalDaemonUnreachableError(error),
                     await ensureLocalDeviceReachableForRetry()
                 else { throw error }
-                return try await sendTranscriptRequest(maxBytes: maxBytes)
+                return try await sendTranscriptRequest(maxBytes: maxBytes, fromByteOffset: fromByteOffset, fileIdentity: fileIdentity)
             }
         }
 
-        /// Off-main transcript send against the box's current client and token. Factored out so
-        /// `fetchTranscript`'s try/recover/retry reads as one flow.
-        private func sendTranscriptRequest(maxBytes: Int) async throws -> RemoteGhosttyTranscript {
+        /// Off-main transcript send against the box's transcript client and current token. Factored out so
+        /// `fetchTranscript`'s try/recover/retry reads as one flow. Deliberately the transcript client
+        /// rather than the control one: a transcript page is a multi-megabyte read that holds its client's
+        /// request lock for as long as the link takes to deliver it, and typed input must never queue
+        /// behind one (see `DeviceAPIRequestClientBox`).
+        private func sendTranscriptRequest(maxBytes: Int, fromByteOffset: UInt64?, fileIdentity: UInt64?) async throws -> RemoteGhosttyTranscript {
             let sessionID = self.sessionID
             let clientApp = self.clientApp
             let requestClientBox = self.requestClientBox
             return try await Task.detached(priority: .userInitiated) {
-                let (client, token) = requestClientBox.current
+                let (client, token) = requestClientBox.currentTranscript
                 return try Self.fetchTranscript(
-                    sessionID: sessionID, maxBytes: maxBytes, requestClient: client, authToken: token, clientApp: clientApp)
+                    sessionID: sessionID, maxBytes: maxBytes, fromByteOffset: fromByteOffset, fileIdentity: fileIdentity, requestClient: client,
+                    authToken: token, clientApp: clientApp)
             }.value
         }
 
@@ -358,28 +365,43 @@
         /// in-process `SpacesDeviceAPIServer`; the client is a concrete `final class` with no protocol
         /// seam to fake, so this is the closest faithful integration test of the mapping below.
         nonisolated static func fetchTranscript(
-            sessionID: String, maxBytes: Int, requestClient: SpacesDeviceAPIRequestSessionClient, authToken: String?, clientApp: SpacesDeviceClientApp
+            sessionID: String, maxBytes: Int, fromByteOffset: UInt64? = nil, fileIdentity: UInt64? = nil,
+            requestClient: SpacesDeviceAPIRequestSessionClient, authToken: String?, clientApp: SpacesDeviceClientApp
         ) throws -> RemoteGhosttyTranscript {
             let request = SpacesDeviceAPIRequest(
-                command: .terminalTranscript(SpacesDeviceTerminalTranscriptRequest(sessionID: sessionID, maxBytes: maxBytes)), authToken: authToken,
-                clientApp: clientApp)
-            // The session client's default timeout cannot carry a budget-sized transcript on a
-            // slow remote link; use the shared per-command policy instead.
+                command: .terminalTranscript(
+                    SpacesDeviceTerminalTranscriptRequest(
+                        sessionID: sessionID, maxBytes: maxBytes, fromByteOffset: fromByteOffset.map { Int(clamping: $0) }, fileIdentity: fileIdentity
+                    )), authToken: authToken, clientApp: clientApp)
+            // The session client's default timeout cannot carry a budget-sized transcript on a slow
+            // remote link, so the deadline comes from the shared per-command policy, which sizes a
+            // transcript read from the `maxBytes` this request asks for: a deep-history read gets minutes,
+            // a first page about half a minute.
             let response = try requestClient.send(request, timeoutSeconds: SpacesDeviceClient.requestTimeoutSeconds(for: request.command))
             guard response.ok, let transcript = response.terminalTranscript else {
-                // A missing `output.log` is definitive: the server reports `.sessionNotAvailable`, which
-                // means there is simply nothing to replay. Return an empty transcript so the render host
-                // latches its `.unavailable` verdict instead of retrying the doomed fetch on every scroll
-                // gesture; every other failure stays transient and throws so the host retries. The server
-                // does not report a run identity on the error response, so it is nil here.
-                if response.errorCode == .sessionNotAvailable { return RemoteGhosttyTranscript(data: Data(), runIdentity: nil) }
+                // A missing `output.log` is not a failure to retry through the error path: the server
+                // reports `.sessionNotAvailable`, which means there is nothing to replay. Return an empty
+                // transcript, which the render host reads as the verdict it is: definitive for an ended
+                // session, and a live session that has not written yet, whose next gesture reads again.
+                // Every other failure stays transient and throws so the host retries. The server does not
+                // report a run identity on the error response, so it is nil here.
+                if response.errorCode == .sessionNotAvailable {
+                    return RemoteGhosttyTranscript(data: Data(), startByteOffset: 0, endByteOffset: 0, fileIdentity: nil, runIdentity: nil)
+                }
                 // Preserve the response's error code so the instance-level recovery can recognize an
                 // unauthorized rejection (a revoked local token) and re-bootstrap credentials rather than
                 // retrying the doomed send. A nil code is fine; the render host treats any thrown transcript
                 // error as transient and retries regardless of case.
                 throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
             }
-            return RemoteGhosttyTranscript(data: transcript.data, runIdentity: transcript.runIdentity)
+            // The transcript travels as a raw DEFLATE stream (see `SpacesDeviceTerminalTranscriptResult`);
+            // an empty payload is a read that returned no bytes, which never went through the compressor.
+            let data =
+                transcript.byteCount > 0
+                ? try GhosttyRenderUpdateBodyCompression.inflate(transcript.compressedData, expectedLength: transcript.byteCount) : Data()
+            return RemoteGhosttyTranscript(
+                data: data, startByteOffset: transcript.startByteOffset, endByteOffset: transcript.totalBytes, fileIdentity: transcript.fileIdentity,
+                runIdentity: transcript.runIdentity, isSuffixRebuild: transcript.isSuffixRebuild)
         }
 
         /// State-stream subscriber for the Ghostty render host. Instead of opening a
@@ -815,19 +837,28 @@
                 refreshed.port != previousPort || refreshed.hosts != previousHosts || refreshed.certificateFingerprint != previousFingerprint
             // Rebuild on an endpoint/identity move or a token rotation through one branch — a token-only
             // change rebuilds the client too rather than carrying a special-cased in-place token swap.
-            if endpointOrIdentityChanged || refreshedToken != previousToken,
-                let rebuiltClient = try? SpacesDeviceAPIRequestSessionClient(
-                    resolver: SpacesDeviceEndpointRegistry.resolver(for: refreshed, certificateFingerprint: refreshed.certificateFingerprint))
-            {
-                let previousClient = requestClientBox.replace(with: rebuiltClient, authToken: refreshedToken)
-                // `cancel()` contends with `send()`'s request lock, which an in-flight request against the
-                // stale endpoint can hold for its full timeout — so the previous client must be cancelled
-                // off the main actor.
-                Task.detached(priority: .utility) { previousClient.cancel() }
-                // The stream connect in `openStateStream` reads `certificateFingerprint`, so it must move to
-                // the daemon's current identity too or the retried subscribe would pin-fail.
-                certificateFingerprint = refreshed.certificateFingerprint
-                device = refreshed
+            if endpointOrIdentityChanged || refreshedToken != previousToken {
+                // Both of the box's clients are rebuilt together, from one resolver for the refreshed
+                // record: they address the same daemon under one identity, so a box left holding one
+                // rebuilt and one stale client would send a pane's transcript reads to a dead endpoint
+                // while its controls reached the live one.
+                let resolver = SpacesDeviceEndpointRegistry.resolver(for: refreshed, certificateFingerprint: refreshed.certificateFingerprint)
+                if let rebuiltClient = try? SpacesDeviceAPIRequestSessionClient(resolver: resolver),
+                    let rebuiltTranscriptClient = try? SpacesDeviceAPIRequestSessionClient(resolver: resolver)
+                {
+                    let previous = requestClientBox.replace(with: rebuiltClient, transcriptClient: rebuiltTranscriptClient, authToken: refreshedToken)
+                    // `cancel()` contends with `send()`'s request lock, which an in-flight request against the
+                    // stale endpoint can hold for its full timeout, so the previous clients must be cancelled
+                    // off the main actor.
+                    Task.detached(priority: .utility) {
+                        previous.client.cancel()
+                        previous.transcriptClient.cancel()
+                    }
+                    // The stream connect in `openStateStream` reads `certificateFingerprint`, so it must move to
+                    // the daemon's current identity too or the retried subscribe would pin-fail.
+                    certificateFingerprint = refreshed.certificateFingerprint
+                    device = refreshed
+                }
             }
             return true
         }
@@ -2059,42 +2090,62 @@
         }
     }
 
-    /// Mutable, thread-safe holder for the model's persistent Device API request client and the auth
-    /// token that authenticates its requests.
+    /// Mutable, thread-safe holder for the model's persistent Device API request clients and the auth
+    /// token that authenticates their requests.
     ///
     /// The render host vends request senders (`terminalServiceRequestSender`, and the closures behind
     /// `refreshState`/`pasteImage`/`fetchTranscript`/`reloadCatchUpState`) that run off the main actor and
     /// so cannot read main-actor state at send time. A local endpoint recovery
-    /// (`ensureLocalDeviceReachableForRetry`) rebuilds the request client to target the daemon's current
-    /// port and identity; capturing the client by value would leave those already-vended senders forever
-    /// targeting the cancelled stale-endpoint client. Capturing this box instead and reading `current` at
-    /// send time lets every vended sender observe the rebuilt client.
+    /// (`ensureLocalDeviceReachableForRetry`) rebuilds the request clients to target the daemon's current
+    /// port and identity; capturing a client by value would leave those already-vended senders forever
+    /// targeting the cancelled stale-endpoint client. Capturing this box instead and reading it at send
+    /// time lets every vended sender observe the rebuilt clients.
     ///
-    /// The token is boxed with the client because a local recovery can rotate both: a daemon whose pairing
+    /// The token is boxed with the clients because a local recovery can rotate both: a daemon whose pairing
     /// state was reset mints a fresh token on the next bootstrap, revoking the one captured at init. Storing
     /// them together and reading them as one pair at send time keeps every vended sender authenticating with
     /// the token that belongs to the client it is about to send through.
+    ///
+    /// There are two clients because one client is one lane: `SpacesDeviceAPIRequestSessionClient.send`
+    /// holds its request lock for the whole round trip, so everything sent through a single client is
+    /// serialized behind whatever it is currently carrying. A transcript read is the one request whose size
+    /// makes that matter: the pane's first-frame prefetch, each gesture's continuation, and a full
+    /// scrollback read are megabyte-scale bodies that can occupy their client for seconds on a slow remote
+    /// link. `client` therefore carries the pane's controls and state, and `transcriptClient` carries
+    /// transcript reads alone, so a keystroke never waits out a page of scrollback. The daemon already
+    /// serves `.terminalTranscript` on a lane of its own, so the split holds end to end. Both are built
+    /// from one resolver and replaced together, so the two lanes always address the same daemon under the
+    /// same identity and token.
     final class DeviceAPIRequestClientBox: @unchecked Sendable {
         private let lock = NSLock()
         private var client: SpacesDeviceAPIRequestSessionClient
+        private var transcriptClient: SpacesDeviceAPIRequestSessionClient
         private var authToken: String?
 
-        init(_ client: SpacesDeviceAPIRequestSessionClient, authToken: String?) {
+        init(_ client: SpacesDeviceAPIRequestSessionClient, transcriptClient: SpacesDeviceAPIRequestSessionClient, authToken: String?) {
             self.client = client
+            self.transcriptClient = transcriptClient
             self.authToken = authToken
         }
 
-        /// The current client and its auth token, read together under the lock so a concurrent recovery
-        /// cannot hand back a client paired with the other one's token.
+        /// The current control client and its auth token, read together under the lock so a concurrent
+        /// recovery cannot hand back a client paired with the other one's token.
         var current: (client: SpacesDeviceAPIRequestSessionClient, authToken: String?) { lock.withLock { (client, authToken) } }
 
-        /// Swaps in a new client and its auth token, returning the previous client so the caller can cancel it.
-        @discardableResult func replace(with newClient: SpacesDeviceAPIRequestSessionClient, authToken newAuthToken: String?)
-            -> SpacesDeviceAPIRequestSessionClient
-        {
+        /// The current transcript client and the same auth token, read under the same lock and for the same
+        /// reason. Used only by the transcript fetch path.
+        var currentTranscript: (client: SpacesDeviceAPIRequestSessionClient, authToken: String?) { lock.withLock { (transcriptClient, authToken) } }
+
+        /// Swaps in both clients and their auth token, returning the previous pair so the caller can cancel
+        /// them.
+        @discardableResult func replace(
+            with newClient: SpacesDeviceAPIRequestSessionClient, transcriptClient newTranscriptClient: SpacesDeviceAPIRequestSessionClient,
+            authToken newAuthToken: String?
+        ) -> (client: SpacesDeviceAPIRequestSessionClient, transcriptClient: SpacesDeviceAPIRequestSessionClient) {
             lock.withLock {
-                let previous = client
+                let previous = (client: client, transcriptClient: transcriptClient)
                 client = newClient
+                transcriptClient = newTranscriptClient
                 authToken = newAuthToken
                 return previous
             }

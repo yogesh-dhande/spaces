@@ -62,7 +62,15 @@ final class DeviceTerminalSessionStateModelTranscriptTests: XCTestCase {
 
             let result = try DeviceTerminalSessionStateModel.fetchTranscript(
                 sessionID: sessionID, maxBytes: 1_000_000, requestClient: requestClient, authToken: pairingStore.authToken, clientApp: clientApp)
+            // The transcript travels compressed; the model inflates it and reports where the bytes sit in
+            // `output.log`, which is what a replay continues from.
             XCTAssertEqual(result.data, transcript)
+            XCTAssertEqual(result.startByteOffset, 0, "a transcript returned whole starts at the file's first byte")
+            XCTAssertEqual(result.endByteOffset, UInt64(transcript.count))
+            // The file these bytes came from, which a continuation sends back so a head-trim cannot be
+            // mistaken for an append.
+            let inode = try XCTUnwrap(try FileManager.default.attributesOfItem(atPath: paths.outputPath)[.systemFileNumber] as? Int)
+            XCTAssertEqual(result.fileIdentity, UInt64(inode))
             XCTAssertEqual(result.runIdentity, "77|2026-06-05T00:00:04Z")
             XCTAssertEqual(result.runIdentity, runtimeState.runIdentity)
         }
@@ -78,6 +86,8 @@ final class DeviceTerminalSessionStateModelTranscriptTests: XCTestCase {
                 sessionID: "missing-transcript-session-\(UUID().uuidString)", maxBytes: 1000, requestClient: requestClient,
                 authToken: pairingStore.authToken, clientApp: clientApp)
             XCTAssertTrue(result.data.isEmpty)
+            XCTAssertEqual(result.endByteOffset, 0)
+            XCTAssertNil(result.fileIdentity, "there is no transcript file to continue from")
             XCTAssertNil(result.runIdentity)
         }
     }

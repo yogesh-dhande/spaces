@@ -27,6 +27,15 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         /// `Notification.Name.rawValue` for every notification this apply posts, which is the union
         /// across its own reason and `coalescedReasons`. See `RemoteGhosttySessionHost.postLocalNotifications`.
         let notificationNames: [String]
+        /// The transcript effects both clients' local scrollback reads off an apply: where `output.log`
+        /// ends as of it, whether the session printed, and whether it was cleared. Each is the union of
+        /// this apply's own payload and everything folded into it.
+        let reportedOutputEndByteOffset: Int?
+        let reportsTranscriptOutput: Bool
+        let reportsClearScreen: Bool
+        /// The surviving payload's OWN transcript end, so a test can pin that the reported one above came
+        /// from the fold rather than from the payload that survived it.
+        let incomingOutputEndByteOffset: Int?
     }
 
     private final class OutputCollector: @unchecked Sendable {
@@ -92,7 +101,9 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
                 renderText: output.reduction?.storedPayload.renderText, frameText: output.reduction?.frameToApply.map(frameText),
                 dropReason: output.reduction?.dropReason, didRequestResync: output.reduction?.didRequestResync ?? false,
                 requestsResync: output.requestsResync, coalescedAwayCount: output.coalescedAwayCount, didReduce: output.reduction != nil,
-                coalescedReasons: output.coalescedReasons, notificationNames: output.notificationNames.map(\.rawValue))
+                coalescedReasons: output.coalescedReasons, notificationNames: output.notificationNames.map(\.rawValue),
+                reportedOutputEndByteOffset: output.reportedOutputEndByteOffset, reportsTranscriptOutput: output.reportsTranscriptOutput,
+                reportsClearScreen: output.reportsClearScreen, incomingOutputEndByteOffset: output.incomingPayload.outputEndByteOffset)
         }
 
         /// The frame's first row, which is the only one the fixtures vary.
@@ -361,6 +372,51 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         XCTAssertTrue(
             names.contains(Notification.Name.spacesTerminalRuntimeStateDidChange.rawValue),
             "the collapsed-away runtime_state still owes its consumer a refresh even though it never applies on its own")
+    }
+
+    /// What a collapsed-away payload owes the local-scrollback replay, which neither the survivor's own
+    /// reason nor its own `outputEndByteOffset` can report.
+    ///
+    /// A main actor that falls behind leaves the mailbox folding an `.output` payload (the only reason
+    /// that stamps a transcript end) and a `clear_screen` payload into a later full frame whose reason is
+    /// neither and which stamps no offset at all. Both clients judge "has the session printed since the
+    /// replay was read" and "was the screen cleared under the replay" off the apply, so both facts have to
+    /// survive the fold: without them a replay built before that output never pays for the continuation
+    /// read that would catch it up, and a replay built before that clear keeps showing rows the clear
+    /// removed, with nothing later to heal either.
+    func testTranscriptEffectsOfCoalescedPayloadsSurviveIntoTheApplyThatReplacesThem() async throws {
+        let sessionID = "pipeline-coalesced-transcript-effects"
+        let outputFrame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "one"))
+        let clearFrame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "two"))
+        let survivingFrame = GhosttyRenderFrame(sessionRevision: 3, ownerEpoch: 4, snapshot: snapshot(text: "three"))
+        let payloads = [
+            payload(
+                sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output.rawValue, update: .full(outputFrame),
+                outputEndByteOffset: 4096),
+            payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.clearScreen.rawValue, update: .full(clearFrame)),
+            payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.terminated.rawValue, update: .full(survivingFrame)),
+        ]
+
+        let collector = OutputCollector()
+        let target = ApplyTarget(collector: collector)
+        let probe = SubmitProbe()
+        let pipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) }, didSubmit: { probe.recordSubmission() })
+
+        let release = blockMainThread()
+        for payload in payloads { pipeline.submit(payload) }
+        try await waitUntil("every payload submitted to the mailbox") { probe.submissions == payloads.count }
+        release.signal()
+
+        try await waitUntil("the cascade's single apply landed") { !collector.recorded.isEmpty }
+        try await settle()
+        XCTAssertEqual(collector.recorded.count, 1, "the trailing full frame must collapse both payloads ahead of it")
+        let applied = try XCTUnwrap(collector.recorded.first)
+        XCTAssertEqual(applied.reason, TerminalRemoteSessionStateReason.terminated.rawValue, "setup: the survivor is the payload that stamps neither")
+        XCTAssertNil(applied.incomingOutputEndByteOffset, "setup: the surviving payload must carry no transcript end of its own")
+        XCTAssertEqual(applied.reportedOutputEndByteOffset, 4096, "the collapsed-away output's transcript end must ride onto its replacement")
+        XCTAssertTrue(applied.reportsTranscriptOutput, "the collapsed-away output's reason must still say the session printed")
+        XCTAssertTrue(applied.reportsClearScreen, "the collapsed-away clear must still reach the replay it invalidates")
     }
 
     /// The full-frame collapse rule applies just as much when BOTH the surviving and the collapsed output
@@ -1211,11 +1267,13 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
 
     // MARK: - Payload construction
 
-    private func payload(sessionID: String, sequence: Int, reason: String, update: GhosttyRenderUpdate) -> GhosttyRemoteSessionStatePayload {
+    private func payload(sessionID: String, sequence: Int, reason: String, update: GhosttyRenderUpdate, outputEndByteOffset: Int? = nil)
+        -> GhosttyRemoteSessionStatePayload
+    {
         GhosttyRemoteSessionStatePayload(
             sessionID: sessionID, reason: reason, emittedAt: emittedAt(sequence), sessionStateRevision: UInt64(sequence + 1), sessionStateFlags: 1,
             screenStateRevision: UInt64(sequence + 1), runtimeState: nil, attachmentSnapshot: nil, title: "live", workingDirectory: "/tmp/live",
-            outputByteCount: nil, renderUpdate: try? GhosttyRenderUpdateBinaryCodec.encode(update))
+            outputByteCount: nil, outputEndByteOffset: outputEndByteOffset, renderUpdate: try? GhosttyRenderUpdateBinaryCodec.encode(update))
     }
 
     private func corruptPayload(sessionID: String, sequence: Int) -> GhosttyRemoteSessionStatePayload {

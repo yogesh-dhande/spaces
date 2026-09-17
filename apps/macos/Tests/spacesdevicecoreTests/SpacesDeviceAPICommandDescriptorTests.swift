@@ -13,7 +13,9 @@ import Testing
 ///    lane's two commands (`.agentHooksStatus`, `.installAgentHooks`) are the same grouping a caller
 ///    checks with `lane == .agentHook`; the descriptor carries no separate agent-hook flag.
 ///  - `timeoutSeconds` mirrors the four timeout groupings `SpacesDeviceClient`'s `requestTimeoutSeconds`
-///    switch used to compute directly, deleted from that file in the same change that added the descriptor.
+///    switch used to compute directly, deleted from that file in the same change that added the descriptor,
+///    plus `.terminalTranscript`, whose deadline is derived from the request's `maxBytes` rather than
+///    pinned (see `transcriptTimeoutScalesWithThePageSizeRequested`).
 ///
 /// `expectedLane`/`expectedTimeoutSeconds` below are independent copies of those groupings, not reads of
 /// `SpacesDeviceAPICommandDescriptor`'s own switch, so a descriptor case that silently drifted fails here
@@ -38,6 +40,34 @@ import Testing
         }
     }
 
+    /// A transcript read is the one command whose response size the caller picks, so its deadline has to
+    /// grow with that size: a deep-history read of the whole scrollback budget on a slow remote link cannot
+    /// be held to the deadline a first page needs, or the deepest history stays permanently unreachable.
+    /// Pins the shape of that budget at both ends, and that both ends clear the plain default.
+    @Test func transcriptTimeoutScalesWithThePageSizeRequested() {
+        let firstPageSeconds = Self.transcriptTimeoutSeconds(maxBytes: 1_000_000)
+        let fullBudgetSeconds = Self.transcriptTimeoutSeconds(maxBytes: 10_000_000)
+        #expect(firstPageSeconds == 26, "a 1MB first page should get about half a minute")
+        #expect(fullBudgetSeconds == 163, "the 10MB scrollback budget should get minutes, not the 60s a fixed large-payload deadline gave it")
+        #expect(fullBudgetSeconds > 60, "the deep-history read must clear the fixed large-payload deadline it used to share")
+        #expect(firstPageSeconds > 10, "even the smallest transcript page clears the default deadline")
+        #expect(Self.transcriptTimeoutSeconds(maxBytes: 0) == 10, "a zero-byte read is just the fixed round-trip allowance")
+    }
+
+    /// `maxBytes` is whatever a paired client put in the request, and the server reads the command's
+    /// descriptor before it validates that number, so every `Int` has to produce a deadline: a size past the
+    /// deepest page the daemon serves gets that page's deadline, and a negative one the zero-byte deadline,
+    /// instead of trapping the daemon on the rounding's overflow.
+    @Test func transcriptTimeoutClampsAPageSizeNoDaemonWouldServe() {
+        #expect(Self.transcriptTimeoutSeconds(maxBytes: .max) == Self.transcriptTimeoutSeconds(maxBytes: 10_000_000))
+        #expect(Self.transcriptTimeoutSeconds(maxBytes: .min) == Self.transcriptTimeoutSeconds(maxBytes: 0))
+    }
+
+    private static func transcriptTimeoutSeconds(maxBytes: Int) -> TimeInterval {
+        SpacesDeviceAPICommand.terminalTranscript(SpacesDeviceTerminalTranscriptRequest(sessionID: "session-1", maxBytes: maxBytes)).descriptor
+            .timeoutSeconds
+    }
+
     /// Every command that answers off a queue of its own, listed by the lane it takes. The groups do not
     /// overlap, so arm order does not matter; everything else answers inline on the shared state queue
     /// (`.mainQueue`), including `.ping`, which both transports answer off every queue before the lane is
@@ -52,6 +82,7 @@ import Testing
         case .createWorkspace: .workspaceCreate
         case .createProject, .previewGitProject: .projectClone
         case .importProject, .exportProject: .projectConfigFile
+        case .terminalTranscript: .terminalTranscript
         case .terminalControl, .terminalPasteImage, .sendTerminalInput, .state, .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete,
             .workspaceReviewCommentsSend:
             .terminalControl
@@ -68,7 +99,9 @@ import Testing
     /// `agentHooksStatusRequestTimeoutSeconds` = 20, `longRunningMutationTimeoutSeconds` = 60,
     /// `largePayloadRequestTimeoutSeconds` = 60) rather than a reference to those constants, so this test
     /// does not depend on `spacesclientcore` (which `spacesdevicecoreTests` does not, and should not, link
-    /// against).
+    /// against). `.terminalTranscript` is the one case that is not in any of those groups: its response is
+    /// as large as the caller asked for, so its deadline is written out here as the same 10-second
+    /// allowance plus one second per 64 KiB of page the policy budgets.
     private static func expectedTimeoutSeconds(for command: SpacesDeviceAPICommand) -> TimeInterval {
         switch command {
         case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
@@ -78,8 +111,11 @@ import Testing
             .triggerAutomation, .cancelAutomationRun, .endAutomationAgents, .restoreSessions, .discardRestorableSessions:
             60
         case .agentHooksStatus: 20
-        case .terminalTranscript, .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk,
-            .workspaceDiffManifestRelease, .workspaceDiffFileChunk, .workspaceFileList, .workspaceRefList:
+        // Clamped to `TerminalScrollbackBudget.defaultMaxBytes`, written out here as its literal value for
+        // the same reason the timeouts above are: no page larger than the budget is ever served.
+        case .terminalTranscript(let payload): TimeInterval(10 + (min(max(payload.maxBytes, 0), 10_000_000) + 65_535) / 65_536)
+        case .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease,
+            .workspaceDiffFileChunk, .workspaceFileList, .workspaceRefList:
             60
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateProjectMetadata, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession,

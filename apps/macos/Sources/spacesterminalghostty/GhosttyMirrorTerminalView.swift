@@ -98,6 +98,16 @@
         /// scrollbar state, and combined with `acceptsTerminalInput` to drive the jump-to-bottom control:
         /// see `updateJumpToBottomControlVisibility`.
         private var isScrolledIntoScrollback = false
+        /// Whether the frame this view is showing is the pane's own client-local scrollback replay rather
+        /// than the session's. Driven by `RemoteGhosttySessionHost`, and the second way the jump-to-bottom
+        /// control is offered: a replay frame carries no scrollbar state of its own, and the pane showing
+        /// one can always jump back to the live screen whether or not it owns the session.
+        var isShowingLocalScrollbackFrame = false {
+            didSet {
+                guard isShowingLocalScrollbackFrame != oldValue else { return }
+                updateJumpToBottomControlVisibility()
+            }
+        }
         private var pendingSurfacePresentationTask: Task<Void, Never>?
         private var pendingFrameApplyRetryTask: Task<Void, Never>?
         private var pendingFirstResponderRestoreTask: Task<Void, Never>?
@@ -145,6 +155,10 @@
         /// Whether the jump-to-bottom control is currently shown, asked of the control itself rather than
         /// `isScrolledIntoScrollback` alone, so a test also covers the `acceptsTerminalInput` gate.
         var debugJumpToBottomControlIsVisible: Bool { jumpToBottomControl.debugIsVisible }
+        /// Whether the jump-to-bottom control is showing its new-output mark, asked of the real AppKit
+        /// state rather than the last-set flag.
+        var debugJumpToBottomControlShowsNewOutput: Bool { jumpToBottomControl.debugShowsNewOutput }
+        func debugActivateJumpToBottomControl() { jumpToBottomControl.debugActivate() }
 
         /// Per-pane link router installed by `RemoteGhosttySessionHost`. When set it fully replaces the
         /// legacy local-only `GhosttyTerminalLinkOpener.open` path for `.openURL` action events, so the
@@ -175,6 +189,9 @@
         /// Called when the user activates the jump-to-bottom control. `RemoteGhosttySessionHost` wires
         /// this to a `scrollToBottom` control request.
         var onJumpToBottom: (@MainActor () -> Void)?
+        /// Called when this pane's effective appearance changes. `RemoteGhosttySessionHost` uses it to
+        /// rebuild a scrollback replay whose rows were replayed in the other appearance's colors.
+        var onAppearanceChanged: (@MainActor () -> Void)?
         /// Clears the terminal's one shared selection. Not owner-gated: any attached client's plain
         /// click clears it, matching the daemon's `clearSelection` command.
         var onClearSelection: (@MainActor () -> Void)?
@@ -338,6 +355,7 @@
         override func viewDidChangeEffectiveAppearance() {
             super.viewDidChangeEffectiveAppearance()
             updateSearchOverlayAppearance()
+            onAppearanceChanged?()
         }
 
         override func updateTrackingAreas() {
@@ -814,8 +832,12 @@
         /// update it: a frame arriving mid-attach, or an attach mode changing under an already-scrolled
         /// pane.
         private func updateJumpToBottomControlVisibility() {
-            jumpToBottomControl.setScrolledIntoScrollback(isScrolledIntoScrollback && acceptsTerminalInput)
+            jumpToBottomControl.setScrolledIntoScrollback((isScrolledIntoScrollback && acceptsTerminalInput) || isShowingLocalScrollbackFrame)
         }
+
+        /// Marks the jump-to-bottom control when the session produced output while the pane was showing
+        /// its replay, so the user can see there is something new to come back to.
+        func setLocalScrollbackHasNewOutput(_ hasNewOutput: Bool) { jumpToBottomControl.setHasNewOutput(hasNewOutput) }
 
         private func configureSearchButton(_ button: NSButton, symbolName: String, action: Selector, tooltip: String) {
             button.translatesAutoresizingMaskIntoConstraints = false

@@ -1,10 +1,12 @@
 import Foundation
 import XCTest
 import spacesclientcore
-import spacesdevicecore
 import spacesterminalcore
 
 @testable import spacesdeviceapi
+// Testable for `SpacesDeviceAPIRequestSessionClient.openedConnectionCountForTesting`, which is how the
+// lane-separation test proves a transcript read never dials through the control client.
+@testable import spacesdevicecore
 @testable import spacesui
 
 /// Guards the connect-time recovery contract of `DeviceTerminalSessionStateModel` (issue #185 follow-ups):
@@ -15,7 +17,9 @@ import spacesterminalcore
 ///   to fake, then swings the model's `requestClientBox` to a second server the way the local recovery
 ///   does (that recovery bootstraps through the real local control socket and cannot run hermetically). A
 ///   companion test proves the same vended sender — and a transcript fetch — present the box's rotated auth
-///   token to the second server, because the box carries the client and its token together.
+///   token to the second server, because the box carries the clients and their token together. A third
+///   proves a transcript read runs on the box's own transcript client, so a megabyte-scale page cannot hold
+///   the control client's request lock against typed input.
 /// - Test B: a superseded stream client's late disconnect callback must not tear down the client that
 ///   replaced it, while a current-stream disconnect still clears it. It drives the generation guard through
 ///   the model's install-for-testing seam because the concrete stream client offers no way to force
@@ -85,10 +89,13 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         let serverB = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
         try serverB.start()
         defer { serverB.stop() }
-        let clientB = try SpacesDeviceAPIRequestSessionClient(
-            resolver: SpacesDeviceEndpointResolver(
-                hosts: ["127.0.0.1"], port: serverB.listeningPort, certificateFingerprint: identity.certificateFingerprint))
-        model.requestClientBox.replace(with: clientB, authToken: pairingStore.authToken).cancel()
+        let resolverB = SpacesDeviceEndpointResolver(
+            hosts: ["127.0.0.1"], port: serverB.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+        let clientB = try SpacesDeviceAPIRequestSessionClient(resolver: resolverB)
+        let transcriptClientB = try SpacesDeviceAPIRequestSessionClient(resolver: resolverB)
+        let previous = model.requestClientBox.replace(with: clientB, transcriptClient: transcriptClientB, authToken: pairingStore.authToken)
+        previous.client.cancel()
+        previous.transcriptClient.cancel()
 
         // The previously vended sender must now reach server B. The session does not exist there, so the
         // server answers `ok == false` — a real response, not the connection error a stale-endpoint client
@@ -136,10 +143,13 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         let serverB = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: storeB)
         try serverB.start()
         defer { serverB.stop() }
-        let clientB = try SpacesDeviceAPIRequestSessionClient(
-            resolver: SpacesDeviceEndpointResolver(
-                hosts: ["127.0.0.1"], port: serverB.listeningPort, certificateFingerprint: identity.certificateFingerprint))
-        model.requestClientBox.replace(with: clientB, authToken: rotatedToken).cancel()
+        let resolverB = SpacesDeviceEndpointResolver(
+            hosts: ["127.0.0.1"], port: serverB.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+        let clientB = try SpacesDeviceAPIRequestSessionClient(resolver: resolverB)
+        let transcriptClientB = try SpacesDeviceAPIRequestSessionClient(resolver: resolverB)
+        let previous = model.requestClientBox.replace(with: clientB, transcriptClient: transcriptClientB, authToken: rotatedToken)
+        previous.client.cancel()
+        previous.transcriptClient.cancel()
 
         // The previously vended sender routes through the box, so it presents the rotated token to server B.
         _ = try sender(TerminalServiceRequest(command: .state(TerminalServiceSessionRequest(sessionID: "missing-session-\(UUID().uuidString)"))))
@@ -152,6 +162,57 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         XCTAssertTrue(
             storeB.presentedTokens.allSatisfy { $0 == rotatedToken },
             "a request reached server B without the rotated token: \(storeB.presentedTokens)")
+    }
+
+    /// A transcript read runs on the box's own transcript client, not the control client every keystroke
+    /// and control request shares. `SpacesDeviceAPIRequestSessionClient.send` holds its request lock for the
+    /// whole round trip, so a multi-megabyte transcript page sent on the control client would hold typed
+    /// input behind it for as long as the link takes to deliver it. Asserts on the connections each client
+    /// actually opened: after a recovery swings the box, only the transcript client dials, and it presents
+    /// the refreshed token, so the two lanes stay separate without drifting apart in identity.
+    @MainActor func testTranscriptFetchRunsOnItsOwnClientAfterRecovery() async throws {
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
+        let clientApp = Self.makeClientApp(installationID: "INSTALLATION-LANE-\(UUID().uuidString)")
+
+        let storeA = AlwaysAuthorizedRecoveryPairingStore()
+        let serverA = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: storeA)
+        try serverA.start()
+
+        let device = SpacesPairedDeviceRecord(
+            id: "recovery-device-\(UUID().uuidString)", name: "Mac", platform: "macos", hosts: ["127.0.0.1"], port: serverA.listeningPort,
+            certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-07-20T00:00:00Z", updatedAt: "2026-07-20T00:00:00Z",
+            lastSelectedAt: "2026-07-20T00:00:00Z")
+        let model = try DeviceTerminalSessionStateModel(
+            device: device, sessionID: "session-\(UUID().uuidString)",
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "session", title: "t", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-07-20T00:00:00Z",
+                workspaceID: "workspace", kind: .shell), clientApp: clientApp,
+            preparedCredentials: .init(certificateFingerprint: identity.certificateFingerprint, authToken: storeA.authToken))
+
+        serverA.stop()
+        let rotatedToken = "rotated-token-\(UUID().uuidString)"
+        let storeB = RecordingRecoveryPairingStore()
+        let serverB = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: storeB)
+        try serverB.start()
+        defer { serverB.stop() }
+        let resolverB = SpacesDeviceEndpointResolver(
+            hosts: ["127.0.0.1"], port: serverB.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+        let clientB = try SpacesDeviceAPIRequestSessionClient(resolver: resolverB)
+        let transcriptClientB = try SpacesDeviceAPIRequestSessionClient(resolver: resolverB)
+        let previous = model.requestClientBox.replace(with: clientB, transcriptClient: transcriptClientB, authToken: rotatedToken)
+        previous.client.cancel()
+        previous.transcriptClient.cancel()
+
+        // Server B has no such session, so it answers `.sessionNotAvailable`, which `fetchTranscript` maps to
+        // an empty transcript without recovering (the device is not the local device).
+        _ = try await model.fetchTranscript(maxBytes: 1000)
+
+        XCTAssertEqual(transcriptClientB.openedConnectionCountForTesting, 1, "the transcript read did not go through the transcript client")
+        XCTAssertEqual(clientB.openedConnectionCountForTesting, 0, "the transcript read dialed the control client, where it would queue keystrokes")
+        XCTAssertFalse(storeB.presentedTokens.isEmpty, "server B received no request to authorize")
+        XCTAssertTrue(
+            storeB.presentedTokens.allSatisfy { $0 == rotatedToken },
+            "the transcript read reached server B without the rotated token: \(storeB.presentedTokens)")
     }
 
     /// Fix 3: a superseded stream client's late disconnect is ignored; a current-stream disconnect clears it.

@@ -2,8 +2,8 @@ import Foundation
 import ghosttyvtshim
 
 /// Shared bridge between the libghostty-vt C shim and the Swift render types. Both the headless Linux
-/// daemon session (`GhosttyEmbeddedSessionCore`) and the client-local ended-session scrollback replay
-/// (`TerminalEndedSessionScrollbackModel`) render through this one converter and theme packer, so a
+/// daemon session (`GhosttyEmbeddedSessionCore`) and the client-local scrollback replay
+/// (`TerminalLocalScrollbackModel`) render through this one converter and theme packer, so a
 /// replayed frame carries the exact same cell/theme shape the daemon would have produced.
 public enum GhosttyVtSessionBridge {
     /// Packs a theme's terminal export and appearance into the C shim's theme struct (default
@@ -23,16 +23,27 @@ public enum GhosttyVtSessionBridge {
         return theme
     }
 
+    /// Reports whether the session's terminal has the alternate screen active, the state clients route
+    /// scroll gestures on. A caller that has a live vt session reads it here and hands the result to
+    /// `snapshot(from:...)`, which sees only the raw cell export.
+    public static func alternateScreenActive(session: OpaquePointer) -> Bool {
+        var active = false
+        guard spaces_ghostty_vt_session_alternate_screen_active(session, &active) else { return false }
+        return active
+    }
+
     /// Converts a libghostty-vt snapshot into the Swift render snapshot the render pipeline consumes.
     /// The raw snapshot's `cells` buffer stays owned by the caller (freed with
     /// `spaces_ghostty_vt_snapshot_free`); this only reads it. Mouse tracking is not part of the raw
-    /// snapshot — it is a terminal mode, queried separately — so the caller supplies it. Selection and
-    /// scrollbar are likewise queried separately (the shim has no per-snapshot equivalent of the
-    /// embedded surface's combined export) and default to absent/zero, which is what the ended-session
-    /// scrollback replay caller wants: a replay has no live selection or scrollbar to report.
+    /// snapshot (it is a terminal mode, queried separately), so the caller supplies it. The active
+    /// screen is queried separately for the same reason: a caller with a live session passes
+    /// `alternateScreenActive(session:)`. Selection and scrollbar are likewise queried separately (the
+    /// shim has no per-snapshot equivalent of the embedded surface's combined export) and default to
+    /// absent/zero, which is what the scrollback replay caller wants: a replay has no live selection or
+    /// scrollbar to report.
     public static func snapshot(
-        from rawSnapshot: SpacesGhosttyVtSnapshot, mouseReportingActive: Bool, selection: GhosttyTerminalSelectionRange? = nil,
-        scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0
+        from rawSnapshot: SpacesGhosttyVtSnapshot, mouseReportingActive: Bool, alternateScreenActive: Bool,
+        selection: GhosttyTerminalSelectionRange? = nil, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0
     ) -> GhosttyTerminalSnapshot {
         var cells: [GhosttyTerminalSnapshot.Cell] = []
         var clusters: [Int: String] = [:]
@@ -50,8 +61,8 @@ public enum GhosttyVtSessionBridge {
             columns: Int(rawSnapshot.columns), rows: Int(rawSnapshot.rows), cursorColumn: Int(rawSnapshot.cursor_column),
             cursorRow: Int(rawSnapshot.cursor_row), cursorVisible: rawSnapshot.cursor_visible,
             defaultForegroundRGB: rawSnapshot.default_foreground_rgb, defaultBackgroundRGB: rawSnapshot.default_background_rgb, cells: cells,
-            clusters: clusters, mouseReportingActive: mouseReportingActive, selection: selection, scrollbarTotal: scrollbarTotal,
-            scrollbarOffset: scrollbarOffset)
+            clusters: clusters, mouseReportingActive: mouseReportingActive, alternateScreenActive: alternateScreenActive, selection: selection,
+            scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset)
     }
 
     /// Rebuilds a cell's grapheme cluster from the shim's base codepoint plus the extra codepoints it

@@ -90,11 +90,12 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         XCTAssertEqual(scrollRectDelta.changedCellCount, columns)
         XCTAssertEqual(try GhosttyRenderUpdateApplier.apply(scrollRectUpdate, to: baseline).snapshot, target)
         // Body bytes, not blob bytes: the body is the layout this fixture pins, while the compressed blob's
-        // size depends on which platform's DEFLATE encoder wrote it. The delta header grew by 18 bytes (the
-        // 17-byte selection/scrollbar section plus the 1-byte scroll-rects-overflowed flag) versus the
-        // pre-selection layout, on top of what each fixture already accounted for.
-        XCTAssertEqual(scrollRectBytes, 1_227)
-        XCTAssertEqual(cellRunOnlyBytes, 27_109)
+        // size depends on which platform's DEFLATE encoder wrote it. The delta header grew by 19 bytes (the
+        // 17-byte selection/scrollbar section, the 1-byte scroll-rects-overflowed flag, and the 1-byte
+        // alternate-screen flag) versus the pre-selection layout, on top of what each fixture already
+        // accounted for.
+        XCTAssertEqual(scrollRectBytes, 1_228)
+        XCTAssertEqual(cellRunOnlyBytes, 27_110)
         XCTAssertLessThan(scrollRectBytes, cellRunOnlyBytes)
         // Compression does not reverse the ordering the fixture exists to show.
         XCTAssertLessThan(scrollRectEncoded.count, cellRunOnlyEncoded.count)
@@ -267,16 +268,16 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         let update = GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: snapshot))
 
         // 40-byte update body header (reserved 2, three revisions 24, owner epoch 8, columns 2, rows 2,
-        // empty fallback reason 2), 36-byte snapshot header (19 fixed fields plus the 17-byte
+        // empty fallback reason 2), 37-byte snapshot header (20 fixed fields plus the 17-byte
         // selection/scrollbar section), 14 bytes a cell.
-        XCTAssertEqual(try body(of: GhosttyRenderUpdateBinaryCodec.encode(update)).count, 40 + 36 + snapshot.cells.count * 14)
+        XCTAssertEqual(try body(of: GhosttyRenderUpdateBinaryCodec.encode(update)).count, 40 + 37 + snapshot.cells.count * 14)
 
         // One cluster cell adds exactly its sparse entry: 4-byte offset, 2-byte length, utf8 bytes.
         let clustered = makeSnapshot(lines: ["👋🏽ello", "world"])
         let clusteredUpdate = GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: clustered))
         XCTAssertEqual(
             try body(of: GhosttyRenderUpdateBinaryCodec.encode(clusteredUpdate)).count,
-            40 + 36 + snapshot.cells.count * 14 + 6 + Array("👋🏽".utf8).count)
+            40 + 37 + snapshot.cells.count * 14 + 6 + Array("👋🏽".utf8).count)
     }
 
     /// A Linux daemon streaming to an iPhone means one platform's zlib writes what the other's Compression
@@ -651,6 +652,60 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         XCTAssertFalse(applied.snapshot.mouseReportingActive)
     }
 
+    /// Alternate-screen state decides whether a client scrolls its own local replay or sends the
+    /// gesture to the daemon, so it has to survive both frame shapes. As with mouse reporting, the
+    /// delta is the case that matters: a program entering the alternate screen is an ordinary screen
+    /// change that never forces a full frame.
+    func testAlternateScreenStateSurvivesFullAndDeltaFrames() throws {
+        let previous = makeSnapshot(lines: ["hello"])
+        let target = makeSnapshot(lines: ["hullo"], alternateScreenActive: true)
+        let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
+
+        let full = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
+        XCTAssertEqual(full.fullFrame?.snapshot.alternateScreenActive, true)
+
+        let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 1, ownerEpoch: 1)
+        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline)
+        let delta = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(update))
+        XCTAssertEqual(delta.kind, .delta)
+        XCTAssertEqual(delta.delta?.alternateScreenActive, true)
+
+        let applied = try GhosttyRenderUpdateApplier.apply(delta, to: baseline)
+        XCTAssertEqual(applied.snapshot, target)
+        XCTAssertTrue(applied.snapshot.alternateScreenActive)
+    }
+
+    /// The program leaving the alternate screen has to reach the client the same way, or a pane would
+    /// keep sending every scroll gesture to a program that went back to a scrollable primary screen.
+    func testAlternateScreenStateClearsThroughADelta() throws {
+        let previous = makeSnapshot(lines: ["hello"], alternateScreenActive: true)
+        let target = makeSnapshot(lines: ["hullo"])
+        let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
+        let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 1, ownerEpoch: 1)
+
+        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline)
+        let applied = try GhosttyRenderUpdateApplier.apply(update, to: baseline)
+
+        XCTAssertFalse(applied.snapshot.alternateScreenActive)
+    }
+
+    /// Mouse reporting and the alternate screen are independent terminal state, and a client reads them
+    /// for different decisions (a click versus a scroll gesture). A delta that only flips one must not
+    /// disturb the other, which a codec that misordered the two flag bytes would break.
+    func testAlternateScreenAndMouseReportingTravelIndependently() throws {
+        let previous = makeSnapshot(lines: ["hello"], mouseReportingActive: true)
+        let target = makeSnapshot(lines: ["hullo"], mouseReportingActive: true, alternateScreenActive: true)
+        let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
+        let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 1, ownerEpoch: 1)
+
+        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline)
+        let decoded = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(update))
+        let applied = try GhosttyRenderUpdateApplier.apply(decoded, to: baseline)
+
+        XCTAssertTrue(applied.snapshot.mouseReportingActive)
+        XCTAssertTrue(applied.snapshot.alternateScreenActive)
+    }
+
     /// The shared selection and the scrollbar position have to survive a full frame exactly like every
     /// other field: rectangle and stream shapes, both extends flags, and non-zero scrollbar counters.
     func testSelectionAndScrollbarSurviveAFullFrame() throws {
@@ -767,15 +822,15 @@ final class GhosttyRenderUpdateTests: XCTestCase {
     }
 
     /// The version byte is the only guard for a persisted or peer payload built at a different layout:
-    /// the current version is 6, and a payload claiming version 5 (the uncompressed layout) is rejected
-    /// exactly like any other unsupported version, never silently misread as a compressed body.
-    func testVersionIsSixAndVersionFivePayloadIsRejected() throws {
-        XCTAssertEqual(GhosttyRenderUpdate.currentVersion, 6)
+    /// the current version is 7, and a payload claiming version 6 (the layout without the alternate-screen
+    /// flag) is rejected exactly like any other unsupported version, never silently misread a field short.
+    func testVersionIsSevenAndVersionSixPayloadIsRejected() throws {
+        XCTAssertEqual(GhosttyRenderUpdate.currentVersion, 7)
 
         let snapshot = makeSnapshot(lines: ["hello"])
         var encoded = try GhosttyRenderUpdateBinaryCodec.encode(
             GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: snapshot)))
-        encoded[4] = 5
+        encoded[4] = 6
 
         XCTAssertThrowsError(try GhosttyRenderUpdateBinaryCodec.decode(encoded)) { error in
             XCTAssertEqual(error as? GhosttyRenderUpdateBinaryCodec.BinaryCodecError, .unsupportedVersion)
@@ -811,7 +866,7 @@ final class GhosttyRenderUpdateTests: XCTestCase {
     /// top, keyed by cell index, for fixtures that need text no character can express.
     private func makeSnapshot(
         lines: [String], clusters: [Int: String] = [:], linkURLs: [Int: String] = [:], mouseReportingActive: Bool = false,
-        mouseShiftCapture: UInt8 = GhosttyTerminalSnapshot.mouseShiftCaptureUnset
+        mouseShiftCapture: UInt8 = GhosttyTerminalSnapshot.mouseShiftCaptureUnset, alternateScreenActive: Bool = false
     ) -> GhosttyTerminalSnapshot {
         let columns = lines.map(\.count).max() ?? 1
         let rows = max(lines.count, 1)
@@ -828,7 +883,7 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         return GhosttyTerminalSnapshot(
             columns: columns, rows: rows, cursorColumn: 0, cursorRow: rows - 1, cursorVisible: false, defaultForegroundRGB: 0xEEEEEE,
             defaultBackgroundRGB: 0x101010, cells: cells, clusters: cellClusters, linkURLs: linkURLs, mouseReportingActive: mouseReportingActive,
-            mouseShiftCapture: mouseShiftCapture)
+            mouseShiftCapture: mouseShiftCapture, alternateScreenActive: alternateScreenActive)
     }
 
     private func makeUniformRowSnapshot(columns: Int, rows: Int, firstScalar: UInt32) -> GhosttyTerminalSnapshot {

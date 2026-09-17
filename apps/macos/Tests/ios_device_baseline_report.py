@@ -683,51 +683,60 @@ def metric_streaming(window):
 
 
 def metric_scrollback(window):
+    """A history flick renders locally: the phone scrolls its own replay of the transcript and the
+    daemon is told nothing, so there is no scroll round trip and no network frame the flick itself
+    caused. What this measures is the local render loop (frames per flick, and how soon the first
+    one follows the finger), what the session pushed independently while the flick ran, and what
+    the replay's transcript reads cost. Paging (`scrollback_page_fetch`) is not tied to any one
+    flick, so it is reported as a single total over the whole window rather than sliced per flick."""
     if window is None:
         return None
     # Flicks are ordered by time, not by their `index` attribute: the flicks back toward the bottom
     # restart at index 1, so keying by index would collapse them onto the history flicks.
     flicks = sorted((m for m in (window.markers.get("flick") or []) if event_time(m) is not None), key=event_time)
-    rpc_ms, frames_per_flick, kb_per_flick, settle_ms = [], [], [], []
+    local_frames_per_flick, network_frames_per_flick, kb_per_flick, flick_to_local_frame_ms = [], [], [], []
     for position, flick in enumerate(flicks):
         start_t = event_time(flick)
         end_t = event_time(flicks[position + 1]) if position + 1 < len(flicks) else window.end
         end_t = end_t or window.end
 
-        # Every scroll round trip the flick caused counts, since a flick decelerates through dozens of
-        # scroll requests and each one is a full round trip the user waits on.
-        rpc_ms.extend(
-            event_elapsed_ms(e)
+        local_frames = [
+            e
             for e in window.app_events
-            if e.get("name") == "input_command_rpc_end"
-            and attr(e, "input_kind") == "send_scroll"
-            and attr(e, "success") == "1"
+            if e.get("name") == "scroll_local_frame"
             and event_time(e) is not None
             and start_t <= event_time(e) <= end_t
-            and event_elapsed_ms(e) is not None
+        ]
+        local_frames.sort(key=event_time)
+        local_frames_per_flick.append(len(local_frames))
+        if local_frames:
+            flick_to_local_frame_ms.append((event_time(local_frames[0]) - start_t).total_seconds() * 1000.0)
+
+        # Frames the session pushed on its own while the flick ran. A local flick causes none of
+        # them, so this is what says whether the session was quiet or printing under the gesture.
+        network_frames = render_frames_in_wall_range(window.app_events, start_t, end_t)
+        network_frames_per_flick.append(len(network_frames))
+        kb_per_flick.append(decoded_kb(network_frames))
+
+    page_fetch_kb_total = (
+        sum(
+            (numeric(e.get("count")) or 0)
+            for e in window.app_events
+            if e.get("name") == "scrollback_page_fetch"
         )
+        / 1024.0
+    )
 
-        frames = render_frames_in_wall_range(window.app_events, start_t, end_t)
-        frames_per_flick.append(len(frames))
-        kb_per_flick.append(decoded_kb(frames))
-        # "flick -> settled" is approximated as the flick's own start to its last in-window frame:
-        # a true 500 ms trailing-quiet check would need to look past this flick's own end boundary
-        # into the next flick's frames to rule out a frame arriving just after this slice, which
-        # this per-flick slicing does not attempt.
-        if frames:
-            last_frame_t = max(event_time(f) for f in frames if event_time(f) is not None)
-            settle_ms.append((last_frame_t - start_t).total_seconds() * 1000.0)
-
-    rpc_stats, frame_stats, kb_stats, settle_stats = stats(rpc_ms), stats(frames_per_flick), stats(kb_per_flick), stats(settle_ms)
+    local_frame_stats = stats(local_frames_per_flick)
+    network_frame_stats = stats(network_frames_per_flick)
+    kb_stats = stats(kb_per_flick)
+    flick_to_local_frame_stats = stats(flick_to_local_frame_ms)
     return {
-        "rpc_p50": rpc_stats["p50"],
-        "rpc_max": rpc_stats["max"],
-        "frames_p50": frame_stats["p50"],
-        "frames_max": frame_stats["max"],
+        "local_frames_p50": local_frame_stats["p50"],
+        "network_frames_p50": network_frame_stats["p50"],
         "kb_p50": kb_stats["p50"],
-        "kb_max": kb_stats["max"],
-        "settle_p50": settle_stats["p50"],
-        "settle_max": settle_stats["max"],
+        "flick_to_local_frame_p50": flick_to_local_frame_stats["p50"],
+        "page_fetch_kb_total": page_fetch_kb_total,
     }
 
 
@@ -984,14 +993,11 @@ for _burst in ("1", "2"):
     )
 
 SCROLLBACK_COLUMNS = [
-    ("rpc_p50", "scroll rpc p50 ms", fmt_ms),
-    ("rpc_max", "scroll rpc max ms", fmt_ms),
-    ("frames_p50", "frames/flick p50", fmt_count),
-    ("frames_max", "frames/flick max", fmt_count),
+    ("local_frames_p50", "local frames/flick p50", fmt_count),
+    ("network_frames_p50", "network frames/flick p50", fmt_count),
     ("kb_p50", "decoded KB/flick p50", fmt_kb),
-    ("kb_max", "decoded KB/flick max", fmt_kb),
-    ("settle_p50", "flick->settled p50 ms", fmt_ms),
-    ("settle_max", "flick->settled max ms", fmt_ms),
+    ("flick_to_local_frame_p50", "flick->first local frame p50 ms", fmt_ms),
+    ("page_fetch_kb_total", "page fetch KB total", fmt_kb),
 ]
 
 BACKGROUND_COLUMNS = [

@@ -58,7 +58,7 @@ import ghosttyvtshim
         var raw = SpacesGhosttyVtSnapshot()
         #expect(spaces_ghostty_vt_session_copy_snapshot(session, &raw))
         defer { spaces_ghostty_vt_snapshot_free(&raw) }
-        return GhosttyVtSessionBridge.snapshot(from: raw, mouseReportingActive: false)
+        return GhosttyVtSessionBridge.snapshot(from: raw, mouseReportingActive: false, alternateScreenActive: false)
     }
 
     /// Reassembles the logical line starting at row 0 the way a wrapped-line selection does: keep taking

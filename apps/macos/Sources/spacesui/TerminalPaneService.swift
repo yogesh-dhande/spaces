@@ -344,9 +344,10 @@ import workspacecore
                     Self.terminalSessionHost(
                         launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: requestSender,
                         stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(),
-                        transcriptProvider: { [weak stateModel] maxBytes in
+                        transcriptProvider: { [weak stateModel] maxBytes, fromByteOffset, fileIdentity in
                             guard let stateModel else { throw WorkspaceError.invalidArgument(message: "Terminal state model was released.") }
-                            return try await stateModel.fetchTranscript(maxBytes: maxBytes)
+                            return try await stateModel.fetchTranscript(
+                                maxBytes: maxBytes, fromByteOffset: fromByteOffset, fileIdentity: fileIdentity)
                         }, agentSignalHandler: agentSignalHandler, linkOpenHandler: { [linkOpenBox] rawLink in linkOpenBox.open(rawLink) },
                         // A keystroke that cannot reach the device is the pane's earliest evidence its link
                         // is gone; the state model owns that verdict, so the raw failure goes there rather

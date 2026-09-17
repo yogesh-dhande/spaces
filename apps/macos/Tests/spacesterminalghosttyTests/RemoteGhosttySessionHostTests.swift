@@ -7,6 +7,11 @@ import spacesterminalcore
 
 @testable import spacesterminalghostty
 
+/// The transcript file every faked read in this file reports its bytes as coming from. A continuation
+/// carries it back, which is what lets a test assert the pane continues the file it built its replay
+/// from rather than one a head-trim replaced.
+private let fakeTranscriptFileIdentity: UInt64 = 91
+
 final class RemoteGhosttySessionHostTests: XCTestCase {
     private var originalDatabasePath: String?
     private var originalRuntimeDirectory: String?
@@ -26,6 +31,50 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             defer { lock.unlock() }
             value += 1
             return value
+        }
+    }
+
+    /// The bytes a fake transcript read answers with, which a test can swap between reads when its fake
+    /// daemon changes what `output.log` holds partway through.
+    private final class MutableTranscript: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Data
+
+        init(_ value: Data) { self.value = value }
+
+        var current: Data {
+            get {
+                lock.lock()
+                defer { lock.unlock() }
+                return value
+            }
+            set {
+                lock.lock()
+                defer { lock.unlock() }
+                value = newValue
+            }
+        }
+    }
+
+    /// The run identity a fake transcript read labels its bytes with, which a test can swap between reads
+    /// when its fake daemon's runtime state catches up with a relaunch partway through.
+    private final class MutableRunIdentity: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: String?
+
+        init(_ value: String?) { self.value = value }
+
+        var current: String? {
+            get {
+                lock.lock()
+                defer { lock.unlock() }
+                return value
+            }
+            set {
+                lock.lock()
+                defer { lock.unlock() }
+                value = newValue
+            }
         }
     }
 
@@ -54,7 +103,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             lock.lock()
             let continuation = continuations.isEmpty ? nil : continuations.removeFirst()
             lock.unlock()
-            continuation?.resume(returning: RemoteGhosttyTranscript(data: data, runIdentity: runIdentity))
+            continuation?.resume(
+                returning: RemoteGhosttyTranscript(
+                    data: data, startByteOffset: 0, endByteOffset: UInt64(data.count), fileIdentity: fakeTranscriptFileIdentity,
+                    runIdentity: runIdentity))
         }
     }
 
@@ -1349,7 +1401,11 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         // it replays normally (the positive counterpart to the mismatched-identity rejection test).
         let host = RemoteGhosttySessionHost(
             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send,
-            transcriptProvider: { _ in RemoteGhosttyTranscript(data: transcript, runIdentity: runtimeState.runIdentity) })
+            transcriptProvider: { _, _, _ in
+                RemoteGhosttyTranscript(
+                    data: transcript, startByteOffset: 0, endByteOffset: UInt64(transcript.count), fileIdentity: fakeTranscriptFileIdentity,
+                    runIdentity: runtimeState.runIdentity)
+            })
         waitForCondition("ended host renders final state") { host.snapshotText()?.contains("final-01") == true }
 
         try host.attach(
@@ -1404,9 +1460,11 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let attempts = TranscriptFetchAttempts()
         let host = RemoteGhosttySessionHost(
             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send,
-            transcriptProvider: { _ in
+            transcriptProvider: { _, _, _ in
                 if attempts.next() == 1 { throw POSIXError(.ETIMEDOUT) }
-                return RemoteGhosttyTranscript(data: transcript, runIdentity: runtimeState.runIdentity)
+                return RemoteGhosttyTranscript(
+                    data: transcript, startByteOffset: 0, endByteOffset: UInt64(transcript.count), fileIdentity: fakeTranscriptFileIdentity,
+                    runIdentity: runtimeState.runIdentity)
             })
         waitForCondition("ended host renders final state") { host.snapshotText()?.contains("final-01") == true }
 
@@ -1449,7 +1507,11 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let host = RemoteGhosttySessionHost(
             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send,
-            transcriptProvider: { _ in RemoteGhosttyTranscript(data: transcript, runIdentity: runtimeState.runIdentity) })
+            transcriptProvider: { _, _, _ in
+                RemoteGhosttyTranscript(
+                    data: transcript, startByteOffset: 0, endByteOffset: UInt64(transcript.count), fileIdentity: fakeTranscriptFileIdentity,
+                    runIdentity: runtimeState.runIdentity)
+            })
         waitForCondition("ended host renders final state") { host.snapshotText()?.contains("final-01") == true }
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
@@ -1498,8 +1560,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, title: "fallback", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
             createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
-        // The ended run's final frame and the relaunched (running) run share the 8x5 grid so the
-        // replay wraps like the ended pane's final frame.
+        // The ended run's final frame and the relaunched (running) run share a grid, in the runtime rows
+        // and in the frames themselves, so the replay wraps like the ended pane's final frame and no
+        // payload in this sequence reads as a resize (which would discard the replay on its own).
         let exitedState = TerminalSessionRuntimeState(
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .exited, updatedAt: "2026-06-05T00:00:01Z",
             exitedAt: "2026-06-05T00:00:01Z", title: "final-title", workingDirectory: "/tmp/final", columns: 8, rows: 5)
@@ -1515,7 +1578,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-06-05T00:00:02Z",
             sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runningState,
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live-title", workingDirectory: "/tmp/live", outputByteCount: nil,
-            renderUpdate: try renderUpdate(text: "RUNNING", sessionRevision: 2))
+            renderUpdate: try renderUpdate(text: "RUNNING1", sessionRevision: 2))
         // The relaunched run's own exit: a distinct child process, its own exit time, and a later emission
         // than the live state it follows — which is what the daemon serves for a second exit, and what
         // makes the two runs distinguishable to everything that orders by run rather than by arrival.
@@ -1537,7 +1600,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let host = RemoteGhosttySessionHost(
             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send,
-            transcriptProvider: { _ in try await transcriptGate.fetch() })
+            transcriptProvider: { _, _, _ in try await transcriptGate.fetch() })
         waitForCondition("ended host renders final state") { host.snapshotText()?.contains("final-01") == true }
 
         try host.attach(
@@ -1626,10 +1689,14 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         // whichever run the replay is armed against, so identity never blocks the discard-and-re-fetch.
         let host = RemoteGhosttySessionHost(
             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send,
-            transcriptProvider: { _ in
+            transcriptProvider: { _, _, _ in
                 attempts.next() == 1
-                    ? RemoteGhosttyTranscript(data: transcriptA, runIdentity: exitedStateA.runIdentity)
-                    : RemoteGhosttyTranscript(data: transcriptB, runIdentity: exitedStateB.runIdentity)
+                    ? RemoteGhosttyTranscript(
+                        data: transcriptA, startByteOffset: 0, endByteOffset: UInt64(transcriptA.count), fileIdentity: fakeTranscriptFileIdentity,
+                        runIdentity: exitedStateA.runIdentity)
+                    : RemoteGhosttyTranscript(
+                        data: transcriptB, startByteOffset: 0, endByteOffset: UInt64(transcriptB.count), fileIdentity: fakeTranscriptFileIdentity,
+                        runIdentity: exitedStateB.runIdentity)
             })
         waitForCondition("ended host renders run A final state") { host.snapshotText()?.contains("final-A") == true }
 
@@ -1665,7 +1732,12 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(attempts.count, 2, "the new ended run should have re-fetched its own transcript")
     }
 
-    @MainActor func testEndedRemoteHostRejectsTranscriptReportedForADifferentRun() throws {
+    /// A transcript labelled with a run other than the one the replay is armed against is rejected, and
+    /// the rejection is retryable rather than final: the label is read from runtime state the daemon
+    /// commits write-behind, so a pane that paints before that commit lands sees the new run's bytes under
+    /// the previous run's identity. The pane returns to idle and the next gesture reads again, which is
+    /// what keeps scrolling alive once the labels agree.
+    @MainActor func testEndedRemoteHostRetriesATranscriptReportedForADifferentRun() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1687,18 +1759,21 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-title-A", workingDirectory: "/tmp/final", outputByteCount: nil,
                 renderUpdate: try renderUpdate(text: "final-A", sessionRevision: 1)))
 
-        // The fetch resolves with a transcript the server read from a *different* run (childPID 4,
-        // exitedAt T2): the session relaunched after the fetch started but before this client observed a
-        // new state payload, truncating output.log so the bytes belong to the newer run. The host must
-        // reject it by the reported run identity — the armed run's transcript is definitively gone.
+        // Every fetch resolves with a transcript labelled with a *different* run (childPID 4, exitedAt T2)
+        // until the test swaps the label, which is what a relaunch whose runtime-state commit has not
+        // landed yet looks like from here: the bytes the endpoint serves carry a run this pane's armed run
+        // key does not match.
         let attempts = TranscriptFetchAttempts()
-        let newRunTranscript = Data((1...200).map { String(format: "NEWRUN-%04d", $0) }.joined(separator: "\r\n").utf8)
-        let differentRunIdentity = "4|2026-06-05T00:00:02Z"
+        let transcript = MutableTranscript(Data((1...200).map { String(format: "NEWRUN-%04d", $0) }.joined(separator: "\r\n").utf8))
+        let servedRunIdentity = MutableRunIdentity("4|2026-06-05T00:00:02Z")
         let host = RemoteGhosttySessionHost(
             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send,
-            transcriptProvider: { _ in
+            transcriptProvider: { _, _, _ in
                 _ = attempts.next()
-                return RemoteGhosttyTranscript(data: newRunTranscript, runIdentity: differentRunIdentity)
+                let data = transcript.current
+                return RemoteGhosttyTranscript(
+                    data: data, startByteOffset: 0, endByteOffset: UInt64(data.count), fileIdentity: fakeTranscriptFileIdentity,
+                    runIdentity: servedRunIdentity.current)
             })
         waitForCondition("ended host renders run A final state") { host.snapshotText()?.contains("final-A") == true }
 
@@ -1706,23 +1781,2085 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:03Z"),
             mode: .viewer, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
 
-        // The scroll arms the replay and fetches; the mismatched-identity response latches `.unavailable`.
+        // The scroll arms the replay and fetches; the mismatched-identity response is rejected.
         XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
         waitForCondition("mismatched-identity transcript fetch completes") { attempts.count >= 1 }
 
-        // The viewport keeps the run A final frame and never shows the rejected new run's rows.
-        for _ in 0..<10 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        // The viewport keeps the run A final frame and never shows the rejected run's rows, however many
+        // gestures ask again while the label stays wrong.
+        for _ in 0..<5 {
+            _ = host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil)
+            for _ in 0..<5 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        }
         guard let text = host.snapshotText() else { return XCTFail("ended host lost its rendered surface") }
         XCTAssertTrue(text.contains("final-A"), "the armed run's final frame was replaced: \(text)")
         XCTAssertFalse(text.contains("NEWRUN-"), "the mismatched-run transcript replaced the viewport: \(text)")
 
-        // Further scroll gestures must not re-fetch: `.unavailable` latched, so the attempt count stays 1.
-        for _ in 0..<5 {
+        // Each of those gestures read again rather than being absorbed by a latched verdict.
+        let mismatchedAttempts = attempts.count
+        XCTAssertGreaterThanOrEqual(mismatchedAttempts, 2, "a rejected run label must be read again rather than latching scrollback off")
+
+        // The runtime state catches up, so the endpoint labels the same bytes with the run the pane is
+        // armed against: the next gesture builds its replay and scrolls it.
+        transcript.current = Data((1...200).map { String(format: "OLDRUN-%04d", $0) }.joined(separator: "\r\n").utf8)
+        servedRunIdentity.current = exitedStateA.runIdentity
+        waitForCondition("the retried read scrolls once the labels agree", timeout: 4) {
             _ = host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil)
+            guard let text = host.snapshotText() else { return false }
+            return text.contains("OLDRUN-") && !text.contains("final-A")
+        }
+        XCTAssertGreaterThan(attempts.count, mismatchedAttempts, "the healing gesture must have read the transcript again")
+        XCTAssertFalse(host.snapshotText()?.contains("NEWRUN-") == true, "the rejected transcript must never render")
+    }
+
+    // MARK: - Client-local scrollback on a live pane
+
+    /// A live pane reads its first page of transcript as soon as it has painted a frame, so the user's
+    /// first wheel event scrolls instead of waiting out a round trip. The read is the page size, not the
+    /// whole budget, and it is a suffix read rather than a continuation.
+    @MainActor func testLivePanePrefetchesItsScrollbackAfterTheFirstPaintedFrame() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-prefetch", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let provider = RecordingTranscriptProvider { _ in
+            RemoteGhosttyTranscript(
+                data: Self.transcript(rows: 1...200), startByteOffset: 0, endByteOffset: UInt64(Self.transcript(rows: 1...200).count),
+                fileIdentity: fakeTranscriptFileIdentity, runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+        let request = try XCTUnwrap(provider.requests.first)
+        XCTAssertEqual(request.maxBytes, TerminalScrollbackBudget.initialLocalScrollbackPageBytes)
+        XCTAssertNil(request.fromByteOffset, "the first read builds a replay, so it must be a suffix read rather than a continuation")
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "prefetching must not put the pane into its replay before the user scrolls")
+    }
+
+    /// The feature itself (issue #693): scrolling a live pane scrolls the pane's own replay of the
+    /// session's transcript and tells the daemon nothing, so the session's viewport - which every other
+    /// viewer shares - stays where it is.
+    @MainActor func testLivePaneScrollsItsOwnReplayWithoutTellingTheDaemon() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-local", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let transcript = Self.transcript(rows: 1...200)
+        let provider = RecordingTranscriptProvider { _ in
+            RemoteGhosttyTranscript(
+                data: transcript, startByteOffset: 0, endByteOffset: UInt64(transcript.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+
+        waitForCondition("the pane shows its own transcript rows") {
+            guard let text = host.snapshotText() else { return false }
+            return text.contains("row-0") && !text.contains("live-01")
+        }
+        XCTAssertTrue(host.debugIsShowingLocalScrollbackFrame)
+        XCTAssertFalse(controlCommands(recorder).contains("scroll"), "a local scroll must not move the session's shared viewport")
+        XCTAssertTrue(host.debugJumpToBottomControlIsVisible, "a pane showing its own history must offer the jump back to the live screen")
+    }
+
+    /// A full-screen program owns the wheel: the alternate screen has no scrollback of its own, so every
+    /// event is forwarded exactly as it was before panes had a local viewport.
+    @MainActor func testAlternateScreenSessionForwardsWheelEventsToTheDaemon() throws {
+        try assertWheelIsForwarded(sessionID: "live-scrollback-alt-screen", alternateScreenActive: true, mouseReportingActive: false)
+    }
+
+    /// A program tracking the mouse wants the wheel as a mouse report, so it is forwarded too.
+    @MainActor func testMouseReportingSessionForwardsWheelEventsToTheDaemon() throws {
+        try assertWheelIsForwarded(sessionID: "live-scrollback-mouse-reporting", alternateScreenActive: false, mouseReportingActive: true)
+    }
+
+    @MainActor private func assertWheelIsForwarded(sessionID: String, alternateScreenActive: Bool, mouseReportingActive: Bool) throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: sessionID, root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(
+            payload: try liveScrollbackPayload(
+                session, text: Self.liveScreen, revision: 1, alternateScreenActive: alternateScreenActive, mouseReportingActive: mouseReportingActive)
+        )
+        let transcript = Self.transcript(rows: 1...200)
+        let provider = RecordingTranscriptProvider { _ in
+            RemoteGhosttyTranscript(
+                data: transcript, startByteOffset: 0, endByteOffset: UInt64(transcript.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+
+        waitForCondition("the wheel event reaches the session") { self.controlCommands(recorder).contains("scroll") }
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "a forwarded gesture must leave the pane showing the session's own frames")
+    }
+
+    /// A program can enable the alternate screen while a stale replay is still on screen from an earlier
+    /// gesture. The next gesture reroutes to the daemon (the session it would scroll is no longer the
+    /// replay's own primary screen), and that reroute must not leave the pane showing history while the
+    /// wheel drives a screen nobody can see: the pane has to return to the live frame first.
+    @MainActor func testGestureReroutedToTheDaemonLeavesTheStaleReplayBeforeDrivingTheHiddenScreen() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-alt-screen-while-replaying", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let transcript = Self.transcript(rows: 1...200)
+        let provider = RecordingTranscriptProvider { _ in
+            RemoteGhosttyTranscript(
+                data: transcript, startByteOffset: 0, endByteOffset: UInt64(transcript.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: try XCTUnwrap(window.contentView))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+
+        // Scroll the primary screen's replay into history, then end the gesture the same way a flick ends
+        // elsewhere in this file, so the next wheel event starts a fresh gesture and re-decides its route.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the pane shows its own transcript rows") { host.debugIsShowingLocalScrollbackFrame }
+        _ = host.sendScroll(
+            horizontal: 0, vertical: 0, scrollMods: GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .ended),
+            pointerPosition: nil)
+
+        // The session switches to the alternate screen while the stale replay is still on screen. This
+        // frame is applied underneath the replay without repainting it (see `applyReducedState`), so the
+        // transcript end offset it also carries is what a poll can observe to know the frame landed.
+        recorder.setPayload(
+            try liveScrollbackPayload(session, text: Self.liveScreen, revision: 2, outputEndByteOffset: transcript.count, alternateScreenActive: true)
+        )
+        waitForCondition("the pane observes the session switching to the alternate screen") {
+            host.requestSurfaceRefresh()
+            return host.debugLatestTranscriptEndByteOffset == UInt64(transcript.count)
+        }
+        XCTAssertTrue(host.debugIsShowingLocalScrollbackFrame, "the frame underneath updates without repainting the stale replay on screen")
+
+        // The next gesture reroutes to the daemon and must leave the stale replay before its wheel reaches
+        // the program that changed screens underneath it.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the wheel event reaches the session") { self.controlCommands(recorder).contains("scroll") }
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "the rerouted gesture must put the pane back on the live screen")
+    }
+
+    /// Typing does not cancel a gesture the session owns. The full-screen program reading those wheel
+    /// events decides for itself what a keystroke in the middle of them means, and none of them can paint
+    /// this pane's history over the keystroke's screen, so the rest of the flick is forwarded as usual.
+    @MainActor func testTypingDuringAnAlternateScreenFlickKeepsForwardingIt() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-alt-screen-typing", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(
+            payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1, alternateScreenActive: true, mouseReportingActive: false))
+        let transcript = Self.transcript(rows: 1...200)
+        let provider = RecordingTranscriptProvider { _ in
+            RemoteGhosttyTranscript(
+                data: transcript, startByteOffset: 0, endByteOffset: UInt64(transcript.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+
+        let momentum = GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .changed)
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: momentum, pointerPosition: nil))
+        waitForCondition("the flick reaches the session") { self.scrollControlCount(recorder) >= 1 }
+        let forwardedBeforeTheKeystroke = scrollControlCount(recorder)
+
+        XCTAssertTrue(host.sendTextAsPaste("echo hi"))
+
+        _ = host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: momentum, pointerPosition: nil)
+        waitForCondition("the rest of the flick still reaches the session") { self.scrollControlCount(recorder) > forwardedBeforeTheKeystroke }
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "a forwarded gesture must leave the pane showing the session's own frames")
+    }
+
+    /// One read per gesture of whatever the session wrote since the last one, asked for as a continuation
+    /// from where the replay ends and proved with the bytes the replay already holds there.
+    @MainActor func testSecondGestureReadsWhatTheSessionWroteSinceTheFirst() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-continuation", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let firstHalf = Self.transcript(rows: 1...100)
+        let secondHalf = Data("\r\n".utf8) + Self.transcript(rows: 101...200)
+        let totalBytes = UInt64(firstHalf.count + secondHalf.count)
+        let provider = RecordingTranscriptProvider { request in
+            guard let fromByteOffset = request.fromByteOffset else {
+                return RemoteGhosttyTranscript(
+                    data: firstHalf, startByteOffset: 0, endByteOffset: UInt64(firstHalf.count), fileIdentity: fakeTranscriptFileIdentity,
+                    runIdentity: runIdentity)
+            }
+            return RemoteGhosttyTranscript(
+                data: secondHalf, startByteOffset: fromByteOffset, endByteOffset: totalBytes, fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        // A pane that is genuinely on screen: an off-screen pane holds its screen updates, and this test
+        // needs the payload that reports the session's new output to actually reach the host.
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: try XCTUnwrap(window.contentView))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+
+        // One gesture, ended by its momentum, against the page the pane already holds.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the first gesture scrolls the replay") { host.snapshotText()?.contains("row-0") == true }
+        _ = host.sendScroll(
+            horizontal: 0, vertical: 0, scrollMods: GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .ended),
+            pointerPosition: nil)
+        XCTAssertEqual(provider.requests.count, 1, "a gesture must not read anything while the session has written nothing new")
+
+        // The session writes: the next state payload reports where `output.log` now ends.
+        recorder.setPayload(try liveScrollbackPayload(session, text: Self.liveScreen, revision: 2, outputEndByteOffset: Int(totalBytes)))
+        waitForCondition("the pane observes where the session's output now ends") {
+            host.requestSurfaceRefresh()
+            return host.debugLatestTranscriptEndByteOffset == totalBytes
+        }
+
+        // The next gesture reads exactly the bytes since the replay's end, naming the transcript file its
+        // replay was built from.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 200, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the gesture reads the continuation") { provider.requests.count >= 2 }
+        let continuation = try XCTUnwrap(provider.requests.last)
+        XCTAssertEqual(continuation.fromByteOffset, UInt64(firstHalf.count))
+        XCTAssertEqual(
+            continuation.fileIdentity, fakeTranscriptFileIdentity,
+            "a continuation must name the transcript file the replay was built from, which is what proves the offset still names its bytes")
+
+        // The appended rows are in the replay: scrolling back down reaches them. One row per step, and
+        // stopping at the first appended row, because a step onto the replay's newest row hands the pane
+        // back to the session's own screen.
+        waitForCondition("the appended rows are reachable in the replay") {
+            _ = host.sendScroll(horizontal: 0, vertical: -18, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil)
+            return host.snapshotText()?.contains("row-101") == true
+        }
+    }
+
+    /// A continuation's bytes are replayed into the replay off the main actor, because replaying a page
+    /// through libghostty-vt is tens of milliseconds the pane would otherwise spend frozen: no scrolling,
+    /// no rendering, no input. The replay belongs to that hop while it runs, so the gesture that is still
+    /// moving buffers its rows instead of scrolling a replay that is not here, and the install applies
+    /// them - the flick lands where the finger left it, over a replay that now holds the appended rows.
+    @MainActor func testAGestureDuringTheContinuationAppendLandsWhenTheReplayComesBack() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-append-gesture", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let page = Self.transcript(rows: 1...200)
+        let writtenSince = Data("\r\n".utf8) + Self.transcript(rows: 201...260)
+        let totalBytes = UInt64(page.count + writtenSince.count)
+        let provider = GatedTranscriptProvider()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        // A pane that is genuinely on screen: an off-screen pane holds its screen updates, and this test
+        // needs the payload that reports the session's new output to actually reach the host.
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: try XCTUnwrap(window.contentView))
+        waitForCondition("the pane starts reading its scrollback page") { provider.requests.count >= 1 }
+        let gestureEnd = GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .ended)
+
+        // A replay on screen, a little way back into the page the pane holds.
+        provider.resolveNext(
+            RemoteGhosttyTranscript(
+                data: page, startByteOffset: 0, endByteOffset: UInt64(page.count), fileIdentity: fakeTranscriptFileIdentity, runIdentity: runIdentity)
+        )
+        waitForCondition("the first gesture scrolls the replay") {
+            _ = host.sendScroll(horizontal: 0, vertical: 200, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil)
+            return host.debugIsShowingLocalScrollbackFrame
+        }
+        _ = host.sendScroll(horizontal: 0, vertical: 0, scrollMods: gestureEnd, pointerPosition: nil)
+
+        // The session writes, so the next gesture reads what it wrote.
+        recorder.setPayload(try liveScrollbackPayload(session, text: Self.liveScreen, revision: 2, outputEndByteOffset: Int(totalBytes)))
+        waitForCondition("the pane observes where the session's output now ends") {
+            host.requestSurfaceRefresh()
+            return host.debugLatestTranscriptEndByteOffset == totalBytes
+        }
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 200, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the gesture starts its continuation read") { provider.requests.count >= 2 }
+        let rowsBeforeTheAppend = try XCTUnwrap(topVisibleTranscriptRow(host))
+
+        // The read is answered and the gesture keeps moving while its bytes are replayed off the main
+        // actor.
+        let scrolledDuringTheAppend = MainActorFlag()
+        host.debugOnLocalScrollbackReplayHandedToLoad = { [weak host] in
+            guard let host, !scrolledDuringTheAppend.isSet else { return }
+            scrolledDuringTheAppend.isSet = true
+            _ = host.sendScroll(horizontal: 0, vertical: 360, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil)
+        }
+        provider.resolveNext(
+            RemoteGhosttyTranscript(
+                data: writtenSince, startByteOffset: UInt64(page.count), endByteOffset: totalBytes, fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity))
+        waitForCondition("the appended bytes land and the replay comes back") {
+            scrolledDuringTheAppend.isSet && !host.debugLoadHoldsLocalScrollbackReplay
+        }
+
+        // The rows the gesture scrolled while the replay was away are applied: the pane is further back in
+        // history than the append left it, rather than sitting exactly where the gesture found it.
+        let rowsAfterTheAppend = try XCTUnwrap(topVisibleTranscriptRow(host))
+        XCTAssertTrue(host.debugIsShowingLocalScrollbackFrame)
+        XCTAssertLessThanOrEqual(
+            rowsAfterTheAppend, rowsBeforeTheAppend - 15,
+            "the rows scrolled while the append held the replay were dropped: \(rowsBeforeTheAppend) -> \(rowsAfterTheAppend)")
+
+        // And the appended rows are in the replay. One row per step, stopping at the first appended row,
+        // because a step onto the replay's newest row hands the pane back to the session's own screen.
+        waitForCondition("the appended rows are reachable in the replay") {
+            _ = host.sendScroll(horizontal: 0, vertical: -18, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil)
+            return host.snapshotText()?.contains("row-201") == true
+        }
+    }
+
+    /// Jumping to the bottom while a continuation is being replayed into the replay off the main actor
+    /// has to reach that replay too. The pane goes back to the live screen straight away, but the replay
+    /// is with the append, so the rewind is owed and paid at the install: otherwise the replay comes back
+    /// parked where the reader left it and their next gesture jumps into history they already walked away
+    /// from, instead of starting at the live bottom.
+    @MainActor func testJumpingToTheBottomDuringTheContinuationAppendStartsTheNextGestureAtTheLiveBottom() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-jump-mid-append", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let page = Self.transcript(rows: 1...200)
+        let writtenSince = Data("\r\n".utf8) + Self.transcript(rows: 201...260)
+        let totalBytes = UInt64(page.count + writtenSince.count)
+        let provider = GatedTranscriptProvider()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: try XCTUnwrap(window.contentView))
+        waitForCondition("the pane starts reading its scrollback page") { provider.requests.count >= 1 }
+        let gestureEnd = GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .ended)
+
+        provider.resolveNext(
+            RemoteGhosttyTranscript(
+                data: page, startByteOffset: 0, endByteOffset: UInt64(page.count), fileIdentity: fakeTranscriptFileIdentity, runIdentity: runIdentity)
+        )
+        waitForCondition("the first gesture scrolls the replay") {
+            _ = host.sendScroll(horizontal: 0, vertical: 200, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil)
+            return host.debugIsShowingLocalScrollbackFrame
+        }
+        _ = host.sendScroll(horizontal: 0, vertical: 0, scrollMods: gestureEnd, pointerPosition: nil)
+        recorder.setPayload(try liveScrollbackPayload(session, text: Self.liveScreen, revision: 2, outputEndByteOffset: Int(totalBytes)))
+        waitForCondition("the pane observes where the session's output now ends") {
+            host.requestSurfaceRefresh()
+            return host.debugLatestTranscriptEndByteOffset == totalBytes
+        }
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 200, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the gesture starts its continuation read") { provider.requests.count >= 2 }
+
+        // The reader jumps back to the live screen while the appended bytes are being replayed.
+        let jumpedDuringTheAppend = MainActorFlag()
+        host.debugOnLocalScrollbackReplayHandedToLoad = { [weak host] in
+            guard let host, !jumpedDuringTheAppend.isSet else { return }
+            jumpedDuringTheAppend.isSet = true
+            host.debugActivateJumpToBottom()
+        }
+        provider.resolveNext(
+            RemoteGhosttyTranscript(
+                data: writtenSince, startByteOffset: UInt64(page.count), endByteOffset: totalBytes, fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity))
+        waitForCondition("the appended bytes land and the replay comes back") {
+            jumpedDuringTheAppend.isSet && !host.debugLoadHoldsLocalScrollbackReplay
+        }
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "the jump must leave the replay")
+        XCTAssertEqual(host.snapshotText()?.contains("live-01"), true, "the jump must put the session's own screen back")
+
+        // The wheel goes quiet past the idle boundary, which ends the gesture the jump cancelled, and the
+        // next one reads back from the live bottom: the newest rows the replay holds, which are the ones
+        // the continuation appended, rather than the rows the reader jumped away from.
+        let idleDeadline = Date().addingTimeInterval(Self.scrollGestureIdlePause)
+        while Date() < idleDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 180, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+
+        XCTAssertTrue(host.debugIsShowingLocalScrollbackFrame)
+        let topRow = try XCTUnwrap(topVisibleTranscriptRow(host))
+        XCTAssertGreaterThan(
+            topRow, 200, "the gesture after the jump started from the offset the reader left rather than from the live bottom: row-\(topRow)")
+    }
+
+    /// The other half of a continuation: a transcript the daemon could not serve as one comes back as a
+    /// fresh suffix, and the replay is rebuilt from it off the main actor. The rebuilt replay is put back
+    /// at the distance above its newest row the reader was at, so a jump to the bottom while that build
+    /// holds the replay has to reach it too: otherwise the install restores the offset the reader just
+    /// left and their next gesture reads back from history instead of from the live bottom.
+    @MainActor func testJumpingToTheBottomDuringASuffixRebuildStartsTheNextGestureAtTheLiveBottom() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-jump-mid-rebuild", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let page = Self.transcript(rows: 1...400)
+        // What a head-trim left behind: a file the replay's own offset no longer names, so the daemon
+        // answers the continuation with a replayable suffix instead of the bytes since that offset.
+        let rebuilt = Self.transcript(rows: 1...600)
+        let provider = GatedTranscriptProvider()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: try XCTUnwrap(window.contentView))
+        waitForCondition("the pane starts reading its scrollback page") { provider.requests.count >= 1 }
+        let gestureEnd = GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .ended)
+
+        // A reader well back into the page the pane holds.
+        provider.resolveNext(
+            RemoteGhosttyTranscript(
+                data: page, startByteOffset: 0, endByteOffset: UInt64(page.count), fileIdentity: fakeTranscriptFileIdentity, runIdentity: runIdentity)
+        )
+        for _ in 0..<10 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the first gesture scrolls the replay") { host.debugIsShowingLocalScrollbackFrame }
+        _ = host.sendScroll(horizontal: 0, vertical: 0, scrollMods: gestureEnd, pointerPosition: nil)
+
+        // The transcript's end moves, so the next gesture reads from the replay's own end.
+        recorder.setPayload(try liveScrollbackPayload(session, text: Self.liveScreen, revision: 2, outputEndByteOffset: rebuilt.count))
+        waitForCondition("the pane observes the transcript's end moving") {
+            host.requestSurfaceRefresh()
+            return host.debugLatestTranscriptEndByteOffset == UInt64(rebuilt.count)
+        }
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 200, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the gesture starts its continuation read") { provider.requests.count >= 2 }
+
+        // The reader jumps back to the live screen while the served suffix is being replayed into the
+        // replacement replay.
+        let jumpedDuringTheRebuild = MainActorFlag()
+        host.debugOnLocalScrollbackReplayHandedToLoad = { [weak host] in
+            guard let host, !jumpedDuringTheRebuild.isSet else { return }
+            jumpedDuringTheRebuild.isSet = true
+            host.debugActivateJumpToBottom()
+        }
+        provider.resolveNext(
+            RemoteGhosttyTranscript(
+                data: rebuilt, startByteOffset: 0, endByteOffset: UInt64(rebuilt.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity, isSuffixRebuild: true))
+        waitForCondition("the rebuilt replay is installed") { jumpedDuringTheRebuild.isSet && !host.debugLoadHoldsLocalScrollbackReplay }
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "the jump must leave the replay")
+        XCTAssertEqual(host.snapshotText()?.contains("live-01"), true, "the jump must put the session's own screen back")
+
+        // The wheel goes quiet past the idle boundary, which ends the gesture the jump cancelled, and the
+        // next one reads back from the rebuilt replay's newest rows rather than from the distance above
+        // them the reader jumped away from.
+        let idleDeadline = Date().addingTimeInterval(Self.scrollGestureIdlePause)
+        while Date() < idleDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 180, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+
+        XCTAssertTrue(host.debugIsShowingLocalScrollbackFrame)
+        let topRow = try XCTUnwrap(topVisibleTranscriptRow(host))
+        XCTAssertGreaterThan(
+            topRow, 550, "the gesture after the jump started from the offset the reader left rather than from the live bottom: row-\(topRow)")
+    }
+
+    /// Reaching the oldest row the page holds reads the whole retained history once, and the rebuilt
+    /// replay keeps the rows the user is looking at exactly where they were.
+    @MainActor func testReachingTheOldestRowReadsTheWholeBudgetAndKeepsTheRowsOnScreen() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-budget", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let whole = Self.transcript(rows: 1...200)
+        let tail = Self.transcript(rows: 101...200)
+        // The page-sized read is served as a suffix starting partway into `output.log`, which is what says
+        // a deeper read could return more; the budget-sized read returns the whole file.
+        let provider = RecordingTranscriptProvider { request in
+            request.maxBytes >= TerminalScrollbackBudget.defaultMaxBytes
+                ? RemoteGhosttyTranscript(
+                    data: whole, startByteOffset: 0, endByteOffset: UInt64(whole.count), fileIdentity: fakeTranscriptFileIdentity,
+                    runIdentity: runIdentity)
+                : RemoteGhosttyTranscript(
+                    data: tail, startByteOffset: UInt64(whole.count - tail.count), endByteOffset: UInt64(whole.count),
+                    fileIdentity: fakeTranscriptFileIdentity, runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+
+        // One gesture of 2000 points: 111 rows at the 18-point cell height the normalizer assumes. The
+        // page holds 100 rows, so 95 of them are applied (the viewport is five rows tall) and the
+        // remaining 16 are what the deeper replay has to carry.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the gesture reaches the oldest row the page holds and reads the whole budget") { provider.requests.count >= 2 }
+        XCTAssertEqual(provider.requests.last?.maxBytes, TerminalScrollbackBudget.defaultMaxBytes)
+        for _ in 0..<20 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        // 111 rows above the newest row of a 200-row replay: the rows continue where the gesture left off
+        // rather than restarting at either end of the transcript.
+        let rebuiltText = try XCTUnwrap(host.snapshotText())
+        XCTAssertTrue(rebuiltText.contains("row-085"), "the rebuilt replay did not continue where the gesture left off: \(rebuiltText)")
+
+        // And the deeper history is now reachable.
+        waitForCondition("the deeper history is reachable") {
+            _ = host.sendScroll(horizontal: 0, vertical: 4000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil)
+            return host.snapshotText()?.contains("row-001") == true
+        }
+        XCTAssertEqual(provider.requests.count, 2, "the whole budget is read once, not once per gesture that sits at the top")
+    }
+
+    /// Typing belongs at the session's own bottom row, so an input send leaves the replay and puts the
+    /// live screen back.
+    @MainActor func testTypingLeavesTheReplayAndShowsTheLiveScreen() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-typing", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let transcript = Self.transcript(rows: 1...200)
+        let provider = RecordingTranscriptProvider { _ in
+            RemoteGhosttyTranscript(
+                data: transcript, startByteOffset: 0, endByteOffset: UInt64(transcript.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the pane shows its own transcript rows") { host.snapshotText()?.contains("row-0") == true }
+
+        XCTAssertTrue(host.sendTextAsPaste("echo hi"))
+
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "typing must leave the replay")
+        XCTAssertEqual(host.snapshotText()?.contains("live-01"), true, "typing must put the session's own screen back")
+        XCTAssertFalse(host.debugJumpToBottomControlIsVisible)
+    }
+
+    /// Cmd+K clears the session's screen and scrollback, and the daemon records that clear in the
+    /// transcript. The page this pane read before the clear still holds the rows the clear removed, so
+    /// the replay is dropped outright: the next gesture reads again, replays the recorded clear, and
+    /// scrolls only what the session has printed since.
+    @MainActor func testClearingTheScreenDropsTheReplayThatPredatesIt() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-clear", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        // What the daemon's `output.log` holds after it performs the clear: the history it already had,
+        // the clear it records for anyone replaying those bytes, and what the session prints afterwards.
+        var clearedTranscript = Self.transcript(rows: 1...200)
+        clearedTranscript.append(GhosttyTerminalTranscriptMutation.clearScreenAndScrollback)
+        clearedTranscript.append(Data("\r\n".utf8))
+        clearedTranscript.append(Data((1...200).map { String(format: "new-%03d", $0) }.joined(separator: "\r\n").utf8))
+        let transcript = MutableTranscript(Self.transcript(rows: 1...200))
+        let provider = RecordingTranscriptProvider { _ in
+            let data = transcript.current
+            return RemoteGhosttyTranscript(
+                data: data, startByteOffset: 0, endByteOffset: UInt64(data.count), fileIdentity: fakeTranscriptFileIdentity, runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the pane shows its own transcript rows") { host.snapshotText()?.contains("row-0") == true }
+        // Back down onto the live screen by hand, and the gesture ends there. The replay survives that
+        // return, which is the state this is about: the clear is sent from the live bottom, with a replay
+        // of the pre-clear history cached behind it.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: -4000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "setup: the pane is back on the session's own screen")
+        _ = host.sendScroll(
+            horizontal: 0, vertical: 0, scrollMods: GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .ended),
+            pointerPosition: nil)
+        let readsBeforeTheClear = provider.requests.count
+
+        // The daemon performs the clear and its transcript records it. Swapped in before the request is
+        // sent so no read can be answered from the pre-clear transcript in between.
+        transcript.current = clearedTranscript
+        XCTAssertTrue(host.clearScreenAndScrollback())
+
+        waitForCondition("the clear reaches the session") { [self] in controlCommands(recorder).contains("clearScreen") }
+
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+
+        waitForCondition("the gesture after the clear scrolls the rows printed since") { host.snapshotText()?.contains("new-") == true }
+        XCTAssertGreaterThan(provider.requests.count, readsBeforeTheClear, "the gesture after the clear must read the transcript again")
+        let text = try XCTUnwrap(host.snapshotText())
+        XCTAssertFalse(text.contains("row-"), "the rows the clear removed must not come back from the replay read before it: \(text)")
+    }
+
+    /// A clear another client sent reaches this pane as a `.clearScreen` state payload, which stamps no
+    /// transcript end and so proves nothing new by the offset rule the jump control reads. The replay this
+    /// pane cached predates that clear all the same, so the payload's reason is what drops it: without
+    /// that, the gesture after ownership comes back scrolls the rows the clear removed.
+    @MainActor func testAClearBroadcastByAnotherClientDropsTheReplayThatPredatesIt() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-clear-broadcast", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        // What the daemon's `output.log` holds after the other client's clear: the history it already had,
+        // the clear it records for anyone replaying those bytes, and what the session prints afterwards.
+        var clearedTranscript = Self.transcript(rows: 1...200)
+        clearedTranscript.append(GhosttyTerminalTranscriptMutation.clearScreenAndScrollback)
+        clearedTranscript.append(Data("\r\n".utf8))
+        clearedTranscript.append(Data((1...200).map { String(format: "new-%03d", $0) }.joined(separator: "\r\n").utf8))
+        let transcript = MutableTranscript(Self.transcript(rows: 1...200))
+        let provider = RecordingTranscriptProvider { _ in
+            let data = transcript.current
+            return RemoteGhosttyTranscript(
+                data: data, startByteOffset: 0, endByteOffset: UInt64(data.count), fileIdentity: fakeTranscriptFileIdentity, runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        // A pane that is genuinely on screen: an off-screen pane holds its screen updates, and this test
+        // needs the clear the other client sent to actually reach the host.
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: try XCTUnwrap(window.contentView))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the pane shows its own transcript rows") { host.snapshotText()?.contains("row-0") == true }
+        // Back down onto the live screen by hand, and the gesture ends there. The replay survives that
+        // return, which is the state this is about: the other client's clear lands with a replay of the
+        // pre-clear history cached behind it.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: -4000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "setup: the pane is back on the session's own screen")
+        _ = host.sendScroll(
+            horizontal: 0, vertical: 0, scrollMods: GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .ended),
+            pointerPosition: nil)
+        let readsBeforeTheClear = provider.requests.count
+
+        // The other client's clear: the daemon performs it, records it in the transcript, and broadcasts
+        // the screen it left behind under reason `.clearScreen` with no transcript end stamped on it.
+        //
+        // Queued as a one-shot ahead of the screen it left behind, which is how the daemon serves it: the
+        // clear travels as one broadcast, and every `.state` read after it is answered with the current
+        // screen under `.stateChange` (`currentRemoteStatePayload`), never the clear again. Serving the
+        // clear to every read instead would let the refresh still in flight when the wait below ends
+        // deliver it once more, after the gesture has already put its rows on the load the first clear's
+        // discard started, and that second discard drops them with no later event to scroll.
+        transcript.current = clearedTranscript
+        recorder.setPayloads([
+            try liveScrollbackPayload(session, text: Self.newerLiveScreen, revision: 2, reason: .clearScreen),
+            try liveScrollbackPayload(session, text: Self.newerLiveScreen, revision: 3),
+        ])
+        waitForCondition("the clear broadcast reaches the pane") {
+            host.requestSurfaceRefresh()
+            return host.snapshotText()?.contains("done-01") == true
+        }
+
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+
+        waitForCondition("the gesture after the clear scrolls the rows printed since") { host.snapshotText()?.contains("new-") == true }
+        XCTAssertGreaterThan(provider.requests.count, readsBeforeTheClear, "the clear broadcast must leave the pane reading the transcript again")
+        let text = try XCTUnwrap(host.snapshotText())
+        XCTAssertFalse(text.contains("row-"), "the rows the clear removed must not come back from the replay read before it: \(text)")
+    }
+
+    /// A main actor that falls behind leaves the apply mailbox folding the `.output` payload that reported
+    /// where `output.log` now ends into a later full frame whose reason stamps no offset at all. Only the
+    /// survivor applies, so a pane that read the survivor's own fields would never learn the session
+    /// printed, and the replay it cached before that output would sit behind the session with no later
+    /// payload to heal it. The fold is produced the way production produces it: an off-screen pane holds
+    /// its screen updates, so the queued output is still waiting when the next full frame collapses it.
+    @MainActor func testAnOutputFoldedIntoALaterFrameStillPagesInWhatTheSessionPrinted() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-coalesced-output", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let firstHalf = Self.transcript(rows: 1...100)
+        let secondHalf = Data("\r\n".utf8) + Self.transcript(rows: 101...200)
+        let totalBytes = UInt64(firstHalf.count + secondHalf.count)
+        let provider = RecordingTranscriptProvider { request in
+            guard let fromByteOffset = request.fromByteOffset else {
+                return RemoteGhosttyTranscript(
+                    data: firstHalf, startByteOffset: 0, endByteOffset: UInt64(firstHalf.count), fileIdentity: fakeTranscriptFileIdentity,
+                    runIdentity: runIdentity)
+            }
+            return RemoteGhosttyTranscript(
+                data: secondHalf, startByteOffset: fromByteOffset, endByteOffset: totalBytes, fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity)
+        }
+        // Payloads reach the pane over its subscription rather than through a request sender, because only
+        // subscription payloads go through the apply mailbox: a direct `.state` response is out-of-band and
+        // `ApplyMailbox.mayCollapse` refuses to collapse one in either direction.
+        let queue = DispatchQueue(label: "spaces.test.coalesced-output-stream")
+        let initialPayload = try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1, reason: .initial)
+        let server = GhosttyRemoteSessionStateStreamServer(socketPath: session.paths.subscriptionSocketPath, queue: queue) { initialPayload }
+        try server.start()
+        defer { server.stop() }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+
+        // The pane's terminal container is a subview of a visible window, so hiding it takes the pane off
+        // screen exactly the way switching to another tab does.
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        let contentView = try XCTUnwrap(window.contentView)
+        let container = NSView(frame: contentView.bounds)
+        contentView.addSubview(container)
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: container)
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the first gesture scrolls the replay") { host.snapshotText()?.contains("row-0") == true }
+        _ = host.sendScroll(
+            horizontal: 0, vertical: 0, scrollMods: GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .ended),
+            pointerPosition: nil)
+        XCTAssertEqual(provider.requests.count, 1, "setup: the session has written nothing new, so the first gesture read nothing more")
+
+        container.isHidden = true
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        // The payload that reports the session's new output, queued while nobody can see the pane.
+        server.broadcast(
+            try liveScrollbackPayload(session, text: Self.newerLiveScreen, revision: 2, outputEndByteOffset: Int(totalBytes), reason: .output))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertNotEqual(
+            host.debugLatestTranscriptEndByteOffset, totalBytes, "setup: the held pane must still be holding the output payload, not applying it")
+        // The full frame that folds it away. Its own reason stamps no transcript end, so this apply is the
+        // pane's only news of what the payload it replaced reported.
+        server.broadcast(try liveScrollbackPayload(session, text: Self.newerLiveScreen, revision: 3, reason: .stateChange))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        container.isHidden = false
+
+        waitForCondition("the coalesced apply reports where the session's output now ends") { host.debugLatestTranscriptEndByteOffset == totalBytes }
+
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 200, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the gesture reads the continuation") { provider.requests.count >= 2 }
+        let continuation = try XCTUnwrap(provider.requests.last)
+        XCTAssertEqual(continuation.fromByteOffset, UInt64(firstHalf.count), "the gesture must read exactly the bytes since the replay's end")
+        waitForCondition("the appended rows are reachable in the replay") {
+            _ = host.sendScroll(horizontal: 0, vertical: -18, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil)
+            return host.snapshotText()?.contains("row-101") == true
+        }
+    }
+
+    /// The same fold, carrying a clear instead: another client's `.clearScreen` broadcast is folded into
+    /// the next full frame while this pane is off screen. The clear removed rows the cached replay still
+    /// holds, so the apply that replaces it has to drop that replay even though its own reason says
+    /// nothing about a clear.
+    @MainActor func testAClearFoldedIntoALaterFrameDropsTheReplayThatPredatesIt() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-coalesced-clear", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        // What the daemon's `output.log` holds after the other client's clear: the history it already had,
+        // the clear it records for anyone replaying those bytes, and what the session prints afterwards.
+        var clearedTranscript = Self.transcript(rows: 1...200)
+        clearedTranscript.append(GhosttyTerminalTranscriptMutation.clearScreenAndScrollback)
+        clearedTranscript.append(Data("\r\n".utf8))
+        clearedTranscript.append(Data((1...200).map { String(format: "new-%03d", $0) }.joined(separator: "\r\n").utf8))
+        let transcript = MutableTranscript(Self.transcript(rows: 1...200))
+        let provider = RecordingTranscriptProvider { _ in
+            let data = transcript.current
+            return RemoteGhosttyTranscript(
+                data: data, startByteOffset: 0, endByteOffset: UInt64(data.count), fileIdentity: fakeTranscriptFileIdentity, runIdentity: runIdentity)
+        }
+        let queue = DispatchQueue(label: "spaces.test.coalesced-clear-stream")
+        let initialPayload = try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1, reason: .initial)
+        let server = GhosttyRemoteSessionStateStreamServer(socketPath: session.paths.subscriptionSocketPath, queue: queue) { initialPayload }
+        try server.start()
+        defer { server.stop() }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        let contentView = try XCTUnwrap(window.contentView)
+        let container = NSView(frame: contentView.bounds)
+        contentView.addSubview(container)
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: container)
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the pane shows its own transcript rows") { host.snapshotText()?.contains("row-0") == true }
+        // Back down onto the live screen by hand, so the clear lands with a replay of the pre-clear
+        // history cached behind it rather than on screen.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: -4000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "setup: the pane is back on the session's own screen")
+        _ = host.sendScroll(
+            horizontal: 0, vertical: 0, scrollMods: GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .ended),
+            pointerPosition: nil)
+        let readsBeforeTheClear = provider.requests.count
+
+        container.isHidden = true
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        transcript.current = clearedTranscript
+        server.broadcast(try liveScrollbackPayload(session, text: Self.newerLiveScreen, revision: 2, reason: .clearScreen))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertEqual(provider.requests.count, readsBeforeTheClear, "setup: the held pane must still be holding the clear, not applying it")
+        server.broadcast(try liveScrollbackPayload(session, text: Self.newerLiveScreen, revision: 3, reason: .stateChange))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        container.isHidden = false
+        // The drain the redisplay schedules is a main-actor task, so the collapsed apply lands after this
+        // call returns; the gesture below has to come after it, not race it.
+        waitForCondition("the collapsed apply paints the screen the pane was held on") { host.snapshotText()?.contains("done-01") == true }
+
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the gesture after the clear scrolls the rows printed since") { host.snapshotText()?.contains("new-") == true }
+        XCTAssertGreaterThan(provider.requests.count, readsBeforeTheClear, "the folded-away clear must leave the pane reading the transcript again")
+        let text = try XCTUnwrap(host.snapshotText())
+        XCTAssertFalse(text.contains("row-"), "the rows the clear removed must not come back from the replay read before it: \(text)")
+    }
+
+    /// The jump control returns a pane to the live screen with no request at all: the session's viewport
+    /// never moved, so the frame the pane already holds is the current screen. Output that arrived while
+    /// the user was reading back is marked on the control until they come back.
+    @MainActor func testJumpToBottomLeavesTheReplayWithoutAskingTheDaemon() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-jump", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let transcript = Self.transcript(rows: 1...200)
+        let provider = RecordingTranscriptProvider { _ in
+            RemoteGhosttyTranscript(
+                data: transcript, startByteOffset: 0, endByteOffset: UInt64(transcript.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        // A pane that is genuinely on screen: an off-screen pane holds its screen updates, and this test
+        // needs the output that arrives while the user reads back to actually reach the host.
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: try XCTUnwrap(window.contentView))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the pane shows its own transcript rows") { host.snapshotText()?.contains("row-0") == true }
+
+        // The session prints while the user reads back: an output broadcast, which reports where
+        // `output.log` now ends. That report is what says the session wrote something, and it is what the
+        // new-output mark is driven by - a frame's mere arrival is not, since repaint-only broadcasts
+        // carry one too.
+        recorder.setPayload(
+            try liveScrollbackPayload(
+                session, text: "live-06\nlive-07\nlive-08\nlive-09\nlive-10", revision: 2, outputEndByteOffset: transcript.count + 8, reason: .output)
+        )
+        waitForCondition("the control marks the output that arrived underneath") {
+            host.requestSurfaceRefresh()
+            return host.debugJumpToBottomControlShowsNewOutput
+        }
+        XCTAssertTrue(host.snapshotText()?.contains("row-0") == true, "new output must not yank the reader off the rows they are on")
+
+        host.debugActivateJumpToBottom()
+
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame)
+        XCTAssertEqual(host.snapshotText()?.contains("live-10"), true, "the jump must show the session's current screen")
+        XCTAssertFalse(host.debugJumpToBottomControlShowsNewOutput, "coming back to the live screen clears the new-output mark")
+        XCTAssertFalse(
+            controlCommands(recorder).contains("scrollToBottom"), "a pane showing its own history jumps locally, without asking the session")
+    }
+
+    /// Scrolling by hand back down onto the replay's newest row is the third way back to the live screen,
+    /// and the one a reader reaches without touching the control: the pane paints the session's own frame
+    /// again and the control goes away, because the replay's newest row is only as fresh as the transcript
+    /// page it was read from. The gesture is not cancelled, so scrolling straight back up re-enters the
+    /// replay it rewound, with no read of the transcript to pay for.
+    @MainActor func testScrollingBackDownToTheBottomShowsTheLiveScreenAgain() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-back-down", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let transcript = Self.transcript(rows: 1...200)
+        let provider = RecordingTranscriptProvider { _ in
+            RemoteGhosttyTranscript(
+                data: transcript, startByteOffset: 0, endByteOffset: UInt64(transcript.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the pane shows its own transcript rows") { host.snapshotText()?.contains("row-0") == true }
+        XCTAssertTrue(host.debugIsShowingLocalScrollbackFrame)
+        let readsWhileReadingBack = provider.requests.count
+
+        // The same gesture reverses and runs past the replay's newest row.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: -4000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "the replay's bottom is not the current screen, the session's own frame is")
+        XCTAssertEqual(host.snapshotText()?.contains("live-01"), true, "scrolling back down by hand must hand the pane back to the live frame")
+        XCTAssertFalse(host.debugJumpToBottomControlIsVisible, "a pane back on the live screen has nothing to jump to")
+
+        // Nothing cancelled the gesture, so the next upward delta reads the history again from the replay
+        // that survived, rather than paying for a fresh page.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+
+        XCTAssertTrue(host.debugIsShowingLocalScrollbackFrame, "an upward delta re-enters the replay the return rewound")
+        XCTAssertTrue(host.snapshotText()?.contains("row-0") == true)
+        XCTAssertEqual(provider.requests.count, readsWhileReadingBack, "the replay survived the return, so re-entering it reads nothing")
+        XCTAssertFalse(controlCommands(recorder).contains("scroll"), "none of this moves the session's shared viewport")
+    }
+
+    /// The jump control's new-output mark says the session *wrote* something while the user was reading
+    /// back, not that a frame arrived. The daemon broadcasts a full frame for repaint-only events too -
+    /// another viewer changing the shared selection is one - and a reader scrolled into history must not
+    /// be told there is something new to come back to when nothing was written, nor pay for a
+    /// continuation read that has nothing to read.
+    @MainActor func testARepaintOnlyFrameDuringAReplayMarksNoNewOutput() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-repaint-only", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let page = Self.transcript(rows: 1...400)
+        let appended = Data("\r\nrow-401".utf8)
+        let appendedEndByteOffset = page.count + appended.count
+        let recorder = DirectTerminalServiceRecorder(
+            payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1, outputEndByteOffset: page.count))
+        let provider = RecordingTranscriptProvider { request in
+            guard let fromByteOffset = request.fromByteOffset else {
+                return RemoteGhosttyTranscript(
+                    data: page, startByteOffset: 0, endByteOffset: UInt64(page.count), fileIdentity: fakeTranscriptFileIdentity,
+                    runIdentity: runIdentity)
+            }
+            return RemoteGhosttyTranscript(
+                data: appended, startByteOffset: fromByteOffset, endByteOffset: UInt64(appendedEndByteOffset),
+                fileIdentity: fakeTranscriptFileIdentity, runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        // The payloads below have to actually reach the host, and an off-screen pane holds its screen
+        // updates.
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: try XCTUnwrap(window.contentView))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+        let gestureEnd = GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .ended)
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the pane shows its own transcript rows") { host.debugIsShowingLocalScrollbackFrame }
+        _ = host.sendScroll(horizontal: 0, vertical: 0, scrollMods: gestureEnd, pointerPosition: nil)
+
+        // Another viewer changes the shared selection. A Linux daemon stamps every payload with where
+        // `output.log` ends, so this one carries a full frame at a transcript end that has not moved.
+        recorder.setPayload(
+            try liveScrollbackPayload(
+                session, text: "sel-001\nsel-002\nsel-003\nsel-004\nsel-005", revision: 2, outputEndByteOffset: page.count, reason: .selection))
+        for _ in 0..<30 {
+            host.requestSurfaceRefresh()
             RunLoop.main.run(until: Date().addingTimeInterval(0.02))
         }
-        XCTAssertEqual(attempts.count, 1, "a mismatched-identity rejection must latch .unavailable and not re-fetch")
-        XCTAssertFalse(host.snapshotText()?.contains("NEWRUN-") == true, "the rejected transcript must never render")
+
+        XCTAssertFalse(host.debugJumpToBottomControlShowsNewOutput, "a repaint-only broadcast marked new output the session never wrote")
+        XCTAssertTrue(host.debugIsShowingLocalScrollbackFrame, "the repaint-only frame must not yank the reader off the rows they are on")
+
+        // And the gesture after it has nothing to read: the replay is already level with the transcript.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 200, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        _ = host.sendScroll(horizontal: 0, vertical: 0, scrollMods: gestureEnd, pointerPosition: nil)
+        for _ in 0..<20 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        XCTAssertEqual(provider.requests.count, 1, "a gesture read the transcript again for a broadcast that wrote nothing")
+
+        // The same broadcast from a Mac daemon, which stamps that field on output payloads only: a full
+        // frame with no transcript end at all, under a reason that is not output.
+        recorder.setPayload(try liveScrollbackPayload(session, text: "sel-011\nsel-012\nsel-013\nsel-014\nsel-015", revision: 3, reason: .selection))
+        for _ in 0..<30 {
+            host.requestSurfaceRefresh()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+
+        XCTAssertFalse(host.debugJumpToBottomControlShowsNewOutput, "a repaint-only broadcast that stamps no transcript end marked new output")
+        XCTAssertTrue(host.debugIsShowingLocalScrollbackFrame, "the repaint-only frame must not yank the reader off the rows they are on")
+
+        // The jump proves those frames did reach the host, so the assertions above were not made against
+        // payloads still in flight.
+        host.debugActivateJumpToBottom()
+        XCTAssertEqual(host.snapshotText()?.contains("sel-011"), true, "the repaint-only frames never reached the host")
+
+        // Real output, on the other hand, both marks the control and is what the next gesture reads.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the pane is back in its own history") { host.debugIsShowingLocalScrollbackFrame }
+        _ = host.sendScroll(horizontal: 0, vertical: 0, scrollMods: gestureEnd, pointerPosition: nil)
+        recorder.setPayload(
+            try liveScrollbackPayload(
+                session, text: "out-001\nout-002\nout-003\nout-004\nout-005", revision: 4, outputEndByteOffset: appendedEndByteOffset, reason: .output
+            ))
+        waitForCondition("the pane observes where the session's output now ends") {
+            host.requestSurfaceRefresh()
+            return host.debugLatestTranscriptEndByteOffset == UInt64(appendedEndByteOffset)
+        }
+
+        XCTAssertTrue(host.debugJumpToBottomControlShowsNewOutput, "output that arrived while the user reads back must mark the jump control")
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 200, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the gesture reads what the session appended") { provider.requests.count >= 2 }
+        XCTAssertEqual(try XCTUnwrap(provider.requests.last).fromByteOffset, UInt64(page.count))
+    }
+
+    /// The shared selection is anchored in the session's own screen, which a pane showing its replay is
+    /// not looking at: a drag over replayed rows names rows of this client's own copy of the transcript.
+    /// Committing those would move the selection every other viewer sees onto text nobody selected, so
+    /// while a replay frame is on screen no selection request leaves the host at all - neither the commit
+    /// a drag's release makes nor the clear a plain click makes. Both resume the moment the pane is back
+    /// on the session's own screen.
+    @MainActor func testADragOnTheReplayCommitsNoSharedSelection() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-selection", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let transcript = Self.transcript(rows: 1...400)
+        let provider = RecordingTranscriptProvider { _ in
+            RemoteGhosttyTranscript(
+                data: transcript, startByteOffset: 0, endByteOffset: UInt64(transcript.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        let container = try XCTUnwrap(window.contentView)
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: container)
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the pane shows its own transcript rows") { host.debugIsShowingLocalScrollbackFrame }
+        // The two callbacks the mirror view fires from its own mouse handling: the clear a plain
+        // mouse-down makes, and the commit a drag's release makes (`commitLocalSelectionIfPresent`),
+        // reporting rows of whatever viewport the pane last painted.
+        let mirrorView = try XCTUnwrap(
+            container.subviews.compactMap { $0 as? GhosttyMirrorTerminalView }.first, "the pane never installed its mirror view")
+
+        mirrorView.onClearSelection?()
+        mirrorView.onSetSelection?(1, 12, 6, 12, false)
+        for _ in 0..<20 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+
+        let commandsDuringReplay = controlCommands(recorder)
+        XCTAssertFalse(
+            commandsDuringReplay.contains("setSelection"), "a drag over replayed rows committed replay coordinates as the session's shared selection")
+        XCTAssertFalse(
+            commandsDuringReplay.contains("clearSelection"), "a click on a replay frame cleared the selection every other viewer is looking at")
+
+        // Back on the session's own screen, where the pane's rows are the session's rows again, both
+        // requests reach the daemon. The repaint the jump makes is also what drops any highlight the
+        // local drag left on the surface: applying a frame paints the selection that frame carries and
+        // clears one it does not.
+        host.debugActivateJumpToBottom()
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame)
+        XCTAssertEqual(host.snapshotText()?.contains("live-01"), true, "the jump must put the session's own screen back")
+
+        mirrorView.onSetSelection?(1, 2, 6, 2, false)
+
+        waitForCondition("the commit made on the live screen reaches the session") { self.controlCommands(recorder).contains("setSelection") }
+    }
+
+    /// Discarding a replay (a keystroke, a resize, a relaunch) leaves any continuation read it started
+    /// running. That read resolving must not retire the mark the *current* replay's own read set: a
+    /// gesture would then start a second read of the same range while the first is still in flight, and
+    /// both would append those bytes to the replay.
+    @MainActor func testAStaleContinuationReadDoesNotUnlockTheCurrentReplaysRead() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-stale-continuation", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let page = Self.transcript(rows: 1...400)
+        let pageTranscript = RemoteGhosttyTranscript(
+            data: page, startByteOffset: 0, endByteOffset: UInt64(page.count), fileIdentity: fakeTranscriptFileIdentity, runIdentity: runIdentity)
+        let writtenSince = Data("\r\nrow-401".utf8)
+        let transcriptEndByteOffset = page.count + writtenSince.count
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let provider = GatedTranscriptProvider()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: try XCTUnwrap(window.contentView))
+        waitForCondition("the pane starts reading its scrollback page") { provider.requests.count >= 1 }
+        let gestureEnd = GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .ended)
+
+        // A replay, scrolled onto the screen.
+        provider.resolveLast(pageTranscript)
+        waitForCondition("the first replay is ready and scrolls") {
+            _ = host.sendScroll(horizontal: 0, vertical: 200, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil)
+            _ = host.sendScroll(horizontal: 0, vertical: 0, scrollMods: gestureEnd, pointerPosition: nil)
+            return host.debugIsShowingLocalScrollbackFrame
+        }
+
+        // The session writes, so the next gesture reads what it wrote. That read is left in flight.
+        recorder.setPayload(try liveScrollbackPayload(session, text: Self.liveScreen, revision: 2, outputEndByteOffset: transcriptEndByteOffset))
+        waitForCondition("the pane observes where the session's output now ends") {
+            host.requestSurfaceRefresh()
+            return host.debugLatestTranscriptEndByteOffset == UInt64(transcriptEndByteOffset)
+        }
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 200, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        _ = host.sendScroll(horizontal: 0, vertical: 0, scrollMods: gestureEnd, pointerPosition: nil)
+        waitForCondition("the gesture starts its continuation read") { provider.requests.count >= 2 }
+        XCTAssertEqual(try XCTUnwrap(provider.requests.last).fromByteOffset, UInt64(page.count))
+
+        // The user types: the replay is discarded with that read still in flight, and the pane reads a
+        // fresh page and opens a second replay over the same session.
+        XCTAssertTrue(host.sendTextAsPaste("echo hi"))
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "typing must leave the replay")
+        recorder.setPayload(try liveScrollbackPayload(session, text: Self.liveScreen, revision: 3, outputEndByteOffset: transcriptEndByteOffset))
+        waitForCondition("the pane reads a fresh page for the replay it reopens") {
+            host.requestSurfaceRefresh()
+            return provider.requests.count >= 3
+        }
+        provider.resolveLast(pageTranscript)
+        waitForCondition("the reopened replay's gesture starts its own continuation read") {
+            _ = host.sendScroll(horizontal: 0, vertical: 200, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil)
+            _ = host.sendScroll(horizontal: 0, vertical: 0, scrollMods: gestureEnd, pointerPosition: nil)
+            return provider.requests.count >= 4
+        }
+
+        // The read the first replay left behind lands now, against a replay that is gone.
+        provider.resolveNext(
+            RemoteGhosttyTranscript(
+                data: writtenSince, startByteOffset: UInt64(page.count), endByteOffset: UInt64(transcriptEndByteOffset),
+                fileIdentity: fakeTranscriptFileIdentity, runIdentity: runIdentity))
+        for _ in 0..<20 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 200, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        _ = host.sendScroll(horizontal: 0, vertical: 0, scrollMods: gestureEnd, pointerPosition: nil)
+        for _ in 0..<20 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+
+        XCTAssertEqual(
+            provider.requests.count, 4,
+            "a stale read's completion unlocked the current replay's read, so a gesture stacked a second read of the same range on it")
+    }
+
+    /// A keystroke that lands mid-flick has to end that flick. The pane is back on the live screen the
+    /// keystroke belongs to, while the momentum events still arriving carry the route the gesture
+    /// latched: without cancelling the gesture, the very next delta reads a fresh page and paints the
+    /// history the user just left right back over the screen they typed into.
+    @MainActor func testTypingDuringMomentumDropsTheRestOfTheFlick() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-typing-momentum", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let transcript = Self.transcript(rows: 1...200)
+        let provider = RecordingTranscriptProvider { _ in
+            RemoteGhosttyTranscript(
+                data: transcript, startByteOffset: 0, endByteOffset: UInt64(transcript.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+
+        let momentum = GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .changed)
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: momentum, pointerPosition: nil))
+        waitForCondition("the flick scrolls the pane into its own history") { host.snapshotText()?.contains("row-0") == true }
+
+        XCTAssertTrue(host.sendTextAsPaste("echo hi"))
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "typing must leave the replay")
+
+        // The flick is still travelling. Everything left of it goes nowhere: not to the replay, and not
+        // to the daemon either, since the user left history on purpose.
+        _ = host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: momentum, pointerPosition: nil)
+        for _ in 0..<20 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "a cancelled flick's momentum put the pane back into its replay")
+        let text = try XCTUnwrap(host.snapshotText())
+        XCTAssertFalse(text.contains("row-"), "a cancelled flick's momentum painted history over the live screen: \(text)")
+        XCTAssertTrue(text.contains("live-01"), "the keystroke's own screen must stay showing: \(text)")
+        XCTAssertFalse(controlCommands(recorder).contains("scroll"), "a cancelled gesture's deltas must not reach the session either")
+
+        // The momentum ending is the gesture's end, so the next flick scrolls like any other.
+        _ = host.sendScroll(
+            horizontal: 0, vertical: 0, scrollMods: GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .ended),
+            pointerPosition: nil)
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the gesture after the cancelled one scrolls the replay again") { host.snapshotText()?.contains("row-0") == true }
+    }
+
+    /// A gesture latches on its first event, which can be a fraction of a row: nothing is painted, and the
+    /// pane is still showing the session's own screen. Typing there has no replay to leave, but the gesture
+    /// behind the keystroke is still travelling, and its remaining deltas would scroll the replay and paint
+    /// history over the screen the keystroke belongs to, so the latch is cancelled on input whether or not
+    /// the replay was showing.
+    @MainActor func testTypingDuringAGestureThatHasNotCrossedARowDropsTheRestOfIt() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-typing-sub-row", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let transcript = Self.transcript(rows: 1...200)
+        let provider = RecordingTranscriptProvider { _ in
+            RemoteGhosttyTranscript(
+                data: transcript, startByteOffset: 0, endByteOffset: UInt64(transcript.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+        for _ in 0..<10 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+
+        // A wheel gesture whose first event is worth less than one row: the route latches, and the pane
+        // paints nothing.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 5, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "a sub-row delta must not put the pane into its replay")
+
+        XCTAssertTrue(host.sendTextAsPaste("echo hi"))
+
+        // The rest of the gesture, worth many rows, goes nowhere: not to the replay, and not to the daemon.
+        for _ in 0..<4 { _ = host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil) }
+        for _ in 0..<20 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "a cancelled gesture's deltas put the pane into its replay")
+        let text = try XCTUnwrap(host.snapshotText())
+        XCTAssertFalse(text.contains("row-"), "a cancelled gesture painted history over the live screen: \(text)")
+        XCTAssertTrue(text.contains("live-01"), "the keystroke's own screen must stay showing: \(text)")
+        XCTAssertFalse(controlCommands(recorder).contains("scroll"), "a cancelled gesture's deltas must not reach the session either")
+        XCTAssertEqual(provider.requests.count, 1, "a cancelled gesture must not read another page of the transcript")
+
+        // The idle boundary ends the cancelled gesture, so the next one scrolls the replay like any other.
+        let idleDeadline = Date().addingTimeInterval(Self.scrollGestureIdlePause)
+        while Date() < idleDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the gesture after the cancelled one scrolls the replay again") { host.snapshotText()?.contains("row-0") == true }
+    }
+
+    /// The jump control cancels the gesture it lands in for the same reason, and it has more to lose: the
+    /// replay survives the jump, so the flick's remaining momentum would scroll the user straight back
+    /// off the live screen they just asked for.
+    @MainActor func testJumpToBottomDuringMomentumDropsTheRestOfTheFlick() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-jump-momentum", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let transcript = Self.transcript(rows: 1...200)
+        let provider = RecordingTranscriptProvider { _ in
+            RemoteGhosttyTranscript(
+                data: transcript, startByteOffset: 0, endByteOffset: UInt64(transcript.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: try XCTUnwrap(window.contentView))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+
+        let momentum = GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .changed)
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: momentum, pointerPosition: nil))
+        waitForCondition("the flick scrolls the pane into its own history") { host.snapshotText()?.contains("row-0") == true }
+
+        host.debugActivateJumpToBottom()
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "the jump must show the live screen")
+
+        _ = host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: momentum, pointerPosition: nil)
+        for _ in 0..<20 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "the flick's momentum scrolled the pane back off the screen it jumped to")
+        let text = try XCTUnwrap(host.snapshotText())
+        XCTAssertTrue(text.contains("live-01"), "the jump's own screen must stay showing: \(text)")
+        XCTAssertFalse(controlCommands(recorder).contains("scroll"), "a cancelled gesture's deltas must not reach the session either")
+
+        _ = host.sendScroll(
+            horizontal: 0, vertical: 0, scrollMods: GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .ended),
+            pointerPosition: nil)
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the gesture after the jump scrolls the replay again") { host.snapshotText()?.contains("row-0") == true }
+    }
+
+    /// A live pane can paint its first frame before the child has written a byte, and a session whose
+    /// `output.log` does not exist yet reads back as an empty transcript too. Neither says anything final
+    /// about a session that is still running, so the pane stays retryable: latching the verdict would
+    /// absorb every scroll gesture for the rest of the run, however much the session printed afterwards.
+    @MainActor func testALivePaneWhoseFirstReadFoundNoOutputReadsAgainOnTheNextGesture() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-empty-prefetch", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let transcript = Self.transcript(rows: 1...200)
+        let attempts = TranscriptFetchAttempts()
+        // The prefetch finds nothing; the session has written its 200 rows by the time the user scrolls.
+        let provider = RecordingTranscriptProvider { _ in
+            guard attempts.next() > 1 else {
+                return RemoteGhosttyTranscript(data: Data(), startByteOffset: 0, endByteOffset: 0, fileIdentity: nil, runIdentity: nil)
+            }
+            return RemoteGhosttyTranscript(
+                data: transcript, startByteOffset: 0, endByteOffset: UInt64(transcript.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+        XCTAssertEqual(provider.requests.count, 1, "an empty read must not put every later frame back on the read path")
+
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+
+        waitForCondition("the gesture reads again and scrolls the pane into the session's history") { host.snapshotText()?.contains("row-0") == true }
+        XCTAssertGreaterThanOrEqual(provider.requests.count, 2, "the gesture after an empty read must pay for another one")
+        XCTAssertTrue(host.debugIsShowingLocalScrollbackFrame)
+    }
+
+    /// A flick at a device that cannot answer must cost one read, not one per delta. The read a gesture
+    /// starts lands in the state a delta reads from, so a failure that only returned the pane to idle
+    /// would have every later delta of the same flick start another read that fails the same way. The
+    /// failure cancels the gesture instead, and the gesture after the idle boundary is the retry.
+    @MainActor func testAGestureWhoseReadFailsAbsorbsTheRestOfTheFlick() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-failed-gesture-read", root: root)
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let provider = GatedTranscriptProvider()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        // The flick's deltas are stamped on a clock the test holds still, so the settling the async read
+        // failure needs cannot drift past the idle interval and split one flick into two gestures.
+        let clock = ScrollGestureTestClock()
+        host.scrollGestureClock = { clock.now }
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: try XCTUnwrap(window.contentView))
+        waitForCondition("the pane starts its prefetch") { provider.requests.count >= 1 }
+
+        // The prefetch fails on its own, with no gesture behind it, so it leaves the pane retryable.
+        provider.failNext(SimulatedTransportFailure())
+        for _ in 0..<10 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+
+        // The flick's first delta pays for the read the prefetch did not deliver, and that read fails too.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the gesture pays for its own read") { provider.requests.count >= 2 }
+        provider.failNext(SimulatedTransportFailure())
+        for _ in 0..<10 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+
+        for _ in 0..<5 { _ = host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil) }
+        for _ in 0..<20 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+
+        XCTAssertEqual(provider.requests.count, 2, "each delta of the flick started another read of a transcript the device cannot serve")
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "a flick whose read failed must leave the pane on the session's own screen")
+
+        // The idle boundary ends the cancelled gesture, and the gesture after it reads again.
+        clock.advance(by: Self.scrollGestureIdlePause)
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the gesture after the idle boundary retries the read") { provider.requests.count >= 3 }
+        let page = Self.transcript(rows: 1...200)
+        provider.resolveNext(
+            RemoteGhosttyTranscript(
+                data: page, startByteOffset: 0, endByteOffset: UInt64(page.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: session.runtimeState.runIdentity))
+        waitForCondition("the retry scrolls the pane into the session's history") { host.snapshotText()?.contains("row-0") == true }
+    }
+
+    /// The same rule for the other outcome that installs nothing and stays retryable: a live session whose
+    /// transcript has no bytes yet. One flick must not spend a read per delta discovering that.
+    @MainActor func testAGestureWhoseReadFindsNoOutputAbsorbsTheRestOfTheFlick() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-empty-gesture-read", root: root)
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let provider = GatedTranscriptProvider()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        // The flick's deltas are stamped on a clock the test holds still, so the settling the empty read
+        // needs to propagate cannot drift past the idle interval and split one flick into two gestures.
+        let clock = ScrollGestureTestClock()
+        host.scrollGestureClock = { clock.now }
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: try XCTUnwrap(window.contentView))
+        waitForCondition("the pane starts its prefetch") { provider.requests.count >= 1 }
+
+        let empty = RemoteGhosttyTranscript(data: Data(), startByteOffset: 0, endByteOffset: 0, fileIdentity: nil, runIdentity: nil)
+        // The prefetch finds nothing, with no gesture behind it, so it leaves the pane retryable.
+        provider.resolveNext(empty)
+        for _ in 0..<10 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the gesture pays for its own read") { provider.requests.count >= 2 }
+        provider.resolveNext(empty)
+        for _ in 0..<10 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+
+        for _ in 0..<5 { _ = host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil) }
+        for _ in 0..<20 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+
+        XCTAssertEqual(provider.requests.count, 2, "each delta of the flick started another read of a transcript that had no bytes yet")
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "a flick whose read found no output must leave the pane on the session's own screen")
+
+        clock.advance(by: Self.scrollGestureIdlePause)
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the gesture after the idle boundary retries the read") { provider.requests.count >= 3 }
+        let page = Self.transcript(rows: 1...200)
+        provider.resolveNext(
+            RemoteGhosttyTranscript(
+                data: page, startByteOffset: 0, endByteOffset: UInt64(page.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: session.runtimeState.runIdentity))
+        waitForCondition("the retry scrolls the pane into the session's history") { host.snapshotText()?.contains("row-0") == true }
+    }
+
+    /// The other half of that rule: an ended session's transcript is complete, so an empty one is
+    /// definitive. The pane latches the verdict instead of paying for a read on every gesture for as long
+    /// as it stays open.
+    @MainActor func testAnEndedPaneWhoseTranscriptIsEmptyStopsReadingIt() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessionID = "ended-scrollback-empty"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: .ghosttyEmbedded, title: "final", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+            createdAt: "2026-09-16T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .exited, updatedAt: "2026-09-16T00:00:01Z",
+            exitedAt: "2026-09-16T00:00:01Z", title: "final-title", workingDirectory: "/tmp/final", columns: 8, rows: 5)
+        let recorder = DirectTerminalServiceRecorder(
+            payload: GhosttyRemoteSessionStatePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated.rawValue, emittedAt: "2026-09-16T00:00:01Z",
+                sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
+                renderUpdate: try renderUpdate(text: "final-01\nfinal-02\nfinal-03\nfinal-04\nfinal-05", sessionRevision: 1)))
+        let provider = RecordingTranscriptProvider { _ in
+            RemoteGhosttyTranscript(data: Data(), startByteOffset: 0, endByteOffset: 0, fileIdentity: nil, runIdentity: nil)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send, transcriptProvider: provider.fetch)
+        waitForCondition("ended host renders final state") { host.snapshotText()?.contains("final-01") == true }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .viewer, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+        waitForCondition("the ended pane reads its transcript once") { provider.requests.count >= 1 }
+
+        for _ in 0..<3 {
+            _ = host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil)
+            for _ in 0..<10 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        }
+
+        XCTAssertEqual(provider.requests.count, 1, "an ended session's empty transcript is final, so the pane must stop asking for it")
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame)
+        XCTAssertEqual(host.snapshotText()?.contains("final-01"), true, "a pane with nothing to replay stays on the session's final frame")
+    }
+
+    /// A page load that ends without installing a replay has to paint the session's own frame. The rows a
+    /// gesture puts on a load in flight suppress every live paint while that load runs, so the frames
+    /// landing meanwhile are only cached; a load that then fails installs nothing, and without the repaint
+    /// the pane keeps the frame it had when the gesture started. A live session would paint over it with
+    /// its next frame, but a session that ended during the load never sends another one.
+    @MainActor func testAFailedPageLoadPaintsTheLiveFrameItSuppressed() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pane = try makePaneHoldingAGestureOnAGatedLoad(sessionID: "live-scrollback-failed-load-repaint", root: root)
+        defer { pane.window.orderOut(nil) }
+
+        // The read fails, so the load ends with no replay to show.
+        pane.provider.failNext(SimulatedTransportFailure())
+
+        waitForCondition("the pane paints the frame the load suppressed") { pane.host.snapshotText()?.contains("done-01") == true }
+        XCTAssertFalse(pane.host.debugIsShowingLocalScrollbackFrame, "a load that installed no replay leaves the pane on the session's own screen")
+    }
+
+    /// The same repaint for the other exit that installs nothing: a read the daemon answers with no bytes
+    /// at all, which is what a live session ahead of its own output returns.
+    @MainActor func testAnEmptyPageResponsePaintsTheLiveFrameItSuppressed() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pane = try makePaneHoldingAGestureOnAGatedLoad(sessionID: "live-scrollback-empty-load-repaint", root: root)
+        defer { pane.window.orderOut(nil) }
+
+        pane.provider.resolveNext(RemoteGhosttyTranscript(data: Data(), startByteOffset: 0, endByteOffset: 0, fileIdentity: nil, runIdentity: nil))
+
+        waitForCondition("the pane paints the frame the load suppressed") { pane.host.snapshotText()?.contains("done-01") == true }
+        XCTAssertFalse(pane.host.debugIsShowingLocalScrollbackFrame, "a load that installed no replay leaves the pane on the session's own screen")
+    }
+
+    /// A load can install its replay and still owe those paints: a downward flick started while the read
+    /// was in flight parks its rows on the load, and applying them at the install leaves the replay on its
+    /// newest row, where the pane belongs to the session's own frame rather than to any replay frame.
+    @MainActor func testAPageLoadLandingOnItsNewestRowPaintsTheLiveFrameItSuppressed() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pane = try makePaneHoldingAGestureOnAGatedLoad(sessionID: "live-scrollback-bottom-load-repaint", root: root, scrollVertical: -200)
+        defer { pane.window.orderOut(nil) }
+
+        let page = Self.transcript(rows: 1...200)
+        pane.provider.resolveNext(
+            RemoteGhosttyTranscript(
+                data: page, startByteOffset: 0, endByteOffset: UInt64(page.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: pane.session.runtimeState.runIdentity))
+
+        waitForCondition("the pane paints the frame the load suppressed") { pane.host.snapshotText()?.contains("done-01") == true }
+        XCTAssertFalse(pane.host.debugIsShowingLocalScrollbackFrame, "a replay sitting on its newest row leaves the pane on the session's own screen")
+    }
+
+    /// A gesture that latches onto the replay before its first page has even come back is still committed
+    /// to it: output the session writes while that page is in flight has to mark the jump control, even
+    /// though no replay frame is on screen yet for the mark to sit next to, and the mark has to survive the
+    /// page installing and painting the history the gesture was waiting on.
+    @MainActor func testOutputDuringTheFirstPageLoadMarksTheJumpControlOnceTheReplayInstalls() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pane = try makePaneHoldingAGestureOnAGatedLoad(sessionID: "live-scrollback-first-page-new-output", root: root)
+        defer { pane.window.orderOut(nil) }
+
+        let page = Self.transcript(rows: 1...200)
+        pane.provider.resolveNext(
+            RemoteGhosttyTranscript(
+                data: page, startByteOffset: 0, endByteOffset: UInt64(page.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: pane.session.runtimeState.runIdentity))
+
+        waitForCondition("the page installs and paints the replay the gesture was waiting on") { pane.host.debugIsShowingLocalScrollbackFrame }
+        XCTAssertTrue(
+            pane.host.debugJumpToBottomControlShowsNewOutput,
+            "output that arrived while the first page was still loading must mark the jump control once the replay it belongs to is showing")
+    }
+
+    /// A pane whose gated page load is holding a gesture's rows, with the session's newest frame delivered
+    /// and left unpainted by that load: the setup the suppressed-frame tests share, up to the point where
+    /// the load ends. The caller ends the load its own way and asserts what the pane paints.
+    /// `scrollVertical` is that gesture's direction, since the rows waiting on the load are what decide
+    /// where the install puts the replay: up into history, or back onto its newest row.
+    @MainActor private func makePaneHoldingAGestureOnAGatedLoad(sessionID: String, root: URL, scrollVertical: CGFloat = 200) throws -> (
+        host: RemoteGhosttySessionHost, provider: GatedTranscriptProvider, window: NSWindow, session: LiveScrollbackSession
+    ) {
+        let session = try makeLiveScrollbackSession(sessionID: sessionID, root: root)
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let provider = GatedTranscriptProvider()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        // A pane that is genuinely on screen: an off-screen pane holds its screen updates, and this setup
+        // needs the payload carrying the session's newest frame to actually reach the host.
+        let window = makeVisiblePaneWindow()
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: try XCTUnwrap(window.contentView))
+        waitForCondition("the pane starts reading its scrollback page") { provider.requests.count >= 1 }
+
+        // A gesture while the read is held puts its rows on the load, and a load holding rows is what
+        // suppresses live paints: a frame painted here would be replaced the moment the page lands.
+        XCTAssertTrue(
+            host.sendScroll(horizontal: 0, vertical: scrollVertical, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+
+        // The session's newest frame lands while the load holds those rows, so it is cached rather than
+        // painted. It is carried at the grid the first frame established, which is what keeps it from
+        // discarding the load instead.
+        recorder.setPayload(try liveScrollbackPayload(session, text: Self.newerLiveScreen, revision: 2, outputEndByteOffset: 4096))
+        waitForCondition("the pane applies the session's newest frame") {
+            host.requestSurfaceRefresh()
+            return host.debugLatestTranscriptEndByteOffset == 4096
+        }
+        XCTAssertEqual(host.snapshotText()?.contains("done-01"), false, "a load holding a gesture's rows must not let the session's own frame paint")
+        return (host, provider, window, session)
+    }
+
+    /// A mouse wheel's clicks and a slow trackpad drag never report a momentum phase, so the pause
+    /// between two bursts is the only thing that ends such a gesture. The burst after the pause is a new
+    /// gesture: it reads what the session wrote while the wheel was still, which would otherwise be
+    /// missing from everything the user scrolls back through for the rest of the pane's life.
+    @MainActor func testAWheelBurstAfterAPauseReadsWhatTheSessionWroteBetweenBursts() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-idle-gesture", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let firstHalf = Self.transcript(rows: 1...100)
+        let secondHalf = Data("\r\n".utf8) + Self.transcript(rows: 101...200)
+        let totalBytes = UInt64(firstHalf.count + secondHalf.count)
+        let provider = RecordingTranscriptProvider { request in
+            guard let fromByteOffset = request.fromByteOffset else {
+                return RemoteGhosttyTranscript(
+                    data: firstHalf, startByteOffset: 0, endByteOffset: UInt64(firstHalf.count), fileIdentity: fakeTranscriptFileIdentity,
+                    runIdentity: runIdentity)
+            }
+            return RemoteGhosttyTranscript(
+                data: secondHalf, startByteOffset: fromByteOffset, endByteOffset: totalBytes, fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: try XCTUnwrap(window.contentView))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+
+        // One burst of wheel events, which report no momentum phase at all and so end with nothing.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the first burst scrolls the replay") { host.snapshotText()?.contains("row-0") == true }
+        XCTAssertEqual(provider.requests.count, 1)
+
+        // The session writes while the wheel is still.
+        recorder.setPayload(try liveScrollbackPayload(session, text: Self.liveScreen, revision: 2, outputEndByteOffset: Int(totalBytes)))
+        waitForCondition("the pane observes where the session's output now ends") {
+            host.requestSurfaceRefresh()
+            return host.debugLatestTranscriptEndByteOffset == totalBytes
+        }
+        // And the wheel stays still past the idle boundary, which is what ends the burst's gesture.
+        let idleDeadline = Date().addingTimeInterval(Self.scrollGestureIdlePause)
+        while Date() < idleDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 200, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+
+        waitForCondition("the burst after the pause reads the continuation") { provider.requests.count >= 2 }
+        XCTAssertEqual(try XCTUnwrap(provider.requests.last).fromByteOffset, UInt64(firstHalf.count))
+        // One row per step, and stopping at the first row written between the bursts, because a step onto
+        // the replay's newest row hands the pane back to the session's own screen.
+        waitForCondition("the rows written between the bursts are reachable in the replay") {
+            _ = host.sendScroll(horizontal: 0, vertical: -18, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil)
+            return host.snapshotText()?.contains("row-101") == true
+        }
+    }
+
+    /// Typing while the pane's first page is still being read has to drop the rows the gesture put on
+    /// that read: the page lands after the keystroke, and the rows it would paint are history over the
+    /// live screen the keystroke belongs to.
+    @MainActor func testTypingWhileThePageIsLoadingDropsTheRowsItWouldHavePainted() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-typing-mid-load", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let transcript = Self.transcript(rows: 1...200)
+        let provider = GatedTranscriptProvider()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+        waitForCondition("the pane starts reading its scrollback page") { provider.requests.count >= 1 }
+
+        // The gesture lands on a replay that does not exist yet, so its rows wait on the read.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "there is nothing to show yet: the page is still being read")
+
+        XCTAssertTrue(host.sendTextAsPaste("echo hi"))
+
+        provider.resolveNext(
+            RemoteGhosttyTranscript(
+                data: transcript, startByteOffset: 0, endByteOffset: UInt64(transcript.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity))
+        for _ in 0..<20 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "a page that lands after a keystroke must not put the pane into its replay")
+        let text = try XCTUnwrap(host.snapshotText())
+        XCTAssertFalse(text.contains("row-"), "history painted over the live screen after the keystroke: \(text)")
+        XCTAssertTrue(text.contains("live-01"), "typing must leave the session's own screen showing: \(text)")
+    }
+
+    /// A head-trim rewrites `output.log` and moves its end BACKWARDS. The pane has to hear that its
+    /// replay no longer matches the file, or it keeps replaying bytes at offsets the file no longer holds
+    /// until the session writes past the pre-trim size; the transcript file the read names is what turns
+    /// the gesture's continuation into the rebuild that repairs it.
+    @MainActor func testATrimmedTranscriptIsRebuiltOnTheNextGesture() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-trim", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let original = Self.transcript(rows: 1...200)
+        // What the trim left behind: a shorter file whose rows are labelled so the rebuild is visible.
+        let trimmed = Data((1...150).map { String(format: "trim-%03d", $0) }.joined(separator: "\r\n").utf8)
+        let provider = RecordingTranscriptProvider { request in
+            guard request.fromByteOffset != nil else {
+                return RemoteGhosttyTranscript(
+                    data: original, startByteOffset: 0, endByteOffset: UInt64(original.count), fileIdentity: fakeTranscriptFileIdentity,
+                    runIdentity: runIdentity)
+            }
+            return RemoteGhosttyTranscript(
+                data: trimmed, startByteOffset: 0, endByteOffset: UInt64(trimmed.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity, isSuffixRebuild: true)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: try XCTUnwrap(window.contentView))
+        waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the first gesture scrolls the replay") { host.snapshotText()?.contains("row-0") == true }
+        _ = host.sendScroll(
+            horizontal: 0, vertical: 0, scrollMods: GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .ended),
+            pointerPosition: nil)
+
+        // The daemon trims the head: the same session now reports a transcript that ends EARLIER than the
+        // replay's own end.
+        recorder.setPayload(try liveScrollbackPayload(session, text: Self.liveScreen, revision: 2, outputEndByteOffset: trimmed.count))
+        waitForCondition("the pane observes the transcript's end moving backwards") {
+            host.requestSurfaceRefresh()
+            return host.debugLatestTranscriptEndByteOffset == UInt64(trimmed.count)
+        }
+
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 200, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+
+        waitForCondition("the gesture reads again from the replay's end") { provider.requests.count >= 2 }
+        XCTAssertEqual(try XCTUnwrap(provider.requests.last).fromByteOffset, UInt64(original.count))
+        waitForCondition("the replay is rebuilt from what the trimmed file holds") { host.snapshotText()?.contains("trim-") == true }
+    }
+
+    /// A resize reflows every row, and a page read that is still in flight would install a replay wrapped
+    /// at the grid it was started at. It is dropped exactly as a built replay is, and the pane reads
+    /// again at the grid the session is on.
+    @MainActor func testAResizeWhileThePageIsLoadingReadsAgainAtTheNewGrid() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-resize-mid-load", root: root)
+        let runIdentity = session.runtimeState.runIdentity
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let provider = GatedTranscriptProvider()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: try XCTUnwrap(window.contentView))
+        waitForCondition("the pane starts reading its scrollback page") { provider.requests.count >= 1 }
+
+        // The session resizes while that read is in flight: a wider, taller grid than the 7x5 the read
+        // was started at.
+        recorder.setPayload(try liveScrollbackPayload(session, text: Self.resizedLiveScreen, revision: 2))
+        waitForCondition("the resized frame reaches the pane") {
+            host.requestSurfaceRefresh()
+            return host.snapshotText()?.contains("wide-01") == true
+        }
+
+        waitForCondition("the pane reads again at the grid the session is on") { provider.requests.count >= 2 }
+
+        // The read started at the old grid resolves into nothing: its replay would wrap every row at a
+        // grid the session has left.
+        provider.resolveNext(
+            RemoteGhosttyTranscript(
+                data: Self.transcript(rows: 1...200), startByteOffset: 0, endByteOffset: UInt64(Self.transcript(rows: 1...200).count),
+                fileIdentity: fakeTranscriptFileIdentity, runIdentity: runIdentity))
+        for _ in 0..<10 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        for _ in 0..<10 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame, "the discarded read must not install a replay wrapped at the old grid")
+        XCTAssertEqual(host.snapshotText()?.contains("wide-01"), true)
+
+        // The read the resize started does install one.
+        let rebuilt = Data((1...200).map { String(format: "wide-row-%03d", $0) }.joined(separator: "\r\n").utf8)
+        provider.resolveNext(
+            RemoteGhosttyTranscript(
+                data: rebuilt, startByteOffset: 0, endByteOffset: UInt64(rebuilt.count), fileIdentity: fakeTranscriptFileIdentity,
+                runIdentity: runIdentity))
+        waitForCondition("the replay read at the new grid is what the pane scrolls") {
+            _ = host.sendScroll(horizontal: 0, vertical: 200, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil)
+            return host.snapshotText()?.contains("wide-row-") == true
+        }
+    }
+
+    // MARK: - Client-local scrollback helpers
+
+    /// Records every transcript read a host makes and answers it from a script, so a test can assert what
+    /// the pane asked for - page size, continuation offset, transcript file - as well as what it
+    /// rendered.
+    private final class RecordingTranscriptProvider: @unchecked Sendable {
+        struct Request: Sendable {
+            let maxBytes: Int
+            let fromByteOffset: UInt64?
+            let fileIdentity: UInt64?
+        }
+
+        private let lock = NSLock()
+        private var recorded: [Request] = []
+        private let respond: @Sendable (Request) -> RemoteGhosttyTranscript
+
+        init(respond: @escaping @Sendable (Request) -> RemoteGhosttyTranscript) { self.respond = respond }
+
+        var requests: [Request] {
+            lock.lock()
+            defer { lock.unlock() }
+            return recorded
+        }
+
+        func fetch(maxBytes: Int, fromByteOffset: UInt64?, fileIdentity: UInt64?) async throws -> RemoteGhosttyTranscript {
+            let request = Request(maxBytes: maxBytes, fromByteOffset: fromByteOffset, fileIdentity: fileIdentity)
+            record(request)
+            return respond(request)
+        }
+
+        private func record(_ request: Request) {
+            lock.lock()
+            defer { lock.unlock() }
+            recorded.append(request)
+        }
+    }
+
+    /// A transcript provider that records what was asked for and holds every fetch suspended until the
+    /// test resolves it, so a test can put the pane in its loading state and then do something to it.
+    private final class GatedTranscriptProvider: @unchecked Sendable {
+        struct Request: Sendable {
+            let maxBytes: Int
+            let fromByteOffset: UInt64?
+            let fileIdentity: UInt64?
+        }
+
+        private let lock = NSLock()
+        private var recorded: [Request] = []
+        private var continuations: [CheckedContinuation<RemoteGhosttyTranscript, Error>] = []
+
+        var requests: [Request] {
+            lock.lock()
+            defer { lock.unlock() }
+            return recorded
+        }
+
+        func fetch(maxBytes: Int, fromByteOffset: UInt64?, fileIdentity: UInt64?) async throws -> RemoteGhosttyTranscript {
+            record(Request(maxBytes: maxBytes, fromByteOffset: fromByteOffset, fileIdentity: fileIdentity))
+            return try await withCheckedThrowingContinuation { continuation in hold(continuation) }
+        }
+
+        private func record(_ request: Request) {
+            lock.lock()
+            defer { lock.unlock() }
+            recorded.append(request)
+        }
+
+        private func hold(_ continuation: CheckedContinuation<RemoteGhosttyTranscript, Error>) {
+            lock.lock()
+            defer { lock.unlock() }
+            continuations.append(continuation)
+        }
+
+        func resolveNext(_ transcript: RemoteGhosttyTranscript) {
+            lock.lock()
+            let continuation = continuations.isEmpty ? nil : continuations.removeFirst()
+            lock.unlock()
+            continuation?.resume(returning: transcript)
+        }
+
+        /// Fails the oldest fetch in flight, for the transport failures (timeout, daemon restarting,
+        /// device offline) a read ends on without any bytes to install.
+        func failNext(_ error: Error) {
+            lock.lock()
+            let continuation = continuations.isEmpty ? nil : continuations.removeFirst()
+            lock.unlock()
+            continuation?.resume(throwing: error)
+        }
+
+        /// Resolves the most recently started fetch, leaving earlier ones suspended, so a test can answer
+        /// a later read while an older one is still in flight.
+        func resolveLast(_ transcript: RemoteGhosttyTranscript) {
+            lock.lock()
+            let continuation = continuations.popLast()
+            lock.unlock()
+            continuation?.resume(returning: transcript)
+        }
+    }
+
+    /// A flag a main-actor block sets for the test that enqueued it. A task cannot capture a mutable
+    /// local, and what these tests have to observe happens inside one.
+    @MainActor private final class MainActorFlag { var isSet = false }
+
+    /// The clock a test hands the host for its scroll-gesture timing. The deltas of one flick are stamped
+    /// at whatever instant the test has the clock on, so they stay inside the host's idle interval however
+    /// long the run loop takes, and the idle boundary between two gestures is crossed by advancing it.
+    @MainActor private final class ScrollGestureTestClock {
+        private(set) var now = Date(timeIntervalSince1970: 1_758_000_000)
+
+        func advance(by interval: TimeInterval) { now = now.addingTimeInterval(interval) }
+    }
+
+    /// The topmost numbered transcript row the pane is showing, so a test can say where a gesture left the
+    /// replay without hard-coding the line arithmetic of a replayed page.
+    @MainActor private func topVisibleTranscriptRow(_ host: RemoteGhosttySessionHost) -> Int? {
+        guard let text = host.snapshotText(), let match = text.range(of: "row-[0-9]{3}", options: .regularExpression) else { return nil }
+        return Int(text[match].dropFirst(4))
+    }
+
+    /// A running remote session whose frames are the 8x5 grid the local-scrollback tests replay their
+    /// numbered transcript at.
+    private struct LiveScrollbackSession {
+        let launchConfiguration: TerminalSessionLaunchConfiguration
+        let paths: TerminalSessionPaths
+        let runtimeState: TerminalSessionRuntimeState
+    }
+
+    private static let liveScreen = "live-01\nlive-02\nlive-03\nlive-04\nlive-05"
+    /// The screen the session prints later in the run, at `liveScreen`'s own grid so the frame carrying it
+    /// does not discard the pane's replay on the way in.
+    private static let newerLiveScreen = "done-01\ndone-02\ndone-03\ndone-04\ndone-05"
+    /// The same session after a resize: a wider, taller grid than `liveScreen`'s 7x5.
+    private static let resizedLiveScreen = "wide-01--\nwide-02--\nwide-03--\nwide-04--\nwide-05--\nwide-06--"
+    /// Longer than the host's own 250 ms scroll-gesture idle interval, which is what separates two turns
+    /// of a phase-less wheel into two gestures.
+    private static let scrollGestureIdlePause: TimeInterval = 0.4
+
+    private static func transcript(rows: ClosedRange<Int>) -> Data {
+        Data(rows.map { String(format: "row-%03d", $0) }.joined(separator: "\r\n").utf8)
+    }
+
+    /// A key window holding a pane-sized content view. A pane in no window is off screen, and an
+    /// off-screen pane holds its screen updates, so any test that needs a later payload to actually reach
+    /// the host has to put the pane on the screen.
+    @MainActor private func makeVisiblePaneWindow() -> NSWindow {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
+        let window = KeyTestWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        window.makeKeyAndOrderFront(nil)
+        return window
+    }
+
+    private func makeTemporaryRoot() throws -> URL {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    private func makeLiveScrollbackSession(sessionID: String, root: URL) throws -> LiveScrollbackSession {
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: .ghosttyEmbedded, title: "live", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+            createdAt: "2026-09-16T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-09-16T00:00:01Z",
+            title: "live", workingDirectory: "/tmp/work", columns: 8, rows: 5)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+        return LiveScrollbackSession(launchConfiguration: launchConfiguration, paths: paths, runtimeState: runtimeState)
+    }
+
+    /// One state payload for a live-scrollback session: the frame it paints, and where `output.log` ends
+    /// as of that payload when the test needs the pane to know the session has written something.
+    private func liveScrollbackPayload(
+        _ session: LiveScrollbackSession, text: String, revision: UInt64, outputEndByteOffset: Int? = nil, alternateScreenActive: Bool = false,
+        mouseReportingActive: Bool = false, reason: TerminalRemoteSessionStateReason = .stateChange
+    ) throws -> GhosttyRemoteSessionStatePayload {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: session.launchConfiguration.sessionID, reason: reason.rawValue, emittedAt: "2026-09-16T00:00:01Z",
+            sessionStateRevision: revision, sessionStateFlags: 1, screenStateRevision: revision, runtimeState: session.runtimeState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live", workingDirectory: "/tmp/work", outputByteCount: nil,
+            outputEndByteOffset: outputEndByteOffset,
+            renderUpdate: try renderUpdate(
+                text: text, sessionRevision: revision, alternateScreenActive: alternateScreenActive, mouseReportingActive: mouseReportingActive))
+    }
+
+    /// The control commands a recorder saw, in order, so a test can assert what did - and did not - reach
+    /// the session.
+    private func scrollControlCount(_ recorder: DirectTerminalServiceRecorder) -> Int { controlCommands(recorder).filter { $0 == "scroll" }.count }
+
+    private func controlCommands(_ recorder: DirectTerminalServiceRecorder) -> [String] {
+        recorder.requests().compactMap { request in
+            guard case .control(let payload) = request.command else { return nil }
+            return payload.controlRequest.command
+        }
     }
 
     @MainActor func testRunningRemoteHostRejectsViewerBindingActions() throws {
@@ -3325,7 +5462,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try makeRunningSessionFixture(sessionID: "remote-scroll-lost-link", root: root)
+        // On the alternate screen the wheel belongs to the full-screen program, so the gesture is
+        // forwarded rather than scrolling the pane's own replay - which is what makes this a test of a
+        // forwarded scroll's failure at all.
+        let fixture = try makeRunningSessionFixture(sessionID: "remote-scroll-lost-link", root: root, alternateScreenActive: true)
         // Every control request fails, so whichever ones attach's own owner handoff happens to send are
         // just as informative as the deliberate scroll below — the assertion below waits specifically for
         // the "scroll" command by name, not for the first (possibly unrelated) reported failure.
@@ -3736,7 +5876,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
     private func snapshot(
         text: String, mouseReportingActive: Bool = false, mouseShiftCapture: UInt8 = GhosttyTerminalSnapshot.mouseShiftCaptureUnset,
-        selection: GhosttyTerminalSelectionRange? = nil
+        alternateScreenActive: Bool = false, selection: GhosttyTerminalSelectionRange? = nil
     ) -> GhosttyTerminalSnapshot {
         let rows = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let columns = rows.map(\.count).max() ?? 0
@@ -3749,11 +5889,15 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         return GhosttyTerminalSnapshot(
             columns: columns, rows: paddedRows.count, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
             defaultBackgroundRGB: 0x000000, cells: cells, mouseReportingActive: mouseReportingActive, mouseShiftCapture: mouseShiftCapture,
-            selection: selection)
+            alternateScreenActive: alternateScreenActive, selection: selection)
     }
 
-    private func renderUpdate(text: String, sessionRevision: UInt64? = nil, ownerEpoch: UInt64 = 0) throws -> Data {
-        let frame = GhosttyRenderFrame(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot(text: text))
+    private func renderUpdate(
+        text: String, sessionRevision: UInt64? = nil, ownerEpoch: UInt64 = 0, alternateScreenActive: Bool = false, mouseReportingActive: Bool = false
+    ) throws -> Data {
+        let frame = GhosttyRenderFrame(
+            sessionRevision: sessionRevision, ownerEpoch: ownerEpoch,
+            snapshot: snapshot(text: text, mouseReportingActive: mouseReportingActive, alternateScreenActive: alternateScreenActive))
         return try GhosttyRenderUpdateBinaryCodec.encode(.full(frame))
     }
 
@@ -3766,7 +5910,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let payload: GhosttyRemoteSessionStatePayload
     }
 
-    private func makeRunningSessionFixture(sessionID: String, root: URL) throws -> RunningSessionFixture {
+    private func makeRunningSessionFixture(sessionID: String, root: URL, alternateScreenActive: Bool = false) throws -> RunningSessionFixture {
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
         let launchConfiguration = TerminalSessionLaunchConfiguration(
@@ -3781,7 +5925,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             sessionID: sessionID, reason: TerminalRemoteSessionStateReason.stateChange.rawValue, emittedAt: "2026-07-24T00:00:01Z",
             sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState,
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil,
-            renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 1))
+            renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 1, alternateScreenActive: alternateScreenActive))
         return RunningSessionFixture(launchConfiguration: launchConfiguration, paths: paths, payload: payload)
     }
 
