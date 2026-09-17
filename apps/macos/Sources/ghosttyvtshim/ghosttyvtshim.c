@@ -76,60 +76,69 @@ typedef GhosttyResult (*GhosttyTerminalSelectionFormatAllocFn)(
 );
 typedef size_t (*GhosttyTerminalTakeRenderScrollRectsFn)(GhosttyTerminal, GhosttyTerminalScrollRect *, size_t, bool *);
 
+// Every libghostty-vt entry point the shim calls, as (table field, function-pointer type, library
+// function). This one list drives the symbol table's layout, how it is filled, and the completeness
+// check, so those three cannot drift apart; adding an entry here is the only step needed to use a new
+// libghostty-vt function.
+#define SPACES_GHOSTTY_VT_FOR_EACH_SYMBOL(X)                                                                                   \
+    X(terminal_new, GhosttyTerminalNewFn, ghostty_terminal_new)                                                                \
+    X(terminal_free, GhosttyTerminalFreeFn, ghostty_terminal_free)                                                             \
+    X(terminal_vt_write, GhosttyTerminalVtWriteFn, ghostty_terminal_vt_write)                                                  \
+    X(terminal_scroll_viewport, GhosttyTerminalScrollViewportFn, ghostty_terminal_scroll_viewport)                             \
+    X(terminal_resize, GhosttyTerminalResizeFn, ghostty_terminal_resize)                                                       \
+    X(terminal_get, GhosttyTerminalGetFn, ghostty_terminal_get)                                                                \
+    X(terminal_set, GhosttyTerminalSetFn, ghostty_terminal_set)                                                                \
+    X(paste_encode, GhosttyPasteEncodeFn, ghostty_paste_encode)                                                                \
+    X(key_encoder_new, GhosttyKeyEncoderNewFn, ghostty_key_encoder_new)                                                        \
+    X(key_encoder_free, GhosttyKeyEncoderFreeFn, ghostty_key_encoder_free)                                                     \
+    X(key_encoder_setopt_from_terminal, GhosttyKeyEncoderSetoptFromTerminalFn, ghostty_key_encoder_setopt_from_terminal)       \
+    X(key_encoder_encode, GhosttyKeyEncoderEncodeFn, ghostty_key_encoder_encode)                                               \
+    X(key_event_new, GhosttyKeyEventNewFn, ghostty_key_event_new)                                                              \
+    X(key_event_free, GhosttyKeyEventFreeFn, ghostty_key_event_free)                                                           \
+    X(key_event_set_action, GhosttyKeyEventSetActionFn, ghostty_key_event_set_action)                                          \
+    X(key_event_set_key, GhosttyKeyEventSetKeyFn, ghostty_key_event_set_key)                                                   \
+    X(key_event_set_mods, GhosttyKeyEventSetModsFn, ghostty_key_event_set_mods)                                                \
+    X(key_event_set_utf8, GhosttyKeyEventSetUtf8Fn, ghostty_key_event_set_utf8)                                                \
+    X(key_event_set_unshifted_codepoint, GhosttyKeyEventSetUnshiftedCodepointFn, ghostty_key_event_set_unshifted_codepoint)    \
+    X(mouse_encoder_new, GhosttyMouseEncoderNewFn, ghostty_mouse_encoder_new)                                                  \
+    X(mouse_encoder_free, GhosttyMouseEncoderFreeFn, ghostty_mouse_encoder_free)                                               \
+    X(mouse_encoder_setopt, GhosttyMouseEncoderSetoptFn, ghostty_mouse_encoder_setopt)                                         \
+    X(mouse_encoder_setopt_from_terminal, GhosttyMouseEncoderSetoptFromTerminalFn, ghostty_mouse_encoder_setopt_from_terminal) \
+    X(mouse_encoder_encode, GhosttyMouseEncoderEncodeFn, ghostty_mouse_encoder_encode)                                         \
+    X(mouse_event_new, GhosttyMouseEventNewFn, ghostty_mouse_event_new)                                                        \
+    X(mouse_event_free, GhosttyMouseEventFreeFn, ghostty_mouse_event_free)                                                     \
+    X(mouse_event_set_action, GhosttyMouseEventSetActionFn, ghostty_mouse_event_set_action)                                    \
+    X(mouse_event_set_button, GhosttyMouseEventSetButtonFn, ghostty_mouse_event_set_button)                                    \
+    X(mouse_event_set_mods, GhosttyMouseEventSetModsFn, ghostty_mouse_event_set_mods)                                          \
+    X(mouse_event_set_position, GhosttyMouseEventSetPositionFn, ghostty_mouse_event_set_position)                              \
+    X(formatter_terminal_new, GhosttyFormatterTerminalNewFn, ghostty_formatter_terminal_new)                                   \
+    X(formatter_format_alloc, GhosttyFormatterFormatAllocFn, ghostty_formatter_format_alloc)                                   \
+    X(formatter_free, GhosttyFormatterFreeFn, ghostty_formatter_free)                                                          \
+    X(ghostty_free, GhosttyFreeFn, ghostty_free)                                                                               \
+    X(render_state_new, GhosttyRenderStateNewFn, ghostty_render_state_new)                                                     \
+    X(render_state_free, GhosttyRenderStateFreeFn, ghostty_render_state_free)                                                  \
+    X(render_state_update, GhosttyRenderStateUpdateFn, ghostty_render_state_update)                                            \
+    X(render_state_get, GhosttyRenderStateGetFn, ghostty_render_state_get)                                                     \
+    X(row_iterator_new, GhosttyRenderStateRowIteratorNewFn, ghostty_render_state_row_iterator_new)                             \
+    X(row_iterator_free, GhosttyRenderStateRowIteratorFreeFn, ghostty_render_state_row_iterator_free)                          \
+    X(row_iterator_next, GhosttyRenderStateRowIteratorNextFn, ghostty_render_state_row_iterator_next)                          \
+    X(row_get, GhosttyRenderStateRowGetFn, ghostty_render_state_row_get)                                                       \
+    X(row_cells_new, GhosttyRenderStateRowCellsNewFn, ghostty_render_state_row_cells_new)                                      \
+    X(row_cells_free, GhosttyRenderStateRowCellsFreeFn, ghostty_render_state_row_cells_free)                                   \
+    X(row_cells_next, GhosttyRenderStateRowCellsNextFn, ghostty_render_state_row_cells_next)                                   \
+    X(row_cells_get, GhosttyRenderStateRowCellsGetFn, ghostty_render_state_row_cells_get)                                      \
+    X(cell_get, GhosttyCellGetFn, ghostty_cell_get)                                                                            \
+    X(grid_row_get, GhosttyRowGetFn, ghostty_row_get)                                                                          \
+    X(terminal_grid_ref, GhosttyTerminalGridRefFn, ghostty_terminal_grid_ref)                                                  \
+    X(terminal_point_from_grid_ref, GhosttyTerminalPointFromGridRefFn, ghostty_terminal_point_from_grid_ref)                   \
+    X(terminal_selection_format_alloc, GhosttyTerminalSelectionFormatAllocFn, ghostty_terminal_selection_format_alloc)         \
+    X(terminal_take_render_scroll_rects, GhosttyTerminalTakeRenderScrollRectsFn, ghostty_terminal_take_render_scroll_rects)
+
 typedef struct {
     void *handle;
-    GhosttyTerminalNewFn terminal_new;
-    GhosttyTerminalFreeFn terminal_free;
-    GhosttyTerminalVtWriteFn terminal_vt_write;
-    GhosttyTerminalScrollViewportFn terminal_scroll_viewport;
-    GhosttyTerminalResizeFn terminal_resize;
-    GhosttyTerminalGetFn terminal_get;
-    GhosttyTerminalSetFn terminal_set;
-    GhosttyPasteEncodeFn paste_encode;
-    GhosttyKeyEncoderNewFn key_encoder_new;
-    GhosttyKeyEncoderFreeFn key_encoder_free;
-    GhosttyKeyEncoderSetoptFromTerminalFn key_encoder_setopt_from_terminal;
-    GhosttyKeyEncoderEncodeFn key_encoder_encode;
-    GhosttyKeyEventNewFn key_event_new;
-    GhosttyKeyEventFreeFn key_event_free;
-    GhosttyKeyEventSetActionFn key_event_set_action;
-    GhosttyKeyEventSetKeyFn key_event_set_key;
-    GhosttyKeyEventSetModsFn key_event_set_mods;
-    GhosttyKeyEventSetUtf8Fn key_event_set_utf8;
-    GhosttyKeyEventSetUnshiftedCodepointFn key_event_set_unshifted_codepoint;
-    GhosttyMouseEncoderNewFn mouse_encoder_new;
-    GhosttyMouseEncoderFreeFn mouse_encoder_free;
-    GhosttyMouseEncoderSetoptFn mouse_encoder_setopt;
-    GhosttyMouseEncoderSetoptFromTerminalFn mouse_encoder_setopt_from_terminal;
-    GhosttyMouseEncoderEncodeFn mouse_encoder_encode;
-    GhosttyMouseEventNewFn mouse_event_new;
-    GhosttyMouseEventFreeFn mouse_event_free;
-    GhosttyMouseEventSetActionFn mouse_event_set_action;
-    GhosttyMouseEventSetButtonFn mouse_event_set_button;
-    GhosttyMouseEventSetModsFn mouse_event_set_mods;
-    GhosttyMouseEventSetPositionFn mouse_event_set_position;
-    GhosttyFormatterTerminalNewFn formatter_terminal_new;
-    GhosttyFormatterFormatAllocFn formatter_format_alloc;
-    GhosttyFormatterFreeFn formatter_free;
-    GhosttyFreeFn ghostty_free;
-    GhosttyRenderStateNewFn render_state_new;
-    GhosttyRenderStateFreeFn render_state_free;
-    GhosttyRenderStateUpdateFn render_state_update;
-    GhosttyRenderStateGetFn render_state_get;
-    GhosttyRenderStateRowIteratorNewFn row_iterator_new;
-    GhosttyRenderStateRowIteratorFreeFn row_iterator_free;
-    GhosttyRenderStateRowIteratorNextFn row_iterator_next;
-    GhosttyRenderStateRowGetFn row_get;
-    GhosttyRenderStateRowCellsNewFn row_cells_new;
-    GhosttyRenderStateRowCellsFreeFn row_cells_free;
-    GhosttyRenderStateRowCellsNextFn row_cells_next;
-    GhosttyRenderStateRowCellsGetFn row_cells_get;
-    GhosttyCellGetFn cell_get;
-    GhosttyRowGetFn grid_row_get;
-    GhosttyTerminalGridRefFn terminal_grid_ref;
-    GhosttyTerminalPointFromGridRefFn terminal_point_from_grid_ref;
-    GhosttyTerminalSelectionFormatAllocFn terminal_selection_format_alloc;
-    GhosttyTerminalTakeRenderScrollRectsFn terminal_take_render_scroll_rects;
+#define SPACES_GHOSTTY_VT_DECLARE_FIELD(field, type, symbol) type field;
+    SPACES_GHOSTTY_VT_FOR_EACH_SYMBOL(SPACES_GHOSTTY_VT_DECLARE_FIELD)
+#undef SPACES_GHOSTTY_VT_DECLARE_FIELD
 } SpacesGhosttyVtSymbols;
 
 struct SpacesGhosttyVtSession {
@@ -165,23 +174,42 @@ enum {
 };
 
 // iOS cannot dlopen a library that is not inside the app bundle, and the Spaces app embeds no
-// libghostty-vt dylib: the iOS slice of ghostty-vt.xcframework is linked statically into the app
-// binary instead, so the library's symbols are already in this image and RTLD_DEFAULT resolves them.
-// Every other platform loads the shared library at runtime through the search ladder below.
+// libghostty-vt dylib: the library's iOS slice is linked into the same image as this code, and the
+// shim names its functions directly. Every other platform loads the shared library at runtime
+// through the search ladder below and binds through dlsym.
 //
-// Looking a symbol up by name is not a reference the linker can see, so nothing in the app image keeps
-// these alive on its own and dead-code stripping (on for Release and archive builds) would take every
-// one of them out of the image this lookup searches. `OTHER_LDFLAGS` in `apps/ios/project.yml` names
-// each of them a dead-strip root for exactly that reason; a symbol added to the table below has to be
-// added there too, or it resolves in debug builds and is gone from the shipped app.
+// A direct reference is what makes the static build correct: the linker sees it, pulls the archive
+// member in, keeps it through dead-code stripping, and fails the link outright if the function is
+// missing. A lookup by name cannot do any of that, because it asks the runtime for an exported name
+// rather than the linker for a symbol: a stripped Release executable exports nothing, so every dlsym
+// in the shipped app returns NULL even though the code is right there in the binary.
 #if defined(__APPLE__) && TARGET_OS_IPHONE
 #define SPACES_GHOSTTY_VT_STATIC_LINK 1
 #else
 #define SPACES_GHOSTTY_VT_STATIC_LINK 0
 #endif
 
-// Releases a handle taken by the loader. A statically linked build never took one: RTLD_DEFAULT is a
-// pseudo-handle for this image, not something dlclose may be given.
+#if SPACES_GHOSTTY_VT_STATIC_LINK
+// The request for the archive travels inside this object rather than living in a link setting,
+// because there is no link setting that reaches the right link: in Debug and test builds Xcode
+// builds this package target as its own dynamic framework, and that link sees neither the app
+// project's settings nor the directory Xcode processes a package's binary dependencies into. A
+// `#pragma comment(lib, ...)` (a Microsoft extension clang parses because this target compiles with
+// -fms-extensions) becomes an LC_LINKER_OPTION `-l<name>` in the object, and the linker honors the
+// auto-link options of every object it links, so whichever link consumes this object is the one
+// that asks for the archive. The two names are the device and simulator slices, which
+// apps/macos/scripts/setup_ghostty.sh publishes side by side in the directory Package.swift passes
+// as `-L`: one `-L` has to serve both links, and SwiftPM platform conditions cannot tell a
+// simulator build from a device build, so the names are what separate them.
+#if TARGET_OS_SIMULATOR
+#pragma comment(lib, "ghostty-vt-iossimulator")
+#else
+#pragma comment(lib, "ghostty-vt-ios")
+#endif
+#endif
+
+// Releases a handle taken by the loader. A statically linked build never took one: its handle field
+// holds the RTLD_DEFAULT pseudo-handle for this image, not something dlclose may be given.
 static void spaces_ghostty_vt_release_handle(void *handle) {
 #if SPACES_GHOSTTY_VT_STATIC_LINK
     (void)handle;
@@ -285,6 +313,8 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     memset(symbols, 0, sizeof(*symbols));
 
 #if SPACES_GHOSTTY_VT_STATIC_LINK
+    // There is no library handle in a static build. RTLD_DEFAULT stands in as the non-NULL marker
+    // spaces_ghostty_vt_unload_symbols reads to tell a filled table from an empty one.
     void *handle = RTLD_DEFAULT;
 #else
     void *handle = NULL;
@@ -378,126 +408,40 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     // symbol predates that sync and implements the old constructor ABI
     // (by-value GhosttyTerminalOptions), so calling through the same-named
     // symbol would be undefined behavior. Reject it before any call is made.
+    //
+    // Only a dlopen build can pick up such a library. A static build takes its headers and its archive
+    // from the same pinned Ghostty artifact set, so the rejected generation is not what is linked in,
+    // and it could not run this probe anyway: naming either symbol would be an undefined reference the
+    // link fails on.
+#if !SPACES_GHOSTTY_VT_STATIC_LINK
     if (dlsym(handle, "ghostty_terminal_mode_get") != NULL ||
         dlsym(handle, "ghostty_render_state_colors_get") != NULL) {
         spaces_ghostty_vt_release_handle(handle);
         return false;
     }
+#endif
+
+#if SPACES_GHOSTTY_VT_STATIC_LINK
+    // Direct binding, uncast: the compiler checks each function against the table's type, so a
+    // libghostty-vt signature change is a build error here rather than a crash on the phone.
+#define SPACES_GHOSTTY_VT_BIND(field, type, symbol) symbols->field = symbol;
+#else
+#define SPACES_GHOSTTY_VT_BIND(field, type, symbol) symbols->field = (type)dlsym(handle, #symbol);
+#endif
 
     symbols->handle = handle;
-    symbols->terminal_new = (GhosttyTerminalNewFn)dlsym(handle, "ghostty_terminal_new");
-    symbols->terminal_free = (GhosttyTerminalFreeFn)dlsym(handle, "ghostty_terminal_free");
-    symbols->terminal_vt_write = (GhosttyTerminalVtWriteFn)dlsym(handle, "ghostty_terminal_vt_write");
-    symbols->terminal_scroll_viewport = (GhosttyTerminalScrollViewportFn)dlsym(handle, "ghostty_terminal_scroll_viewport");
-    symbols->terminal_resize = (GhosttyTerminalResizeFn)dlsym(handle, "ghostty_terminal_resize");
-    symbols->terminal_get = (GhosttyTerminalGetFn)dlsym(handle, "ghostty_terminal_get");
-    symbols->terminal_set = (GhosttyTerminalSetFn)dlsym(handle, "ghostty_terminal_set");
-    symbols->paste_encode = (GhosttyPasteEncodeFn)dlsym(handle, "ghostty_paste_encode");
-    symbols->key_encoder_new = (GhosttyKeyEncoderNewFn)dlsym(handle, "ghostty_key_encoder_new");
-    symbols->key_encoder_free = (GhosttyKeyEncoderFreeFn)dlsym(handle, "ghostty_key_encoder_free");
-    symbols->key_encoder_setopt_from_terminal =
-        (GhosttyKeyEncoderSetoptFromTerminalFn)dlsym(handle, "ghostty_key_encoder_setopt_from_terminal");
-    symbols->key_encoder_encode = (GhosttyKeyEncoderEncodeFn)dlsym(handle, "ghostty_key_encoder_encode");
-    symbols->key_event_new = (GhosttyKeyEventNewFn)dlsym(handle, "ghostty_key_event_new");
-    symbols->key_event_free = (GhosttyKeyEventFreeFn)dlsym(handle, "ghostty_key_event_free");
-    symbols->key_event_set_action = (GhosttyKeyEventSetActionFn)dlsym(handle, "ghostty_key_event_set_action");
-    symbols->key_event_set_key = (GhosttyKeyEventSetKeyFn)dlsym(handle, "ghostty_key_event_set_key");
-    symbols->key_event_set_mods = (GhosttyKeyEventSetModsFn)dlsym(handle, "ghostty_key_event_set_mods");
-    symbols->key_event_set_utf8 = (GhosttyKeyEventSetUtf8Fn)dlsym(handle, "ghostty_key_event_set_utf8");
-    symbols->key_event_set_unshifted_codepoint =
-        (GhosttyKeyEventSetUnshiftedCodepointFn)dlsym(handle, "ghostty_key_event_set_unshifted_codepoint");
-    symbols->mouse_encoder_new = (GhosttyMouseEncoderNewFn)dlsym(handle, "ghostty_mouse_encoder_new");
-    symbols->mouse_encoder_free = (GhosttyMouseEncoderFreeFn)dlsym(handle, "ghostty_mouse_encoder_free");
-    symbols->mouse_encoder_setopt = (GhosttyMouseEncoderSetoptFn)dlsym(handle, "ghostty_mouse_encoder_setopt");
-    symbols->mouse_encoder_setopt_from_terminal =
-        (GhosttyMouseEncoderSetoptFromTerminalFn)dlsym(handle, "ghostty_mouse_encoder_setopt_from_terminal");
-    symbols->mouse_encoder_encode = (GhosttyMouseEncoderEncodeFn)dlsym(handle, "ghostty_mouse_encoder_encode");
-    symbols->mouse_event_new = (GhosttyMouseEventNewFn)dlsym(handle, "ghostty_mouse_event_new");
-    symbols->mouse_event_free = (GhosttyMouseEventFreeFn)dlsym(handle, "ghostty_mouse_event_free");
-    symbols->mouse_event_set_action = (GhosttyMouseEventSetActionFn)dlsym(handle, "ghostty_mouse_event_set_action");
-    symbols->mouse_event_set_button = (GhosttyMouseEventSetButtonFn)dlsym(handle, "ghostty_mouse_event_set_button");
-    symbols->mouse_event_set_mods = (GhosttyMouseEventSetModsFn)dlsym(handle, "ghostty_mouse_event_set_mods");
-    symbols->mouse_event_set_position = (GhosttyMouseEventSetPositionFn)dlsym(handle, "ghostty_mouse_event_set_position");
-    symbols->formatter_terminal_new = (GhosttyFormatterTerminalNewFn)dlsym(handle, "ghostty_formatter_terminal_new");
-    symbols->formatter_format_alloc = (GhosttyFormatterFormatAllocFn)dlsym(handle, "ghostty_formatter_format_alloc");
-    symbols->formatter_free = (GhosttyFormatterFreeFn)dlsym(handle, "ghostty_formatter_free");
-    symbols->ghostty_free = (GhosttyFreeFn)dlsym(handle, "ghostty_free");
-    symbols->render_state_new = (GhosttyRenderStateNewFn)dlsym(handle, "ghostty_render_state_new");
-    symbols->render_state_free = (GhosttyRenderStateFreeFn)dlsym(handle, "ghostty_render_state_free");
-    symbols->render_state_update = (GhosttyRenderStateUpdateFn)dlsym(handle, "ghostty_render_state_update");
-    symbols->render_state_get = (GhosttyRenderStateGetFn)dlsym(handle, "ghostty_render_state_get");
-    symbols->row_iterator_new = (GhosttyRenderStateRowIteratorNewFn)dlsym(handle, "ghostty_render_state_row_iterator_new");
-    symbols->row_iterator_free = (GhosttyRenderStateRowIteratorFreeFn)dlsym(handle, "ghostty_render_state_row_iterator_free");
-    symbols->row_iterator_next = (GhosttyRenderStateRowIteratorNextFn)dlsym(handle, "ghostty_render_state_row_iterator_next");
-    symbols->row_get = (GhosttyRenderStateRowGetFn)dlsym(handle, "ghostty_render_state_row_get");
-    symbols->row_cells_new = (GhosttyRenderStateRowCellsNewFn)dlsym(handle, "ghostty_render_state_row_cells_new");
-    symbols->row_cells_free = (GhosttyRenderStateRowCellsFreeFn)dlsym(handle, "ghostty_render_state_row_cells_free");
-    symbols->row_cells_next = (GhosttyRenderStateRowCellsNextFn)dlsym(handle, "ghostty_render_state_row_cells_next");
-    symbols->row_cells_get = (GhosttyRenderStateRowCellsGetFn)dlsym(handle, "ghostty_render_state_row_cells_get");
-    symbols->cell_get = (GhosttyCellGetFn)dlsym(handle, "ghostty_cell_get");
-    symbols->grid_row_get = (GhosttyRowGetFn)dlsym(handle, "ghostty_row_get");
-    symbols->terminal_grid_ref = (GhosttyTerminalGridRefFn)dlsym(handle, "ghostty_terminal_grid_ref");
-    symbols->terminal_point_from_grid_ref =
-        (GhosttyTerminalPointFromGridRefFn)dlsym(handle, "ghostty_terminal_point_from_grid_ref");
-    symbols->terminal_selection_format_alloc =
-        (GhosttyTerminalSelectionFormatAllocFn)dlsym(handle, "ghostty_terminal_selection_format_alloc");
-    symbols->terminal_take_render_scroll_rects =
-        (GhosttyTerminalTakeRenderScrollRectsFn)dlsym(handle, "ghostty_terminal_take_render_scroll_rects");
+    SPACES_GHOSTTY_VT_FOR_EACH_SYMBOL(SPACES_GHOSTTY_VT_BIND)
+#undef SPACES_GHOSTTY_VT_BIND
 
-    if (
-        symbols->terminal_new == NULL ||
-        symbols->terminal_free == NULL ||
-        symbols->terminal_vt_write == NULL ||
-        symbols->terminal_scroll_viewport == NULL ||
-        symbols->terminal_resize == NULL ||
-        symbols->terminal_get == NULL ||
-        symbols->terminal_set == NULL ||
-        symbols->paste_encode == NULL ||
-        symbols->key_encoder_new == NULL ||
-        symbols->key_encoder_free == NULL ||
-        symbols->key_encoder_setopt_from_terminal == NULL ||
-        symbols->key_encoder_encode == NULL ||
-        symbols->key_event_new == NULL ||
-        symbols->key_event_free == NULL ||
-        symbols->key_event_set_action == NULL ||
-        symbols->key_event_set_key == NULL ||
-        symbols->key_event_set_mods == NULL ||
-        symbols->key_event_set_utf8 == NULL ||
-        symbols->key_event_set_unshifted_codepoint == NULL ||
-        symbols->mouse_encoder_new == NULL ||
-        symbols->mouse_encoder_free == NULL ||
-        symbols->mouse_encoder_setopt == NULL ||
-        symbols->mouse_encoder_setopt_from_terminal == NULL ||
-        symbols->mouse_encoder_encode == NULL ||
-        symbols->mouse_event_new == NULL ||
-        symbols->mouse_event_free == NULL ||
-        symbols->mouse_event_set_action == NULL ||
-        symbols->mouse_event_set_button == NULL ||
-        symbols->mouse_event_set_mods == NULL ||
-        symbols->mouse_event_set_position == NULL ||
-        symbols->formatter_terminal_new == NULL ||
-        symbols->formatter_format_alloc == NULL ||
-        symbols->formatter_free == NULL ||
-        symbols->ghostty_free == NULL ||
-        symbols->render_state_new == NULL ||
-        symbols->render_state_free == NULL ||
-        symbols->render_state_update == NULL ||
-        symbols->render_state_get == NULL ||
-        symbols->row_iterator_new == NULL ||
-        symbols->row_iterator_free == NULL ||
-        symbols->row_iterator_next == NULL ||
-        symbols->row_get == NULL ||
-        symbols->row_cells_new == NULL ||
-        symbols->row_cells_free == NULL ||
-        symbols->row_cells_next == NULL ||
-        symbols->row_cells_get == NULL ||
-        symbols->cell_get == NULL ||
-        symbols->grid_row_get == NULL ||
-        symbols->terminal_grid_ref == NULL ||
-        symbols->terminal_point_from_grid_ref == NULL ||
-        symbols->terminal_selection_format_alloc == NULL ||
-        symbols->terminal_take_render_scroll_rects == NULL
-    ) {
+    // A dlopen build can land on a library that is missing an entry point, and a partially filled
+    // table would fault on first use. A static build cannot get here incomplete: a missing function
+    // fails the link.
+    bool complete = true;
+#define SPACES_GHOSTTY_VT_REQUIRE(field, type, symbol) complete = complete && symbols->field != NULL;
+    SPACES_GHOSTTY_VT_FOR_EACH_SYMBOL(SPACES_GHOSTTY_VT_REQUIRE)
+#undef SPACES_GHOSTTY_VT_REQUIRE
+
+    if (!complete) {
         spaces_ghostty_vt_release_handle(handle);
         memset(symbols, 0, sizeof(*symbols));
         return false;

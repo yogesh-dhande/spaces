@@ -32,6 +32,7 @@ RESOURCES_ROOT="$GHOSTTYKIT_ROOT/Resources"
 GHOSTTYVT_ROOT="$LOCAL_ROOT/ghosttyvt"
 GHOSTTYVT_INCLUDE_ROOT="$GHOSTTYVT_ROOT/include"
 GHOSTTYVT_LIB_ROOT="$GHOSTTYVT_ROOT/lib"
+GHOSTTYVT_IOS_LINK_ROOT="$GHOSTTYVT_ROOT/ios-link"
 TOOLCHAIN_ROOT="$GHOSTTYVT_ROOT/toolchain"
 
 ZIG_VERSION="0.16.0"
@@ -371,6 +372,38 @@ normalize_ghosttykit_static_library() {
             fi
         done
     fi
+}
+
+# The iOS link inputs. `ghosttyvtshim` compiles a `#pragma comment(lib, ...)` into its own object, so
+# the object asks the linker for `-lghostty-vt-ios` on a device build and `-lghostty-vt-iossimulator`
+# on a simulator build, whichever link consumes it (see SPACES_GHOSTTY_VT_STATIC_LINK in
+# ghosttyvtshim.c). Package.swift passes this directory as that target's iOS `-L`, and one `-L` has to
+# serve both links because SwiftPM platform conditions cannot tell a simulator build from a device
+# build. So the two slices are published here side by side under the two distinct names the pragma
+# emits, and the names are what separate them.
+#
+# Recreated on every successful setup rather than travelling with the artifacts: these are derived
+# links into the installed xcframework, so they sit outside the trees artifact_content_digest hashes
+# (ghosttyvt/include and ghosttyvt/lib) and outside what the shared cache copies, alongside the Zig
+# toolchain directory, which is derived state for the same reason.
+link_ghosttyvt_ios_archives() {
+    # macOS only: the Linux artifact set ships the shared library rather than an xcframework, and no
+    # iOS client is built there.
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        return 0
+    fi
+
+    local xcframework="$GHOSTTYVT_LIB_ROOT/ghostty-vt.xcframework"
+    local device_slice="$xcframework/ios-arm64/libghostty-vt-fat.a"
+    local simulator_slice="$xcframework/ios-arm64-simulator/libghostty-vt-fat.a"
+    [[ -f "$device_slice" ]] || die "libghostty-vt iOS device slice missing at $device_slice"
+    [[ -f "$simulator_slice" ]] || die "libghostty-vt iOS simulator slice missing at $simulator_slice"
+
+    mkdir -p "$GHOSTTYVT_IOS_LINK_ROOT"
+    ln -sfn "../lib/ghostty-vt.xcframework/ios-arm64/libghostty-vt-fat.a" \
+        "$GHOSTTYVT_IOS_LINK_ROOT/libghostty-vt-ios.a"
+    ln -sfn "../lib/ghostty-vt.xcframework/ios-arm64-simulator/libghostty-vt-fat.a" \
+        "$GHOSTTYVT_IOS_LINK_ROOT/libghostty-vt-iossimulator.a"
 }
 
 # One digest over the four artifact trees the manifest's install_paths name, in a
@@ -1204,6 +1237,10 @@ case "$MODE" in
         ;;
 esac
 
+# Every mode that gets here installed a verified artifact set, so this is the one place that covers
+# the local-reuse, cache-restore, download, and source-build outcomes alike.
+link_ghosttyvt_ios_archives
+
 # Seed the shared cache from the installed artifacts. Runs after every mode
 # (including the fast local-reuse path) so the main checkout populates the cache
 # for worktrees without a separate step. A failure here must not fail an
@@ -1217,6 +1254,7 @@ echo "  xcframework: $XCFRAMEWORK_ROOT"
 echo "  resources:   $RESOURCES_ROOT/ghostty"
 echo "  vt include:  $GHOSTTYVT_INCLUDE_ROOT"
 echo "  vt lib:      $GHOSTTYVT_LIB_ROOT"
+echo "  vt ios link: $GHOSTTYVT_IOS_LINK_ROOT"
 echo
 echo "Runtime overrides:"
 echo "  export SPACES_GHOSTTYKIT_XCFRAMEWORK=\"$XCFRAMEWORK_ROOT\""

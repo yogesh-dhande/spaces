@@ -1165,68 +1165,11 @@
 				DEVELOPMENT_TEAM = BEMDA62NB6;
 				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
 				GENERATE_INFOPLIST_FILE = NO;
-				"GHOSTTY_VT_LIBRARY[sdk=iphoneos*]" = "$(SRCROOT)/../macos/.local/ghosttyvt/lib/ghostty-vt.xcframework/ios-arm64/libghostty-vt-fat.a";
-				"GHOSTTY_VT_LIBRARY[sdk=iphonesimulator*]" = "$(SRCROOT)/../macos/.local/ghosttyvt/lib/ghostty-vt.xcframework/ios-arm64-simulator/libghostty-vt-fat.a";
 				INFOPLIST_FILE = Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
-				);
-				OTHER_LDFLAGS = (
-					"-Wl,-force_load,$(GHOSTTY_VT_LIBRARY)",
-					"-Wl,-u,_ghostty_terminal_new",
-					"-Wl,-u,_ghostty_terminal_free",
-					"-Wl,-u,_ghostty_terminal_vt_write",
-					"-Wl,-u,_ghostty_terminal_scroll_viewport",
-					"-Wl,-u,_ghostty_terminal_resize",
-					"-Wl,-u,_ghostty_terminal_get",
-					"-Wl,-u,_ghostty_terminal_set",
-					"-Wl,-u,_ghostty_paste_encode",
-					"-Wl,-u,_ghostty_key_encoder_new",
-					"-Wl,-u,_ghostty_key_encoder_free",
-					"-Wl,-u,_ghostty_key_encoder_setopt_from_terminal",
-					"-Wl,-u,_ghostty_key_encoder_encode",
-					"-Wl,-u,_ghostty_key_event_new",
-					"-Wl,-u,_ghostty_key_event_free",
-					"-Wl,-u,_ghostty_key_event_set_action",
-					"-Wl,-u,_ghostty_key_event_set_key",
-					"-Wl,-u,_ghostty_key_event_set_mods",
-					"-Wl,-u,_ghostty_key_event_set_utf8",
-					"-Wl,-u,_ghostty_key_event_set_unshifted_codepoint",
-					"-Wl,-u,_ghostty_mouse_encoder_new",
-					"-Wl,-u,_ghostty_mouse_encoder_free",
-					"-Wl,-u,_ghostty_mouse_encoder_setopt",
-					"-Wl,-u,_ghostty_mouse_encoder_setopt_from_terminal",
-					"-Wl,-u,_ghostty_mouse_encoder_encode",
-					"-Wl,-u,_ghostty_mouse_event_new",
-					"-Wl,-u,_ghostty_mouse_event_free",
-					"-Wl,-u,_ghostty_mouse_event_set_action",
-					"-Wl,-u,_ghostty_mouse_event_set_button",
-					"-Wl,-u,_ghostty_mouse_event_set_mods",
-					"-Wl,-u,_ghostty_mouse_event_set_position",
-					"-Wl,-u,_ghostty_formatter_terminal_new",
-					"-Wl,-u,_ghostty_formatter_format_alloc",
-					"-Wl,-u,_ghostty_formatter_free",
-					"-Wl,-u,_ghostty_free",
-					"-Wl,-u,_ghostty_render_state_new",
-					"-Wl,-u,_ghostty_render_state_free",
-					"-Wl,-u,_ghostty_render_state_update",
-					"-Wl,-u,_ghostty_render_state_get",
-					"-Wl,-u,_ghostty_render_state_row_iterator_new",
-					"-Wl,-u,_ghostty_render_state_row_iterator_free",
-					"-Wl,-u,_ghostty_render_state_row_iterator_next",
-					"-Wl,-u,_ghostty_render_state_row_get",
-					"-Wl,-u,_ghostty_render_state_row_cells_new",
-					"-Wl,-u,_ghostty_render_state_row_cells_free",
-					"-Wl,-u,_ghostty_render_state_row_cells_next",
-					"-Wl,-u,_ghostty_render_state_row_cells_get",
-					"-Wl,-u,_ghostty_cell_get",
-					"-Wl,-u,_ghostty_row_get",
-					"-Wl,-u,_ghostty_terminal_grid_ref",
-					"-Wl,-u,_ghostty_terminal_point_from_grid_ref",
-					"-Wl,-u,_ghostty_terminal_selection_format_alloc",
-					"-Wl,-u,_ghostty_terminal_take_render_scroll_rects",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.usespaces.spacesmobile;
 				PRODUCT_NAME = SpacesMobile;
@@ -1245,68 +1188,11 @@
 				DEVELOPMENT_TEAM = BEMDA62NB6;
 				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
 				GENERATE_INFOPLIST_FILE = NO;
-				"GHOSTTY_VT_LIBRARY[sdk=iphoneos*]" = "$(SRCROOT)/../macos/.local/ghosttyvt/lib/ghostty-vt.xcframework/ios-arm64/libghostty-vt-fat.a";
-				"GHOSTTY_VT_LIBRARY[sdk=iphonesimulator*]" = "$(SRCROOT)/../macos/.local/ghosttyvt/lib/ghostty-vt.xcframework/ios-arm64-simulator/libghostty-vt-fat.a";
 				INFOPLIST_FILE = Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
-				);
-				OTHER_LDFLAGS = (
-					"-Wl,-force_load,$(GHOSTTY_VT_LIBRARY)",
-					"-Wl,-u,_ghostty_terminal_new",
-					"-Wl,-u,_ghostty_terminal_free",
-					"-Wl,-u,_ghostty_terminal_vt_write",
-					"-Wl,-u,_ghostty_terminal_scroll_viewport",
-					"-Wl,-u,_ghostty_terminal_resize",
-					"-Wl,-u,_ghostty_terminal_get",
-					"-Wl,-u,_ghostty_terminal_set",
-					"-Wl,-u,_ghostty_paste_encode",
-					"-Wl,-u,_ghostty_key_encoder_new",
-					"-Wl,-u,_ghostty_key_encoder_free",
-					"-Wl,-u,_ghostty_key_encoder_setopt_from_terminal",
-					"-Wl,-u,_ghostty_key_encoder_encode",
-					"-Wl,-u,_ghostty_key_event_new",
-					"-Wl,-u,_ghostty_key_event_free",
-					"-Wl,-u,_ghostty_key_event_set_action",
-					"-Wl,-u,_ghostty_key_event_set_key",
-					"-Wl,-u,_ghostty_key_event_set_mods",
-					"-Wl,-u,_ghostty_key_event_set_utf8",
-					"-Wl,-u,_ghostty_key_event_set_unshifted_codepoint",
-					"-Wl,-u,_ghostty_mouse_encoder_new",
-					"-Wl,-u,_ghostty_mouse_encoder_free",
-					"-Wl,-u,_ghostty_mouse_encoder_setopt",
-					"-Wl,-u,_ghostty_mouse_encoder_setopt_from_terminal",
-					"-Wl,-u,_ghostty_mouse_encoder_encode",
-					"-Wl,-u,_ghostty_mouse_event_new",
-					"-Wl,-u,_ghostty_mouse_event_free",
-					"-Wl,-u,_ghostty_mouse_event_set_action",
-					"-Wl,-u,_ghostty_mouse_event_set_button",
-					"-Wl,-u,_ghostty_mouse_event_set_mods",
-					"-Wl,-u,_ghostty_mouse_event_set_position",
-					"-Wl,-u,_ghostty_formatter_terminal_new",
-					"-Wl,-u,_ghostty_formatter_format_alloc",
-					"-Wl,-u,_ghostty_formatter_free",
-					"-Wl,-u,_ghostty_free",
-					"-Wl,-u,_ghostty_render_state_new",
-					"-Wl,-u,_ghostty_render_state_free",
-					"-Wl,-u,_ghostty_render_state_update",
-					"-Wl,-u,_ghostty_render_state_get",
-					"-Wl,-u,_ghostty_render_state_row_iterator_new",
-					"-Wl,-u,_ghostty_render_state_row_iterator_free",
-					"-Wl,-u,_ghostty_render_state_row_iterator_next",
-					"-Wl,-u,_ghostty_render_state_row_get",
-					"-Wl,-u,_ghostty_render_state_row_cells_new",
-					"-Wl,-u,_ghostty_render_state_row_cells_free",
-					"-Wl,-u,_ghostty_render_state_row_cells_next",
-					"-Wl,-u,_ghostty_render_state_row_cells_get",
-					"-Wl,-u,_ghostty_cell_get",
-					"-Wl,-u,_ghostty_row_get",
-					"-Wl,-u,_ghostty_terminal_grid_ref",
-					"-Wl,-u,_ghostty_terminal_point_from_grid_ref",
-					"-Wl,-u,_ghostty_terminal_selection_format_alloc",
-					"-Wl,-u,_ghostty_terminal_take_render_scroll_rects",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.usespaces.spacesmobile;
 				PRODUCT_NAME = SpacesMobile;
