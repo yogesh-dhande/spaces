@@ -392,30 +392,50 @@ class StreamingMetricTests(unittest.TestCase):
 
 
 class ScrollbackMetricTests(unittest.TestCase):
-    def test_per_flick_scroll_rpc_and_frames(self) -> None:
+    def test_per_flick_local_frames_and_page_fetch_total(self) -> None:
         events = [
             *scenario_bracket("good", "scrollback", "2026-09-08T10:00:00.000Z", "2026-09-08T10:00:20.000Z"),
+            # A page fetch before the first flick and one after the second: both must land in the
+            # window-wide total regardless of which flick's slice (if any) they fall inside.
+            app_event(
+                "s1", "ios-viewer", "scrollback_page_fetch", "2026-09-08T10:00:00.500Z", 0,
+                count=8192, attributes={"incremental": "0"},
+            ),
             lane_marker("ios-uitest", "2026-09-08T10:00:01.000Z", 0, "good", "scrollback", "flick", {"index": "1", "direction": "down"}),
             app_event(
-                "s1", "ios-viewer", "input_command_rpc_end", "2026-09-08T10:00:01.050Z", 0,
-                elapsed_ms=25, attributes={"success": "1", "input_kind": "send_scroll"},
+                "s1", "ios-viewer", "scroll_local_frame", "2026-09-08T10:00:01.020Z", 0,
+                attributes={"offset_rows": "1"},
             ),
+            app_event(
+                "s1", "ios-viewer", "scroll_local_frame", "2026-09-08T10:00:01.040Z", 0,
+                attributes={"offset_rows": "2"},
+            ),
+            # Output the session pushed on its own while the flick ran; the flick itself caused none.
             app_event(
                 "s1", "ios-viewer", "render_frame_payload_receive", "2026-09-08T10:00:01.100Z", 0,
                 count=512, attributes={"render_update": "1"},
             ),
             lane_marker("ios-uitest", "2026-09-08T10:00:03.000Z", 0, "good", "scrollback", "flick", {"index": "2", "direction": "down"}),
             app_event(
-                "s1", "ios-viewer", "input_command_rpc_end", "2026-09-08T10:00:03.075Z", 0,
-                elapsed_ms=75, attributes={"success": "1", "input_kind": "send_scroll"},
+                "s1", "ios-viewer", "scroll_local_frame", "2026-09-08T10:00:03.050Z", 0,
+                attributes={"offset_rows": "1"},
+            ),
+            app_event(
+                "s1", "ios-viewer", "scrollback_page_fetch", "2026-09-08T10:00:05.000Z", 0,
+                count=2048, attributes={"incremental": "1"},
             ),
         ]
         window = window_for(events, [], "good", "scrollback")
         metrics = report.metric_scrollback(window)
-        self.assertEqual(metrics["rpc_p50"], 25.0)
-        self.assertEqual(metrics["rpc_max"], 75.0)
-        self.assertEqual(metrics["frames_p50"], 0)
-        self.assertEqual(metrics["frames_max"], 1)
+        # flick 1 has two local frames (2 rows scrolled locally), flick 2 has one: [2, 1] -> p50 1.
+        self.assertEqual(metrics["local_frames_p50"], 1)
+        # flick 1 has one network frame, flick 2 has none: [1, 0] -> p50 0.
+        self.assertEqual(metrics["network_frames_p50"], 0)
+        self.assertAlmostEqual(metrics["kb_p50"], 0.0)
+        # flick 1's first local frame is 20ms after its marker, flick 2's is 50ms: [20, 50] -> p50 20.
+        self.assertEqual(metrics["flick_to_local_frame_p50"], 20.0)
+        # 8192 bytes (first page) + 2048 bytes (continuation) over the whole window, not per flick.
+        self.assertAlmostEqual(metrics["page_fetch_kb_total"], 10.0)
 
     def test_return_flicks_reusing_indices_stay_separate(self) -> None:
         events = [
@@ -436,9 +456,11 @@ class ScrollbackMetricTests(unittest.TestCase):
             ),
         ]
         metrics = report.metric_scrollback(window_for(events, [], "good", "scrollback"))
-        self.assertEqual(metrics["frames_p50"], 1)
-        self.assertEqual(metrics["frames_max"], 2)
-        self.assertAlmostEqual(metrics["kb_max"], 4.0)
+        # If flicks were grouped by their `index` attribute instead of sliced by time, both flicks
+        # would collapse into index "1" and report a single group of 3 frames instead of two
+        # separate flicks of 1 and 2: [1, 2] -> p50 1, not [3] -> p50 3.
+        self.assertEqual(metrics["network_frames_p50"], 1)
+        self.assertAlmostEqual(metrics["kb_p50"], 1.0)
 
 
 class BackgroundMetricTests(unittest.TestCase):

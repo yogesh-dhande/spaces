@@ -8,6 +8,9 @@
 #endif
 #include <stdarg.h>
 #include <stdbool.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -161,6 +164,32 @@ enum {
     SPACES_GHOSTTY_VT_FLAG_ROW_WRAP_CONTINUATION = 1 << 12,
 };
 
+// iOS cannot dlopen a library that is not inside the app bundle, and the Spaces app embeds no
+// libghostty-vt dylib: the iOS slice of ghostty-vt.xcframework is linked statically into the app
+// binary instead, so the library's symbols are already in this image and RTLD_DEFAULT resolves them.
+// Every other platform loads the shared library at runtime through the search ladder below.
+//
+// Looking a symbol up by name is not a reference the linker can see, so nothing in the app image keeps
+// these alive on its own and dead-code stripping (on for Release and archive builds) would take every
+// one of them out of the image this lookup searches. `OTHER_LDFLAGS` in `apps/ios/project.yml` names
+// each of them a dead-strip root for exactly that reason; a symbol added to the table below has to be
+// added there too, or it resolves in debug builds and is gone from the shipped app.
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+#define SPACES_GHOSTTY_VT_STATIC_LINK 1
+#else
+#define SPACES_GHOSTTY_VT_STATIC_LINK 0
+#endif
+
+// Releases a handle taken by the loader. A statically linked build never took one: RTLD_DEFAULT is a
+// pseudo-handle for this image, not something dlclose may be given.
+static void spaces_ghostty_vt_release_handle(void *handle) {
+#if SPACES_GHOSTTY_VT_STATIC_LINK
+    (void)handle;
+#else
+    dlclose(handle);
+#endif
+}
+
 static void *spaces_ghostty_vt_dlopen_path(const char *path) {
     if (path == NULL || path[0] == '\0') return NULL;
     return dlopen(path, RTLD_NOW | RTLD_LOCAL);
@@ -255,6 +284,9 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     if (symbols == NULL) return false;
     memset(symbols, 0, sizeof(*symbols));
 
+#if SPACES_GHOSTTY_VT_STATIC_LINK
+    void *handle = RTLD_DEFAULT;
+#else
     void *handle = NULL;
     const char *env_path = getenv("SPACES_GHOSTTY_VT_DYLIB_PATH");
     if (env_path != NULL && env_path[0] != '\0') {
@@ -337,6 +369,7 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     }
 
     if (handle == NULL) return false;
+#endif
 
     // ABI-generation probe: the upstream sync that introduced the current
     // ghostty_terminal_new signature (columns/rows arguments, scrollback via
@@ -347,7 +380,7 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     // symbol would be undefined behavior. Reject it before any call is made.
     if (dlsym(handle, "ghostty_terminal_mode_get") != NULL ||
         dlsym(handle, "ghostty_render_state_colors_get") != NULL) {
-        dlclose(handle);
+        spaces_ghostty_vt_release_handle(handle);
         return false;
     }
 
@@ -465,7 +498,7 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
         symbols->terminal_selection_format_alloc == NULL ||
         symbols->terminal_take_render_scroll_rects == NULL
     ) {
-        dlclose(handle);
+        spaces_ghostty_vt_release_handle(handle);
         memset(symbols, 0, sizeof(*symbols));
         return false;
     }
@@ -475,7 +508,7 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
 
 static void spaces_ghostty_vt_unload_symbols(SpacesGhosttyVtSymbols *symbols) {
     if (symbols == NULL || symbols->handle == NULL) return;
-    dlclose(symbols->handle);
+    spaces_ghostty_vt_release_handle(symbols->handle);
     memset(symbols, 0, sizeof(*symbols));
 }
 
@@ -1138,6 +1171,19 @@ bool spaces_ghostty_vt_session_mouse_tracking_active(SpacesGhosttyVtSession *ses
         return false;
     }
     *out_active = active;
+    return true;
+}
+
+bool spaces_ghostty_vt_session_alternate_screen_active(SpacesGhosttyVtSession *session, bool *out_active) {
+    if (out_active == NULL) return false;
+    *out_active = false;
+    if (session == NULL || session->terminal == NULL) return false;
+
+    GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+    *out_active = screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE;
     return true;
 }
 

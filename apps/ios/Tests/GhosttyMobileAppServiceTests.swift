@@ -725,6 +725,54 @@
             XCTAssertEqual(sentKeys, ["right", "left"])
         }
 
+        /// A keystroke during a flick's momentum ends the flick. The display link keeps firing after the
+        /// keystroke, and the app layer answers a scroll delta by painting this client's own scrolled
+        /// replay, so a delta delivered after the keystroke would hide the frames the keystroke produced.
+        /// Input is forwarded to the app through a main-actor hop while scroll deltas go straight through,
+        /// so the gesture has to end here rather than in the app's reaction to the send. The next gesture
+        /// scrolls normally: the cancellation is of that flick, not of scrolling.
+        func testAKeystrokeDuringMomentumEndsTheGestureUntilTheNextOneBegins() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentScrolls: [Double] = []
+            var sentText: [String] = []
+            hostView.onSendScroll = { _, vertical, _, _ in sentScrolls.append(vertical) }
+            hostView.onSendText = { text, _ in sentText.append(text) }
+            hostView.setAcceptsTerminalInput(true)
+
+            hostView.debugBeginScrollGestureForTesting()
+            XCTAssertTrue(hostView.debugSendScrollForTesting(horizontal: 0, vertical: 12))
+            XCTAssertEqual(sentScrolls, [12], "a moving gesture scrolls")
+
+            hostView.insertText("a")
+            XCTAssertEqual(sentText, ["a"])
+
+            sentScrolls.removeAll()
+            XCTAssertFalse(
+                hostView.debugSendScrollForTesting(horizontal: 0, vertical: 12), "a momentum delta after the keystroke is not a scroll any more")
+            XCTAssertEqual(sentScrolls, [], "no delta from the cancelled gesture may reach the app")
+
+            hostView.debugBeginScrollGestureForTesting()
+            XCTAssertTrue(hostView.debugSendScrollForTesting(horizontal: 0, vertical: 12))
+            XCTAssertEqual(sentScrolls, [12], "the next gesture scrolls again")
+        }
+
+        /// A finger landing on a flick stops it: the user wanted the scrolling to stop, and the momentum
+        /// display link is invalidated before this gesture's own deltas start arriving.
+        func testATouchStopsAFlickInProgress() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            hostView.onSendScroll = { _, _, _, _ in }
+            hostView.setAcceptsTerminalInput(true)
+
+            hostView.debugBeginScrollGestureForTesting()
+            hostView.debugContinueScrollGestureForTesting(translation: CGPoint(x: 0, y: 40))
+            hostView.debugEndScrollGestureForTesting(velocity: CGPoint(x: 0, y: 2_000))
+            XCTAssertTrue(hostView.debugIsMomentumRunningForTesting, "a fast lift hands the gesture to its momentum")
+
+            hostView.debugBeginScrollGestureForTesting()
+
+            XCTAssertFalse(hostView.debugIsMomentumRunningForTesting, "the touch stopped the flick")
+        }
+
         func testRemoteTerminalAccessoryModifiersApplyToInput() throws {
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             var sentKeys: [String] = []
@@ -2644,7 +2692,9 @@
         /// A grid the same size as `promptAtBottomSnapshot`'s, but with the cursor on its first row instead
         /// of its last: the cursor-follow rule needs no shift at all for this one, unlike the bottom prompt,
         /// which proves a rendered-window report changed for the row offset alone rather than for its size.
-        private func promptAtTopSnapshot(columns: Int, rows: Int) -> GhosttyTerminalSnapshot { snapshot(columns: columns, rows: rows, text: "shell %") }
+        private func promptAtTopSnapshot(columns: Int, rows: Int) -> GhosttyTerminalSnapshot {
+            snapshot(columns: columns, rows: rows, text: "shell %")
+        }
 
         private func snapshotSignature(_ snapshot: GhosttyTerminalSnapshot?) -> String {
             guard let snapshot else { return "nil" }

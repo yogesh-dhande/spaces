@@ -308,6 +308,67 @@
             XCTAssertEqual(model.snapshotColumns, padRecording.columns)
             XCTAssertEqual(model.snapshotRows, padRecording.rows)
         }
+
+        // MARK: - Scrollback history
+
+        /// The recording holds rendered frames, not the `output.log` bytes a scrollback replay is built
+        /// from, so Demo Mode has no history to serve. The transcript command answers with the verdict a
+        /// daemon gives a session whose transcript file does not exist, which the client maps to an empty
+        /// transcript rather than to a failure worth retrying.
+        func testTerminalTranscriptReportsNoHistoryToReplay() async throws {
+            let backend = DemoDeviceBackend(library: try loadLibrary())
+
+            let response = await backend.serve(
+                SpacesDeviceAPIRequest(command: .terminalTranscript(.init(sessionID: "demo-harbor-backend", maxBytes: 65536))))
+
+            XCTAssertFalse(response.ok)
+            XCTAssertEqual(response.errorCode, .sessionNotAvailable)
+            XCTAssertNil(response.terminalTranscript)
+        }
+
+        /// An ended demo terminal asks for history once, off the frame it paints, and latches the verdict:
+        /// no later gesture pays for another read, and the gestures are absorbed rather than sent to the
+        /// backend as wheel deltas.
+        func testDemoTerminalReadsHistoryOnceAndAbsorbsLaterGestures() async throws {
+            let library = try loadLibrary()
+            let backend = DemoDeviceBackend(library: library)
+            let recorder = DeviceAPIRequestRecorder()
+            let client = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return await backend.serve(request)
+            }
+            // The one recorded session whose run has exited, which is what makes its recorded frame the
+            // complete history of that run.
+            let session = SpacesDeviceTerminalSessionSummary(
+                id: "demo-lantern-backend", title: "backend", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, state: .exited,
+                backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 0, childPID: nil, workspaceID: "workspace", workspaceTitle: nil,
+                projectID: nil, projectName: nil, createdAt: "2026-06-04T14:23:10Z", updatedAt: "2026-06-04T14:23:23Z", isControlAvailable: true,
+                isSubscriptionAvailable: true, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .process, rowSourceID: nil,
+                hasFinalRender: false)
+            let model = TerminalViewerModel(
+                session: session, settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: client,
+                isDemoMode: true)
+            defer { model.stop() }
+
+            let state = await backend.serve(SpacesDeviceAPIRequest(command: .state(.init(sessionID: session.id, includesRenderUpdate: true))))
+            _ = await model.applyLatestState(try XCTUnwrap(state.sessionState), isOutOfBand: false)
+            await waitUntilAsync("the recorded frame to ask the backend for history") { await recorder.transcriptRequests().count == 1 }
+            // Let the refusal land before the gestures below, so what they read is the latched verdict.
+            try await Task.sleep(for: .milliseconds(200))
+            XCTAssertFalse(model.hasReadyLocalScrollbackForTesting, "a recording carries no transcript to replay")
+
+            for _ in 0..<3 {
+                model.noteScrollGestureBegan()
+                model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            }
+            try await Task.sleep(for: .milliseconds(200))
+
+            let reads = await recorder.transcriptRequests().count
+            XCTAssertEqual(reads, 1, "Demo Mode's `there is nothing to replay` is a verdict, not a read to try again")
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "there is no replay to paint")
+            let wheelDeltas = await recorder.countTerminalControlAction(.scroll)
+            XCTAssertEqual(wheelDeltas, 0, "a gesture with no replay to scroll is absorbed, never sent to the backend")
+        }
     }
 
     /// Lock-guarded string box so the synchronous subscribe callback can hand text back to the test.

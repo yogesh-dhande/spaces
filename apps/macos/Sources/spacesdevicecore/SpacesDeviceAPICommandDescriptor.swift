@@ -1,4 +1,5 @@
 import Foundation
+import spacesterminalcore
 
 /// The serial lane a `SpacesDeviceAPICommand` dispatches to inside `SpacesDeviceAPIServer`. One case per
 /// queue choice the two transports' dispatch ladders make. `.terminalControl` and `.workspaceGit` name a
@@ -29,6 +30,7 @@ public enum SpacesDeviceAPICommandLane: Sendable, Equatable {
     case projectClone
     case projectConfigFile
     case terminalControl
+    case terminalTranscript
     case workspaceGit
     case mainQueue
 }
@@ -47,7 +49,9 @@ public struct SpacesDeviceAPICommandDescriptor: Sendable, Equatable {
     /// caller that needs to gate on "is this an agent-hook command" checks `lane == .agentHook` rather
     /// than a separate flag.
     public let lane: SpacesDeviceAPICommandLane
-    /// The deadline `SpacesDeviceClient` uses when sending this command.
+    /// The deadline every client uses when sending this command. Pinned per case, except
+    /// `.terminalTranscript`, whose response size the request itself picks and whose deadline is therefore
+    /// derived from that size (see `transcriptRequestTimeoutSeconds(maxBytes:)`).
     public let timeoutSeconds: TimeInterval
 }
 
@@ -63,9 +67,9 @@ extension SpacesDeviceAPICommand {
     /// `.agentHooksStatus` probes every configured coding agent's shell/config state, which can take
     /// longer than the default deadline but far less than a long-running mutation.
     private static let agentHooksStatusRequestTimeoutSeconds: TimeInterval = 20
-    /// A response carrying a large embedded payload — a transcript up to the full scrollback budget,
-    /// a workspace file read/write, or one bounded workspace-diff patch range — needs more than the
-    /// default timeout on slow remote links.
+    /// A response carrying a large embedded payload (a workspace file read/write, or one bounded
+    /// workspace-diff patch range) needs more than the default timeout on slow remote links. A transcript
+    /// read is sized by the caller and takes `transcriptRequestTimeoutSeconds(maxBytes:)` instead.
     private static let largePayloadRequestTimeoutSeconds: TimeInterval = 60
     /// Everything else: reads and small, fast mutations.
     private static let defaultRequestTimeoutSeconds: TimeInterval = 10
@@ -164,8 +168,10 @@ extension SpacesDeviceAPICommand {
             return Self.descriptor(wireKey: "sendTerminalInput", lane: .terminalControl, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .tailTerminalOutput:
             return Self.descriptor(wireKey: "tailTerminalOutput", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
-        case .terminalTranscript:
-            return Self.descriptor(wireKey: "terminalTranscript", lane: .mainQueue, timeoutSeconds: Self.largePayloadRequestTimeoutSeconds)
+        case .terminalTranscript(let payload):
+            return Self.descriptor(
+                wireKey: "terminalTranscript", lane: .terminalTranscript,
+                timeoutSeconds: Self.transcriptRequestTimeoutSeconds(maxBytes: payload.maxBytes))
         case .resolveTerminalLink:
             return Self.descriptor(wireKey: "resolveTerminalLink", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .readTerminalLinkChunk:
@@ -233,6 +239,30 @@ extension SpacesDeviceAPICommand {
         case .discardRestorableSessions:
             return Self.descriptor(wireKey: "discardRestorableSessions", lane: .mainQueue, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         }
+    }
+
+    /// How long a transcript page is given to arrive: a fixed allowance for the round trip and the
+    /// daemon's own read, plus the page itself at a deliberately pessimistic floor throughput. A
+    /// transcript is the one command whose response size the caller picks, from a first page to the whole
+    /// scrollback budget, so it is the one command whose deadline is computed rather than pinned: a fixed
+    /// deadline wide enough for the deepest read would be absurd for the shallowest, and one sized for the
+    /// shallowest puts the deepest read permanently out of reach on a slow link.
+    ///
+    /// The floor is the point of the calculation, and what it is applied to is what actually crosses the
+    /// link. That is not `maxBytes`: the page travels as a base64-encoded DEFLATE stream, and terminal
+    /// output compresses far more than base64's one-third expansion costs, so budgeting the raw page size
+    /// at 64 KB/s is already generous for the bytes on the wire. A first page
+    /// (`TerminalScrollbackBudget.initialLocalScrollbackPageBytes`) gets about half a minute and the
+    /// deepest page the daemon serves (`TerminalScrollbackBudget.defaultMaxBytes`) minutes, so the
+    /// deadline describes "the daemon is not answering" rather than "this page is large".
+    private static func transcriptRequestTimeoutSeconds(maxBytes: Int) -> TimeInterval {
+        let floorBytesPerSecond = 64 * 1024
+        // The caller picks `maxBytes` and the server reads this descriptor before it validates that number,
+        // so the size is clamped to the deepest page the daemon ever serves: the deadline never exceeds the
+        // full budget's, and no value a client can send overflows the rounding below.
+        let pageBytes = min(max(maxBytes, 0), TerminalScrollbackBudget.defaultMaxBytes)
+        let transferSeconds = (pageBytes + floorBytesPerSecond - 1) / floorBytesPerSecond
+        return TimeInterval(10 + transferSeconds)
     }
 
     private static func descriptor(wireKey: String, lane: SpacesDeviceAPICommandLane, timeoutSeconds: TimeInterval)

@@ -219,6 +219,17 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
     /// transcript response to a specific run, so a transcript fetch that straddles a relaunch is
     /// rejected by data rather than by state-delivery timing.
     public var runIdentity: String { "\(childPID.map(String.init) ?? "-")|\(exitedAt ?? "-")" }
+
+    /// The run a set of transcript bytes belongs to: the child process that wrote them, which is the
+    /// leading field of `runIdentity`. Only a relaunch truncates `output.log`, so only a new child
+    /// process invalidates a replay built from those bytes; the same process exiting advances
+    /// `runIdentity`'s exit half while every byte the replay holds stays exactly where it was. Comparing
+    /// this half is what tells a relaunch from an exit, so a pane scrolled into its history keeps that
+    /// history when the process it was watching exits. `nil` when there is no identity to key on.
+    public static func runKey(for runIdentity: String?) -> String? {
+        guard let runIdentity else { return nil }
+        return String(runIdentity.prefix { $0 != "|" })
+    }
 }
 
 public struct TerminalSessionAttachmentSnapshot: Codable, Sendable, Equatable {

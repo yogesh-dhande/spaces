@@ -101,7 +101,7 @@ struct TerminalDetailView: View {
                             onInputReadinessChanged: { ready in
                                 model.setInputSurfaceReady(ready)
                                 writeE2EEventIfNeeded(kind: "input_readiness", detail: ready ? "ready" : "pending")
-                            },
+                            }, onScrollGestureBegan: { model.noteScrollGestureBegan() },
                             onScrollGestureApplied: {
                                 writeE2EEventIfNeeded(kind: "e2e_scroll_gesture_applied", detail: nil)
                                 model.flushPendingScroll()
@@ -309,7 +309,13 @@ struct TerminalDetailView: View {
     private var selectionCopyPillPlacement: SelectionCopyPillPlacement? {
         // The daemon rejects readSelectionText once the session has ended, so the pill would be a
         // dead control on a frozen frame.
-        guard let snapshot = model.latestState?.renderSnapshot, snapshot.selection != nil, model.endedRender == nil,
+        //
+        // A local scroll frame is the other frame the pill has nothing to sit on. It is replayed from
+        // transcript bytes, which carry no shared selection, so the surface underneath shows no highlight
+        // at all; anchoring the pill against the session snapshot's coordinates would float it over rows
+        // from a different frame. Both step aside for the flick and return with the session's frame when
+        // the replay is dropped.
+        guard !model.isShowingLocalScrollFrame, let snapshot = model.latestState?.renderSnapshot, snapshot.selection != nil, model.endedRender == nil,
             let window = model.renderedViewportWindow
         else { return nil }
         let metrics = GhosttyRemoteTerminalViewport.cellMetrics(fontSize: terminalFontSize)
@@ -327,9 +333,8 @@ struct TerminalDetailView: View {
     /// the terminal underneath.
     @ViewBuilder private var jumpToBottomOverlay: some View {
         if model.isScrolledIntoScrollback, let origin = jumpToBottomOrigin {
-            TerminalJumpToBottomButton { performJumpToBottom() }.offset(x: origin.x, y: origin.y).frame(
-                maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading
-            ).transition(.opacity)
+            TerminalJumpToBottomButton(hasNewOutput: model.hasNewOutputBelowScrollback) { performJumpToBottom() }.offset(x: origin.x, y: origin.y)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).transition(.opacity)
         }
     }
 
@@ -391,7 +396,7 @@ struct TerminalDetailView: View {
 
     private func sendTerminalScroll(horizontal: Double, vertical: Double, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?) {
         writeE2EEventIfNeeded(kind: "send_scroll", detail: "\(horizontal),\(vertical)")
-        Task { await model.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition) }
+        model.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
     }
 
     private func openTerminalLink(_ link: String) {

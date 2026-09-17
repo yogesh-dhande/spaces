@@ -4394,6 +4394,54 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
+    /// A program entering the alternate screen (what less, vim, and coding agents do) is reported on
+    /// the exported snapshot, and leaving it clears the report. Clients route a scroll gesture on this:
+    /// the alternate screen has no scrollback of its own, so the gesture belongs to the program rather
+    /// than to a local replay. This drives a real surface through the real escape sequences, so it
+    /// covers the fork's export and the Swift conversion together.
+    func testExportedSnapshotReportsTheAlternateScreenWhileAProgramHoldsIt() async throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scriptURL = root.appendingPathComponent("alt_screen_probe.sh")
+        let leaveURL = root.appendingPathComponent("leave")
+        // The probe holds the alternate screen until the test asks it to leave, so neither assertion
+        // races a timed window: each one waits for the marker the probe printed on that screen.
+        try """
+        printf '\\033[?1049hALTSCREENREADY\\r\\n'
+        while [ ! -f "$1" ]; do sleep 0.05; done
+        printf '\\033[?1049lPRIMARYSCREENREADY\\r\\n'
+        sleep 60
+        """.write(to: scriptURL, atomically: true, encoding: .utf8)
+
+        func shellQuoted(_ value: String) -> String { "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'" }
+        let driverBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedTerminalSessionDriver> in
+            let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
+                launchConfiguration: TerminalSessionLaunchConfiguration(
+                    sessionID: "host-managed-alt-screen-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "alt-screen",
+                    workingDirectory: root.path, shell: "/bin/zsh", command: "/bin/sh \(shellQuoted(scriptURL.path)) \(shellQuoted(leaveURL.path))",
+                    createdAt: "2026-09-16T00:00:00Z", workspaceID: "workspace-1", kind: .shell))
+            try sessionDriver.startIfNeeded()
+            return Box(sessionDriver)
+        }
+        let sessionDriver = driverBox.value
+        defer { TerminalEngineActor.runSynchronously { sessionDriver.terminate() } }
+
+        try await waitUntil(diagnostics: { self.readyProbeDiagnostics(sessionDriver: sessionDriver, scriptURL: scriptURL) }) {
+            sessionDriver.snapshotText()?.contains("ALTSCREENREADY") == true
+        }
+        XCTAssertEqual(TerminalEngineActor.runSynchronously { sessionDriver.snapshot()?.alternateScreenActive }, true)
+
+        try Data().write(to: leaveURL)
+        try await waitUntil(diagnostics: { self.readyProbeDiagnostics(sessionDriver: sessionDriver, scriptURL: scriptURL) }) {
+            sessionDriver.snapshotText()?.contains("PRIMARYSCREENREADY") == true
+        }
+        XCTAssertEqual(TerminalEngineActor.runSynchronously { sessionDriver.snapshot()?.alternateScreenActive }, false)
+    }
+
     func testHeadlessDriverSendsScrollToMouseReportingApplicationAtPointerPosition() async throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
         guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }

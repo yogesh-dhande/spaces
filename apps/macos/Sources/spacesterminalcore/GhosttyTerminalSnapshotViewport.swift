@@ -72,6 +72,7 @@ public enum GhosttyTerminalSnapshotViewport {
             linkURLs: croppedCellText(
                 snapshot.linkURLs, sourceColumns: snapshot.columns, columnOffset: columnOffset, rowOffset: rowOffset, columns: columns, rows: rows),
             mouseReportingActive: snapshot.mouseReportingActive, mouseShiftCapture: snapshot.mouseShiftCapture,
+            alternateScreenActive: snapshot.alternateScreenActive,
             selection: croppedSelection(
                 snapshot.selection, sourceColumns: snapshot.columns, columnOffset: columnOffset, rowOffset: rowOffset, columns: columns, rows: rows),
             scrollbarTotal: snapshot.scrollbarTotal, scrollbarOffset: snapshot.scrollbarOffset + UInt32(rowOffset))

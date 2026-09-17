@@ -51,6 +51,6 @@ import ghosttyvtshim
         var raw = SpacesGhosttyVtSnapshot()
         #expect(spaces_ghostty_vt_session_copy_snapshot(session, &raw))
         defer { spaces_ghostty_vt_snapshot_free(&raw) }
-        return GhosttyVtSessionBridge.snapshot(from: raw, mouseReportingActive: false)
+        return GhosttyVtSessionBridge.snapshot(from: raw, mouseReportingActive: false, alternateScreenActive: false)
     }
 }

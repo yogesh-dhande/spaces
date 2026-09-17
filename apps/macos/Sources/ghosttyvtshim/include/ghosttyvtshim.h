@@ -298,6 +298,15 @@ bool spaces_ghostty_vt_session_mouse_tracking_active(
     bool *out_active
 );
 
+// Reports whether the session's terminal has the alternate screen active (what DEC modes 1047/1049
+// switch to). Reads libghostty-vt's active-screen data query rather than the modes themselves, so a
+// program that entered through either mode, or that the library switched for any other reason, is
+// reported the same way. Returns false if the underlying query fails.
+bool spaces_ghostty_vt_session_alternate_screen_active(
+    SpacesGhosttyVtSession *session,
+    bool *out_active
+);
+
 bool spaces_ghostty_vt_session_copy_snapshot(
     SpacesGhosttyVtSession *session,
     SpacesGhosttyVtSnapshot *out_snapshot

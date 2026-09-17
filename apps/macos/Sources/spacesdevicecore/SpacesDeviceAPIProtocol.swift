@@ -1939,36 +1939,91 @@ public struct SpacesDeviceTerminalOutputResult: Codable, Sendable, Equatable {
     public init(text: String) { self.text = text }
 }
 
-/// Raw suffix of a terminal session's persisted output transcript, for client-local ended-session
-/// scrollback replay. Read-only and not interactivity-gated — it exposes the same append-only
-/// `output.log` bytes `tailTerminalOutput` already renders — and works uniformly for local and
-/// remote devices. `maxBytes` bounds how much of the tail the daemon returns.
+/// A range of a terminal session's persisted output transcript, for client-local scrollback replay (an
+/// ended session's final transcript, and a live session's fetched history). Read-only and not
+/// interactivity-gated (it exposes the same append-only `output.log` bytes `tailTerminalOutput` already
+/// renders), and works uniformly for local and remote devices.
+///
+/// Two reads, one command. Without `fromByteOffset` the daemon returns a suffix bounded by `maxBytes`,
+/// cut at a parser-safe boundary and prefixed with a state preamble so the replay starts from the
+/// terminal state the dropped head established. With `fromByteOffset` it returns exactly the bytes from
+/// that offset to the end, with no cut and no preamble: those bytes continue a replay the client already
+/// holds, so anything inserted or skipped would corrupt it, and an offset at the end simply reports the
+/// current total with no data.
+///
+/// A continuation carries `fileIdentity`, the identity of the transcript file the client's bytes were
+/// read from (`SpacesDeviceTerminalTranscriptResult.fileIdentity`). `output.log` is append-only only
+/// until the daemon head-trims it, and a trim rewrites the file and renames a fresh one into its place,
+/// so an offset alone cannot say whether it still names the content the client continues from. The
+/// daemon serves the range only while the file it reads is the one that identity names, and otherwise
+/// answers with a fresh suffix flagged `isSuffixRebuild` instead of bytes that do not follow the
+/// client's own. A continuation that carries no identity is answered the same way. `maxBytes` bounds a
+/// continuation exactly as it bounds a suffix read: a gap wider than the page the client asked for is
+/// answered as that same flagged suffix rather than as an unbounded range.
 public struct SpacesDeviceTerminalTranscriptRequest: Codable, Sendable, Equatable {
     public let sessionID: String
     public let maxBytes: Int
+    public let fromByteOffset: Int?
+    public let fileIdentity: UInt64?
 
-    public init(sessionID: String, maxBytes: Int) {
+    public init(sessionID: String, maxBytes: Int, fromByteOffset: Int? = nil, fileIdentity: UInt64? = nil) {
         self.sessionID = sessionID
         self.maxBytes = maxBytes
+        self.fromByteOffset = fromByteOffset
+        self.fileIdentity = fileIdentity
     }
 }
 
-/// Result of `terminalTranscript`: the requested suffix `data` of the output transcript, the
-/// transcript's full `totalBytes` (so a client can tell whether it received the whole log or a
-/// budget-capped tail), and the `runIdentity` of the session run the transcript was read from. The
-/// client validates `runIdentity` against the run its ended-scrollback replay was armed against, so a
-/// fetch that straddles a relaunch (which truncates `output.log`) is rejected rather than replaying
-/// the new run's bytes under the old run's final frame. `runIdentity` is nil when no runtime state
-/// exists for the session.
+/// Result of `terminalTranscript`.
+///
+/// The transcript travels as a raw DEFLATE stream in `compressedData`, the same primitive the render
+/// update codec uses (`GhosttyRenderUpdateBodyCompression`), because terminal output is highly redundant
+/// text and a megabyte page of it crosses a phone's link several times faster compressed. `byteCount` is
+/// the length it inflates to, which is what the inflater is told; both are zero-length and zero when the
+/// read returned no bytes (an empty transcript, or a continuation already at the end).
+///
+/// `startByteOffset` and `totalBytes` bracket the served bytes in `output.log`: the replay holds the
+/// transcript from `startByteOffset` (zero means the whole file, so no deeper read exists) through
+/// `totalBytes`, which is also where the client's next continuation read starts. A suffix read's payload
+/// is longer than that range, because the state preamble in front of it exists nowhere in the file.
+///
+/// `runIdentity` is the run the transcript was read from. A client validates it against the run its
+/// replay was armed against, so a fetch that straddles a relaunch (which truncates `output.log`) is
+/// rejected rather than replayed under the earlier run's rows. It is nil when no runtime state exists for
+/// the session.
+///
+/// `fileIdentity` names the transcript file these bytes were read from, taken from the same open handle
+/// that produced them. A head-trim rewrites `output.log` and renames a fresh file into its place, which
+/// leaves every offset in the file naming different content; the identity changes with it, while an
+/// ordinary append leaves it alone. A client sends it back with its next continuation, and that is what
+/// tells an appended file from a rewritten one.
+///
+/// `isSuffixRebuild` answers a continuation request the daemon could not serve as a continuation: the
+/// bytes at `fromByteOffset` belong to a different file than the one the client read (a head-trim
+/// replaced it), the request carried no `fileIdentity`, or the gap from that offset to the end is wider
+/// than `maxBytes`. The payload is then the same preambled suffix a request without `fromByteOffset`
+/// returns, and the client rebuilds its replay from it rather than appending it. It is false for every
+/// other answer, including a request that carried no `fromByteOffset` at all.
 public struct SpacesDeviceTerminalTranscriptResult: Codable, Sendable, Equatable {
-    public let data: Data
+    public let compressedData: Data
+    public let byteCount: Int
+    public let startByteOffset: UInt64
     public let totalBytes: UInt64
+    public let fileIdentity: UInt64
     public let runIdentity: String?
+    public let isSuffixRebuild: Bool
 
-    public init(data: Data, totalBytes: UInt64, runIdentity: String? = nil) {
-        self.data = data
+    public init(
+        compressedData: Data, byteCount: Int, startByteOffset: UInt64, totalBytes: UInt64, fileIdentity: UInt64, runIdentity: String? = nil,
+        isSuffixRebuild: Bool = false
+    ) {
+        self.compressedData = compressedData
+        self.byteCount = byteCount
+        self.startByteOffset = startByteOffset
         self.totalBytes = totalBytes
+        self.fileIdentity = fileIdentity
         self.runIdentity = runIdentity
+        self.isSuffixRebuild = isSuffixRebuild
     }
 }
 
@@ -2437,8 +2492,10 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case terminalPasteImage(SpacesDeviceTerminalPasteImageRequest)
     case sendTerminalInput(SpacesDeviceTerminalInputRequest)
     case tailTerminalOutput(SpacesDeviceTerminalTailRequest)
-    /// Reads a suffix of a terminal session's persisted output transcript for client-local
-    /// ended-session scrollback replay. Read-only.
+    /// Reads a range of a terminal session's persisted output transcript for client-local scrollback
+    /// replay, for a live pane as well as an ended one: a bounded suffix that builds a replay, a
+    /// continuation from a byte offset that extends one the client already holds, and the rebuild that
+    /// answers a continuation the daemon cannot serve. Read-only.
     case terminalTranscript(SpacesDeviceTerminalTranscriptRequest)
     case subscribe(SpacesDeviceTerminalSubscriptionRequest)
     case resolveTerminalLink(SpacesDeviceTerminalLinkResolveRequest)

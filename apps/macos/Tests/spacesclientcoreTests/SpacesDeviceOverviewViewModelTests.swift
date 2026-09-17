@@ -18,11 +18,16 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
             SpacesDeviceClient.requestTimeoutSeconds(
                 for: .restartWorkspaceProcess(.init(workspaceID: "workspace-1", processID: nil, processKey: "web", processTemplateID: nil))),
             SpacesDeviceClient.longRunningMutationTimeoutSeconds)
-        // A transcript response can carry the full 10MB scrollback budget, which a slow remote link
-        // cannot deliver within the default timeout. Workspace file reads/writes and diffs share this
-        // same large-payload bucket for the same reason.
-        XCTAssertEqual(
-            SpacesDeviceClient.requestTimeoutSeconds(for: .terminalTranscript(.init(sessionID: "session-1", maxBytes: 1))),
+        // Workspace file reads/writes and diffs carry a large embedded payload a slow remote link cannot
+        // deliver within the default timeout, so they share one fixed large-payload deadline. A transcript
+        // read is sized by its caller instead, so the shared policy scales its deadline with `maxBytes`:
+        // the 10MB scrollback budget gets minutes, well past the fixed large-payload deadline (the exact
+        // curve is pinned in `SpacesDeviceAPICommandDescriptorTests`).
+        XCTAssertGreaterThan(
+            SpacesDeviceClient.requestTimeoutSeconds(for: .terminalTranscript(.init(sessionID: "session-1", maxBytes: 10_000_000))),
+            SpacesDeviceClient.requestTimeoutSeconds(for: .terminalTranscript(.init(sessionID: "session-1", maxBytes: 1_000_000))))
+        XCTAssertGreaterThan(
+            SpacesDeviceClient.requestTimeoutSeconds(for: .terminalTranscript(.init(sessionID: "session-1", maxBytes: 10_000_000))),
             SpacesDeviceClient.largePayloadRequestTimeoutSeconds)
         XCTAssertEqual(
             SpacesDeviceClient.requestTimeoutSeconds(for: .workspaceFileRead(.init(workspaceID: "workspace-1", relativePath: "README.md"))),

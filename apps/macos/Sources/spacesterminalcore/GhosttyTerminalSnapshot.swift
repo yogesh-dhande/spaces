@@ -50,6 +50,11 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
     public let mouseReportingActive: Bool
     /// The exporting terminal's shift-capture request as 0 = unset, 1 = false, 2 = true.
     public let mouseShiftCapture: UInt8
+    /// True when the exporting terminal has the alternate screen active (DEC modes 1047/1049, which
+    /// full-screen programs such as less, vim, and coding agents enter). The alternate screen has no
+    /// scrollback of its own, so clients route a scroll gesture on this: while it is set the gesture
+    /// belongs to the application rather than to a local viewport.
+    public let alternateScreenActive: Bool
     /// The shared terminal selection, projected into this snapshot's viewport by the daemon. Nil when
     /// there is no selection or the selection does not intersect this viewport at all.
     public let selection: GhosttyTerminalSelectionRange?
@@ -64,7 +69,7 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
     public init(
         columns: Int, rows: Int, cursorColumn: Int, cursorRow: Int, cursorVisible: Bool, defaultForegroundRGB: UInt32, defaultBackgroundRGB: UInt32,
         cells: [Cell], clusters: [Int: String] = [:], linkURLs: [Int: String] = [:], mouseReportingActive: Bool = false, mouseShiftCapture: UInt8 = 0,
-        selection: GhosttyTerminalSelectionRange? = nil, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0
+        alternateScreenActive: Bool = false, selection: GhosttyTerminalSelectionRange? = nil, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0
     ) {
         self.columns = columns
         self.rows = rows
@@ -78,6 +83,7 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
         self.linkURLs = Self.normalizedLinkURLs(linkURLs, cellCount: cells.count)
         self.mouseReportingActive = mouseReportingActive
         self.mouseShiftCapture = mouseShiftCapture
+        self.alternateScreenActive = alternateScreenActive
         self.selection = selection
         self.scrollbarTotal = scrollbarTotal
         self.scrollbarOffset = scrollbarOffset

@@ -523,6 +523,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     case .projectClone: server.handleProjectCloneRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     case .projectConfigFile: server.handleProjectConfigFileRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     case .terminalControl: server.handleTerminalControlRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    case .terminalTranscript:
+                        server.handleTerminalTranscriptRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     case .workspaceGit: server.handleWorkspaceGitRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     case .mainQueue: finishRequest(Result { try server.handleRequest(request, peerID: peerID) })
                     }
@@ -857,6 +859,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                             case .terminalControl:
                                 try server.admitAndAuthorizeOnQueue(request)
                                 response = try server.handleTerminalControlRequestOnWorkerQueue(request)
+                            case .terminalTranscript:
+                                try server.admitAndAuthorizeOnQueue(request)
+                                response = try server.handleTerminalTranscriptRequestOnWorkerQueue(request)
                             case .workspaceGit:
                                 try server.admitAndAuthorizeOnQueue(request)
                                 response = try server.handleWorkspaceGitRequestOnWorkerQueue(request)
@@ -1173,6 +1178,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// gate. One serial queue for both so an import and an export of the same project cannot interleave
     /// over that file.
     private let projectConfigFileQueue = DispatchQueue(label: "spaces.device.api.project-config-file", qos: .userInitiated)
+    /// `terminalTranscript` reads a transcript range and, for a suffix read, replays everything below its
+    /// cut through a throwaway vt session to build the state preamble that range is served with: tens of
+    /// milliseconds for a multi-megabyte head. Run on the shared state queue that answers overviews and
+    /// state reads, one client's scrollback prefetch would stall every other Device API command behind it,
+    /// which is the same reason the live transcript trim keeps its own preamble replay off the engine
+    /// actor.
+    private let terminalTranscriptQueue = DispatchQueue(label: "spaces.device.api.terminal-transcript", qos: .userInitiated)
 
     /// The fixed queue behind a `SpacesDeviceAPICommandLane`, shared by both transports' dispatch chains.
     /// Covers every lane that has one stored instance; `.terminalControl` and `.workspaceGit` resolve their
@@ -1189,6 +1201,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .workspaceCreate: return workspaceCreateQueue
         case .projectClone: return projectCloneQueue
         case .projectConfigFile: return projectConfigFileQueue
+        case .terminalTranscript: return terminalTranscriptQueue
         case .terminalControl, .workspaceGit, .mainQueue: preconditionFailure("\(lane) resolves its queue at the call site, not through this table.")
         }
     }
@@ -3212,7 +3225,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             .workspaceReviewCommentDelete:
             return try handleTerminalControlLaneRequest(request)
         case .tailTerminalOutput(let payload): return try handleTailTerminalOutputRequest(payload)
-        case .terminalTranscript(let payload): return try handleTerminalTranscriptRequest(payload)
+        // Both transports divert `terminalTranscript` to its own lane before it reaches here (descriptor
+        // lane `.terminalTranscript`; see `SpacesDeviceAPICommandDescriptor`), so this case only keeps the
+        // switch exhaustive.
+        case .terminalTranscript: return try handleTerminalTranscriptLaneRequest(request)
         case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload, context: context)
         case .readTerminalLinkChunk(let payload): return try handleReadTerminalLinkChunkRequest(payload)
         case .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
@@ -3449,6 +3465,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
         ) { dispatchAsync(on: queue(for: .projectConfigFile), handler: { try $0.handleProjectConfigFileRequest(request) }, completion: completion) }
 
+        private func handleTerminalTranscriptRequestAsync(
+            _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
+        ) {
+            dispatchAsync(
+                on: queue(for: .terminalTranscript), handler: { try $0.handleTerminalTranscriptLaneRequest(request) }, completion: completion)
+        }
+
         private func handleWorkspaceGitRequestAsync(
             _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
         ) {
@@ -3500,6 +3523,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
         private func handleProjectConfigFileRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
             try dispatchSync(on: queue(for: .projectConfigFile)) { try $0.handleProjectConfigFileRequest(request) }
+        }
+
+        private func handleTerminalTranscriptRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+            try dispatchSync(on: queue(for: .terminalTranscript)) { try $0.handleTerminalTranscriptLaneRequest(request) }
         }
 
         private func handleWorkspaceGitRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
@@ -3845,44 +3872,231 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return SpacesDeviceAPIResponse(ok: true, message: "Read terminal output.", result: .terminalOutput(.init(text: output)))
     }
 
-    /// Read-only suffix of the session's persisted output transcript, for client-local ended-session
-    /// scrollback replay. Not interactivity-gated: it exposes the same append-only `output.log` bytes
-    /// `tailTerminalOutput` already renders, and an ended session is exactly when this is needed. The
-    /// returned suffix is capped at the smaller of the requested size and the scrollback budget.
+    /// Runs the `terminalTranscript` command (descriptor lane `.terminalTranscript`; see
+    /// `SpacesDeviceAPICommandDescriptor`) on `terminalTranscriptQueue`, off the shared state queue the
+    /// preamble replay would otherwise stall.
+    private func handleTerminalTranscriptLaneRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+        switch request.command {
+        case .terminalTranscript(let payload): return try handleTerminalTranscriptRequest(payload)
+        default: preconditionFailure("Only the terminalTranscript command runs on the terminal-transcript queue.")
+        }
+    }
+
+    /// Read-only range of the session's persisted output transcript, for client-local scrollback replay.
+    /// Not interactivity-gated: it exposes the same append-only `output.log` bytes `tailTerminalOutput`
+    /// already renders, and an ended session is one of the cases that needs it.
+    ///
+    /// The bytes are returned as a raw DEFLATE stream: terminal output is highly redundant text, and a
+    /// megabyte page of it crosses a phone's link several times faster compressed.
     private func handleTerminalTranscriptRequest(_ payload: SpacesDeviceTerminalTranscriptRequest) throws -> SpacesDeviceAPIResponse {
         let sessionID = payload.sessionID
+        // A non-positive cap has no valid suffix or continuation to serve: `terminalTranscriptRead` would
+        // clamp it to zero bytes and still fall onto the suffix path, where `statePreamble` replays the
+        // entire transcript to describe a cut it never makes, burning the shared transcript queue for a
+        // response the client asked to be empty.
+        guard payload.maxBytes > 0 else {
+            return SpacesDeviceAPIResponse(ok: false, message: "maxBytes must be positive.", errorCode: .invalidArgument)
+        }
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         guard FileManager.default.fileExists(atPath: paths.outputPath) else {
             return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' has no output yet.", errorCode: .sessionNotAvailable)
         }
-        let cap = min(max(payload.maxBytes, 0), TerminalScrollbackBudget.defaultMaxBytes)
         let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: paths.outputPath))
         defer { try? handle.close() }
+        // Taken from the open descriptor, so it names the file these bytes come from even if a trim
+        // renames a replacement over the path a moment later. Serving it back is what lets the client's
+        // next continuation be verified (see `continuationTranscriptData`).
+        let fileIdentity = try Self.transcriptFileIdentity(handle: handle)
         let totalBytes = try handle.seekToEnd()
-        let startOffset = totalBytes > UInt64(cap) ? totalBytes - UInt64(cap) : 0
-        try handle.seek(toOffset: startOffset)
-        // Bound the read to the size snapshot: `output.log` is append-only, so this range always
-        // exists, and a still-running session appending past `totalBytes` cannot grow the response
-        // beyond the cap (this command is deliberately not interactivity-gated).
-        var data = try handle.read(upToCount: Int(totalBytes - startOffset)) ?? Data()
-        // A capped suffix starts at an arbitrary byte, which can split a UTF-8 character or an
-        // escape sequence and replay as garbage. Advance to the first line boundary so the replay
-        // starts on whole lines; a suffix with no newline at all is returned raw (the vt parser
-        // resynchronizes, at worst mangling the oldest visible scrollback line).
-        // Accepted limitation: a suffix cut inside established VT state (an alternate-screen session,
-        // a persistent SGR color) replays with default terminal state — faithfully restoring it would
-        // require reconstructing terminal state from the dropped prefix, which capped replay deliberately
-        // does not do. The newest scrollback is unaffected.
-        if startOffset > 0, let newlineIndex = data.firstIndex(of: 0x0A), newlineIndex < data.endIndex - 1 {
-            data = data.subdata(in: (newlineIndex + 1)..<data.endIndex)
-        }
-        // Carry the current run's identity so the client can reject a fetch that straddled a relaunch:
-        // a relaunch truncates `output.log`, so bytes read here could belong to a newer run than the one
+        // The preamble grid (columns/rows) only shapes how a suffix rebuild renders; a session that has
+        // never reported one (no runtime row yet) gets the conventional 80x24, the same shape every other
+        // grid-less reader assumes. Reading it before the bytes is safe because a stale grid from a
+        // relaunch just reflows the replay, it does not mislabel it, so this read does not need to wait
+        // for the identity ordering below.
+        let gridState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+        let read = try Self.terminalTranscriptRead(
+            handle: handle, totalBytes: totalBytes, fileIdentity: fileIdentity, payload: payload, columns: gridState?.columns ?? 80,
+            rows: gridState?.rows ?? 24)
+        // Carries the current run's identity so the client can reject a fetch that straddled a relaunch:
+        // a relaunch truncates `output.log`, so `read.data` above could belong to a newer run than the one
         // the client's replay was armed against. `nil` when no runtime state exists yet.
-        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+        //
+        // Read AFTER `read.data` is pinned, never before: a relaunch between the two writes a new runtime
+        // row and truncates the transcript, so reading the identity first can pair an old identity with
+        // bytes a relaunch already replaced underneath it, which is exactly the mismatch this field exists
+        // to catch. Taken in this order the only possible stale pairing is the harmless one - the newer
+        // run's identity over the older run's bytes, which the client rejects and reads again.
+        //
+        // Accepted window: the relaunch truncates `output.log` before the new runtime row is committed
+        // (the row is written behind the in-memory state), so a read landing in those milliseconds can
+        // still pair the previous identity with the new run's first bytes, and a client armed to that
+        // identity installs them. It cannot last: the state payload carrying the new run key follows
+        // within the same relaunch, and both clients discard the replay on a run-key change.
+        let identityState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+        // `deflate` rejects empty input, so a read that returned nothing stays an empty field the client
+        // never inflates.
+        let compressed = read.data.isEmpty ? Data() : try GhosttyRenderUpdateBodyCompression.deflate(read.data)
         return SpacesDeviceAPIResponse(
             ok: true, message: "Read terminal transcript.",
-            result: .terminalTranscript(.init(data: data, totalBytes: totalBytes, runIdentity: runtimeState?.runIdentity)))
+            result: .terminalTranscript(
+                .init(
+                    compressedData: compressed, byteCount: read.data.count, startByteOffset: read.startByteOffset, totalBytes: totalBytes,
+                    fileIdentity: fileIdentity, runIdentity: identityState?.runIdentity, isSuffixRebuild: read.isSuffixRebuild)))
+    }
+
+    /// The bytes a `terminalTranscript` request asks for, read from an already-open handle, where in
+    /// `output.log` they start, and whether they are a continuation or a rebuild.
+    ///
+    /// `fromByteOffset` is a continuation read: the client already replayed everything before that
+    /// offset, so the range is returned exactly as it sits in the log, with neither a cut nor a preamble
+    /// (either would corrupt the replay it continues). An offset at the end returns nothing, which is how
+    /// a client learns its replay is already current. A continuation is served only when it is provably
+    /// still a continuation and still bounded; when it is neither, the answer is a fresh suffix flagged
+    /// `isSuffixRebuild`, which is exactly what the client would otherwise have to ask for in a second
+    /// round trip.
+    ///
+    /// Without `fromByteOffset` the request is a suffix read, capped at the smaller of the requested size
+    /// and the scrollback budget.
+    private static func terminalTranscriptRead(
+        handle: FileHandle, totalBytes: UInt64, fileIdentity: UInt64, payload: SpacesDeviceTerminalTranscriptRequest, columns: Int, rows: Int
+    ) throws -> (data: Data, startByteOffset: UInt64, isSuffixRebuild: Bool) {
+        let cap = min(max(payload.maxBytes, 0), TerminalScrollbackBudget.defaultMaxBytes)
+        if let fromByteOffset = payload.fromByteOffset {
+            let continuation = try continuationTranscriptData(
+                handle: handle, totalBytes: totalBytes, fileIdentity: fileIdentity, cap: cap, payload: payload, from: fromByteOffset)
+            if let continuation { return (continuation, UInt64(max(fromByteOffset, 0)), false) }
+            let suffix = try suffixTranscriptRead(handle: handle, totalBytes: totalBytes, cap: cap, columns: columns, rows: rows)
+            return (suffix.data, suffix.startByteOffset, true)
+        }
+        let suffix = try suffixTranscriptRead(handle: handle, totalBytes: totalBytes, cap: cap, columns: columns, rows: rows)
+        return (suffix.data, suffix.startByteOffset, false)
+    }
+
+    /// The exact `[fromByteOffset, end)` range, or nil when that range cannot be served as a
+    /// continuation of what the client holds.
+    ///
+    /// Four things disqualify it, and all four are answered the same way (a fresh suffix the client
+    /// rebuilds from), because in all four the client's own bytes are not the prefix of what would be
+    /// returned:
+    ///
+    /// - The request names a different transcript file than the one being read. The daemon head-trims a
+    ///   long-running session's transcript by rewriting it and renaming the rewrite over `output.log`
+    ///   (`TerminalTranscriptTrim.commit`), so every offset in the file then names different content
+    ///   while the file keeps its path. The identity is the file itself, so it separates the rewritten
+    ///   file from the appended one outright, where comparing the bytes around the offset can be
+    ///   defeated by a transcript that repeats itself (identical log or progress lines, cut at a line
+    ///   boundary) and comparing sizes only works while the trimmed file is still shorter than where the
+    ///   client's bytes ended. A relaunch, which truncates the same file in place rather than replacing
+    ///   it, keeps the identity and is caught by `runIdentity` instead.
+    /// - The request carries no identity, so nothing about the offset can be verified.
+    /// - The offset lies past the end of the file, so there is no such range to serve.
+    /// - The gap from the offset to the end is wider than the page the client asked for. A client that
+    ///   left its replay idle through a burst of output would otherwise be sent tens of megabytes it
+    ///   never asked for, on the same link the paging is sized for.
+    private static func continuationTranscriptData(
+        handle: FileHandle, totalBytes: UInt64, fileIdentity: UInt64, cap: Int, payload: SpacesDeviceTerminalTranscriptRequest,
+        from fromByteOffset: Int
+    ) throws -> Data? {
+        guard payload.fileIdentity == fileIdentity else { return nil }
+        let startOffset = UInt64(max(fromByteOffset, 0))
+        guard startOffset <= totalBytes else { return nil }
+        guard totalBytes - startOffset <= UInt64(cap) else { return nil }
+        guard startOffset < totalBytes else { return Data() }
+        try handle.seek(toOffset: startOffset)
+        return try readExactly(handle: handle, count: Int(totalBytes - startOffset))
+    }
+
+    /// Reads exactly `count` bytes from `handle`'s current position, looping across `FileHandle.read
+    /// (upToCount:)` calls instead of trusting one call to satisfy the whole request.
+    ///
+    /// `read(upToCount:)` may legally return fewer bytes than asked (a short read) even on a regular
+    /// file. Every transcript range this server returns is paired with a `totalBytes` or
+    /// `startByteOffset` the client uses to advance its replay position past what it was just sent; a
+    /// caller that took a short read at face value would hand back fewer bytes than the response claims,
+    /// and the client would skip the difference forever, since nothing re-requests bytes it believes it
+    /// already has. This is the same fix `TerminalTranscriptTrim.commit` applies to its own delta read,
+    /// mirrored here for every range this server reads off `output.log`.
+    ///
+    /// Internal rather than private so `TerminalTranscriptServerTests` can drive it directly through a
+    /// pipe, which is the only way to force a real short read in a test.
+    static func readExactly(handle: FileHandle, count: Int) throws -> Data {
+        guard count > 0 else { return Data() }
+        var result = Data(capacity: count)
+        var remaining = count
+        while remaining > 0 {
+            guard let chunk = try handle.read(upToCount: remaining), !chunk.isEmpty else { throw POSIXError(.EIO) }
+            result.append(chunk)
+            remaining -= chunk.count
+        }
+        return result
+    }
+
+    /// The transcript file an open handle refers to, as its inode number. A rename of another file over
+    /// `output.log` (which is how a head-trim commits) leaves this handle on the file it opened and
+    /// gives the path a different one, so the number is what distinguishes the two.
+    ///
+    /// Accepted risk: an inode number can in principle be reused once the trimmed file is unlinked, which
+    /// would let a stale continuation pass this check against a same-numbered but unrelated file. APFS
+    /// allocates inode numbers monotonically and does not reuse them, and on ext4 a false match needs two
+    /// trims (each moving tens of megabytes of transcript) landing between two gestures of the same
+    /// undiscarded replay, plus the allocator happening to hand the freed number back in that window; the
+    /// existing offset and gap guards in `continuationTranscriptData` still bound what such a continuation
+    /// could return even then. A durable generation token would have to be persisted through the same
+    /// write-behind runtime state whose lag the run-identity check already tolerates, so the inode is kept
+    /// rather than adding that persistence for a risk this narrow.
+    private static func transcriptFileIdentity(handle: FileHandle) throws -> UInt64 {
+        var info = stat()
+        guard fstat(handle.fileDescriptor, &info) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        return UInt64(info.st_ino)
+    }
+
+    /// The newest `cap` bytes of the transcript, cut where the VT parser can pick up and prefixed with the
+    /// terminal state the bytes below the cut established.
+    ///
+    /// A suffix starts at an arbitrary byte, which can split a UTF-8 character or an escape sequence, and
+    /// it drops everything that set the terminal up: an alternate screen, a scrolling region, a charset
+    /// designation, a persistent color. Replayed raw it renders a wrong screen rather than a shorter one.
+    /// So the cut is placed at a parser-safe boundary and the dropped head is replayed through a throwaway
+    /// vt session to produce a state preamble, exactly as a transcript head-trim does (see
+    /// `TerminalTranscriptPrefix`, which owns both halves). A transcript short enough to return whole needs
+    /// neither: it already starts where the session did.
+    ///
+    /// When the bounded scan finds no parser-safe boundary at all (a single sequence or plain-text run
+    /// longer than a megabyte), the cut falls on the nominal start and the parser resynchronizes over the
+    /// partial sequence, costing at most the oldest visible scrollback line. The preamble in front of it
+    /// is correct either way, since it describes the state at the cut.
+    ///
+    /// The preamble cannot be skipped when the vt library fails to produce one: the read throws instead, so
+    /// a client sees a failed fetch it can retry rather than a silently wrong screen.
+    ///
+    /// Internal rather than private so a test can drive it with a handle whose path was replaced
+    /// underneath, which is the head-trim race the single-handle read exists to close.
+    static func suffixTranscriptRead(handle: FileHandle, totalBytes: UInt64, cap: Int, columns: Int, rows: Int) throws -> (
+        data: Data, startByteOffset: UInt64
+    ) {
+        // Bound the read to the size snapshot: `output.log` is append-only between trims, so this range
+        // always exists, and a still-running session appending past `totalBytes` cannot grow the response
+        // beyond the cap (this command is deliberately not interactivity-gated).
+        guard totalBytes > UInt64(cap) else {
+            try handle.seek(toOffset: 0)
+            return (try readExactly(handle: handle, count: Int(totalBytes)), 0)
+        }
+        let nominalStart = totalBytes - UInt64(cap)
+        let cutOffset =
+            try TerminalTranscriptPrefix.parserSafeCutOffset(readHandle: handle, nominalStart: nominalStart, endOffset: totalBytes) ?? nominalStart
+        // The preamble replays the head through the SAME handle the tail is read from. A trim can replace
+        // `output.log` with a fresh inode at any moment, so a preamble built by reopening the path would
+        // describe a different file than the tail it prefixes.
+        //
+        // Known limit, shared with the daemon's own head trim: the preamble serializes the modes and the
+        // ACTIVE screen's grid at the cut. When the cut lands inside an alternate-screen run, the primary
+        // grid the program covered is not carried, so a `1049 l` later in the tail restores a blank primary
+        // screen in the replay. Bounded to one screenful at the seam of a capped page; the fix is a fork
+        // change to serialize both screens, tracked as GitHub issue #766.
+        let preamble = try TerminalTranscriptPrefix.statePreamble(readHandle: handle, cutOffset: cutOffset, columns: columns, rows: rows)
+        try handle.seek(toOffset: cutOffset)
+        let tail = try readExactly(handle: handle, count: Int(totalBytes - cutOffset))
+        return (preamble + tail, cutOffset)
     }
 
     private func handleTerminalPasteImageRequest(_ payload: SpacesDeviceTerminalPasteImageRequest) throws -> SpacesDeviceAPIResponse {

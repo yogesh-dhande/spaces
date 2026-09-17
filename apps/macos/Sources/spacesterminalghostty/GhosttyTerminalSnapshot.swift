@@ -103,7 +103,8 @@
                 cursorRow: Int(snapshot.cursor_row), cursorVisible: snapshot.cursor_visible, defaultForegroundRGB: snapshot.default_foreground_rgb,
                 defaultBackgroundRGB: snapshot.default_background_rgb, cells: cells, clusters: clusters, linkURLs: linkURLs,
                 mouseReportingActive: snapshot.mouse_reporting_active, mouseShiftCapture: snapshot.mouse_shift_capture,
-                selection: selection(of: snapshot), scrollbarTotal: snapshot.scrollbar_total, scrollbarOffset: snapshot.scrollbar_offset)
+                alternateScreenActive: snapshot.alternate_screen_active, selection: selection(of: snapshot), scrollbarTotal: snapshot.scrollbar_total,
+                scrollbarOffset: snapshot.scrollbar_offset)
         }
 
         /// Decodes the snapshot's selection out of `selection_flags` and the four viewport-relative,

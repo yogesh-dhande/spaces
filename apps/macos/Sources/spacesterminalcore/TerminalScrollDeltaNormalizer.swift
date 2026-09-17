@@ -18,6 +18,13 @@ public enum TerminalScrollModifiers {
     }
 
     public static func hasPreciseDeltas(_ mods: Int32) -> Bool { mods & precisionMask != 0 }
+
+    /// The momentum phase `make` packed into `mods`. A client reads it to tell one wheel gesture from the
+    /// next: a trackpad flick's last event reports `.ended` (or `.cancelled`), while a mouse wheel's
+    /// discrete clicks carry `.none` throughout and are separated by a pause instead.
+    public static func momentumPhase(_ mods: Int32) -> TerminalScrollMomentumPhase {
+        TerminalScrollMomentumPhase(rawValue: (mods >> 1) & 0b111) ?? .none
+    }
 }
 
 public struct TerminalScrollDeltaNormalizer: Sendable {

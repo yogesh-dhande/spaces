@@ -320,7 +320,7 @@ final class TerminalTranscriptTrimTests: XCTestCase {
     func testTrimDefersWhenScanWindowHasNoParserSafeBoundary() throws {
         let (url, handle) = try makeTranscriptFile()
         // retained > 1 MiB so the whole forward-scan window sits inside the run when the run ends the file.
-        let retainedBytes = TerminalTranscriptTrim.maxParserSafeCutScanBytes + 100_000
+        let retainedBytes = TerminalTranscriptPrefix.maxParserSafeCutScanBytes + 100_000
         var payload = Data()
         payload.append(lineFiller(prefix: "HEADER", minBytes: 400_000).data)
         // A >1.5 MiB run of a single non-ESC, non-LF byte at the end of the file: the nominal cut lands
@@ -345,7 +345,7 @@ final class TerminalTranscriptTrimTests: XCTestCase {
     /// newline and the trim lands, retaining a parser-safe, line-aligned tail.
     func testTrimDefersThenSucceedsOnceWindowSlidesPastTheRun() throws {
         let (url, handle) = try makeTranscriptFile()
-        let retainedBytes = TerminalTranscriptTrim.maxParserSafeCutScanBytes + 100_000
+        let retainedBytes = TerminalTranscriptPrefix.maxParserSafeCutScanBytes + 100_000
         var payload = Data()
         payload.append(lineFiller(prefix: "HEADER", minBytes: 400_000).data)
         payload.append(Data(repeating: 0x41, count: Int(retainedBytes) + 200_000))  // oversized LF/ESC-free run
@@ -393,7 +393,7 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         // The `+ 100_007` (vs. a round number) is deliberate: it makes the nominal offset land a few bytes
         // into a record rather than coincidentally on a record's leading ESC, so this test cannot pass by
         // accident against the old nominal-offset fallback.
-        let retainedBytes = TerminalTranscriptTrim.maxParserSafeCutScanBytes + 100_007  // > 1 MiB newline-free retained span
+        let retainedBytes = TerminalTranscriptPrefix.maxParserSafeCutScanBytes + 100_007  // > 1 MiB newline-free retained span
         var payload = Data()
         payload.append(lineFiller(prefix: "HEADER", minBytes: 400_000).data)
 

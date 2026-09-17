@@ -78,9 +78,10 @@ public enum SpacesDeviceClient {
     static let defaultRequestTimeoutSeconds: TimeInterval = 10
     static let agentHooksStatusRequestTimeoutSeconds: TimeInterval = 20
     static let longRunningMutationTimeoutSeconds: TimeInterval = 60
-    /// A response carrying a large embedded payload — a transcript up to the full scrollback budget
-    /// (10MB, ~13MB as base64 JSON), a workspace file read/write (`workspaceFileMaxBytes`, also base64),
-    /// or one bounded workspace-diff patch range — needs more than the default timeout on slow remote links.
+    /// A response carrying a large embedded payload (a workspace file read/write, `workspaceFileMaxBytes`
+    /// as base64, or one bounded workspace-diff patch range) needs more than the default timeout on slow
+    /// remote links. A transcript read is not in this bucket: its response size is the `maxBytes` the
+    /// caller asks for, so the descriptor derives its deadline from that size.
     static let largePayloadRequestTimeoutSeconds: TimeInterval = 60
 
     public static func macOSClientApp(
@@ -357,9 +358,7 @@ public enum SpacesDeviceClient {
         context: DeviceRequestContext, requestProvider: DeviceRequestProvider, database providedDatabase: SpacesClientDatabase? = nil,
         bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalRecoveryBootstrapProvider
     ) throws -> SpacesDeviceOverviewResolution {
-        do {
-            return try resolutionFromInlineStatus(context: context, requestProvider: requestProvider, database: providedDatabase)
-        } catch {
+        do { return try resolutionFromInlineStatus(context: context, requestProvider: requestProvider, database: providedDatabase) } catch {
             // The local daemon's Device API endpoint is not durable: it can idle-shut-down, be restarted,
             // or be relaunched on a freshly assigned port, so the port in the caller's `paired_devices`
             // record goes stale without anything invalidating it. A transport failure against the local
@@ -429,7 +428,8 @@ public enum SpacesDeviceClient {
             return resolution
         } catch {
             logLocalRecoveryMetric(
-                metricName: metricName, device: context.device, refreshedPort: refreshed.port, startedAt: startedAt, success: false, stage: "overview")
+                metricName: metricName, device: context.device, refreshedPort: refreshed.port, startedAt: startedAt, success: false, stage: "overview"
+            )
             return try resolutionFromHandshake(context: refreshedContext, requestProvider: requestProvider, overviewError: error)
         }
     }
@@ -462,9 +462,9 @@ public enum SpacesDeviceClient {
     /// Ask the frozen core, which stays decodable across versions: an incompatible verdict means
     /// "blocked" (render the block, no overview); anything else rethrows `overviewError` as a genuine
     /// connection error to surface.
-    private static func resolutionFromHandshake(
-        context: DeviceRequestContext, requestProvider: DeviceRequestProvider, overviewError: any Error
-    ) throws -> SpacesDeviceOverviewResolution {
+    private static func resolutionFromHandshake(context: DeviceRequestContext, requestProvider: DeviceRequestProvider, overviewError: any Error)
+        throws -> SpacesDeviceOverviewResolution
+    {
         if let status = try? daemonStatus(context: context, requestProvider: requestProvider) {
             let verdict = SpacesWireCompatibility.evaluate(daemonStatus: status)
             if !verdict.isCompatible { return SpacesDeviceOverviewResolution(overview: nil, daemonStatus: status, compatibility: verdict) }
@@ -555,8 +555,8 @@ public enum SpacesDeviceClient {
     ) throws -> SpacesDeviceAPIResponse {
         try request(
             .init(
-                command: .archiveWorkspace(.init(workspaceID: workspaceID, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch))
-            ), context: context)
+                command: .archiveWorkspace(
+                    .init(workspaceID: workspaceID, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch))), context: context)
     }
 
     public static func runWorkspaceSetup(workspaceID: String, context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
@@ -615,8 +615,9 @@ public enum SpacesDeviceClient {
         workspaceID: String, revision: String, relativePath: String, oldPath: String? = nil, context: DeviceRequestContext
     ) throws -> SpacesDeviceWorkspaceRevisionFileReadResult {
         let response = try request(
-            .init(command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: relativePath, oldPath: oldPath))),
-            context: context)
+            .init(
+                command: .workspaceRevisionFileRead(.init(workspaceID: workspaceID, revision: revision, relativePath: relativePath, oldPath: oldPath))
+            ), context: context)
         guard let result = response.workspaceRevisionFileRead else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -700,8 +701,9 @@ public enum SpacesDeviceClient {
         workspaceID: String, refName: String? = nil, lastCommit: Bool = false, manifestID: String, context: DeviceRequestContext
     ) throws {
         let response = try request(
-            .init(command: .workspaceDiffManifestRelease(.init(workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID))),
-            context: context)
+            .init(
+                command: .workspaceDiffManifestRelease(
+                    .init(workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID))), context: context)
         guard response.ok else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
     }
 
@@ -811,8 +813,8 @@ public enum SpacesDeviceClient {
     /// whenever the authoritative `workspaceFileList` result changes, and the caller re-fetches
     /// `workspaceFileList` on delivery rather than trusting any listing payload on the frame.
     public static func subscribeWorkspaceFileListSignature(
-        workspaceID: String, context: DeviceRequestContext,
-        onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileListSignatureFrame) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+        workspaceID: String, context: DeviceRequestContext, onFrame: @escaping @Sendable (SpacesDeviceWorkspaceFileListSignatureFrame) -> Void,
+        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) throws -> SpacesDeviceWorkspaceFileListSignatureStreamClient {
         let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(context: context)
         let client = try SpacesDeviceWorkspaceFileListSignatureStreamClient(
@@ -827,8 +829,7 @@ public enum SpacesDeviceClient {
         try request(.init(command: .openWorkspaceTerminal(.init(workspaceID: workspaceID))), context: context)
     }
 
-    public static func stopWorkspaceTerminal(workspaceID: String, sessionID: String, context: DeviceRequestContext) throws
-        -> SpacesDeviceAPIResponse
+    public static func stopWorkspaceTerminal(workspaceID: String, sessionID: String, context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse
     { try request(.init(command: .stopWorkspaceTerminal(.init(workspaceID: workspaceID, sessionID: sessionID))), context: context) }
 
     /// Asks the owning daemon to stop an ad hoc terminal the user closed, which it does only when the
@@ -848,8 +849,8 @@ public enum SpacesDeviceClient {
         -> SpacesDeviceAPIResponse
     { try request(.init(command: .renameAgentSession(.init(workspaceID: workspaceID, agentID: agentID, title: title))), context: context) }
 
-    public static func runWorkspaceProcess(workspaceID: String, processKey: String, processTemplateID: String?, context: DeviceRequestContext)
-        throws -> SpacesDeviceAPIResponse
+    public static func runWorkspaceProcess(workspaceID: String, processKey: String, processTemplateID: String?, context: DeviceRequestContext) throws
+        -> SpacesDeviceAPIResponse
     {
         try request(
             .init(command: .runWorkspaceProcess(.init(workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID))),
@@ -884,7 +885,8 @@ public enum SpacesDeviceClient {
     @discardableResult public static func sendTerminalInput(
         sessionID: String, text: String? = nil, bytes: Data? = nil, appendNewline: Bool = false, context: DeviceRequestContext
     ) throws -> SpacesDeviceAPIResponse {
-        try request(.init(command: .sendTerminalInput(.init(sessionID: sessionID, text: text, bytes: bytes, appendNewline: appendNewline))), context: context)
+        try request(
+            .init(command: .sendTerminalInput(.init(sessionID: sessionID, text: text, bytes: bytes, appendNewline: appendNewline))), context: context)
     }
 
     /// Rendered plain-text tail of a terminal session on a paired device (`spaces terminal tail --device`).
@@ -977,13 +979,11 @@ public enum SpacesDeviceClient {
     }
 
     /// Lists automation runs on a paired device, newest first; `automationID` narrows to one automation.
-    public static func listAutomationRuns(automationID: String? = nil, context: DeviceRequestContext) throws
-        -> [TerminalServiceAutomationRunSummary]
+    public static func listAutomationRuns(automationID: String? = nil, context: DeviceRequestContext) throws -> [TerminalServiceAutomationRunSummary]
     { try request(.init(command: .listAutomationRuns(.init(automationID: automationID))), context: context).automationRuns ?? [] }
 
     /// Manually triggers an automation on a paired device, returning the started run as a one-element list.
-    @discardableResult public static func triggerAutomation(id: String, context: DeviceRequestContext) throws
-        -> [TerminalServiceAutomationRunSummary]
+    @discardableResult public static func triggerAutomation(id: String, context: DeviceRequestContext) throws -> [TerminalServiceAutomationRunSummary]
     { try request(.init(command: .triggerAutomation(.init(id: id))), context: context).automationRuns ?? [] }
 
     /// Cancels an automation run on a paired device, returning the canceled run as a one-element list.
@@ -1020,7 +1020,9 @@ public enum SpacesDeviceClient {
 
     /// Projects on a paired device, read from the overview (`spaces project list --device`). Reuses the
     /// overview the sidebar already loads rather than a dedicated listing command.
-    public static func projects(context: DeviceRequestContext) throws -> [SpacesDeviceProjectSummary] { try overview(context: context).overview.projects }
+    public static func projects(context: DeviceRequestContext) throws -> [SpacesDeviceProjectSummary] {
+        try overview(context: context).overview.projects
+    }
 
     /// Workspaces on a paired device, read from the overview (`spaces workspace list --device`).
     public static func workspaces(context: DeviceRequestContext) throws -> [SpacesDeviceWorkspaceSummary] {
@@ -1195,11 +1197,14 @@ public enum SpacesDeviceClient {
     }
 
     /// Delegates to `SpacesDeviceAPICommandDescriptor.timeoutSeconds`, the exhaustive per-command switch
-    /// pinned in `spacesdevicecore`. `defaultRequestTimeoutSeconds`/`agentHooksStatusRequestTimeoutSeconds`/
+    /// pinned in `spacesdevicecore` and read by the phone as well, so one policy sizes a given request on
+    /// every client. `defaultRequestTimeoutSeconds`/`agentHooksStatusRequestTimeoutSeconds`/
     /// `longRunningMutationTimeoutSeconds`/`largePayloadRequestTimeoutSeconds` above stay in this type
     /// (rather than moving into the descriptor) because they are also asserted against directly by
     /// `SpacesDeviceOverviewViewModelTests`; the descriptor's own switch pins the same four values as
     /// literals so the two cannot silently drift without a test on one side or the other catching it.
+    /// `.terminalTranscript` takes none of them: the descriptor sizes its deadline from the request's
+    /// `maxBytes`.
     public static func requestTimeoutSeconds(for command: SpacesDeviceAPICommand) -> TimeInterval { command.descriptor.timeoutSeconds }
 }
 

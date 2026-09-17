@@ -84,6 +84,15 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
         case .state(let request): return serveState(request)
         case .terminalControl(let request): return serveTerminalControl(request)
         case .terminalPasteImage: return reject(Self.terminalInputRejection)
+        // The bundle holds rendered frames, not the `output.log` bytes a client-local scrollback replay
+        // is built from, so Demo Mode has no history to serve and serving any would mean capturing
+        // transcripts into the recording alongside its frames. Answered with the verdict a daemon gives a
+        // session whose `output.log` does not exist, which the client maps to an empty transcript: the
+        // viewer latches that on a recorded session that has ended, so scrolling a demo terminal draws
+        // its recorded screen and issues no further reads.
+        case .terminalTranscript(let request):
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "Terminal session '\(request.sessionID)' has no output yet.", errorCode: .sessionNotAvailable)
 
         case .launchWorkspace(let request):
             return serveWorkspaceLifecycle(workspaceID: request.workspaceID, running: true, message: "Started workspace.")
