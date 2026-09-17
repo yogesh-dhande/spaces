@@ -151,13 +151,12 @@ scripts/verify.sh
 
 Spaces app releases run `apps/macos/scripts/ensure_ghostty_artifacts.sh --publish-missing`, so release builds consume a valid prebuilt artifact release when available and build plus publish from the pinned submodule when the release is absent. For uncommitted local Ghostty experiments, use `apps/macos/scripts/setup_ghostty.sh --build --allow-dirty`; the generated manifest records the dirty source state and must not be used for PR or release workflows.
 
-To validate the real in-process Ghostty owner renderer path in `SpacesApp`, launch the app normally with an isolated database root:
+To validate the owner pane path in `SpacesApp` (the app hosts no Ghostty surface of its own: every pane, the local device's included, is a `RemoteGhosttySessionHost` painting the daemon's render-frame stream over the Device API), launch the app normally with an isolated database root:
 
 ```bash
 apps/macos/scripts/setup_ghostty.sh --build --allow-dirty
 export SPACES_DB_PATH="$TMPDIR/spaces-ghostty-owner/spaces.db"
 mkdir -p "$(dirname "$SPACES_DB_PATH")"
-pkill -x SpacesApp 2>/dev/null || true
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
 ```
 
@@ -196,7 +195,7 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" ap
   terminal show <session-id>
 ```
 
-For built-in terminal verification, keep exactly one `SpacesApp` process running for the chosen profile root. The current `ghostty-embedded` slice keeps live Ghostty rendering owner-only on both macOS and iOS. Opening a terminal window or mobile detail view auto-attempts takeover, live non-owner states show takeover or status UI only, and ended sessions may still show the final Ghostty render when it was persisted.
+For built-in terminal verification, keep exactly one `SpacesApp` process running for the chosen profile root. Live Ghostty rendering is owner-only on both macOS and iOS. Opening a terminal window or mobile detail view auto-attempts takeover, live non-owner states show takeover or status UI only, and ended sessions may still show the final Ghostty render when it was persisted.
 
 If Ghostty owner or mirror setup reports `ghostty_session_new_headless failed` or `ghostty_mirror_new failed`, inspect for stale debug daemons before rerunning. Stop only current-worktree or preserved E2E-profile processes: use `pgrep -af 'SpacesApp|spacesd|spacese2e|xcodebuild|e2e|mobile-demo'`, confirm each candidate with `ps eww -p <pid> -o pid,ppid,command`, and kill only processes whose executable and `SPACES_DB_PATH`/`SPACES_RUNTIME_DIR` belong to the current checkout or a preserved E2E run root. Leave other worktree profiles running. libghostty reports why it refused a session only under `GHOSTTY_LOG=stderr`; when the reason points at the artifacts themselves rather than the environment, `apps/macos/scripts/setup_ghostty.sh --build` rebuilds them from the pinned submodule.
 
@@ -462,7 +461,6 @@ For manual simulator verification of the iOS client:
 ```bash
 export SPACES_DB_PATH="$TMPDIR/spaces-ios-demo/spaces.db"
 mkdir -p "$(dirname "$SPACES_DB_PATH")"
-pkill -x SpacesApp 2>/dev/null || true
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
 mkdir -p "$TMPDIR/spaces-ios-demo/workspace"
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e register-project --project-dir "$TMPDIR/spaces-ios-demo/workspace" >/dev/null

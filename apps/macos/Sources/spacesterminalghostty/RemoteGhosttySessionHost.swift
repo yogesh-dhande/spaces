@@ -89,6 +89,10 @@
     public typealias RemoteGhosttyTranscriptProvider =
         @Sendable (_ maxBytes: Int, _ fromByteOffset: UInt64?, _ fileIdentity: UInt64?) async throws -> RemoteGhosttyTranscript
 
+    /// The pane-side terminal host for every Mac pane, the local device's included. "Remote" is relative
+    /// to the daemon process that runs the Ghostty core: this host paints the frames that daemon streams
+    /// over the Device API and hosts no Ghostty surface of its own, so a local-device pane and a
+    /// paired-device pane share this path and differ only in the socket their state model dials.
     @MainActor public final class RemoteGhosttySessionHost: TerminalGhosttySessionHosting {
         private let launchConfiguration: TerminalSessionLaunchConfiguration
         private let paths: TerminalSessionPaths
