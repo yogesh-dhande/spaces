@@ -409,6 +409,7 @@ Review comments can be sent only to a non-exited coding agent that still belongs
 - A stopped workspace can still contribute attention items when that helps the user notice something actionable.
 - Alerts rows should support direct window focus by click and by the numbered window shortcuts.
 - The Alerts sidebar badge and dock badge should reflect the number of visible Alerts attention rows after dismissals are applied.
+- The dock badge shows only while the app holds the badge notification permission, which it requests together with alert and sound permission.
 - Users should be able to dismiss individual Alerts attention items so they disappear from the Alerts list and dock badge until that specific attention event changes.
 - Dismissing an Alerts attention item must not hide the underlying process or agent row from the sidebar's runtime-target list.
 - On macOS the Alerts pane opens only when the user asks for it, by clicking the sidebar's Alerts row, pressing the Alerts shortcut, or moving the sidebar selection up past the first workspace. It is also where the app lands at launch, when nothing is selected yet. Background refreshes and reloads never take the user to Alerts, however much device state moves: a new alert arriving is not a reason to replace what is on screen, so a bell or an agent event leaves a focused terminal exactly where it is.

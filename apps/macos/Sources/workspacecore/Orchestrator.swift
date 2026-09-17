@@ -1661,7 +1661,16 @@ public final class WorkspaceOrchestrator {
                 let center = UNUserNotificationCenter.current()
                 let settings = await notificationSettings(center: center)
                 notificationAuthorizationCache.set(settings.authorizationStatus)
-                guard settings.authorizationStatus == .notDetermined else { return }
+                // An install that answered the authorization prompt before `.badge` was added to the
+                // requested options below is stuck with `badgeSetting == .notSupported`: macOS never asked
+                // about the badge, so System Settings has no badge toggle for Spaces and
+                // `NSDockTile.badgeLabel` (SidebarController.updateAlertsSidebarBadge) is suppressed.
+                // Re-requesting for an already-authorized app keeps alert and sound granted; macOS decides
+                // whether the added badge option needs a prompt or is granted alongside them.
+                guard
+                    settings.authorizationStatus == .notDetermined
+                        || (settings.authorizationStatus == .authorized && settings.badgeSetting == .notSupported)
+                else { return }
                 do {
                     let granted = try await requestNotificationAuthorization(center: center)
                     let updatedSettings = await notificationSettings(center: center)
@@ -1692,7 +1701,11 @@ public final class WorkspaceOrchestrator {
 
         private static func requestNotificationAuthorization(center: UNUserNotificationCenter) async throws -> Bool {
             try await withCheckedThrowingContinuation { continuation in
-                center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+                // `.badge` is requested alongside `.alert` and `.sound` because macOS gates the Dock badge
+                // on it: an app that never asked for `.badge` has no "Badge application icon" toggle in
+                // System Settings, and `NSDockTile.badgeLabel` (set from the Alerts count in
+                // SidebarController.updateAlertsSidebarBadge) is silently suppressed without it.
+                center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
                     if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: granted) }
                 }
             }
