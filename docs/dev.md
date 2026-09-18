@@ -104,7 +104,7 @@ That installs `GhosttyKit.xcframework`, Ghostty resources, `libghostty-vt` heade
 
 `GhosttyKit.xcframework` includes a universal macOS slice, an `arm64` iOS device slice, and an `arm64` + `x86_64` iOS simulator slice so simulator verification works on Apple Silicon and Intel hosts.
 
-Artifact validation requires the platform dynamic `libghostty-vt` runtime library (`libghostty-vt.dylib` on macOS, `libghostty-vt.so` on Linux). A static `libghostty-vt.a` alone is not a complete install because terminal transcript rendering loads the dynamic library at runtime. The iOS app force-links the iOS slices of `.local/ghosttyvt/lib/ghostty-vt.xcframework` instead (`apps/ios/project.yml`'s `GHOSTTY_VT_LIBRARY`), so a fresh worktree needs this setup before building iOS too.
+Artifact validation requires the platform dynamic `libghostty-vt` runtime library (`libghostty-vt.dylib` on macOS, `libghostty-vt.so` on Linux). A static `libghostty-vt.a` alone is not a complete install because terminal transcript rendering loads the dynamic library at runtime. The iOS app links the iOS slices of `.local/ghosttyvt/lib/ghostty-vt.xcframework` instead, so a fresh worktree needs this setup before building iOS too. Every successful setup run also creates `.local/ghosttyvt/ios-link/`, holding `libghostty-vt-ios.a` and `libghostty-vt-iossimulator.a` as symlinks into the device and simulator slices. That directory is the iOS `-L` for the `ghosttyvtshim` package target, whose object auto-links one of those two names (see `docs/implementation.md`). It is derived state, recreated on every run, so it is outside both the manifest content digest and the shared artifact cache.
 
 The service router also needs a bundled Caddy binary. For branch-local setup, run:
 

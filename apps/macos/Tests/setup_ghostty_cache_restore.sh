@@ -142,6 +142,17 @@ case "${1:-}" in
         : > zig-out/include/ghostty/vt.h
         : > zig-out/lib/libghostty-vt.a
         cp "$SPACES_TEST_FAKE_VT_LIB" "zig-out/lib/$SPACES_TEST_FAKE_VT_LIB_NAME"
+        # The real build only emits the libghostty-vt iOS xcframework slices on a macOS
+        # host (Apple-only artifact); link_ghosttyvt_ios_archives requires both slices
+        # to exist before it will symlink apps/macos/.local/ghosttyvt/ios-link, so the
+        # stub has to produce them here or every Darwin run of setup_ghostty.sh dies.
+        if [[ "$(uname -s)" == "Darwin" ]]; then
+            mkdir -p \
+                zig-out/lib/ghostty-vt.xcframework/ios-arm64 \
+                zig-out/lib/ghostty-vt.xcframework/ios-arm64-simulator
+            : > zig-out/lib/ghostty-vt.xcframework/ios-arm64/libghostty-vt-fat.a
+            : > zig-out/lib/ghostty-vt.xcframework/ios-arm64-simulator/libghostty-vt-fat.a
+        fi
         ;;
     *)
         echo "unexpected zig invocation: $*" >&2

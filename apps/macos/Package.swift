@@ -4,6 +4,7 @@ import PackageDescription
 
 let packageDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let ghosttyVTIncludeDirectory = "\(packageDirectory)/.local/ghosttyvt/include"
+let ghosttyVTIOSLinkDirectory = "\(packageDirectory)/.local/ghosttyvt/ios-link"
 
 #if os(Linux)
 let systemLibraryTargets: [Target] = [
@@ -128,10 +129,22 @@ let macOnlyProducts: [Product] = [
 #endif
 
 let supportTargets: [Target] = ghosttyKitSupportTargets + macTestSupportTargets + [
+    // Only iOS links libghostty-vt: macOS and Linux dlopen the shared library at runtime and bind
+    // through dlsym, while iOS has no bundle to dlopen from and this shim names the library's
+    // functions directly (see SPACES_GHOSTTY_VT_STATIC_LINK in ghosttyvtshim.c). Neither the app
+    // project's link settings nor a package dependency can put the archive on the link that
+    // resolves those references: with testability on (Debug and test builds) Xcode links this
+    // target as its own dynamic framework. So the shim's own object asks for the archive, through
+    // a `#pragma comment(lib, ...)` that clang turns into an LC_LINKER_OPTION, which is why the
+    // target compiles with `-fms-extensions`. `-L` names the directory holding the device and
+    // simulator archives under the two names that pragma emits; setup_ghostty.sh creates it.
     .target(
         name: "ghosttyvtshim",
         cSettings: [
-            .unsafeFlags(["-I", ghosttyVTIncludeDirectory])
+            .unsafeFlags(["-I", ghosttyVTIncludeDirectory, "-fms-extensions"])
+        ],
+        linkerSettings: [
+            .unsafeFlags(["-L", ghosttyVTIOSLinkDirectory], .when(platforms: [.iOS]))
         ]
     ),
     .target(
