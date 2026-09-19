@@ -273,6 +273,15 @@ final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
     /// bytes are in the host PTY write queue when the child dies, so they never reach it. The CHILD is
     /// killed rather than the session torn down deliberately — the ghostty surface stays alive, so the
     /// only thing that can fail the send is the PTY write itself.
+    ///
+    /// The child puts its terminal into RAW mode before it stops reading, and that is what makes the
+    /// failure a fact rather than a race (issue #773). A non-reading child in canonical mode does not hold
+    /// the write back at all: the line discipline discards an over-long line instead of applying flow
+    /// control, so the master accepts the whole payload and the send correctly reports success. Measured on
+    /// this PTY: canonical takes the full 8 MiB in 197ms without ever blocking, while raw mode stalls at
+    /// 1024 bytes and stays stalled (still 1024 after 3s), then fails with EIO the moment the child is
+    /// killed. So in canonical mode the kill is racing a write that finishes on its own, and on a fast
+    /// runner the write wins; in raw mode the bytes are guaranteed to still be queued when the child dies.
     func testEmbeddedSubmitWhoseHostPTYWriteFailsReportsFailure() async throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
         guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
@@ -282,7 +291,7 @@ final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let paths = TerminalSessionPaths(rootDirectory: root.path)
 
-        let host = try await startSubmitHost(command: "printf '\\033[?2004h'; echo SUBMIT_READY; sleep 30", paths: paths)
+        let host = try await startSubmitHost(command: "stty raw -echo; printf '\\033[?2004h'; echo SUBMIT_READY; sleep 30", paths: paths)
         let hostBox = Box(host)
         let outputPath = paths.outputPath
         try await waitUntil { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
