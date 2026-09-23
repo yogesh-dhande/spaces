@@ -906,6 +906,255 @@ import spacesterminalcore
         XCTAssertEqual(second.skipReason, .concurrency)
     }
 
+    /// An automation's own agent, cut short by a teardown and brought back by a session restore, comes back
+    /// as a run of that automation. Attribution is what keeps the schedule from adding a copy on every
+    /// restart: the restored agent is the automation's live work, so a `skip` automation's next fire is
+    /// skipped while it is still going, even once the restore's own run row has reached `succeeded`.
+    ///
+    /// The restore never re-sends the automation's seed prompt: it carries the agent's work on rather than
+    /// starting that work over.
+    func testRestoringAnAutomationsAgentRelaunchesItAttributedAndBlocksTheNextFire() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        // The relaunch lands in the directory the capture recorded, so that directory has to be real.
+        try FileManager.default.createDirectory(atPath: workspace.dir, withIntermediateDirectories: true)
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id, concurrency: .skip)
+        let first = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: first.id)?.terminalSessionID)
+
+        // What a teardown captures while the agent is still live, carrying the automation it runs for.
+        XCTAssertEqual(try harness.store.captureLiveAgentSessionsForRestore(generation: "gen-1", capturedAt: "2026-09-20T00:00:00Z"), 1)
+        let offer = try XCTUnwrap(try harness.store.restorableSessions().first)
+        XCTAssertEqual(offer.automationID, automation.id)
+
+        // The teardown itself: the run is canceled and its session ends, which is what makes the agent
+        // something to offer back.
+        harness.service.cancelRun(runID: first.id)
+        harness.host.markSessionEnded(sessionID: sessionID)
+        harness.service.tick()
+        XCTAssertFalse(harness.orchestrator.automationSessionIsLive(sessionID: sessionID))
+
+        let restored = try harness.restoreOne(offer)
+        let restoredRun = try XCTUnwrap(try harness.store.automationRuns(automationID: automation.id).first { $0.terminalSessionID == restored.id })
+        XCTAssertEqual(restoredRun.trigger, .restore)
+        XCTAssertEqual(restoredRun.status, .running)
+        XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: restored.id))
+
+        // The restored agent reports a completed turn: its run settles `succeeded` with the session left
+        // live, the same shape an ordinary agent run settles in, and with no prompt ever written.
+        harness.host.markSessionForegroundDetected(sessionID: restored.id)
+        _ = try harness.registerAgentRow(workspaceID: workspace.id, sessionID: restored.id, status: .done)
+        harness.service.tick()
+        XCTAssertEqual(try harness.store.automationRun(id: restoredRun.id)?.status, .succeeded)
+        XCTAssertTrue(harness.host.writtenInput.isEmpty, "a restored agent is not seeded with the automation's prompt again")
+
+        let next = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        XCTAssertEqual(next.status, .skipped)
+        XCTAssertEqual(next.skipReason, .concurrency)
+    }
+
+    /// An automation deleted while its agent sits on an outstanding offer fails that row's relaunch. The
+    /// user is told which agent could not come back, rather than the daemon quietly starting it as a
+    /// standalone conversation the automation's policy can no longer see.
+    func testRestoringAnAgentWhoseAutomationIsDeletedFailsThatRelaunch() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+        XCTAssertEqual(try harness.store.captureLiveAgentSessionsForRestore(generation: "gen-1", capturedAt: "2026-09-20T00:00:00Z"), 1)
+        let offer = try XCTUnwrap(try harness.store.restorableSessions().first)
+
+        harness.service.cancelRun(runID: run.id)
+        harness.host.markSessionEnded(sessionID: sessionID)
+        try harness.service.deleteAutomationCommand(id: automation.id)
+
+        XCTAssertThrowsError(try harness.restoreOne(offer)) { error in XCTAssertTrue("\(error)".contains("has been deleted"), "\(error)") }
+    }
+
+    /// An automation re-authored from Agent to Script while its agent sat on an outstanding offer fails that
+    /// row's relaunch. The poll and cancel paths dispatch on the automation's current kind, so there is no
+    /// run the restored agent could come back as: it would be polled as a script, never settle on its `done`
+    /// signal, and take the wrong teardown. The user is told which agent could not come back instead.
+    func testRestoringAnAgentWhoseAutomationIsNoLongerAnAgentFailsThatRelaunch() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+        XCTAssertEqual(try harness.store.captureLiveAgentSessionsForRestore(generation: "gen-1", capturedAt: "2026-09-20T00:00:00Z"), 1)
+        let offer = try XCTUnwrap(try harness.store.restorableSessions().first)
+
+        harness.service.cancelRun(runID: run.id)
+        harness.host.markSessionEnded(sessionID: sessionID)
+
+        let asScript = AutomationDraft(
+            name: automation.name, enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script, script: "true", agentCommand: nil,
+            agentPrompt: nil, workspaceID: automation.workspaceID, timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce)
+        XCTAssertEqual(try harness.service.updateAutomation(id: automation.id, draft: asScript).kind, .script)
+
+        XCTAssertThrowsError(try harness.restoreOne(offer)) { error in XCTAssertTrue("\(error)".contains("no longer an agent automation"), "\(error)")
+        }
+        XCTAssertTrue(
+            try harness.store.automationRuns(automationID: automation.id).allSatisfy { $0.trigger != .restore }, "a refused relaunch opens no run")
+        XCTAssertTrue(harness.host.terminated.contains(sessionID), "only the predecessor was ended; nothing was relaunched")
+        XCTAssertEqual(harness.host.terminated.count, 1)
+    }
+
+    /// An automation that has moved on while its agent sat on an outstanding offer fails that row's relaunch.
+    /// Startup missed-run reconciliation, the schedule, or a manual trigger can start a newer run before
+    /// anyone answers the offer, and relaunching on top of it would put a second agent beside the one the
+    /// automation is already running, which is the duplicate the attribution exists to prevent.
+    func testRestoringAnAgentWhoseAutomationAlreadyHasALiveRunFailsThatRelaunch() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+        XCTAssertEqual(try harness.store.captureLiveAgentSessionsForRestore(generation: "gen-1", capturedAt: "2026-09-20T00:00:00Z"), 1)
+        let offer = try XCTUnwrap(try harness.store.restorableSessions().first)
+
+        // The teardown that made this agent something to offer back.
+        harness.service.cancelRun(runID: run.id)
+        harness.host.markSessionEnded(sessionID: sessionID)
+        harness.service.tick()
+        XCTAssertFalse(harness.orchestrator.automationSessionIsLive(sessionID: sessionID))
+
+        // The automation moves on before the offer is answered: a newer run with its own live agent.
+        let catchUp = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let catchUpSessionID = try XCTUnwrap(harness.store.automationRun(id: catchUp.id)?.terminalSessionID)
+        XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: catchUpSessionID))
+
+        XCTAssertThrowsError(try harness.restoreOne(offer)) { error in XCTAssertTrue("\(error)".contains("already has a live run"), "\(error)") }
+        XCTAssertTrue(
+            try harness.store.automationRuns(automationID: automation.id).allSatisfy { $0.trigger != .restore }, "a refused relaunch opens no run")
+        let liveSessionIDs = try harness.store.automationRuns(automationID: automation.id).flatMap {
+            try harness.store.terminalSessionIDs(automationRunID: $0.id)
+        }.filter { harness.orchestrator.automationSessionIsLive(sessionID: $0) }
+        XCTAssertEqual(liveSessionIDs, [catchUpSessionID], "the automation is left running the one agent it already had")
+
+        harness.service.cancelRun(runID: catchUp.id)
+    }
+
+    /// One offer can hold several agents of the same automation: an `allow` automation runs concurrently,
+    /// and an agent an automation's agent spawned inherits its run id. Every one of them comes back, each
+    /// under a run of its own. Answering row by row would let the first row's own restore run read as the
+    /// automation's live work and refuse every row behind it.
+    func testRestoringSeveralAgentsOfOneAutomationRelaunchesEveryRow() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        // The relaunches land in the directory the captures recorded, so that directory has to be real.
+        try FileManager.default.createDirectory(atPath: workspace.dir, withIntermediateDirectories: true)
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id, concurrency: .allow)
+        let runs = try (0..<2).map { _ in try XCTUnwrap(harness.service.triggerManually(automationID: automation.id)) }
+        let sessionIDs = try runs.map { try XCTUnwrap(harness.store.automationRun(id: $0.id)?.terminalSessionID) }
+
+        XCTAssertEqual(try harness.store.captureLiveAgentSessionsForRestore(generation: "gen-1", capturedAt: "2026-09-20T00:00:00Z"), 2)
+        let offers = try harness.store.restorableSessions()
+        XCTAssertEqual(offers.map(\.automationID), [automation.id, automation.id])
+
+        // The teardown that made both agents something to offer back.
+        for (run, sessionID) in zip(runs, sessionIDs) {
+            harness.service.cancelRun(runID: run.id)
+            harness.host.markSessionEnded(sessionID: sessionID)
+        }
+        harness.service.tick()
+
+        let outcomes = harness.service.restoreAttributedAgentSessions(offers.map { (record: $0, command: $0.launchCommand) })
+        let restoredSessionIDs = try offers.map { try XCTUnwrap(outcomes[$0.sessionID]).get().id }
+        XCTAssertEqual(Set(restoredSessionIDs).count, 2, "each row comes back as its own session")
+        for sessionID in restoredSessionIDs { XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: sessionID)) }
+
+        let restoreRuns = try harness.store.automationRuns(automationID: automation.id).filter { $0.trigger == .restore }
+        XCTAssertEqual(restoreRuns.count, 2, "every relaunched row gets a run of its own")
+        XCTAssertEqual(Set(restoreRuns.compactMap(\.terminalSessionID)), Set(restoredSessionIDs))
+
+        for run in restoreRuns { harness.service.cancelRun(runID: run.id) }
+    }
+
+    /// Work the automation had in flight when the offer was answered refuses every row of that automation,
+    /// not just the first. The gate is taken once per automation, before any row relaunches, so a catch-up
+    /// run that started while the offer sat unanswered blocks the whole group.
+    func testRestoringSeveralAgentsOfOneAutomationIsRefusedWholeByAnEarlierRun() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        try FileManager.default.createDirectory(atPath: workspace.dir, withIntermediateDirectories: true)
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id, concurrency: .allow)
+        let runs = try (0..<2).map { _ in try XCTUnwrap(harness.service.triggerManually(automationID: automation.id)) }
+        let sessionIDs = try runs.map { try XCTUnwrap(harness.store.automationRun(id: $0.id)?.terminalSessionID) }
+
+        XCTAssertEqual(try harness.store.captureLiveAgentSessionsForRestore(generation: "gen-1", capturedAt: "2026-09-20T00:00:00Z"), 2)
+        let offers = try harness.store.restorableSessions()
+
+        for (run, sessionID) in zip(runs, sessionIDs) {
+            harness.service.cancelRun(runID: run.id)
+            harness.host.markSessionEnded(sessionID: sessionID)
+        }
+        harness.service.tick()
+
+        // The automation moves on before the offer is answered.
+        let catchUp = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let catchUpSessionID = try XCTUnwrap(harness.store.automationRun(id: catchUp.id)?.terminalSessionID)
+
+        let outcomes = harness.service.restoreAttributedAgentSessions(offers.map { (record: $0, command: $0.launchCommand) })
+        for offer in offers {
+            XCTAssertThrowsError(try XCTUnwrap(outcomes[offer.sessionID]).get()) { error in
+                XCTAssertTrue("\(error)".contains("already has a live run"), "\(error)")
+            }
+        }
+        XCTAssertTrue(
+            try harness.store.automationRuns(automationID: automation.id).allSatisfy { $0.trigger != .restore }, "a refused answer opens no run")
+        let liveSessionIDs = try harness.store.automationRuns(automationID: automation.id).flatMap {
+            try harness.store.terminalSessionIDs(automationRunID: $0.id)
+        }.filter { harness.orchestrator.automationSessionIsLive(sessionID: $0) }
+        XCTAssertEqual(liveSessionIDs, [catchUpSessionID], "the automation is left running the one agent it already had")
+
+        harness.service.cancelRun(runID: catchUp.id)
+    }
+
+    /// A relaunch whose session starts but whose run row cannot record the session id tears that session down
+    /// before reporting the failure. Otherwise the restore answers "this one could not come back" while the
+    /// agent it started keeps running, unreachable from its run and holding the automation's next agent fire
+    /// blocked through the run-id stamp on its terminal session.
+    func testRestoreTearsDownItsRelaunchedSessionWhenRecordingItFails() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        // The relaunch lands in the directory the capture recorded, so that directory has to be real.
+        try FileManager.default.createDirectory(atPath: workspace.dir, withIntermediateDirectories: true)
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id, concurrency: .skip)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+        XCTAssertEqual(try harness.store.captureLiveAgentSessionsForRestore(generation: "gen-1", capturedAt: "2026-09-20T00:00:00Z"), 1)
+        let offer = try XCTUnwrap(try harness.store.restorableSessions().first)
+
+        harness.service.cancelRun(runID: run.id)
+        harness.host.markSessionEnded(sessionID: sessionID)
+        harness.service.tick()
+
+        // Fails exactly the write that records the relaunched session id on the restore's run, leaving every
+        // other write working so the failure path's own writes are observable.
+        try harness.store.execute(
+            sql: """
+                CREATE TRIGGER fail_restore_session_id BEFORE UPDATE ON automation_runs
+                WHEN OLD.trigger_kind = 'restore' AND NEW.terminal_session_id IS NOT NULL
+                BEGIN SELECT RAISE(ABORT, 'injected automation_runs write failure'); END;
+                """, bindings: [])
+
+        XCTAssertThrowsError(try harness.restoreOne(offer))
+
+        let restoredRun = try XCTUnwrap(try harness.store.automationRuns(automationID: automation.id).first { $0.trigger == .restore })
+        XCTAssertEqual(restoredRun.status, .failed, "the run the restore opened is finalized, never left running with no session")
+        XCTAssertNil(restoredRun.terminalSessionID)
+        let relaunchedSessionID = try XCTUnwrap(harness.host.terminated.last)
+        XCTAssertNotEqual(relaunchedSessionID, sessionID, "the teardown ends the session this restore started, not its predecessor")
+        XCTAssertFalse(harness.orchestrator.automationSessionIsLive(sessionID: relaunchedSessionID))
+
+        // Nothing of the failed relaunch is left holding the automation's concurrency gate.
+        let next = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        XCTAssertEqual(next.status, .running, "a torn-down relaunch leaves no live attributed session to skip against")
+        harness.service.cancelRun(runID: next.id)
+    }
+
     /// The allow policy spawns a new agent run regardless of a live prior session.
     func testAgentAllowPolicySpawnsDespiteLiveAttributedSession() throws {
         let harness = try Harness(self)
@@ -2366,6 +2615,14 @@ import spacesterminalcore
         service.tick()
         host.markSessionOutput(sessionID: sessionID)
         service.tick()
+    }
+
+    /// Answers a restore offer holding one row and returns what that row came back as, throwing the reason
+    /// the restore refused it. Multi-row answers call `restoreAttributedAgentSessions` directly, since the
+    /// whole point of the batch is what several rows of one automation do to each other.
+    func restoreOne(_ record: RestorableSessionRecord) throws -> TerminalServiceSessionSummary {
+        let outcomes = service.restoreAttributedAgentSessions([(record: record, command: record.launchCommand)])
+        return try XCTUnwrap(outcomes[record.sessionID]).get()
     }
 
     /// Registers a Spaces agent orchestration row bound to a spawned agent session's terminal id, modeling

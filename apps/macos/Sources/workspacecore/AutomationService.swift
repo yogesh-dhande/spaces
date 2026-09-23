@@ -371,6 +371,123 @@ public final class AutomationService: @unchecked Sendable {
         }
     }
 
+    /// Relaunches an automation's own coding agents from restorable records, each as a run of its
+    /// automation, and reports every row's outcome keyed by the captured session id.
+    ///
+    /// A session restore brings back the agents a teardown cut short. An automation's agent is one of
+    /// them, and it comes back attributed: the run that started it was canceled with the teardown, so this
+    /// opens a run of its own for each relaunched session. Attribution is the whole point. It is what keeps
+    /// the automation's concurrency gate counting the restored agent as the automation's live work, so a
+    /// `skip` automation skips its next scheduled fire instead of starting a second agent beside the one
+    /// the user just brought back.
+    ///
+    /// The whole answer arrives in one call because the gate on the automation's own work has to be taken
+    /// once per automation, before any row relaunches. One offer can hold several rows of one automation (an
+    /// `allow` automation running concurrently, or an agent that inherited the run id from the agent the
+    /// automation started), and taking the gate row by row would let the first row's own restore run refuse
+    /// every row behind it.
+    ///
+    /// Each run is stamped `.agent`, the session shape it actually runs with. An automation edited to
+    /// `script` kind since the capture refuses its rows rather than relaunching under that stamp:
+    /// `pollRunningRun` and `cancelRunThrowing` branch on the automation's CURRENT kind, so the restored
+    /// agent would be polled as a script (never settling on its `done` signal) and torn down the wrong way.
+    ///
+    /// `promptDeliveredAt` is set at creation, so a run starts in its awaiting phase and never delivers the
+    /// automation's seed prompt. A restore carries an agent's work on; it does not start that work over. A
+    /// resumed conversation already holds the prompt, and an agent that reported no conversation comes back
+    /// as a fresh session the offer already described as such.
+    ///
+    /// A row fails when its automation has been deleted or is no longer an agent automation since the
+    /// capture, and when that automation already has work of its own in flight. In each case the restore
+    /// reports that row as one that could not come back rather than silently relaunching the agent as a
+    /// standalone conversation, under a policy that cannot see it, or beside an agent the automation is
+    /// already running.
+    public func restoreAttributedAgentSessions(_ requests: [AttributedAgentRestoreRequest]) -> AttributedAgentRestoreOutcomes {
+        queue.sync {
+            // One decision per automation, taken before any row relaunches, so every row of an automation is
+            // answered against the work that automation had in flight when the user answered the offer.
+            var targetsByAutomationID: [String: Result<Automation, any Error>] = [:]
+            for automationID in requests.compactMap(\.record.automationID) where targetsByAutomationID[automationID] == nil {
+                targetsByAutomationID[automationID] = Result { try restoreTargetLocked(automationID: automationID) }
+            }
+            var outcomes: AttributedAgentRestoreOutcomes = [:]
+            for request in requests {
+                do {
+                    guard let automationID = request.record.automationID, let target = targetsByAutomationID[automationID] else {
+                        throw AutomationValidationError("Coding agent session \(request.record.sessionID) is not attributed to an automation.")
+                    }
+                    let session = try relaunchAttributedAgentLocked(record: request.record, command: request.command, automation: try target.get())
+                    outcomes[request.record.sessionID] = .success(session)
+                } catch { outcomes[request.record.sessionID] = .failure(error) }
+            }
+            return outcomes
+        }
+    }
+
+    /// The automation a restore relaunches a captured row as a run of, or the reason its rows cannot come
+    /// back. Read once per automation for a whole restore answer (see `restoreAttributedAgentSessions`).
+    private func restoreTargetLocked(automationID: String) throws -> Automation {
+        guard let automation = try store.automation(id: automationID) else {
+            throw AutomationValidationError("The automation this coding agent ran for has been deleted.")
+        }
+        // The poll and cancel paths dispatch on the automation's current kind, so a captured agent whose
+        // automation was edited to `script` kind before the offer was answered has no correct run to come
+        // back as. Refuse this row rather than dispatching on the run's own stamp.
+        guard automation.kind == .agent else {
+            throw AutomationValidationError("The automation this coding agent ran for is no longer an agent automation.")
+        }
+        // The automation keeps running while the offer sits unanswered: startup missed-run reconciliation
+        // fires a catch-up run, the schedule reaches its next occurrence, or someone triggers it by hand.
+        // Relaunching on top of that would create exactly the duplicate agent this attribution exists to
+        // prevent, so the row is refused against the same conflicts `fire` gates its policies on.
+        //
+        // Deliberately refused rather than queued behind that work, even for a `queue` automation: the
+        // automation has moved on, and the conversation this record captured would be stale by the time a
+        // queued run drained. A refusal puts the choice back to the user, who can start the agent again.
+        guard try !automationHasActiveWork(automation: automation) else {
+            throw AutomationValidationError("The automation this coding agent ran for already has a live run.")
+        }
+        return automation
+    }
+
+    /// Opens one `.restore` run and relaunches the captured agent into it.
+    private func relaunchAttributedAgentLocked(record: RestorableSessionRecord, command: String, automation: Automation) throws
+        -> TerminalServiceSessionSummary
+    {
+        let currentTime = now()
+        let runID = UUID().uuidString
+        try store.insertAutomationRun(
+            AutomationRun(
+                id: runID, automationID: automation.id, kind: .agent, status: .running, skipReason: nil, trigger: .restore, exitCode: nil,
+                terminalSessionID: nil, startedAt: currentTime, endedAt: nil, createdAt: currentTime, promptDeliveredAt: currentTime))
+        // Set once the session is live; distinguishes a post-launch persist failure from a launch failure.
+        var launchedSessionID: String?
+        do {
+            try AutomationPaths.ensureRunDirectory(runID: runID)
+            let session = try orchestrator.createWorkspaceAgentSession(
+                workspaceID: record.workspaceID, command: command, title: record.title, automationRunID: runID,
+                recordedLaunchCommand: record.launchCommand, workingDirectory: record.workingDirectory)
+            launchedSessionID = session.id
+            try store.updateAutomationRun(
+                id: runID, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: session.id, startedAt: currentTime, endedAt: nil,
+                promptDeliveredAt: currentTime)
+            return session
+        } catch {
+            logError("automation_restore_launch_error run=\(runID) error=\(error)")
+            // Invariant: a run may never finalize while a session it launched is still live and unrecorded.
+            // A persist failure leaves the relaunched agent running with no session id on its run row, so the
+            // restore answer reports a failure while that agent keeps going, unreachable and holding the
+            // automation's next agent fire blocked through its `automationRunID` stamp.
+            if let launchedSessionID { teardownUnrecordedAgentSession(sessionID: launchedSessionID) }
+            // A `.running` row with no session id blocks the automation's next fire, so record the
+            // failure here. `pollRunningRun` fails such a row on its next tick if this write cannot
+            // commit, which is why the relaunch's own error is what propagates: it is what the restore
+            // answer reports for this row.
+            try? recordLaunchFailure(automationID: automation.id, runID: runID, startedAt: currentTime)
+            throw error
+        }
+    }
+
     /// Sets a one-time next-run override, replacing the automation's next occurrence with the given instant.
     /// Does not touch the cron anchor: it stays as it is and is recomputed from now when the override fires
     /// (`fireDueAutomations`), so a cron automation's schedule resumes from its expression rather than from
@@ -616,6 +733,15 @@ public final class AutomationService: @unchecked Sendable {
         return false
     }
 
+    /// Whether the automation already has work a second launch must not start beside: an active run row
+    /// (running or queued), a termination still escalating to SIGKILL, or a live session attributed to one
+    /// of its runs. These are the conflicts `fire` gates its `skip` and `queue` policies on; `fire` keeps
+    /// the queued row separate only because its `queue` policy branches on that case.
+    private func automationHasActiveWork(automation: Automation) throws -> Bool {
+        try !store.activeAutomationRuns(automationID: automation.id).isEmpty || automationHasPendingTermination(automationID: automation.id)
+            || (automation.kind == .agent && automationHasLiveAttributedSession(automationID: automation.id))
+    }
+
     /// A script remains concurrency-active after its run row becomes terminal while SIGTERM grace is still
     /// in flight. Starting its replacement before the promised SIGKILL completes would overlap processes
     /// under the Skip/Queue policies even though the database no longer has a running row.
@@ -726,11 +852,22 @@ public final class AutomationService: @unchecked Sendable {
             // Invariant: a run may never finalize while a session it launched is still live and unrecorded.
             // A persist failure leaves the spawned session running but unrecorded; its automationRunID stamp on the
             // session table keeps `automationHasLiveAttributedSession` true, permanently blocking future agent fires.
-            // Mirror `teardownAgentRunSession`'s fallback: the kill is best-effort so the run still lands `.failed`.
-            if let launchedSessionID, (try? orchestrator.killAgentSession(terminalSessionID: launchedSessionID)) != true {
-                orchestrator.automationTerminateSession(sessionID: launchedSessionID)
-            }
+            // The teardown is best-effort so the run still lands `.failed`.
+            if let launchedSessionID { teardownUnrecordedAgentSession(sessionID: launchedSessionID) }
             try recordLaunchFailure(automationID: automation.id, runID: runID, startedAt: startedAt)
+        }
+    }
+
+    /// Tears down a coding-agent session that launched but whose session id never reached its run row.
+    /// Shared by both agent launch paths (a scheduled/manual fire and a session restore) because both leave
+    /// the same orphan: a live session stamped with the run id, which keeps `automationHasLiveAttributedSession`
+    /// true and permanently blocks the automation's next agent fire. Goes through the agent-kill flow so a
+    /// session that already registered a row is finalized and its subscribers told, mirroring
+    /// `teardownAgentRunSession`'s fallback to a plain termination for a not-yet-signaled session. The kill is
+    /// best-effort: it must not mask the launch error the caller is about to record and propagate.
+    private func teardownUnrecordedAgentSession(sessionID: String) {
+        if (try? orchestrator.killAgentSession(terminalSessionID: sessionID)) != true {
+            orchestrator.automationTerminateSession(sessionID: sessionID)
         }
     }
 

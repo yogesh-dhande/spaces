@@ -5,24 +5,34 @@ import Foundation
 /// daemon runs once at boot, AFTER handoff adoption, so `adoptedSessionIDs` names every session this
 /// image legitimately took over and must be exempted.
 ///
-/// The repair matrix is keyed on the row's `service_pid`:
-///  - dead pid (process not alive) .................. repair `.failed` — the owning daemon process is gone.
-///  - our pid, session adopted from handoff ......... leave — live, this image owns it.
-///  - our pid, session NOT adopted .................. repair `.exited` — a session the predecessor image
-///                                                     terminated but whose exited-state write was lost
-///                                                     across `execv` (which preserves the pid), or a
-///                                                     same-pid reuse after a prior daemon under this pid
-///                                                     died. Either way the child is gone.
-///  - other live pid ............................... leave — a live process owns it.
+/// The repair matrix is keyed on the row's `service_pid`, and for the own-pid case, on whether this
+/// image itself resumed from an `execv` handoff (`resumedFromHandoff`):
+///  - dead pid (process not alive) .................. repair `.failed`, the owning daemon process is gone.
+///  - our pid, session adopted from handoff ......... leave, live, this image owns it.
+///  - our pid, session NOT adopted:
+///      - resumed from handoff ....................... repair `.exited`, a predecessor image under this
+///                                                       same pid terminated the session, but its
+///                                                       exited-state write was lost across the `execv`
+///                                                       that preserves the pid.
+///      - did NOT resume from handoff ................ repair `.failed`, the pid match is not a
+///                                                       predecessor image of this one: it is `launchd`
+///                                                       reissuing a dead daemon's old pid to this fresh
+///                                                       process (observed after a reboot). That owning
+///                                                       daemon vanished without finalizing the row, the
+///                                                       same foreign-dead-pid case, just wearing this pid.
+///  - other live pid ................................. leave, a live process owns it.
 ///
-/// Why the own-pid-not-adopted case exists: the `execv` handoff keeps the same pid, so the plain
-/// dead-pid check can never fire for a row the predecessor stranded — the pid is still alive as this
-/// successor image. When a predecessor's exited-state write is dropped (e.g. the per-core persistence
-/// queue exhausts its bounded retries under sustained writer-lock contention or a storage fault during
-/// handoff), that `.running` row would otherwise remain forever, its `service_pid` matching this live
-/// image, and the session would be stranded as running until some future daemon restart under a
-/// different pid. Reconciling own-pid rows that were not adopted closes that lost-write-across-`execv`
-/// class regardless of which write was dropped, and also hardens the pid-reuse corner on a fresh boot.
+/// Why the own-pid branches exist: the `execv` handoff keeps the same pid, so the plain dead-pid check
+/// can never fire for a row the predecessor stranded, the pid is still alive as this successor image.
+/// When a predecessor's exited-state write is dropped (e.g. the per-core persistence queue exhausts its
+/// bounded retries under sustained writer-lock contention or a storage fault during handoff), that
+/// `.running` row would otherwise remain forever, its `service_pid` matching this live image.
+/// `resumedFromHandoff` gates which terminal state is truthful: a genuine `execv` successor finalizes the
+/// row `.exited`, closing that lost-write class. A fresh boot can carry the identical pid match for an
+/// unrelated reason, `launchd` reissuing a dead daemon's old pid to the next process it starts (this is
+/// what a reboot does), and that row belongs to a vanished daemon rather than an `execv` predecessor of
+/// this image, so it must be finalized `.failed` like any other foreign dead pid and its coding agent
+/// offered back as stranded.
 ///
 /// A plain (non-`execv`) daemon shutdown needs nothing beyond the dead-pid case: the successor runs
 /// under a different pid, so the predecessor's rows fall to "dead pid → repair".
@@ -84,12 +94,14 @@ public enum TerminalSessionStaleRecovery {
 
         /// The sessions this pass found stranded by an unclean exit, in the order they were repaired.
         ///
-        /// `.failed` is written by exactly one branch of the repair matrix: a foreign `service_pid` that
-        /// is no longer alive, i.e. the owning daemon vanished without finalizing the row. It is therefore the
-        /// pass's own record of "this run was cut short". `.exited` is the other repair, and it names a
-        /// session a predecessor image deliberately terminated. Callers that want to act on interrupted
-        /// work (the daemon captures those sessions' coding agents as restorable) read this rather than
-        /// re-deriving the rule from the state enum.
+        /// `.failed` is written by two branches of the repair matrix: a foreign `service_pid` that is no
+        /// longer alive, and an own-pid row that is not adopted and did not resume from a handoff. Both
+        /// name an owning daemon that vanished without finalizing the row (the second is that vanished
+        /// daemon's pid reused by `launchd` for this fresh image, typically after a reboot), so `.failed`
+        /// is the pass's own record of "this run was cut short". `.exited` is the other repair, and it
+        /// names a session a genuine `execv` predecessor image deliberately terminated. Callers that want
+        /// to act on interrupted work (the daemon captures those sessions' coding agents as restorable)
+        /// read this rather than re-deriving the rule from the state enum.
         public var sessionsStrandedByUncleanExit: [String] { finalized.filter { $0.state == .failed }.map(\.sessionID) }
     }
 
@@ -100,6 +112,12 @@ public enum TerminalSessionStaleRecovery {
     ///   - ownPID: this daemon image's pid (`getpid()`), matched against each row's `service_pid`.
     ///   - adoptedSessionIDs: sessions this image successfully adopted from the handoff table; exempt
     ///     from repair because they are live under this pid. Empty on a fresh boot.
+    ///   - resumedFromHandoff: true when this daemon image consumed a handoff table at startup (the
+    ///     `execv` successor case), false on a fresh boot. Gates the own-pid-not-adopted branch between
+    ///     `.exited` and `.failed`, as the matrix above describes. Passed separately rather than derived
+    ///     from `adoptedSessionIDs.isEmpty`, because a handoff whose sessions all failed to adopt still
+    ///     leaves the predecessor's rows behind under this pid and those still belong in the `.exited`
+    ///     branch.
     ///   - isProcessAlive: liveness probe for a foreign pid, injected so the daemon shares its own
     ///     `kill(pid, 0)` implementation and tests can drive the foreign-pid branch deterministically.
     ///   - now: repair timestamp, injected for testability.
@@ -109,7 +127,7 @@ public enum TerminalSessionStaleRecovery {
     ///   - sleep: the back-off primitive itself, defaulting to a real `Thread.sleep`. Tests can inject a
     ///     non-blocking closure alongside a near-zero delay to virtualize the wait entirely.
     @discardableResult public static func reconcile(
-        ownPID: Int32, adoptedSessionIDs: Set<String>, isProcessAlive: (Int32) -> Bool, now: Date = Date(),
+        ownPID: Int32, adoptedSessionIDs: Set<String>, resumedFromHandoff: Bool, isProcessAlive: (Int32) -> Bool, now: Date = Date(),
         repairWriteRetryDelay: TimeInterval = TerminalSessionStaleRecovery.repairWriteRetryDelay,
         sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
     ) throws -> ReconcileResult {
@@ -132,13 +150,21 @@ public enum TerminalSessionStaleRecovery {
 
             let terminalState: TerminalSessionState
             if runtimeState.servicePID == ownPID {
-                // Our own pid. `execv` preserves the pid, so a row that claims this live image but was not
-                // adopted from the handoff table is a predecessor's stranded session (its exited write was
-                // dropped) — or a same-pid reuse after a prior daemon under this pid died. The predecessor
-                // DID terminate the session, so `.exited` is the truthful terminal state (mirroring the
-                // nil-quiesce handoff branch, which finalizes an already-exited child `.exited`).
                 guard !adoptedSessionIDs.contains(launchConfiguration.sessionID) else { continue }
-                terminalState = .exited
+                if resumedFromHandoff {
+                    // Our own pid, not adopted, and this image is a genuine `execv` successor: the
+                    // predecessor DID terminate the session, so `.exited` is the truthful terminal state
+                    // (mirroring the nil-quiesce handoff branch, which finalizes an already-exited child
+                    // `.exited`). Its exited write was lost across the `execv` that preserves the pid.
+                    terminalState = .exited
+                } else {
+                    // Our own pid, not adopted, and this image never ran an `execv` handoff: the pid match
+                    // is not a predecessor image of this one, it is `launchd` reissuing a dead daemon's
+                    // old pid to this fresh process (observed after a reboot). That owning daemon vanished
+                    // without finalizing the row, the same case as a foreign dead pid, so `.failed` records
+                    // that the run did not end cleanly and its coding agent is offered back as stranded.
+                    terminalState = .failed
+                }
             } else {
                 // A foreign pid: stale only if that process is gone. The owning daemon vanished without
                 // finalizing this row, so `.failed` records that the run did not end cleanly.

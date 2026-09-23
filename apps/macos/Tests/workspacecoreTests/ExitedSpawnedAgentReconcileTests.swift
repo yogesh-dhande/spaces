@@ -240,6 +240,89 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
             "keeping the pane keeps nothing else: the ended session is torn down either way")
     }
 
+    /// A session Spaces launched to run one coding agent (`agent spawn`, the MCP server, an automation, or a
+    /// session restore, all `.agent` launch kind) gets no `agent_sessions` row at launch: the row appears only
+    /// once the agent's hooks report it, or once `reconcileTerminalForegroundAgentClassifications` mints one
+    /// from live foreground detection. codex and opencode fire no hook until their first turn, and a hook can
+    /// be broken outright, so without the detection insert such a session sits in the sidebar as a plain
+    /// terminal forever. This is the same detection insert a plain shell the user typed an agent into gets,
+    /// with the same deterministic id, so a later hook `init` adopts the row in place.
+    func testAgentLaunchKindSessionWithNoRowGetsOneFromForegroundDetection() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        let sessionID = UUID().uuidString
+        try writeLiveTerminalSession(
+            sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .agent,
+            foregroundDetectedAgentKind: .claude, foregroundExecutableName: "claude", foregroundArgv: ["claude"],
+            foregroundDisplayLabel: "Claude Code", foregroundDisplayCommand: "claude")
+
+        XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+
+        let agent = try XCTUnwrap(try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID))
+        XCTAssertEqual(agent.id, "terminal-agent-\(sessionID)", "the row carries the same deterministic id a plain shell's detection row gets")
+        XCTAssertEqual(agent.detectedAgentKind, "claude")
+    }
+
+    /// A hook `init` signal that lands on the `.agent`-launched session after detection has already minted
+    /// its row (the common case: the agent's own hooks are simply slower than the next reconcile pass)
+    /// updates that SAME row in place, through the identical restart-reuse chokepoint a plain shell's
+    /// detection row is adopted by, rather than minting a second row for the one agent the session runs.
+    func testAgentLaunchKindSessionHookInitAdoptsTheDetectionRowInPlace() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        let sessionID = UUID().uuidString
+        try writeLiveTerminalSession(
+            sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .agent,
+            foregroundDetectedAgentKind: .claude, foregroundExecutableName: "claude", foregroundArgv: ["claude"],
+            foregroundDisplayLabel: "Claude Code", foregroundDisplayCommand: "claude")
+        XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+        let detected = try XCTUnwrap(try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID))
+
+        let adopted = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code", terminalTrackingID: sessionID, status: .spinning,
+            eventType: "init", eventSource: "spaces_agent_signal")
+
+        XCTAssertEqual(adopted.id, detected.id, "the hook init reuses the detection row's id rather than minting a second row")
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
+        XCTAssertEqual(adopted.status, .spinning)
+    }
+
+    /// A live agent's terminal can momentarily report its own bare shell as the foreground sample (between
+    /// the agent's turns, or a foreground read that lands mid-transition) without the agent having actually
+    /// exited. Because this session is `.agent`-launch-kind it exists for the one agent it was launched to
+    /// run, so that momentary read must never be mistaken for the agent quitting: the plain-shell demote
+    /// branch is for a row detection promoted out of a terminal the user typed an agent into, not this one.
+    func testAgentLaunchKindSessionMomentaryBareShellForegroundDoesNotDropTheRow() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        let sessionID = UUID().uuidString
+        try writeLiveTerminalSession(
+            sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .agent,
+            foregroundDetectedAgentKind: .claude, foregroundExecutableName: "claude", foregroundArgv: ["claude"],
+            foregroundDisplayLabel: "Claude Code", foregroundDisplayCommand: "claude")
+        XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+        let detected = try XCTUnwrap(try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID))
+
+        // The foreground reverts to the session's own configured shell with nothing running in it: the
+        // same unambiguous bare-shell signal `foregroundHasRevertedToPlainShell` reads for a plain terminal.
+        try writeLiveTerminalSession(
+            sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .agent, foregroundExecutableName: "zsh",
+            foregroundArgv: ["zsh"])
+
+        XCTAssertFalse(
+            try orchestrator.reconcileTerminalForegroundAgentClassifications(),
+            "a momentary bare-shell foreground on an .agent-launched session is not a relaunch, a demote, or any other mutation")
+        let stillThere = try XCTUnwrap(
+            try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID), "the row must survive the momentary bare foreground")
+        XCTAssertEqual(stillThere.id, detected.id)
+    }
+
     // MARK: - Fixtures
 
     private func makeProjectAndWorkspace(store: SQLiteStore) throws -> (ProjectRecord, WorkspaceRecord) {
@@ -266,8 +349,15 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
     }
 
     /// Writes a launch configuration + a running runtime state with this process's own service PID, so any
-    /// liveness read treats the session as live.
-    private func writeLiveTerminalSession(sessionID: String, workspaceID: String, workspaceDir: String, kind: TerminalSessionKind) throws {
+    /// liveness read treats the session as live. The foreground-detection parameters default to nil (a bare
+    /// interactive session with nothing classified in it); passing them models a live session whose
+    /// foreground currently reports a coding agent or, when only the shell fields are set, its own bare
+    /// prompt.
+    private func writeLiveTerminalSession(
+        sessionID: String, workspaceID: String, workspaceDir: String, kind: TerminalSessionKind,
+        foregroundDetectedAgentKind: TerminalDetectedAgentKind? = nil, foregroundExecutableName: String? = nil,
+        foregroundArgv: [String]? = nil, foregroundDisplayLabel: String? = nil, foregroundDisplayCommand: String? = nil
+    ) throws {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(
@@ -276,7 +366,9 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .running,
-                updatedAt: "2026-06-06T00:00:01Z", title: "agent", workingDirectory: workspaceDir), paths: paths)
+                updatedAt: "2026-06-06T00:00:01Z", title: "agent", workingDirectory: workspaceDir, foregroundExecutableName: foregroundExecutableName,
+                foregroundArgv: foregroundArgv, foregroundDetectedAgentKind: foregroundDetectedAgentKind,
+                foregroundDisplayLabel: foregroundDisplayLabel, foregroundDisplayCommand: foregroundDisplayCommand), paths: paths)
         XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
     }
 }

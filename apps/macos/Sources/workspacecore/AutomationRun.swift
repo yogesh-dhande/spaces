@@ -15,13 +15,18 @@ public enum AutomationRunSkipReason: String, Codable, Sendable, CaseIterable {
 }
 
 /// How a run was initiated. Mirrors `AutomationTriggerKind` for cron/manual fires, adds the `missedCatchUp`
-/// origin a restarted daemon records when it fires a single catch-up run, and `scheduled` for a fire from a
-/// user-set one-time next-run override (of either a cron or a manual automation).
+/// origin a restarted daemon records when it fires a single catch-up run, `scheduled` for a fire from a
+/// user-set one-time next-run override (of either a cron or a manual automation), and `restore` for the run
+/// a session restore opens to bring an automation's own agent back under.
 public enum AutomationRunTrigger: String, Codable, Sendable, CaseIterable {
     case manual
     case cron
     case missedCatchUp = "missed_catch_up"
     case scheduled
+    /// A session restore relaunching an agent an earlier run of this automation started. The work is the
+    /// original run's, carried on under a run of its own because the run that started it was canceled with
+    /// the teardown that offered the agent back.
+    case restore
 }
 
 /// One row per automation execution attempt.

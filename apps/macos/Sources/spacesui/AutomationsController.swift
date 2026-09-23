@@ -726,6 +726,7 @@ import workspacecore
         case .cron: "cron"
         case .scheduled: "scheduled"
         case .missedCatchUp: "missed catch-up"
+        case .restore: "restored"
         case nil: run.trigger
         }
     }

@@ -24,6 +24,18 @@ import Testing
         return url
     }
 
+    /// Creates a real, executable stand-in for the `spaces` binary inside `directory` and returns its
+    /// path. `installState` requires a Spaces-owned entry's embedded path to resolve to an executable
+    /// file on disk, so a test asserting `.current` needs a path that genuinely exists, unlike the
+    /// placeholder text `/usr/local/bin/spaces` other tests here use where the path is never resolved
+    /// (a fixture already outdated by version, or a plain string/marker comparison).
+    private func makeFakeSpacesExecutable(in directory: URL) throws -> String {
+        let executable = directory.appendingPathComponent("spaces")
+        try "#!/bin/sh\n".write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        return executable.path
+    }
+
     private func makeCodexFeatureListExecutable(in directory: URL, enabled: Bool) throws -> String {
         let executable = directory.appendingPathComponent("codex")
         try "#!/bin/sh\nprintf 'hooks stable \(enabled)\\n'\n".write(to: executable, atomically: true, encoding: .utf8)
@@ -78,6 +90,22 @@ import Testing
         #expect(!AgentHookCommand.isCurrent("# spaces-agent-hook"))
     }
 
+    /// `embeddedExecutablePath` must be the exact inverse of `shellQuoted`: whatever path `signalCommand`
+    /// quotes into a command, reading it back must return byte-for-byte, including a path holding a
+    /// single quote (the one character `shellQuoted` escapes) and a path holding a space (the reason the
+    /// path is quoted at all).
+    @Test func embeddedExecutablePathRoundTripsShellQuoting() {
+        for path in ["/usr/local/bin/spaces", "/Users/a b/bin/spaces", "/Users/o'brien/bin/spaces", "'''"] {
+            let generated = AgentHookCommand.signalCommand(event: .done, spacesExecutablePath: path)
+            #expect(AgentHookCommand.embeddedExecutablePath(in: generated) == path)
+        }
+        // Text that is not a quoted-path command at all: no marker, no leading quote.
+        #expect(AgentHookCommand.embeddedExecutablePath(in: "echo hello # some-other-tool") == nil)
+        #expect(AgentHookCommand.embeddedExecutablePath(in: "not-quoted-at-all") == nil)
+        // An opening quote with no closing quote is malformed, not a zero-length path.
+        #expect(AgentHookCommand.embeddedExecutablePath(in: "'/no/closing/quote") == nil)
+    }
+
     @Test func generatedCommandsCarryTheCurrentVersion() {
         let generated = AgentHookCommand.signalCommand(event: .working, spacesExecutablePath: "/usr/local/bin/spaces")
         #expect(AgentHookCommand.isSpacesOwned(generated))
@@ -102,9 +130,45 @@ import Testing
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let file = directory.appendingPathComponent("settings.json")
-        try AgentHookJSONWriter.install(fileURL: file, bindings: bindings, spacesExecutablePath: "/usr/local/bin/spaces")
+        let spacesPath = try makeFakeSpacesExecutable(in: directory)
+        try AgentHookJSONWriter.install(fileURL: file, bindings: bindings, spacesExecutablePath: spacesPath)
 
         #expect(AgentHookJSONWriter.installState(fileURL: file, bindings: bindings) == .current)
+    }
+
+    /// The status rule: a current, fully-bound config still reports `.outdated` once the `spaces` path
+    /// its hook commands embed stops existing, e.g. a development build's worktree gets deleted after its
+    /// daemon wrote that path into the shared config. Reporting `.current` regardless would mean every
+    /// hook keeps firing `|| true` and swallowing its own failure with no way back to the install offer
+    /// that repairs it.
+    @Test func installStateGoesOutdatedWhenTheEmbeddedSpacesPathIsDeleted() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("settings.json")
+        let spacesPath = try makeFakeSpacesExecutable(in: directory)
+        try AgentHookJSONWriter.install(fileURL: file, bindings: bindings, spacesExecutablePath: spacesPath)
+        #expect(AgentHookJSONWriter.installState(fileURL: file, bindings: bindings) == .current)
+
+        try FileManager.default.removeItem(atPath: spacesPath)
+
+        #expect(AgentHookJSONWriter.installState(fileURL: file, bindings: bindings) == .outdated)
+    }
+
+    /// Pins the same rule against the codex `hooks.json` shape directly, independent of
+    /// `CodingAgent.codex.installState`'s feature-toggle and trust-record layers, so a failure here
+    /// points straight at `AgentHookJSONWriter` rather than codex's own state ladder.
+    @Test func installStateGoesOutdatedWhenTheCodexEmbeddedSpacesPathIsDeleted() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("hooks.json")
+        let codexBindings = CodingAgent.codex.jsonEventBindings
+        let spacesPath = try makeFakeSpacesExecutable(in: directory)
+        try AgentHookJSONWriter.install(fileURL: file, bindings: codexBindings, spacesExecutablePath: spacesPath)
+        #expect(AgentHookJSONWriter.installState(fileURL: file, bindings: codexBindings) == .current)
+
+        try FileManager.default.removeItem(atPath: spacesPath)
+
+        #expect(AgentHookJSONWriter.installState(fileURL: file, bindings: codexBindings) == .outdated)
     }
 
     @Test func installStateIsOutdatedWhenEntriesCarryAnOlderVersion() throws {
@@ -143,7 +207,7 @@ import Testing
                 "Stop": [group(command(event: .done, version: 0))],
             ], to: file)
 
-        try AgentHookJSONWriter.install(fileURL: file, bindings: bindings, spacesExecutablePath: "/usr/local/bin/spaces")
+        try AgentHookJSONWriter.install(fileURL: file, bindings: bindings, spacesExecutablePath: try makeFakeSpacesExecutable(in: directory))
 
         let sessionStart = try readCommands(file, eventName: "SessionStart")
         #expect(sessionStart.filter(AgentHookCommand.isSpacesOwned).count == 1)
@@ -251,13 +315,30 @@ import Testing
 
         #expect(AgentHookOpencodePluginWriter.installState(pluginURL: plugin) == .notInstalled)
 
-        try AgentHookOpencodePluginWriter.install(pluginURL: plugin, spacesExecutablePath: "/usr/local/bin/spaces")
+        let spacesPath = try makeFakeSpacesExecutable(in: directory)
+        try AgentHookOpencodePluginWriter.install(pluginURL: plugin, spacesExecutablePath: spacesPath)
         #expect(AgentHookOpencodePluginWriter.installState(pluginURL: plugin) == .current)
 
         // A plugin an older Spaces wrote: ours, but not what this build emits.
         let stale = try String(contentsOf: plugin, encoding: .utf8).replacingOccurrences(
             of: AgentHookCommand.versionedMarker(), with: AgentHookCommand.versionedMarker(0))
         try stale.write(to: plugin, atomically: true, encoding: .utf8)
+        #expect(AgentHookOpencodePluginWriter.installState(pluginURL: plugin) == .outdated)
+    }
+
+    /// The same status rule, pinned against the opencode plugin's own state function: a current plugin
+    /// still reports `.outdated` once the `spaces` path baked into its `SPACES_CLI` constant stops
+    /// existing on disk.
+    @Test func opencodePluginStateGoesOutdatedWhenItsEmbeddedCLIPathIsDeleted() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let plugin = directory.appendingPathComponent(AgentHookOpencodePluginWriter.pluginFileName)
+        let spacesPath = try makeFakeSpacesExecutable(in: directory)
+        try AgentHookOpencodePluginWriter.install(pluginURL: plugin, spacesExecutablePath: spacesPath)
+        #expect(AgentHookOpencodePluginWriter.installState(pluginURL: plugin) == .current)
+
+        try FileManager.default.removeItem(atPath: spacesPath)
+
         #expect(AgentHookOpencodePluginWriter.installState(pluginURL: plugin) == .outdated)
     }
 
@@ -315,7 +396,7 @@ import Testing
         try FileManager.default.createDirectory(at: codexDirectory, withIntermediateDirectories: true)
         let hooksFileURL = codexDirectory.appendingPathComponent("hooks.json")
         try AgentHookJSONWriter.install(
-            fileURL: hooksFileURL, bindings: CodingAgent.codex.jsonEventBindings, spacesExecutablePath: "/usr/local/bin/spaces")
+            fileURL: hooksFileURL, bindings: CodingAgent.codex.jsonEventBindings, spacesExecutablePath: try makeFakeSpacesExecutable(in: home))
         try codexTrustTables(hooksFileURL: hooksFileURL).write(
             to: codexDirectory.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
 
@@ -351,7 +432,7 @@ import Testing
         #expect(state() == .outdated)
 
         try AgentHookJSONWriter.install(
-            fileURL: hooksFileURL, bindings: CodingAgent.codex.jsonEventBindings, spacesExecutablePath: "/usr/local/bin/spaces")
+            fileURL: hooksFileURL, bindings: CodingAgent.codex.jsonEventBindings, spacesExecutablePath: try makeFakeSpacesExecutable(in: home))
         try "[features]\nhooks = true\n".write(to: configURL, atomically: true, encoding: .utf8)
         #expect(state() == .awaitingTrust)
 
@@ -407,7 +488,7 @@ import Testing
         let hooksFileURL = linkedHome.appendingPathComponent(".codex/hooks.json")
         let configURL = linkedHome.appendingPathComponent(".codex/config.toml")
         try AgentHookJSONWriter.install(
-            fileURL: hooksFileURL, bindings: CodingAgent.codex.jsonEventBindings, spacesExecutablePath: "/usr/local/bin/spaces")
+            fileURL: hooksFileURL, bindings: CodingAgent.codex.jsonEventBindings, spacesExecutablePath: try makeFakeSpacesExecutable(in: enclosing))
         let codex = try makeCodexFeatureListExecutable(in: enclosing, enabled: true)
         func state() -> AgentHookInstallState { CodingAgent.codex.installState(home: linkedHome, fileManager: .default, agentExecutablePath: codex) }
 
@@ -438,7 +519,7 @@ import Testing
         let configURL = codexDirectory.appendingPathComponent("config.toml")
         try writeHooks(["Stop": [group("my-own-stop-hook")]], to: hooksFileURL)
         try AgentHookJSONWriter.install(
-            fileURL: hooksFileURL, bindings: CodingAgent.codex.jsonEventBindings, spacesExecutablePath: "/usr/local/bin/spaces")
+            fileURL: hooksFileURL, bindings: CodingAgent.codex.jsonEventBindings, spacesExecutablePath: try makeFakeSpacesExecutable(in: home))
         let codex = try makeCodexFeatureListExecutable(in: home, enabled: true)
         func state() -> AgentHookInstallState { CodingAgent.codex.installState(home: home, fileManager: .default, agentExecutablePath: codex) }
 

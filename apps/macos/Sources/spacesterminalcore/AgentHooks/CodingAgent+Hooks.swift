@@ -130,7 +130,7 @@ extension CodingAgent {
             case .switchedOff: return .disabledByAgent
             case .awaitingReview: return .awaitingTrust
             }
-        case .opencode: return AgentHookOpencodePluginWriter.installState(pluginURL: opencodePluginURL(home: home))
+        case .opencode: return AgentHookOpencodePluginWriter.installState(pluginURL: opencodePluginURL(home: home), fileManager: fileManager)
         }
     }
 

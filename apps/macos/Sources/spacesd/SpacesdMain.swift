@@ -2413,7 +2413,8 @@ enum SpacesDaemonErrorClassification {
             delete: { id in try service().deleteAutomationCommand(id: id) }, list: { try service().listAutomations() },
             runs: { automationID in try service().listAutomationRuns(automationID: automationID) },
             trigger: { id in try service().triggerAutomation(id: id) }, cancelRun: { runID in try service().cancelAutomationRun(runID: runID) },
-            endAgents: { runID in try service().endAttributedAgents(runID: runID) })
+            endAgents: { runID in try service().endAttributedAgents(runID: runID) },
+            restoreAttributedAgents: { requests in try service().restoreAttributedAgentSessions(requests) })
     }
 
     private func profileProjectSummary(_ value: ProjectSummary) -> TerminalServiceProfileProjectSummary {
@@ -3264,16 +3265,23 @@ enum SpacesDaemonErrorClassification {
 
     /// Single startup repair chokepoint for durable runtime rows a predecessor daemon image (or a
     /// crashed prior process) left in a live state. Runs once, AFTER handoff adoption, so the sessions
-    /// this image adopted (`adoptedSessionIDs`) are exempt. The full repair matrix — dead pid → repair
-    /// `.failed`; own pid not adopted → repair `.exited`; own pid adopted → live; other live pid → leave
-    /// — lives in `TerminalSessionStaleRecovery.reconcile`, keyed on the injected `getpid()` and the
-    /// daemon's own `isProcessAlive` probe. The own-pid-not-adopted case is what closes the
-    /// lost-write-across-`execv` class (`execv` preserves the pid, so the plain dead-pid check can never
-    /// fire for a stranded row); a plain shutdown needs nothing more, since its successor runs under a
-    /// different pid and its rows fall to the dead-pid case.
+    /// this image adopted (`adoptedSessionIDs`) are exempt. The full repair matrix (dead pid, repair
+    /// `.failed`; own pid not adopted, repair `.exited` after a handoff and `.failed` otherwise; own pid
+    /// adopted, live; other live pid, leave) lives in `TerminalSessionStaleRecovery.reconcile`, keyed on
+    /// the injected `getpid()` and the daemon's own `isProcessAlive` probe. The own-pid-not-adopted case
+    /// is what closes the lost-write-across-`execv` class (`execv` preserves the pid, so the plain
+    /// dead-pid check can never fire for a stranded row); a plain shutdown needs nothing more, since its
+    /// successor runs under a different pid and its rows fall to the dead-pid case.
+    ///
+    /// `resumedFromHandoff` is what tells the two apart, and `handoffGeneration` is the fact that answers
+    /// it: it is set only by `resumeSessionsFromHandoffIfNeeded` consuming a handoff table, so a zero
+    /// generation means this image is a fresh start and a row carrying its pid belongs to a daemon the
+    /// operating system reissued the pid from (a reboot, where launchd can hand the fresh daemon the dead
+    /// one's pid). Those rows are stranded by an unclean exit, and their coding agents are offered back.
     private func recoverStaleSessions(adoptedSessionIDs: Set<String> = []) throws {
         let result = try TerminalSessionStaleRecovery.reconcile(
-            ownPID: getpid(), adoptedSessionIDs: adoptedSessionIDs, isProcessAlive: { Self.isProcessAlive(pid: Int($0)) })
+            ownPID: getpid(), adoptedSessionIDs: adoptedSessionIDs, resumedFromHandoff: handoffGeneration != 0,
+            isProcessAlive: { Self.isProcessAlive(pid: Int($0)) })
         // A repair write that could not commit within the sweep's bounded retry leaves the row in its
         // prior live state; it heals at the next daemon restart via the dead-pid branch. Log it so the
         // strand is observable rather than silent.

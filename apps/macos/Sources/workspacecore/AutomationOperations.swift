@@ -1,4 +1,5 @@
 import Foundation
+import spacesterminalcore
 
 /// The daemon-side automation operations, injected as `@Sendable` closures that hop to the daemon main
 /// actor and call the one live `AutomationService`. This is the seam for the "one implementation, two
@@ -18,6 +19,16 @@ public struct AutomationOperations: Sendable {
     public let trigger: @Sendable (_ id: String) throws -> AutomationRun
     public let cancelRun: @Sendable (_ runID: String) throws -> AutomationRun
     public let endAgents: @Sendable (_ runID: String) throws -> AutomationRun
+    /// Relaunches an automation's own coding agents from restorable records, each as a run of its
+    /// automation, and reports every row's outcome keyed by the captured session id. Each `command` is what
+    /// that relaunch runs, which resumes the agent's conversation when it reported one; the record carries
+    /// the command to record, the directory, and the title.
+    ///
+    /// Batched because the whole answer is decided together: the gate on an automation's own work is taken
+    /// once per automation, before any row relaunches. Throws only when this daemon has no automation
+    /// scheduler to reach, which refuses the whole answer; a row refused on its own merits comes back as a
+    /// failure in the result.
+    public let restoreAttributedAgents: @Sendable (_ requests: [AttributedAgentRestoreRequest]) throws -> AttributedAgentRestoreOutcomes
 
     public init(
         create: @escaping @Sendable (AutomationDraft) throws -> Automation,
@@ -25,7 +36,8 @@ public struct AutomationOperations: Sendable {
         setNextRun: @escaping @Sendable (String, String) throws -> Automation, delete: @escaping @Sendable (String) throws -> Void,
         list: @escaping @Sendable () throws -> [Automation], runs: @escaping @Sendable (String?) throws -> [AutomationRun],
         trigger: @escaping @Sendable (String) throws -> AutomationRun, cancelRun: @escaping @Sendable (String) throws -> AutomationRun,
-        endAgents: @escaping @Sendable (String) throws -> AutomationRun
+        endAgents: @escaping @Sendable (String) throws -> AutomationRun,
+        restoreAttributedAgents: @escaping @Sendable ([AttributedAgentRestoreRequest]) throws -> AttributedAgentRestoreOutcomes
     ) {
         self.create = create
         self.update = update
@@ -36,5 +48,6 @@ public struct AutomationOperations: Sendable {
         self.trigger = trigger
         self.cancelRun = cancelRun
         self.endAgents = endAgents
+        self.restoreAttributedAgents = restoreAttributedAgents
     }
 }

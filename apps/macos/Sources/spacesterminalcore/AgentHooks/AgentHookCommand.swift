@@ -71,4 +71,32 @@ public enum AgentHookCommand {
     /// Single-quotes a path for `sh -c`, which is how every supported agent runs a `type: "command"`
     /// hook. A home directory containing a space or a quote would otherwise split into extra arguments.
     static func shellQuoted(_ path: String) -> String { "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+
+    /// The absolute `spaces` path a Spaces-owned hook command runs, read back off the command text, or nil
+    /// when the command does not start with a quoted path. `signalCommand` writes it as the command's first
+    /// token, single-quoted by `shellQuoted`, so reading it back is the inverse of that quoting.
+    static func embeddedExecutablePath(in command: String) -> String? {
+        guard command.first == "'" else { return nil }
+        var path = ""
+        var index = command.index(after: command.startIndex)
+        while index < command.endIndex {
+            let character = command[index]
+            guard character == "'" else {
+                path.append(character)
+                index = command.index(after: index)
+                continue
+            }
+            // `shellQuoted` writes an embedded quote as close-quote, backslash, quote, open-quote
+            // (`'\''`), the only way to place a literal `'` inside a single-quoted `sh` token. Any other
+            // quote is the token's closing quote.
+            let escapeEnd = command.index(index, offsetBy: 4, limitedBy: command.endIndex)
+            if let escapeEnd, command[index..<escapeEnd] == "'\\''" {
+                path.append("'")
+                index = escapeEnd
+                continue
+            }
+            return path
+        }
+        return nil  // no closing quote: not a well-formed quoted token
+    }
 }

@@ -369,7 +369,8 @@ final class OrchestratorTerminalStopTests: XCTestCase {
             create: { _ in throw unreachableAutomationOperation }, update: { _, _ in throw unreachableAutomationOperation },
             setNextRun: { _, _ in throw unreachableAutomationOperation }, delete: { _ in throw unreachableAutomationOperation },
             list: { throw unreachableAutomationOperation }, runs: { _ in throw unreachableAutomationOperation },
-            trigger: { _ in throw unreachableAutomationOperation }, cancelRun: cancelRun, endAgents: { _ in throw unreachableAutomationOperation })
+            trigger: { _ in throw unreachableAutomationOperation }, cancelRun: cancelRun, endAgents: { _ in throw unreachableAutomationOperation },
+            restoreAttributedAgents: { _ in throw unreachableAutomationOperation })
     }
 }
 

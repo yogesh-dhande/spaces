@@ -193,6 +193,9 @@ enum SpacesMobileAutomations {
         // a manual trigger either, so the daemon records it under its own trigger kind.
         case "scheduled": "Scheduled"
         case "missed_catch_up": "Missed catch-up"
+        // A session restore bringing this automation's own agent back: the work is an earlier run's,
+        // carried on under a run of its own.
+        case "restore": "Restored"
         default: run.trigger
         }
     }
