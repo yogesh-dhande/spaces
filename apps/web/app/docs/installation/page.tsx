@@ -179,6 +179,13 @@ rm -rf ~/.spaces ~/spaces`}</CodeBlock>
         <Prose>
           A machine you want to work on from your Mac or iPhone — a Linux box under your desk, a cloud VM, or a second Mac — has to meet a few requirements before it can pair. Set them up first and pairing goes through on the first attempt.
         </Prose>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          For a machine you will reach from changing networks, home Wi-Fi one hour and cellular the next, follow{" "}
+          <Link href="/docs/remote-access" className="text-accent hover:underline">
+            Remote Access
+          </Link>
+          : it walks through pairing over Tailscale so the address never changes, what to open and what to leave closed, and how to verify the setup from your Mac and your phone.
+        </p>
 
         <h3 className="mt-6 text-sm font-semibold text-foreground">Spaces on the machine</h3>
         <Prose>
@@ -197,7 +204,11 @@ rm -rf ~/.spaces ~/spaces`}</CodeBlock>
           Pairing itself rides SSH, but nothing after it does: once paired, your Mac or iPhone talks to the machine&apos;s Spaces daemon on TCP <InlineCode>47847</InlineCode>. That port has to be reachable from the client over whatever network you use — LAN, VPN, or Tailscale.
         </Prose>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          On a cloud VM that means an ingress firewall rule allowing <InlineCode>tcp:47847</InlineCode> from the addresses you connect from, alongside the rule for SSH (<InlineCode>tcp:22</InlineCode> unless you moved it). Reaching the machine at its tailnet address rather than its public address needs no ingress rule at all.
+          Reaching the machine at its Tailscale address needs no ingress rule at all, and it is the setup that keeps working when your Mac or phone changes networks; see{" "}
+          <Link href="/docs/remote-access" className="text-accent hover:underline">
+            Remote Access
+          </Link>
+          . Reaching a cloud VM at its public address instead means an ingress firewall rule allowing <InlineCode>tcp:47847</InlineCode> from the addresses you connect from, alongside the rule for SSH (<InlineCode>tcp:22</InlineCode> unless you moved it), and an allowlist built from the address you have at home stops matching as soon as you leave it.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           This is the failure worth recognizing, because working SSH makes it look like the network is fine: pairing gets all the way through the SSH step, and then Spaces reports that the remote Device API is not reachable at that address and port. Open the port and pair again.
