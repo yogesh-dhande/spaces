@@ -50,6 +50,11 @@ import systembridge
     private var renamingTabID: String?
     /// A rebuild requested while the rename editor was open, replayed when it ends.
     private var rebuildDeferredForRename = false
+    /// The two pane actions, retained so they can leave the strip while it holds no tab: splits act on
+    /// the selected tab's focused pane, and an empty panel has none. A control that cannot fire is
+    /// absent rather than greyed (see docs/design.md), so the empty strip carries only its `+`.
+    private var splitRightButton: NSButton!
+    private var splitDownButton: NSButton!
     private var draggingTabID: String?
     private var proposedInsertionIndex: Int?
     private var dragAutoScrollTimer: Timer?
@@ -58,6 +63,12 @@ import systembridge
 
     init() {
         super.init(frame: .zero)
+        splitRightButton = Self.actionButton(
+            symbol: "rectangle.split.2x1", tooltip: "Split right", identifier: "panel-split-right", target: self, action: #selector(splitRightClicked)
+        )
+        splitDownButton = Self.actionButton(
+            symbol: "rectangle.split.1x2", tooltip: "Split down", identifier: "panel-split-down", target: self, action: #selector(splitDownClicked))
+        syncSplitButtonVisibility()
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
@@ -84,11 +95,6 @@ import systembridge
         scrollView.verticalScrollElasticity = .none
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
-        let splitRightButton = Self.actionButton(
-            symbol: "rectangle.split.2x1", tooltip: "Split right", identifier: "panel-split-right", target: self, action: #selector(splitRightClicked)
-        )
-        let splitDownButton = Self.actionButton(
-            symbol: "rectangle.split.1x2", tooltip: "Split down", identifier: "panel-split-down", target: self, action: #selector(splitDownClicked))
         let newTabButton = Self.actionButton(
             symbol: "plus", tooltip: "New terminal tab", identifier: "panel-new-tab", target: self, action: #selector(newTabClicked))
 
@@ -188,7 +194,16 @@ import systembridge
         self.titlesByTabID = titlesByTabID
         self.selectedTabID = selectedTabID
         self.hasMultiplePanesByTabID = hasMultiplePanesByTabID
+        syncSplitButtonVisibility()
         requestRebuild()
+    }
+
+    /// Splits need a pane to act on, so the strip drops both split buttons while it holds no tab and
+    /// restores them with the first one.
+    private func syncSplitButtonVisibility() {
+        let hasTab = !tabIDs.isEmpty
+        splitRightButton.isHidden = !hasTab
+        splitDownButton.isHidden = !hasTab
     }
 
     func updateTitle(_ title: String, forTabID tabID: String) {
@@ -207,6 +222,7 @@ import systembridge
         renamingTabID = nil
         rebuildDeferredForRename = false
         tabIDs = []
+        syncSplitButtonVisibility()
         titlesByTabID = [:]
         selectedTabID = nil
         hasMultiplePanesByTabID = [:]

@@ -1,5 +1,4 @@
 import AppKit
-import spacesterminalcore
 
 /// One panel: a tab bar over the selected tab's pane tree. Instantiated per
 /// `PanelScope` and kept alive (detached) while its workspace is not selected, so
@@ -19,6 +18,11 @@ import spacesterminalcore
     /// Tab-header context menu's "Open Selected Pane in New Window".
     var onOpenSelectedPaneInNewWindow: ((_ tabID: String) -> Void)?
     var onFocusPane: ((String) -> Void)?
+    /// The empty state's `Start workspace` button; offered only for a `.workspace` panel.
+    var onStartWorkspace: (() -> Void)?
+    /// The empty state's `New terminal` button, which starts a session directly like the leader
+    /// shortcut rather than opening the `+` button's target picker.
+    var onNewTerminal: (() -> Void)?
     var onSplitWeightsChanged: ((_ splitID: String, _ weights: [Double]) -> Void)?
     /// Resolves a pane's live content controller; nil renders the pane empty (e.g. a
     /// persisted pane whose session is still reattaching).
@@ -38,7 +42,9 @@ import spacesterminalcore
     /// in for `tabBar`. Non-nil only for a `.globalWindow` scope.
     private let identityStrip: PanelWindowIdentityStripView?
     private let paneTree = PaneTreeView()
-    private let emptyStateLabel = NSTextField(labelWithString: "No open terminals")
+    /// The centered recovery block shown in the pane area while this panel holds no tabs. Driven only
+    /// for a `.workspace` panel: `apply(layout:...)` leaves it hidden whenever no state is supplied.
+    private let emptyStateView = WorkspacePanelEmptyStateView()
     private var renderedLayout = PanelLayout()
     private var renderedTitles: [String: String] = [:]
     /// A titlebar-hosted tab strip driven by this panel instead of the built-in one (main-window
@@ -80,21 +86,26 @@ import spacesterminalcore
         paneTree.onSplitWeightsChanged = { [weak self] splitID, weights in self?.onSplitWeightsChanged?(splitID, weights) }
         paneTree.onConfigurePane = { [weak self] paneView, pane in self?.configure(paneView: paneView, pane: pane) }
 
-        emptyStateLabel.font = Typography.rowDetail
-        emptyStateLabel.textColor = Theme.mutedSecondary
-        emptyStateLabel.translatesAutoresizingMaskIntoConstraints = false
+        emptyStateView.isHidden = true
+        emptyStateView.onStartWorkspace = { [weak self] in self?.onStartWorkspace?() }
+        emptyStateView.onNewTerminal = { [weak self] in self?.onNewTerminal?() }
 
         addSubview(chromeView)
         addSubview(paneTree)
-        addSubview(emptyStateLabel)
+        addSubview(emptyStateView)
         paneTreeTopToTabBar = paneTree.topAnchor.constraint(equalTo: chromeView.bottomAnchor)
         paneTreeTopToView = paneTree.topAnchor.constraint(equalTo: topAnchor)
         NSLayoutConstraint.activate([
             chromeView.topAnchor.constraint(equalTo: topAnchor), chromeView.leadingAnchor.constraint(equalTo: leadingAnchor),
             chromeView.trailingAnchor.constraint(equalTo: trailingAnchor), paneTreeTopToTabBar,
             paneTree.leadingAnchor.constraint(equalTo: leadingAnchor), paneTree.trailingAnchor.constraint(equalTo: trailingAnchor),
-            paneTree.bottomAnchor.constraint(equalTo: bottomAnchor), emptyStateLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
-            emptyStateLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            paneTree.bottomAnchor.constraint(equalTo: bottomAnchor),
+            // Centered in the pane area rather than the whole panel, so the block sits under the tab
+            // strip that stays visible while the panel is empty.
+            emptyStateView.topAnchor.constraint(equalTo: paneTree.topAnchor),
+            emptyStateView.leadingAnchor.constraint(equalTo: paneTree.leadingAnchor),
+            emptyStateView.trailingAnchor.constraint(equalTo: paneTree.trailingAnchor),
+            emptyStateView.bottomAnchor.constraint(equalTo: paneTree.bottomAnchor),
         ])
     }
 
@@ -150,18 +161,33 @@ import spacesterminalcore
     }
 
     /// Renders the layout: chrome (tab strip or identity strip), selected tab's pane tree,
-    /// focused-pane chrome, and the empty state when no tabs exist. `newTabShortcutHint` labels
-    /// the empty state with the New-terminal shortcut when known. `identity` is the current
-    /// identity-strip content for a `.globalWindow` panel; unused (and always nil) for a
-    /// `.workspace` panel, which has no identity strip.
-    func apply(layout: PanelLayout, titlesByTabID: [String: String], identity: PanelWindowIdentity? = nil, newTabShortcutHint: String? = nil) {
+    /// focused-pane chrome, and the empty state when no tabs exist. `emptyState` is what that block
+    /// draws; it is nil for a `.globalWindow` panel, which closes rather than emptying and so shows
+    /// no block. `identity` is the current identity-strip content for a `.globalWindow` panel; unused
+    /// (and always nil) for a `.workspace` panel, which has no identity strip.
+    func apply(
+        layout: PanelLayout, titlesByTabID: [String: String], identity: PanelWindowIdentity? = nil, emptyState: WorkspacePanelEmptyState? = nil
+    ) {
         renderedLayout = layout
         renderedTitles = titlesByTabID
         applyToActiveChrome(identity: identity)
         let selectedTab = layout.tabs.first { $0.id == layout.selectedTabID }
         paneTree.render(root: selectedTab?.root)
-        emptyStateLabel.isHidden = !layout.isEmpty
-        if layout.isEmpty { emptyStateLabel.stringValue = newTabShortcutHint.map { "No open terminals — \($0) opens one" } ?? "No open terminals" }
+        if layout.isEmpty, let emptyState {
+            emptyStateView.update(state: emptyState)
+            emptyStateView.isHidden = false
+        } else {
+            emptyStateView.isHidden = true
+        }
+    }
+
+    /// Refreshes the empty state in place, for the workspace-detail fast path that skips a full
+    /// `apply(layout:...)` on an overview tick: the workspace's run state (and its device's
+    /// reachability) moves there without any layout change, and the offered actions follow it.
+    func updateEmptyState(_ state: WorkspacePanelEmptyState) {
+        guard renderedLayout.isEmpty else { return }
+        emptyStateView.update(state: state)
+        emptyStateView.isHidden = false
     }
 
     private func applyToActiveChrome(identity: PanelWindowIdentity? = nil) {
@@ -174,12 +200,13 @@ import spacesterminalcore
         let hasMultiplePanesByTabID = Dictionary(uniqueKeysWithValues: renderedLayout.tabs.map { ($0.id, PanelLayoutEngine.panes(in: $0).count > 1) })
         if drivesExternalTabBar, let externalTabBar {
             tabBar.isHidden = true
-            externalTabBar.isHidden = renderedLayout.isEmpty
+            // The strip stays visible while the panel is empty, so its `+` keeps offering a tab.
+            externalTabBar.isHidden = false
             externalTabBar.update(
                 tabIDs: renderedLayout.tabs.map(\.id), titlesByTabID: renderedTitles, selectedTabID: renderedLayout.selectedTabID,
                 hasMultiplePanesByTabID: hasMultiplePanesByTabID)
         } else {
-            tabBar.isHidden = renderedLayout.isEmpty
+            tabBar.isHidden = false
             tabBar.update(
                 tabIDs: renderedLayout.tabs.map(\.id), titlesByTabID: renderedTitles, selectedTabID: renderedLayout.selectedTabID,
                 hasMultiplePanesByTabID: hasMultiplePanesByTabID)
