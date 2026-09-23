@@ -98,9 +98,17 @@ enum AgentHookJSONWriter {
 
     /// How completely `fileURL` carries the hooks `bindings` describe.
     ///
-    /// A file with no Spaces-owned entry at all is `.notInstalled`. Anything partial — a bound event
-    /// with no entry (this build added an event an older one did not write), or an entry carrying an
-    /// older `AgentHookCommand.hookVersion` — is `.outdated`, because reinstalling is what fixes it.
+    /// A file with no Spaces-owned entry at all is `.notInstalled`. Anything partial (a bound event with
+    /// no entry, since this build added an event an older one did not write, an entry carrying an older
+    /// `AgentHookCommand.hookVersion`, or a current entry whose embedded `spaces` path does not name an
+    /// executable file) is `.outdated`, because reinstalling is what fixes it. A hook command embeds an
+    /// absolute path resolved at install time (see `AgentHookCommand`), and that path can go stale on
+    /// disk without the file that carries it ever changing, e.g. a development build's worktree gets
+    /// deleted; without this check such a config would keep reading `.current` forever and never be
+    /// offered the reinstall that repairs it. The check is existence only, never a match against the
+    /// stable `~/.spaces/bin/spaces` install location: a development daemon deliberately points its hooks
+    /// at its own sibling CLI so signals reach its own profile, and requiring the stable path would
+    /// misroute a dev profile's signals to the installed profile's daemon.
     static func installState(fileURL: URL, bindings: [EventBinding], fileManager: FileManager = .default) -> AgentHookInstallState {
         guard !bindings.isEmpty, let root = try? loadRootObject(fileURL: fileURL, fileManager: fileManager),
             let hooks = root["hooks"] as? [String: Any]
@@ -113,7 +121,11 @@ enum AgentHookJSONWriter {
         }
         guard ownedCommandsPerBinding.contains(where: { !$0.isEmpty }) else { return .notInstalled }
         let everyEventBound = ownedCommandsPerBinding.allSatisfy { !$0.isEmpty }
-        let everyCommandCurrent = ownedCommandsPerBinding.allSatisfy { $0.allSatisfy(AgentHookCommand.isCurrent) }
+        let commandIsCurrent: (String) -> Bool = { command in
+            guard AgentHookCommand.isCurrent(command), let path = AgentHookCommand.embeddedExecutablePath(in: command) else { return false }
+            return fileManager.isExecutableFile(atPath: path)
+        }
+        let everyCommandCurrent = ownedCommandsPerBinding.allSatisfy { $0.allSatisfy(commandIsCurrent) }
         return everyEventBound && everyCommandCurrent ? .current : .outdated
     }
 

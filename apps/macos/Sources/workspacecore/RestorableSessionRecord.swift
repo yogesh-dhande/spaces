@@ -23,10 +23,13 @@ public struct RestorableSessionRecord: Sendable, Equatable {
     public let workingDirectory: String
     public let title: String
     public let capturedAt: String
+    /// The automation this agent runs for, or nil for an agent that belongs to nobody but the user.
+    /// Restoring a row that names one relaunches the agent as a run of that automation.
+    public let automationID: String?
 
     public init(
         sessionID: String, generation: String, workspaceID: String, agentKind: TerminalDetectedAgentKind?, agentSessionKey: String?,
-        launchCommand: String, workingDirectory: String, title: String, capturedAt: String
+        launchCommand: String, workingDirectory: String, title: String, capturedAt: String, automationID: String? = nil
     ) {
         self.sessionID = sessionID
         self.generation = generation
@@ -37,6 +40,7 @@ public struct RestorableSessionRecord: Sendable, Equatable {
         self.workingDirectory = workingDirectory
         self.title = title
         self.capturedAt = capturedAt
+        self.automationID = automationID
     }
 
     /// The client-facing half of this row. The launch command and the conversation id stay on the daemon,

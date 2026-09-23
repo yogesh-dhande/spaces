@@ -66,6 +66,18 @@ extension SQLiteStore {
     /// runtime row's live one, which advances with the agent's `cd`, and the session's launch directory
     /// only when no runtime row is joined in: the agent comes back where it was working, not where its
     /// terminal opened.
+    ///
+    /// The automation is resolved through the run the session was attributed to rather than stored on the
+    /// session: the run row is where a session's automation is named, and a restore needs the automation
+    /// itself, not the run, because the run that owned this session is canceled with the teardown that
+    /// captured it.
+    ///
+    /// Only an `agent` automation's own agent carries that automation. A script automation exports its run
+    /// id into the script's terminal, so an agent the script spawned from there (`spaces agent spawn`, the
+    /// MCP server's spawn tool) is stamped with the same run id even though the automation runs a script.
+    /// Such an agent is the script's work, not the automation's session shape: there is no agent run for it
+    /// to come back as, since the poll and cancel paths dispatch on the automation's kind. It captures with
+    /// no automation and comes back the way any agent the user started does.
     private static func restorableCaptureColumns(source: TypedAgentSource) -> String {
         """
         terminal_sessions.session_id,
@@ -74,7 +86,8 @@ extension SQLiteStore {
         \(typedAgentIdentity("agent_sessions.session_key")),
         CASE terminal_sessions.kind WHEN 'shell' THEN \(source.command) ELSE terminal_sessions.launch_command END,
         COALESCE(NULLIF(terminal_runtime_states.working_directory, ''), terminal_sessions.working_directory),
-        COALESCE(NULLIF(terminal_sessions.user_title, ''), terminal_sessions.title)
+        COALESCE(NULLIF(terminal_sessions.user_title, ''), terminal_sessions.title),
+        COALESCE(CASE WHEN automations.kind = 'agent' THEN automation_runs.automation_id END, '')
         """
     }
 
@@ -101,7 +114,7 @@ extension SQLiteStore {
     /// Canonical column order for a stored `restorable_sessions` row.
     private static let restorableSessionColumns = """
         session_id, generation, workspace_id, COALESCE(agent_kind, ''), COALESCE(agent_session_key, ''), launch_command, working_directory,
-        title, captured_at
+        title, captured_at, COALESCE(automation_id, '')
         """
 
     /// Every coding-agent session that is still live, across every workspace. This is what a clean Stop
@@ -116,6 +129,8 @@ extension SQLiteStore {
                 JOIN workspaces ON workspaces.id = terminal_sessions.workspace_id
                 JOIN terminal_runtime_states ON terminal_runtime_states.root_directory = terminal_sessions.root_directory
                 LEFT JOIN agent_sessions ON agent_sessions.terminal_session_id = terminal_sessions.session_id
+                LEFT JOIN automation_runs ON automation_runs.id = terminal_sessions.automation_run_id
+                LEFT JOIN automations ON automations.id = automation_runs.automation_id
                 WHERE \(Self.restorableCaptureFilter(source: .liveRuntimeRow)) AND terminal_runtime_states.state IN (\(placeholders))
                 ORDER BY terminal_sessions.created_at, terminal_sessions.session_id
                 """, bindings: interactiveStates)
@@ -135,6 +150,8 @@ extension SQLiteStore {
                 JOIN workspaces ON workspaces.id = terminal_sessions.workspace_id
                 LEFT JOIN terminal_runtime_states ON terminal_runtime_states.root_directory = terminal_sessions.root_directory
                 LEFT JOIN agent_sessions ON agent_sessions.terminal_session_id = terminal_sessions.session_id
+                LEFT JOIN automation_runs ON automation_runs.id = terminal_sessions.automation_run_id
+                LEFT JOIN automations ON automations.id = automation_runs.automation_id
                 WHERE \(Self.restorableCaptureFilter(source: .agentRow)) AND terminal_sessions.session_id IN (\(placeholders))
                 ORDER BY terminal_sessions.created_at, terminal_sessions.session_id
                 """, bindings: sessionIDs)
@@ -159,10 +176,14 @@ extension SQLiteStore {
     /// A bare shell is excluded because it holds no state worth bringing back, and an automation's script
     /// session and a configured process come back through their own machinery.
     ///
-    /// An automation's own agent IS captured, and comes back as a standalone conversation: the relaunch
-    /// carries no run attribution, because the run that owned it was canceled with the teardown. The
-    /// accepted consequence is that the automation can fire a new run while the restored agent is still
-    /// working, since nothing ties that agent to the automation any more.
+    /// An agent automation's own agent IS captured, and comes back as a run of that automation: the capture
+    /// carries the automation the session's run named, and the restore starts a fresh run to relaunch it
+    /// under. The run that owned the captured session was canceled with the teardown, so the attribution
+    /// has to be rebuilt rather than reused, and rebuilding it is what keeps the automation's concurrency
+    /// policy seeing the restored agent as its live work: a `skip` automation skips its next scheduled
+    /// fire while the restored agent is still going, instead of starting a second copy beside it. An agent
+    /// a script automation spawned is captured too, carrying no automation, because it is the script's own
+    /// work rather than the automation's session shape (see `restorableCaptureColumns(source:)`).
     ///
     /// Both queries inner-join `workspaces` for the same reason the offer exists at all: an agent can only
     /// be relaunched into a workspace that is still there, and a session whose workspace has since been
@@ -206,13 +227,14 @@ extension SQLiteStore {
                 try execute(
                     sql: """
                         INSERT INTO restorable_sessions(
-                          session_id, generation, workspace_id, agent_kind, agent_session_key, launch_command, working_directory, title, captured_at
+                          session_id, generation, workspace_id, agent_kind, agent_session_key, launch_command, working_directory, title, captured_at,
+                          automation_id
                         )
-                        VALUES (?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?)
+                        VALUES (?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''))
                         """,
                     bindings: [
                         record.sessionID, record.generation, record.workspaceID, record.agentKind?.rawValue ?? "", record.agentSessionKey ?? "",
-                        record.launchCommand, record.workingDirectory, record.title, record.capturedAt,
+                        record.launchCommand, record.workingDirectory, record.title, record.capturedAt, record.automationID ?? "",
                     ])
             }
         }
@@ -291,18 +313,19 @@ extension SQLiteStore {
     /// on the path an agent that never reported a conversation already takes: the offer says it comes back
     /// as a new run, and the relaunch runs the recorded command unchanged.
     private static func decodeCapture(row: [String]) -> RestorableSessionCapture? {
-        guard row.count >= 7, !row[0].isEmpty, !row[1].isEmpty, !row[4].isEmpty else { return nil }
+        guard row.count >= 8, !row[0].isEmpty, !row[1].isEmpty, !row[4].isEmpty else { return nil }
         let launchCommand = row[4]
         let agentSessionKey = row[3].isEmpty || CodingAgent.launchIsOneShotJob(launchCommand: launchCommand) ? nil : row[3]
         return RestorableSessionCapture(
             sessionID: row[0], workspaceID: row[1], agentKind: TerminalDetectedAgentKind(rawValue: row[2]), agentSessionKey: agentSessionKey,
-            launchCommand: launchCommand, workingDirectory: row[5], title: row[6])
+            launchCommand: launchCommand, workingDirectory: row[5], title: row[6], automationID: row[7].isEmpty ? nil : row[7])
     }
 
     private static func decodeRestorableSession(row: [String]) -> RestorableSessionRecord? {
-        guard row.count >= 9 else { return nil }
+        guard row.count >= 10 else { return nil }
         return RestorableSessionRecord(
             sessionID: row[0], generation: row[1], workspaceID: row[2], agentKind: TerminalDetectedAgentKind(rawValue: row[3]),
-            agentSessionKey: row[4].isEmpty ? nil : row[4], launchCommand: row[5], workingDirectory: row[6], title: row[7], capturedAt: row[8])
+            agentSessionKey: row[4].isEmpty ? nil : row[4], launchCommand: row[5], workingDirectory: row[6], title: row[7], capturedAt: row[8],
+            automationID: row[9].isEmpty ? nil : row[9])
     }
 }

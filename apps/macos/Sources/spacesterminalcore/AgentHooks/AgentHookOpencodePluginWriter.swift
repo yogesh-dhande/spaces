@@ -40,10 +40,17 @@ enum AgentHookOpencodePluginWriter {
     }
 
     /// The ownership marker distinguishes the Spaces plugin from an unrelated file at the managed
-    /// path; its version marker distinguishes this build's plugin from an older Spaces plugin.
-    static func installState(pluginURL: URL) -> AgentHookInstallState {
+    /// path; its version marker distinguishes this build's plugin from an older Spaces plugin; and,
+    /// like `AgentHookJSONWriter.installState`, a current plugin still reports `.outdated` once the
+    /// `spaces` path baked into its `SPACES_CLI` constant does not name an executable file on disk
+    /// (e.g. a deleted development worktree), since that is what re-offers the install that repairs it.
+    /// The check is existence only, never a match against the stable `~/.spaces/bin/spaces` location,
+    /// for the same reason: a development daemon deliberately points the plugin at its own sibling CLI.
+    static func installState(pluginURL: URL, fileManager: FileManager = .default) -> AgentHookInstallState {
         guard let contents = try? String(contentsOf: pluginURL, encoding: .utf8), isSpacesOwned(contents) else { return .notInstalled }
-        return AgentHookCommand.isCurrent(contents) ? .current : .outdated
+        guard AgentHookCommand.isCurrent(contents) else { return .outdated }
+        guard let path = embeddedExecutablePath(in: contents), fileManager.isExecutableFile(atPath: path) else { return .outdated }
+        return .current
     }
 
     /// The plugin source. Uses Bun's `$` shell helper (passed into every opencode plugin) to run the
@@ -91,6 +98,30 @@ enum AgentHookOpencodePluginWriter {
     private static func javaScriptStringLiteral(_ value: String) -> String {
         let escaped = value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
         return "\"\(escaped)\""
+    }
+
+    /// The `spaces` path baked into the plugin's `const SPACES_CLI = "..."` line, read back out of the
+    /// double-quoted JavaScript string literal `javaScriptStringLiteral` writes: any character following
+    /// a backslash is taken literally, and the first quote not preceded by one closes the string. Nil
+    /// when the marker line, or its closing quote, is missing.
+    private static func embeddedExecutablePath(in contents: String) -> String? {
+        guard let markerRange = contents.range(of: "const SPACES_CLI = \"") else { return nil }
+        var path = ""
+        var index = markerRange.upperBound
+        while index < contents.endIndex {
+            let character = contents[index]
+            if character == "\\" {
+                let next = contents.index(after: index)
+                guard next < contents.endIndex else { return nil }
+                path.append(contents[next])
+                index = contents.index(after: next)
+                continue
+            }
+            if character == "\"" { return path }
+            path.append(character)
+            index = contents.index(after: index)
+        }
+        return nil  // no closing quote: not a well-formed string literal
     }
 
     private static func isSpacesOwned(_ contents: String) -> Bool {

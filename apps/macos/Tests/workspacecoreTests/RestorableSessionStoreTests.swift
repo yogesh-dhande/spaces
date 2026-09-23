@@ -67,17 +67,40 @@ final class RestorableSessionStoreTests: XCTestCase {
         XCTAssertNil(beforeHooks.agentKind)
     }
 
-    /// An automation's own agent is a live coding agent like any other and is captured. It comes back as a
-    /// standalone conversation: the relaunch carries no run attribution, because the run that owned it was
-    /// canceled with the teardown that captured it.
-    func testLiveAgentSessionCapturesIncludesAnAutomationRunsOwnAgentSession() throws {
+    /// An automation's own agent is a live coding agent like any other and is captured, carrying the
+    /// automation its run belongs to. That is what a restore relaunches it as a run of, so the automation's
+    /// concurrency policy keeps counting the restored agent as its live work. An agent the user started
+    /// carries no automation, and comes back as the standalone conversation it is.
+    func testLiveAgentSessionCapturesCarryTheAutomationAnAgentRunsFor() throws {
         let store = try makeTemporaryStore()
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let automationID = try seedAutomationRun(store: store, workspaceID: workspace.id, runID: "run-1")
 
         try seedLiveSession(sessionID: "spawned-agent", workspaceID: workspace.id, kind: .agent, launchCommand: "claude")
         try seedLiveSession(sessionID: "automation-agent", workspaceID: workspace.id, kind: .agent, launchCommand: "claude", automationRunID: "run-1")
 
-        XCTAssertEqual(Set(try store.liveAgentSessionCaptures().map(\.sessionID)), ["spawned-agent", "automation-agent"])
+        let captures = Dictionary(uniqueKeysWithValues: try store.liveAgentSessionCaptures().map { ($0.sessionID, $0) })
+
+        XCTAssertEqual(Set(captures.keys), ["spawned-agent", "automation-agent"])
+        XCTAssertEqual(captures["automation-agent"]?.automationID, automationID)
+        XCTAssertNil(captures["spawned-agent"]?.automationID)
+    }
+
+    /// An agent a script automation spawned carries that automation's run id: a script exports
+    /// `SPACES_AUTOMATION_RUN_ID` into its terminal, and a `spaces agent spawn` from there stamps the child
+    /// session with it. That agent is the script's own work, and the script automation has no agent run for
+    /// it to come back as, so it captures with no automation and comes back the way any agent the user
+    /// started does.
+    func testLiveAgentSessionCapturesCarryNoAutomationForAnAgentAScriptAutomationSpawned() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try seedAutomationRun(store: store, workspaceID: workspace.id, runID: "script-run", kind: .script)
+
+        try seedLiveSession(
+            sessionID: "spawned-by-script", workspaceID: workspace.id, kind: .agent, launchCommand: "claude", automationRunID: "script-run")
+
+        let capture = try XCTUnwrap(try store.liveAgentSessionCaptures().first { $0.sessionID == "spawned-by-script" })
+        XCTAssertNil(capture.automationID)
     }
 
     // MARK: - An agent the user typed into a terminal
@@ -499,6 +522,24 @@ final class RestorableSessionStoreTests: XCTestCase {
                 sessionID: sessionID, servicePID: 100, childPID: 100, state: .running, updatedAt: "2026-09-11T00:00:01Z",
                 workingDirectory: workingDirectory, foregroundDetectedAgentKind: foregroundAgentKind, foregroundCommand: foregroundCommand),
             paths: paths)
+    }
+
+    /// An automation of the given kind and one run of it, the rows a capture resolves an attributed
+    /// session's automation through. Returns the automation's id.
+    @discardableResult private func seedAutomationRun(store: SQLiteStore, workspaceID: String, runID: String, kind: AutomationKind = .agent) throws
+        -> String
+    {
+        let automation = Automation(
+            id: UUID().uuidString, name: "Nightly", enabled: true, triggerKind: .cron, cronExpression: "0 2 * * *", kind: kind,
+            script: kind == .script ? "make nightly" : "", agentCommand: kind == .agent ? "claude" : nil,
+            agentPrompt: kind == .agent ? "review the diff" : nil, workspaceID: workspaceID, timeoutSeconds: nil, concurrencyPolicy: .skip,
+            missedRunPolicy: .skip, nextFireTime: nil, createdAt: Date(), updatedAt: Date())
+        try store.upsertAutomation(automation)
+        try store.insertAutomationRun(
+            AutomationRun(
+                id: runID, automationID: automation.id, kind: kind, status: .running, skipReason: nil, trigger: .cron, exitCode: nil,
+                terminalSessionID: nil, startedAt: Date(), endedAt: nil, createdAt: Date()))
+        return automation.id
     }
 
     /// The agent row foreground detection promotes a terminal to, carrying the command a restore relaunches

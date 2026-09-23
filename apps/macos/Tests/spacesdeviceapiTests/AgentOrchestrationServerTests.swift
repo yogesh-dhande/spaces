@@ -631,7 +631,8 @@
                 update: { _, _ in throw AutomationValidationError("unused test operation") },
                 setNextRun: { _, _ in throw AutomationValidationError("unused test operation") }, delete: { _ in }, list: { [] }, runs: { _ in [] },
                 trigger: { _ in throw AutomationValidationError("unused test operation") }, cancelRun: cancelRun,
-                endAgents: { _ in throw AutomationValidationError("unused test operation") })
+                endAgents: { _ in throw AutomationValidationError("unused test operation") },
+                restoreAttributedAgents: { _ in throw AutomationValidationError("unused test operation") })
         }
 
         private func startServerAndClient(

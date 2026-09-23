@@ -6508,14 +6508,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// relaunches did: the offer has been answered, and a second attempt would spawn duplicates of whatever
     /// did come back. Only that generation, because a quit parking its agents over the profile socket can
     /// write a newer record while the relaunches run, and that record is a different offer nobody has seen.
+    /// The one thing that leaves the generation outstanding is a refusal taken before any row is touched,
+    /// which answers nothing (see `restoredAttributedSessions(records:)`).
     ///
     /// The relaunched session records the captured command rather than the resume command it runs, so an
     /// agent restored twice resumes its newest conversation from the original command instead of carrying
     /// the previous restore's selector as well.
     ///
-    /// Each relaunch lands in the directory the agent was working in and carries no automation run
-    /// attribution: an agent an automation started comes back as a standalone conversation, because the run
-    /// that owned it was canceled along with the teardown that captured it.
+    /// Each relaunch lands in the directory the agent was working in. An agent an agent automation started
+    /// comes back as a run of that automation rather than as a standalone conversation, through the
+    /// automation scheduler.
     private func handleRestoreSessionsRequest(_ payload: SpacesDeviceRestorableSessionsRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
@@ -6523,19 +6525,27 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let records = try store.restorableSessions()
         if let rejection = Self.restorableGenerationRejection(records: records, requestedGeneration: payload.generation) { return rejection }
         let orchestrator = try context.orchestrator()
+        // Attributed rows relaunch first, and before any other row is touched, because their whole batch is
+        // refused when the automation scheduler cannot be reached (see `restoredAttributedSessions`).
+        let attributed = try restoredAttributedSessions(records: records)
         var newSessionIDsByCapturedSessionID: [String: String] = [:]
         // Named per row rather than collapsed into the message: a client shows the user which agents are
         // not coming back, and "the workspace is gone" is only actionable when it says which agent it was.
         // The row is named by session id, so the client reports it under the label it listed it under.
         var failures: [SpacesDeviceRestoredSessionFailure] = []
         for record in records {
-            let command = CodingAgent.resumeCommand(launchCommand: record.launchCommand, sessionKey: record.agentSessionKey)
-            do {
-                let session = try orchestrator.createWorkspaceAgentSession(
-                    workspaceID: record.workspaceID, command: command, title: record.title, recordedLaunchCommand: record.launchCommand,
-                    workingDirectory: record.workingDirectory)
-                newSessionIDsByCapturedSessionID[record.sessionID] = session.id
-            } catch {
+            // A row the scheduler answered for takes its answer; every other row is an agent nobody but the
+            // user started, and comes back as the standalone session it was.
+            let outcome =
+                attributed[record.sessionID]
+                ?? Result {
+                    try orchestrator.createWorkspaceAgentSession(
+                        workspaceID: record.workspaceID, command: Self.restoreCommand(for: record), title: record.title,
+                        recordedLaunchCommand: record.launchCommand, workingDirectory: record.workingDirectory)
+                }
+            switch outcome {
+            case .success(let session): newSessionIDsByCapturedSessionID[record.sessionID] = session.id
+            case .failure(let error):
                 failures.append(
                     SpacesDeviceRestoredSessionFailure(
                         sessionID: record.sessionID, title: record.title, message: Self.failureResponse(for: error).message))
@@ -6550,6 +6560,31 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return SpacesDeviceAPIResponse(
             ok: true, message: message,
             result: .restoredSessions(.init(newSessionIDsByCapturedSessionID: newSessionIDsByCapturedSessionID, failures: failures)))
+    }
+
+    /// Relaunches every attributed row of the answer as a run of its automation, in one call to this
+    /// daemon's automation scheduler, and reports each row's outcome by captured session id.
+    ///
+    /// One call rather than one per row because the gate on an automation's own live work is taken once per
+    /// automation for the whole answer: one offer can hold several rows of one automation, and relaunching
+    /// row by row would let the first row's own restore run refuse every row behind it.
+    ///
+    /// Refuses the WHOLE request, rather than failing its attributed rows, when the scheduler cannot be
+    /// reached. A daemon publishes its scheduler only once startup missed-run reconciliation has finished,
+    /// while the Device API is already answering requests, so an answer landing in that window would fail
+    /// every attributed row and still clear the generation, losing those agents for good. A refusal leaves
+    /// the offer outstanding: the client shows the error and the user answers it again.
+    private func restoredAttributedSessions(records: [RestorableSessionRecord]) throws -> AttributedAgentRestoreOutcomes {
+        let attributed = records.filter { $0.automationID != nil }
+        guard !attributed.isEmpty else { return [:] }
+        guard let automationOperations else { throw Self.invalidArgumentError("Automations are unavailable on this daemon.") }
+        return try automationOperations.restoreAttributedAgents(attributed.map { ($0, Self.restoreCommand(for: $0)) })
+    }
+
+    /// The command a captured row relaunches with: the recorded command rewritten to resume the agent's own
+    /// conversation when it reported one.
+    private static func restoreCommand(for record: RestorableSessionRecord) -> String {
+        CodingAgent.resumeCommand(launchCommand: record.launchCommand, sessionKey: record.agentSessionKey)
     }
 
     /// Discards the outstanding restorable record. The other answer to the same offer, and the reason the

@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 22
+    public static let currentVersion = 23
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -794,6 +794,41 @@ public enum DatabaseSchema {
                 try migrationExecuteBatch(handle, sql: "ALTER TABLE agent_sessions ADD COLUMN launch_command TEXT;")
             }
         },
+        // Carries the automation an offered agent belongs to, so restoring it relaunches it as a run of
+        // that automation instead of as a standalone conversation the automation's concurrency policy
+        // cannot see. The automation id is stored rather than the run id the session was attributed to:
+        // the restore starts a run of its own, and the original run is canceled with the teardown that
+        // captured the agent and can be pruned by retention before anyone answers the offer.
+        //
+        // No foreign key to `automations`: an automation deleted while an offer is outstanding leaves a
+        // row naming it, and the restore reports that row as one that cannot come back rather than the
+        // offer silently losing a line. The column is nullable and stays NULL on every existing row and
+        // on every agent that is not an automation's, which is what the restore reads as "relaunch this
+        // as a standalone conversation". The frozen v21 shape is created first for the reason every
+        // altering step in this file writes one out: the ALTER needs a table to alter.
+        DatabaseMigrationStep(
+            fromVersion: 22, toVersion: 23, description: "Attribute a restored automation agent to its automation", requiresBackup: true
+        ) { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS restorable_sessions (
+                      session_id TEXT PRIMARY KEY,
+                      generation TEXT NOT NULL,
+                      workspace_id TEXT NOT NULL,
+                      agent_kind TEXT,
+                      agent_session_key TEXT,
+                      launch_command TEXT NOT NULL,
+                      working_directory TEXT NOT NULL,
+                      title TEXT NOT NULL,
+                      captured_at TEXT NOT NULL,
+                      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+                    );
+                    """)
+            if !(try migrationColumnExists(handle, table: "restorable_sessions", column: "automation_id")) {
+                try migrationExecuteBatch(handle, sql: "ALTER TABLE restorable_sessions ADD COLUMN automation_id TEXT;")
+            }
+        },
     ]
 
     /// The persisted final-render state of a session, one row per session. `has_final_render` stores
@@ -852,6 +887,7 @@ public enum DatabaseSchema {
               working_directory TEXT NOT NULL,
               title TEXT NOT NULL,
               captured_at TEXT NOT NULL,
+              automation_id TEXT,
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
             );
         """

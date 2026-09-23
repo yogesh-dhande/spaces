@@ -15,17 +15,28 @@ extension WorkspaceOrchestrator {
             let sessionID = session.sessionID
             // Runs for EVERY live session, ahead of the configured-owner skip below, because this pass is
             // the only place that sees live foreground state for a session Spaces launched itself. A
-            // configured `.agent` launch registers its row the moment the terminal starts, before the
-            // agent process has been classified, so the kind sampled at registration is nil; the row is
-            // then skipped by the rest of this loop, and repeated `working` signals are a deliberate no-op
-            // that never refreshes it. Without this the row could reach its exit still carrying no kind
-            // and the exit block would name an anonymous "coding agent" for an agent listings had
-            // identified all along.
+            // configured `.agent` launch gets no row until the agent's hooks report it, or until this
+            // pass's own detection insert below writes one, so the kind sampled at that moment can be nil;
+            // repeated `working` signals are a deliberate no-op that never refreshes it once the row
+            // exists. Without this the row could reach its exit still carrying no kind and the exit block
+            // would name an anonymous "coding agent" for an agent listings had identified all along.
             if try refreshPersistedForegroundAgentDetails(sessionID: sessionID, runtimeState: session.runtimeState) { didMutate = true }
             let ownership = builtInTerminalSessionOwnership(sessionID: sessionID, index: ownershipIndex)
-            if builtInTerminalSessionHasConfiguredOwner(ownership) { continue }
+            // A session Spaces launched to run exactly one coding agent (`.agent` launch kind, no other
+            // configured owner) exists for that one agent, so it is let through the configured-owner skip:
+            // otherwise nothing would ever mint its row when codex/opencode fire no hook until their first
+            // turn, or a hook is simply broken, and the session would sit in the sidebar as a plain
+            // terminal. Once the row exists (below), this same flag keeps every plain-shell branch
+            // (relaunch, demote) from running against it: those are for a row detection promoted out of a
+            // terminal the user typed an agent into, not a terminal Spaces launched to run one.
+            let ownedOnlyByItsOwnAgentLaunch = ownership.process == nil && ownership.launchKind == .agent
+            if builtInTerminalSessionHasConfiguredOwner(ownership), !ownedOnlyByItsOwnAgentLaunch { continue }
             guard let workspace = try workspaceForBuiltInTerminalSession(sessionID: sessionID, ownership: ownership) else { continue }
             if let existingRow = try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID) {
+                // The row already describes the one agent this `.agent`-launched session exists for,
+                // whether a hook signal or this pass's own detection wrote it: a live agent's terminal
+                // momentarily showing a bare foreground must not be read as a relaunch or a demote.
+                if ownedOnlyByItsOwnAgentLaunch { continue }
                 // A relaunch in the terminal the last agent exited from: the row is held `.exited`, the
                 // terminal outlived its agent, and detection reports an agent in the foreground again.
                 // The agent's own SessionStart cannot be relied on to say so: codex fires it with the
@@ -182,6 +193,17 @@ extension WorkspaceOrchestrator {
     func isAdHocDetectedForegroundAgent(_ record: AgentWindowRecord) -> Bool {
         guard record.provider == .spaces, let sessionID = builtInAgentSessionID(for: record) else { return false }
         return record.id == adHocDetectedAgentID(sessionID: sessionID)
+    }
+
+    /// Whether this row's backing built-in terminal session is one Spaces launched to run a coding agent
+    /// (`.agent` kind). Such a session exists for the one agent in it, so its row describes that agent's
+    /// own lifecycle even when foreground detection is what wrote the row (the ad-hoc detection id and the
+    /// `.agent` launch kind are not mutually exclusive: a hookless or broken-hook agent's row only ever
+    /// gets minted by detection). The silent demote that reverts a plain shell's detection row back to a
+    /// bare terminal must never claim a row this is true for.
+    func builtInAgentSessionWasLaunchedAsAgent(_ record: AgentWindowRecord) -> Bool {
+        guard let sessionID = builtInAgentSessionID(for: record) else { return false }
+        return terminalSessionLaunchConfiguration(sessionID: sessionID)?.kind == .agent
     }
 
     /// Whether this agent row has ever recorded a real hook lifecycle signal (`spaces_agent_signal`), as
@@ -392,8 +414,13 @@ extension WorkspaceOrchestrator {
         // agent. A never-signaled ad-hoc foreground-detection row is pure detection state that the reconciler
         // may silently demote (deleting it with no exited notice), so a watcher attached to it would be owed
         // a notice that never comes. Reject it and tell the caller to retry after the agent signals; this
-        // also keeps the silent demote provably unwatchable.
-        if isAdHocDetectedForegroundAgent(target), try !agentRowHasRecordedHookSignal(target) {
+        // also keeps the silent demote provably unwatchable. A detection row backing an `.agent`-launch-kind
+        // session is exempt from this rejection: that session exists for the one agent it was launched to
+        // run, so `handleAgentExit` never silently demotes its row, and a watcher may subscribe before the
+        // agent's first hook signal.
+        if isAdHocDetectedForegroundAgent(target), try !agentRowHasRecordedHookSignal(target),
+            !builtInAgentSessionWasLaunchedAsAgent(target)
+        {
             throw WorkspaceError.invalidArgument(
                 message: "Agent session \(agentSessionID) has not emitted its first hook signal yet; retry the subscribe after it starts working.")
         }
@@ -701,13 +728,18 @@ extension WorkspaceOrchestrator {
         let sessionBackedSpacesAgent = builtInAgentSessionID(for: existing) != nil
         let existingSessionIsLive = sessionBackedSpacesAgent && builtInAgentSessionIsStillLive(existing)
         if existingSessionIsLive {
-            if isAdHocDetectedForegroundAgent(existing), try !agentRowHasRecordedHookSignal(existing) {
+            if isAdHocDetectedForegroundAgent(existing), try !agentRowHasRecordedHookSignal(existing),
+                !builtInAgentSessionWasLaunchedAsAgent(existing)
+            {
                 // Foreground-detected agent's process ended but its shell terminal is still live, and the
                 // row never recorded a hook signal — pure detection state with no lifecycle history or
                 // subscribers, so demote to a plain terminal rather than keeping a phantom "exited"
                 // coding-agent row on the shell. A detection row that HAS signaled is deliberately NOT
                 // claimed here: it falls through to the live-terminal `.exited` branch below so its
-                // subscribers get the exited notice and a restart can reuse the row.
+                // subscribers get the exited notice and a restart can reuse the row. Nor is a row backing
+                // an `.agent`-launch-kind session, signaled or not: that session exists for the one agent
+                // it was launched to run, so its row takes the `.exited` path like any other spawned
+                // agent rather than quietly reverting to a plain terminal.
                 try demoteAdHocDetectedForegroundAgent(existing)
                 return nil
             }
