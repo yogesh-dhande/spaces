@@ -12,6 +12,12 @@ export const docsPageLinks: DocsPageLink[] = [
       "Get Spaces installed, its dependencies in place, and your environment verified, then grant permission to control Google Chrome on first launch. Includes installing and updating the daemon on Linux, plus the SSH access, network reachability, and background-service requirements a remote machine or cloud VM has to meet before it can pair. If the Editor shows a persistent \"Live refresh off\" notice naming the device's inotify watch limit, raise fs.inotify.max_user_watches on that device.",
   },
   {
+    href: "/docs/remote-access",
+    title: "Remote Access",
+    summary:
+      "Reach a remote machine or cloud VM from your Mac and iPhone across changing networks: pair over Tailscale, understand the SSH and port 47847 connections, keep the daemon running across disconnects, and verify the setup survives a change of network.",
+  },
+  {
     href: "/docs/getting-started",
     title: "Getting Started",
     summary: "Connect your first project and launch a workspace in under five minutes.",
