@@ -167,6 +167,7 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 
 ## Empty, Missing, And Draft States
 - Empty or missing values should use muted text placeholders rather than large empty-state treatments in dense views.
+- A full pane whose only content is its recovery actions is the one carve-out: it may center a block of the subject's name, its path in monospaced caption, and the labeled pill actions that fill the pane, with their shortcut hints beneath. The pill is the iOS control bar's (glyph plus label on the secondary surface), and the same state rules apply, so only the actions that currently apply are drawn. A pane that has content of its own keeps the muted placeholder instead.
 - Missing state should preserve context when possible so the user can act on it in place.
 - Draft state should be obvious and easy to complete or cancel.
 - A blocked review-comment composer should explain the missing prerequisite directly beneath its text area: say whether no agent is running or a running agent must be assigned. Do not add a success helper when sending is available; the enabled action and its agent label are sufficient.

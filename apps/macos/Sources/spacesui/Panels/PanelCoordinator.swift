@@ -145,6 +145,16 @@ import spacesterminalcore
             self.movePaneToNewPanelWindow(scope: scope, paneID: paneID)
         }
         view.onFocusPane = { [weak self] paneID in self?.focusPane(scope: scope, paneID: paneID, moveKeyboardFocus: true) }
+        // Only a `.workspace` panel draws the empty state, so only it can fire these; both act on the
+        // workspace the scope names.
+        view.onStartWorkspace = { [weak self] in
+            guard let self, case .workspace(_, let workspaceID) = scope else { return }
+            self.host.launchWorkspace(id: workspaceID)
+        }
+        view.onNewTerminal = { [weak self] in
+            guard let self, case .workspace(_, let workspaceID) = scope else { return }
+            self.host.openWorkspaceTerminal(workspaceID: workspaceID, route: .button)
+        }
         view.onSplitWeightsChanged = { [weak self] splitID, weights in self?.updateSplitWeights(scope: scope, splitID: splitID, weights: weights) }
         view.paneContentProvider = { [weak self] pane in self?.content(forPane: pane) }
         view.onWindowMembershipChanged = { [weak self] isInWindow in
@@ -1639,6 +1649,17 @@ import spacesterminalcore
         }
     }
 
+    /// Refreshes a visible panel's empty state in place. The workspace-detail fast path calls this on
+    /// overview ticks: those carry the workspace's run state and its device's reachability, which decide
+    /// which actions the empty block offers, and nothing else would re-derive them without a layout
+    /// change. The view compares the whole state and touches no button unless one of its values moved.
+    func refreshEmptyState(scope: PanelScope) {
+        guard let panel = panels[scope], let view = panel.view, panel.layout.isEmpty, let state = host.workspacePanelEmptyState(scope: scope) else {
+            return
+        }
+        view.updateEmptyState(state)
+    }
+
     /// Re-titles every materialized global panel window after an overview update.
     ///
     /// A rename (and its clearing) reaches this client only through the overview — nothing emits a
@@ -1807,9 +1828,9 @@ import spacesterminalcore
             var titles: [String: String] = [:]
             for tab in state.layout.tabs { titles[tab.id] = tabTitle(forTabID: tab.id, in: state.layout) }
             let identity = globalWindowIdentity(scope: scope, layout: state.layout)
-            view.apply(
-                layout: state.layout, titlesByTabID: titles, identity: identity,
-                newTabShortcutHint: host.shortcuts.footerShortcutHint(for: .guiOpenTerminalShortcut))
+            // Only an empty panel draws the block, so a panel with tabs derives no state for it.
+            let emptyState = state.layout.isEmpty ? host.workspacePanelEmptyState(scope: scope) : nil
+            view.apply(layout: state.layout, titlesByTabID: titles, identity: identity, emptyState: emptyState)
             syncPaneAccessibilityTitles(scope: scope)
             syncPanelWindowTitle(scope: scope)
             syncFocusedPaneFooter(scope: scope)

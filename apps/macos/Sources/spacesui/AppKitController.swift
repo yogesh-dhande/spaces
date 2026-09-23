@@ -4371,6 +4371,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // only the footer's status needs refreshing.
         if panelView.superview === detailContainer, visibleDetailWorkspaceID == workspace.id {
             populateWorkspaceDetailFooter(workspace: workspace)
+            // An empty panel's block offers Start only while the workspace owes one, so it has to
+            // follow the run state these ticks carry; the panel re-render that would otherwise
+            // recompute it is exactly what this fast path skips.
+            panelCoordinator.refreshEmptyState(scope: scope)
             // The tab strip titles derive from runtime-target names, which an overview
             // tick can rename without touching the layout; refresh them in place since
             // this fast path skips the panel re-render.
@@ -4395,6 +4399,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         ])
         panelCoordinator.restoreSelection(scope: scope)
         detailContainer.layoutSubtreeIfNeeded()
+    }
+
+    /// What a workspace panel's empty state draws while the panel holds no tabs — the workspace's
+    /// identity and which of Start workspace and New terminal apply. Nil for a `.globalWindow` scope,
+    /// which closes when its last pane goes and so has no empty state, and for a workspace no longer
+    /// listed, whose panel is on its way out.
+    ///
+    /// Start follows the same rule as the workspace footer and the sidebar row's menu
+    /// (`workspaceLifecycleControlsOfferStart`), reading the missing-process count from the same
+    /// runtime status the footer uses: a workspace with no reported status yet has no missing
+    /// configured process to report either, so the count reads zero exactly as the footer's default
+    /// status does.
+    func workspacePanelEmptyState(scope: PanelScope) -> WorkspacePanelEmptyState? {
+        guard case .workspace(_, let workspaceID) = scope, let (_, workspace) = findWorkspace(id: workspaceID) else { return nil }
+        let missingConfiguredProcessCount = deviceModel.workspaceRuntimeStatusByID[workspaceID]?.missingConfiguredProcessCount ?? 0
+        return WorkspacePanelEmptyState(
+            workspaceName: workspace.displayName, directory: workspace.dir,
+            offersStart: Self.workspaceLifecycleControlsOfferStart(
+                isRunning: workspace.isRunning, missingConfiguredProcessCount: missingConfiguredProcessCount),
+            deviceAcceptsDaemonActions: deviceAcceptsDaemonActions(forWorkspaceID: workspaceID),
+            unreachableDeviceTooltip: unreachableDeviceTooltip(forWorkspaceID: workspaceID),
+            newTerminalShortcutHint: shortcuts.footerShortcutHint(for: .guiOpenTerminalShortcut))
     }
 
     /// Everything `populateWorkspaceDetailFooter` draws, so a refresh that would draw the same strip can
