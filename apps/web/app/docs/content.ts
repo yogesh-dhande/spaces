@@ -75,7 +75,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/orchestration",
     title: "Agent Orchestration",
     summary:
-      "Let one lead agent spawn and coordinate children across worktrees, harnesses, and machines. Includes the orchestrator prompt.",
+      "Let one lead agent spawn and coordinate children across worktrees, harnesses, and machines, starting from the included orchestrator prompt.",
   },
   {
     href: "/docs/automations",
