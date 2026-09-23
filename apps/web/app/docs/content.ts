@@ -9,84 +9,85 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/installation",
     title: "Installation & Setup",
     summary:
-      "Get Spaces installed, its dependencies in place, and your environment verified, then grant permission to control Google Chrome on first launch. Includes installing and updating the daemon on Linux, plus the SSH access, network reachability, and background-service requirements a remote machine or cloud VM has to meet before it can pair. If the Editor shows a persistent \"Live refresh off\" notice naming the device's inotify watch limit, raise fs.inotify.max_user_watches on that device.",
+      "Install Spaces on your Mac or a Linux box, grant Chrome access, and pair a remote machine or cloud VM.",
   },
   {
     href: "/docs/remote-access",
     title: "Remote Access",
     summary:
-      "Reach a remote machine or cloud VM from your Mac and iPhone across changing networks: pair over Tailscale, understand the SSH and port 47847 connections, keep the daemon running across disconnects, and verify the setup survives a change of network.",
+      "Keep a remote machine reachable from your Mac and iPhone as you move between Wi-Fi and cellular.",
   },
   {
     href: "/docs/getting-started",
     title: "Getting Started",
-    summary: "Connect your first project and launch a workspace in under five minutes.",
+    summary:
+      "Connect your first project and launch a workspace in under five minutes.",
   },
   {
     href: "/docs/projects",
     title: "Projects",
     summary:
-      "Configure a codebase once so every workspace you create starts with its processes running and its named services reachable at stable per-workspace URLs, with browser sessions ready to focus.",
+      "Configure a codebase once so every new workspace starts with its processes running and its services reachable.",
   },
   {
     href: "/docs/workspaces",
     title: "Workspaces",
     summary:
-      "Create, name, and switch between isolated streams of work, each with its own git branch, windows, processes, and settings.",
+      "Create, name, and switch between isolated streams of work, each with its own branch, windows, and processes.",
   },
   {
     href: "/docs/workspace-lifecycle",
     title: "Workspace Lifecycle",
     summary:
-      "Understand how workspaces move between stopped and running, and how deleting removes one, across the GUI and the minimal CLI runtime flow.",
+      "How a workspace moves between stopped and running, and what deleting one removes.",
   },
   {
     href: "/docs/services",
     title: "Services",
     summary:
-      "Declare named services once and reach each at a stable per-workspace URL through a bundled Caddy proxy — no manual port assignment, no cookie collisions between workspaces.",
+      "Give each named service a stable per-workspace URL through the bundled Caddy proxy.",
   },
   {
     href: "/docs/processes",
     title: "Processes",
     summary:
-      "Run servers, workers, and coding agents alongside each workspace as terminal-style shell commands with named-service and Spaces directory variables.",
+      "Run servers, workers, and coding agents alongside each workspace as shell commands.",
   },
   {
     href: "/docs/browser-sessions",
     title: "Browser Sessions",
     summary:
-      "Attach Chrome URLs to a workspace so the pages you need are one direct shortcut away while unopened sessions stay out of window cycling, and open the same sessions in an in-app web view from your iPhone.",
+      "Attach Chrome URLs to a workspace and open them from the Mac app or the in-app web view on your iPhone.",
   },
   {
     href: "/docs/window-management",
     title: "Window Management",
     summary:
-      "Spaces tracks workspace Chrome tabs and terminal panes so direct shortcuts can open or focus targets and cycling stays inside already-open windows.",
+      "How Spaces tracks workspace Chrome tabs and terminal panes so shortcuts open, focus, and cycle the right windows.",
   },
   {
     href: "/docs/coding-agents",
     title: "Coding Agents",
     summary:
-      "Track Claude Code, Codex, opencode, and other coding agents per workspace, and drive several of them from a single terminal — list, spawn, annotate, subscribe for blocked/done alerts, send keystrokes, and kill. Spaces offers to install lifecycle hooks for detected agent CLIs so each session reports its state automatically.",
+      "Track Claude Code, Codex, opencode, and other agents per workspace, and get alerted when one is blocked or done.",
   },
   {
     href: "/docs/orchestration",
     title: "Agent Orchestration",
     summary:
-      "Talk to one agent to get all your work done: a lead agent spawns children in isolated worktrees across harnesses, models, and machines, and coordinates them to a verified finish. Includes the copy-paste orchestrator prompt.",
+      "Let one lead agent spawn and coordinate children across worktrees, harnesses, and machines. Includes the orchestrator prompt.",
   },
   {
     href: "/docs/automations",
     title: "Automations",
     summary:
-      "Schedule a coding agent with a prompt, or run any shell command, on your Mac or a paired Linux box — manually or on a schedule, even when Spaces is closed. Watch runs live and replay them later.",
+      "Run a coding agent or shell command on a schedule, on your Mac or a paired Linux box, and replay the runs later.",
   },
   {
     href: "/docs/shortcuts",
     title: "Keyboard Shortcuts",
     summary:
-      "Jump between workspaces, focus windows, and trigger common actions with shortcuts you can configure, plus the fixed keys that zoom terminal text.",
+      "Jump between workspaces, focus windows, and trigger common actions with configurable shortcuts.",
   },
   {
     href: "/docs/troubleshooting",
@@ -104,19 +105,19 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/cli",
     title: "CLI Reference",
     summary:
-      "Use the spaces CLI for same-machine workspace actions, pairing links, Spaces terminal sessions, text and byte terminal input, owner-seeking terminal windows, and stopping a workspace or a single terminal session.",
+      "Drive workspaces, terminal sessions, and pairing from the spaces command line.",
   },
   {
     href: "/docs/mcp",
     title: "Model Context Protocol",
     summary:
-      "Connect an MCP client such as Claude Code, Codex, or opencode to the spaces mcp server so it can list and drive your projects, workspaces, and Spaces terminals.",
+      "Connect Claude Code, Codex, or opencode to the spaces MCP server to list and drive your workspaces and terminals.",
   },
   {
     href: "/docs/ios",
     title: "iOS App",
     summary:
-      "Pair the Spaces iOS app directly with a Mac or Linux device — no desktop app in between — to browse live terminal sessions, watch coding agents, run workspace processes, open browser sessions in an in-app web view, and create workspaces from your phone, or tour the app with sample data in Demo Mode before you pair.",
+      "Pair your iPhone directly with a Mac or Linux device to watch and steer sessions, or tour the app in Demo Mode first.",
   },
 ];
 
