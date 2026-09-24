@@ -53,6 +53,18 @@ enum CodePaneBridge {
         return dict["id"] == nil && dict["method"] as? String == "ready"
     }
 
+    /// Whether a message body is the fire-and-forget `{method:"unsubscribeFileSignature"}`
+    /// notification: the page asking the host to end the file-signature stream outright, because it
+    /// now shows something no disk change could be reconciled into (an open image). It carries no
+    /// path (the host already knows which one it is watching, and the page must never be able to
+    /// name a different one) and expects no reply, so it is recognized here rather than as a
+    /// `Request`. There is no matching subscribe notification: an `editor`-purpose
+    /// `workspaceFileRead` is the only thing that ever points the stream.
+    static func isUnsubscribeFileSignature(body: Any) -> Bool {
+        guard let dict = body as? [String: Any] else { return false }
+        return dict["id"] == nil && dict["method"] as? String == "unsubscribeFileSignature"
+    }
+
     /// One editor's open-file snapshot inside the complete workspace state and `InitPayload`.
     /// Mirrors `CodePaneWeb/src/bridge/types.ts`'s
     /// `CodePaneEditorState`: `baseContent` is the file's content as of `baseSHA256` (the merge
@@ -87,9 +99,7 @@ enum CodePaneBridge {
             self.confirmedBaseSHA256 = confirmedBaseSHA256
         }
 
-        private enum CodingKeys: String, CodingKey {
-            case path, baseSHA256, baseContent, content, dirty, conflict, confirmedBaseSHA256
-        }
+        private enum CodingKeys: String, CodingKey { case path, baseSHA256, baseContent, content, dirty, conflict, confirmedBaseSHA256 }
 
         /// Hand-written for `confirmedBaseSHA256` alone: absent and explicitly null are different
         /// instructions to the next write, and `decodeIfPresent` maps both to nil. Every other field
@@ -103,9 +113,8 @@ enum CodePaneBridge {
             content = try container.decode(String.self, forKey: .content)
             dirty = try container.decode(Bool.self, forKey: .dirty)
             conflict = try container.decode(Bool.self, forKey: .conflict)
-            confirmedBaseSHA256 = container.contains(.confirmedBaseSHA256)
-                ? .some(try container.decode(String?.self, forKey: .confirmedBaseSHA256))
-                : .none
+            confirmedBaseSHA256 =
+                container.contains(.confirmedBaseSHA256) ? .some(try container.decode(String?.self, forKey: .confirmedBaseSHA256)) : .none
         }
 
         func encode(to encoder: any Encoder) throws {
@@ -150,8 +159,8 @@ enum CodePaneBridge {
         let confirmedBaseSHA256: String??
 
         init(
-            path: String, baseSHA256: String, baseContent: String, comparisonOldContent: String?, content: String, dirty: Bool, conflict: Bool = false,
-            conflictBaseSHA256: String? = nil, confirmedBaseSHA256: String?? = nil
+            path: String, baseSHA256: String, baseContent: String, comparisonOldContent: String?, content: String, dirty: Bool,
+            conflict: Bool = false, conflictBaseSHA256: String? = nil, confirmedBaseSHA256: String?? = nil
         ) {
             self.path = path
             self.baseSHA256 = baseSHA256
@@ -184,9 +193,8 @@ enum CodePaneBridge {
             // The one optional key in this snapshot: absent and explicitly null mean different
             // things here (no Keep mine decision vs. one that recreates a deleted file), which
             // `decodeIfPresent` cannot tell apart since it maps both to nil.
-            confirmedBaseSHA256 = container.contains(.confirmedBaseSHA256)
-                ? .some(try container.decode(String?.self, forKey: .confirmedBaseSHA256))
-                : .none
+            confirmedBaseSHA256 =
+                container.contains(.confirmedBaseSHA256) ? .some(try container.decode(String?.self, forKey: .confirmedBaseSHA256)) : .none
         }
 
         func encode(to encoder: any Encoder) throws {
@@ -529,11 +537,22 @@ enum CodePaneBridge {
         case workspaceDiffManifestRelease(scope: DiffScope, manifestID: String)
         /// `ownsFileSignature` is true only for the standalone Editor's read; inline diff reads must
         /// not retarget the one native file-signature watcher away from that Editor file.
-        case workspaceFileRead(
-            path: String, ownsFileSignature: Bool, comparisonBaseRevision: String?, oldPath: String?, requiresDirectPath: Bool)
+        case workspaceFileRead(path: String, ownsFileSignature: Bool, comparisonBaseRevision: String?, oldPath: String?, requiresDirectPath: Bool)
         /// Reads a file from the immutable target revision attached to last-commit diff metadata. It must
         /// not affect the standalone Editor's live working-tree file-signature subscription.
         case workspaceRevisionFileRead(path: String, revision: String, oldPath: String?)
+        /// Reads raw bytes for one of the six raster image types `imageMediaType(forPath:)` recognizes,
+        /// for the Editor's image preview. `mediaType` is resolved once here by `plan(for:)`, so
+        /// `imageReadPayload` never has to re-decide the same narrowing. See `workspaceFileRead`'s
+        /// text-only contract, which this case stays entirely out of: everything that is not one of
+        /// those six extensions keeps going through that method's refusal.
+        ///
+        /// `isOpenDocument` is true only when the Editor is opening this image AS the pane's document,
+        /// as opposed to loading an image a Markdown document displays. Neither retargets the one
+        /// native file-signature watcher (an open image has no buffer a disk change could be reconciled
+        /// into), but the former is still a navigation: see `performWorkspaceImageRead` for what that
+        /// costs a text read still in flight for the file the pane is leaving.
+        case workspaceImageRead(path: String, mediaType: String, isOpenDocument: Bool)
         /// `baseSHA256` is `nil` for the "create" convention (see `WorkspaceFileWriteOptions.baseSHA256`
         /// in `CodePaneWeb/src/bridge/types.ts`): the write must fail as a conflict unless the target
         /// path does not exist yet. This is how "Keep mine" recreates a file the daemon reports as
@@ -627,8 +646,10 @@ enum CodePaneBridge {
             case "inlineDiff":
                 let comparisonBaseRevision = request.params["comparisonBaseRevision"] as? String
                 let oldPath = request.params["oldPath"] as? String
-                return .success(.workspaceFileRead(
-                    path: path, ownsFileSignature: false, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath, requiresDirectPath: true))
+                return .success(
+                    .workspaceFileRead(
+                        path: path, ownsFileSignature: false, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath,
+                        requiresDirectPath: true))
             default: return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileRead purpose must be editor or inlineDiff."))
             }
         case "workspaceRevisionFileRead":
@@ -636,6 +657,23 @@ enum CodePaneBridge {
                 return .failure(BridgeError(code: .invalidArgument, message: "workspaceRevisionFileRead requires a path and revision."))
             }
             return .success(.workspaceRevisionFileRead(path: path, revision: revision, oldPath: request.params["oldPath"] as? String))
+        case "workspaceImageRead":
+            // Every caller identifies whether this read is the pane opening the image as its document
+            // or a Markdown document displaying one of its own images, the same way `workspaceFileRead`
+            // makes every caller name its purpose. Only the former is a navigation.
+            guard let path = request.params["path"] as? String, !path.isEmpty, let purpose = request.params["purpose"] as? String else {
+                return .failure(BridgeError(code: .invalidArgument, message: "workspaceImageRead requires a path and purpose."))
+            }
+            guard let mediaType = imageMediaType(forPath: path) else {
+                return .failure(BridgeError(code: .invalidArgument, message: "This file cannot be opened as an image."))
+            }
+            let isOpenDocument: Bool
+            switch purpose {
+            case "editor": isOpenDocument = true
+            case "markdownEmbed": isOpenDocument = false
+            default: return .failure(BridgeError(code: .invalidArgument, message: "workspaceImageRead purpose must be editor or markdownEmbed."))
+            }
+            return .success(.workspaceImageRead(path: path, mediaType: mediaType, isOpenDocument: isOpenDocument))
         case "workspaceFileWrite":
             // `options.baseSHA256` is optional: absent or JSON `null` (the wire's "create" convention
             // — see realBridge.ts's `workspaceFileWrite`) both fall out of `as? String` as `nil` here,
@@ -651,8 +689,7 @@ enum CodePaneBridge {
             switch purpose {
             case "editor": requiresDirectPath = false
             case "inlineDiff": requiresDirectPath = true
-            default:
-                return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileWrite purpose must be editor or inlineDiff."))
+            default: return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileWrite purpose must be editor or inlineDiff."))
             }
             return .success(.workspaceFileWrite(path: path, content: content, baseSHA256: baseSHA256, requiresDirectPath: requiresDirectPath))
         case "workspaceFileList": return .success(.workspaceFileList)
@@ -738,6 +775,24 @@ enum CodePaneBridge {
         }
     }
 
+    // MARK: - Image support
+
+    /// The six raster formats the web bridge's image preview understands, keyed by lowercased file
+    /// extension. This is the single source of truth for "is this path an image": `plan(for:)`'s
+    /// `workspaceImageRead` case consults it to decide whether to even ask the daemon, and
+    /// `imageReadPayload` never re-decides it.
+    private static let imageMediaTypesByExtension: [String: String] = [
+        "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp",
+    ]
+
+    /// Resolves `path`'s extension, lowercased, to a media type, or `nil` when it names none of the six
+    /// image extensions above (so `PHOTO.PNG` and `photo.png` both resolve).
+    static func imageMediaType(forPath path: String) -> String? {
+        let ext = (path as NSString).pathExtension.lowercased()
+        guard !ext.isEmpty else { return nil }
+        return imageMediaTypesByExtension[ext]
+    }
+
     // MARK: - Result payload shaping
 
     /// `workspaceFileRead`'s wire shape (`content`, `sha256`, `size`) doesn't match
@@ -757,9 +812,7 @@ enum CodePaneBridge {
             self.comparisonOldContent = comparisonOldContent
         }
 
-        private enum CodingKeys: String, CodingKey {
-            case content, sha256, size, comparisonOldContent
-        }
+        private enum CodingKeys: String, CodingKey { case content, sha256, size, comparisonOldContent }
 
         // `comparisonOldContent` is required-nullable on the web bridge. In particular, an added
         // file has no old side; omitting the key would be indistinguishable from a malformed response.
@@ -789,9 +842,32 @@ enum CodePaneBridge {
         } else {
             comparisonOldContent = nil
         }
-        return .success(FileReadPayload(
-            content: content, sha256: result.sha256, size: result.size,
-            comparisonOldContent: comparisonOldContent))
+        return .success(FileReadPayload(content: content, sha256: result.sha256, size: result.size, comparisonOldContent: comparisonOldContent))
+    }
+
+    /// Raw-bytes counterpart to `FileReadPayload`, for a `workspaceImageRead` path. Every field is
+    /// required (unlike `FileReadPayload`'s required-nullable comparison side), so a plain synthesized
+    /// `Encodable` conformance is enough.
+    struct ImageReadPayload: Encodable, Equatable {
+        let base64Data: String
+        let mediaType: String
+        let sha256: String
+        let size: Int
+    }
+
+    /// Passes the daemon's raw bytes straight through for an image read. Deliberately does NOT consult
+    /// `isBinaryGuess` and does not attempt a UTF-8 decode, unlike `fileReadPayload`: an image's bytes
+    /// are binary by definition, so the exact guess and decode `fileReadPayload` refuses on is what this
+    /// path exists to accept. `plan(for:)`'s `workspaceImageRead` case has already narrowed `path` down
+    /// to one of the six image extensions `imageMediaType(forPath:)` recognizes before this is ever
+    /// called; everything that is not one of those six extensions keeps going through `fileReadPayload`'s
+    /// text-only refusal, untouched by this method. The base64 itself is still validated: the daemon
+    /// should never send anything else, but this is the boundary that would catch it if it did.
+    static func imageReadPayload(_ result: SpacesDeviceWorkspaceFileReadResult, mediaType: String) -> Result<ImageReadPayload, BridgeError> {
+        guard Data(base64Encoded: result.base64Data) != nil else {
+            return .failure(BridgeError(code: .invalidArgument, message: "This image could not be read."))
+        }
+        return .success(ImageReadPayload(base64Data: result.base64Data, mediaType: mediaType, sha256: result.sha256, size: result.size))
     }
 
     struct RevisionFileReadPayload: Encodable, Equatable {
@@ -801,9 +877,7 @@ enum CodePaneBridge {
         let isWorktreeEquivalentToRevision: Bool
         let comparisonOldContent: String?
 
-        private enum CodingKeys: String, CodingKey {
-            case content, sha256, size, isWorktreeEquivalentToRevision, comparisonOldContent
-        }
+        private enum CodingKeys: String, CodingKey { case content, sha256, size, isWorktreeEquivalentToRevision, comparisonOldContent }
 
         // See `FileReadPayload`: this specialized Last Commit response has the same strict
         // required-nullable old-side contract for an added file.
@@ -822,12 +896,9 @@ enum CodePaneBridge {
     }
 
     static func revisionFileReadPayload(_ result: SpacesDeviceWorkspaceRevisionFileReadResult) -> Result<RevisionFileReadPayload, BridgeError> {
-        guard !result.worktreeFile.isBinaryGuess,
-            let worktreeData = Data(base64Encoded: result.worktreeFile.base64Data),
+        guard !result.worktreeFile.isBinaryGuess, let worktreeData = Data(base64Encoded: result.worktreeFile.base64Data),
             let worktreeContent = String(data: worktreeData, encoding: .utf8)
-        else {
-            return .failure(BridgeError(code: .invalidArgument, message: "This file cannot be opened as text."))
-        }
+        else { return .failure(BridgeError(code: .invalidArgument, message: "This file cannot be opened as text.")) }
         let comparisonOldContent: String?
         if let encoded = result.comparisonOldBase64Data {
             guard let data = Data(base64Encoded: encoded), let content = String(data: data, encoding: .utf8) else {
@@ -837,9 +908,10 @@ enum CodePaneBridge {
         } else {
             comparisonOldContent = nil
         }
-        return .success(.init(
-            content: worktreeContent, sha256: result.worktreeFile.sha256, size: result.worktreeFile.size,
-            isWorktreeEquivalentToRevision: result.isWorktreeEquivalentToRevision, comparisonOldContent: comparisonOldContent))
+        return .success(
+            .init(
+                content: worktreeContent, sha256: result.worktreeFile.sha256, size: result.worktreeFile.size,
+                isWorktreeEquivalentToRevision: result.isWorktreeEquivalentToRevision, comparisonOldContent: comparisonOldContent))
     }
 
     /// `workspaceFileWrite`'s wire shape is `{ok:true, sha256}`, `{conflict:true, currentSHA256}`, or

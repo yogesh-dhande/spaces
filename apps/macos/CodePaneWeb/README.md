@@ -69,6 +69,19 @@ production build.
   returns Git-filtered `comparisonOldContent` for that revision (and its optional rename
   `oldPath`), without adding old text to the streamed patch. Every caller must identify one of
   these purposes.
+- `workspaceImageRead(path, purpose)`: one image file's exact bytes as `base64Data`, plus the
+  `mediaType` its extension resolves to, `sha256`, and `size`. Only `.png`, `.jpg`, `.jpeg`, `.gif`,
+  `.webp`, and `.bmp` are readable this way; every other file the daemon guesses is binary stays
+  refused by `workspaceFileRead` as unopenable text. `editor` is the image the Editor is opening as
+  the pane's document; `markdownEmbed` is an image a Markdown document displays. Neither retargets
+  the file-signature watcher, so an open image does not live-refresh. `editor` does count as the
+  pane navigating: the host claims a fresh navigation token for it at dispatch, so a text read still
+  in flight for the file being left cannot point the watcher at itself when it lands, which is what
+  the failing-image-open case depends on (the page keeps showing the previous file and sends no
+  `unsubscribeFileSignature` of its own). That superseded read also never installs a watcher of its
+  own, while its own dispatch already retired the watcher for the file still showing, so the host
+  reuses a watcher only while it belongs to the current subscription generation: the page's reread of
+  the file it is still showing reinstalls it rather than being skipped for naming the same path.
 - `workspaceRevisionFileRead({path, revision, oldPath?})` — the exact live-checkout `content`,
   `sha256`, and size whose Git-filter-aware equivalence was checked against the manifest-pinned
   revision, plus the first-parent filtered `comparisonOldContent` (using `oldPath` for renames).
@@ -115,6 +128,14 @@ production build.
 - `subscribeDiffSignature(scope, listener)` — returns an unsubscribe function. Only one scope
   is observed at a time; calling it again is expected to replace the previous subscription's
   effective scope rather than layer another live one.
+- `unsubscribeFileSignature()`: fire-and-forget, ends the host's file-signature stream outright.
+  The `subscribeFileSignature` unsubscribe function above only detaches this page's listener; the
+  host keeps the daemon streaming for whichever path an `editor` read last named, since that read is
+  the only thing that points it. Editor mode sends this when it opens an image, which has no buffer
+  a disk change could be reconciled into, so the previous file's stream stops rather than polling on
+  behind it. The next successful `editor` read points the stream again in the ordinary way, and it is
+  the only thing that does: while the stop stands, a failed open's own restore of the file left
+  showing is skipped, so nothing resubscribes behind a page that holds no listener.
 - `subscribeFileListSignature(listener)`: returns an unsubscribe function for the Files-list
   membership stream.
 - Both signature events carry `liveRefreshError` (a string) whenever the daemon's file watcher for
@@ -162,6 +183,9 @@ branch on `.code`.
 - **Ready (JS -> Swift, fire-and-forget):** the same message handler with `{method:"ready"}`
   and no `id`, sent once after the plugin's `spaces:init` listener is attached. The host must
   wait for this before dispatching `spaces:init` — the plugin renders nothing until it arrives.
+- **Watcher stop (JS -> Swift, fire-and-forget):** the same message handler with
+  `{method:"unsubscribeFileSignature"}` and no `id`. It carries no path: the host already knows
+  which one it is watching, and the page must not be able to name a different one.
 - **State pushes (JS -> Swift, fire-and-forget):** the same message handler receives
   `{method:"workspaceStateChanged", params: CodePaneWorkspaceState}`. The web app debounces
   continuous edits and immediately reports discrete changes through one complete, self-contained
@@ -286,7 +310,8 @@ file, or off any rendered line is left to WebKit's native menu instead.
 ## Editor mode
 
 A read-only open-file bar (`src/app/editorView.ts`, `.editor-path`) feeds a single-item,
-edit-mode `CodeView`, with an Editor sidebar sharing the Changes list element.
+edit-mode `CodeView` and, for a previewable file, a rendered surface beside it (see Previews
+below), with an Editor sidebar sharing the Changes list element.
 Files uses a lazily fetched full workspace listing and a collapsed, lazy-materialized directory
 tree; that listing is sorted and capped at 50,000 paths with a `truncated` flag. Changes
 reparents the existing changed-files list, so toggling the sidebar does not rebuild its rows.
@@ -311,6 +336,158 @@ the edit session, saving first when the buffer is dirty. Clicking into another f
 flushes the open session and switches once it is clean. Quitting is one event pair: the host
 dispatches `spaces:flushEdits` with a token, the page awaits the flush in flight and answers with
 `editsFlushed` carrying that token.
+
+### Previews
+
+One segmented control at the trailing end of the open-file bar (`src/app/modeControl.ts`) drives
+every preview; `src/app/previewMode.ts` decides a file's kind from its extension, which segments
+its control offers, and which one it opens on. `src/app/previewSurface.ts` builds whichever
+rendered surface the pick names, into the preview half of the `.editor-split` row that also holds
+the source `CodeView` and a draggable divider (`src/app/editorSplitDivider.ts`). A mode switch
+hides a half rather than unmounting it, so returning to the source finds the same document, caret,
+and scroll position.
+
+Markdown renders through markdown-it with `html: false`, the same pipeline and options the iOS
+terminal Markdown artifact viewer uses; `src/styles/markdownPreview.css` is an adapted copy of
+`apps/ios/Resources/terminal-markdown.css` (see that file's own header for why it is a copy).
+Top-level blocks are stamped with their source line, which is what the split's two-way scroll sync
+reads. A source line before the first stamped block (a document opening with blank lines) scrolls the
+preview to its top, since that is where such a line's part of the document sits. Preview mode hides
+the source half, and a hidden half has no geometry, so the reading position the pane persists comes
+from the block at the preview's own scroll top while Preview is showing; a hibernated pane returns to
+the line the user was reading there rather than to the one showing when Preview was picked. An image or link the document writes resolves against the workspace through
+`src/app/workspacePath.ts`; a resolved image is fetched once per path with `workspaceImageRead` and
+cached. Rendered anchors carry no `href` at all: the target the preview resolved goes in `data-link`,
+and one delegated click/Enter listener opens that workspace file in the Editor, or scrolls to the
+heading a `#fragment` names. An `href` would give
+the web view navigations no listener ever sees (a middle click, WKWebView's own Open Link item, a
+dragged link), and the pane has nowhere to send them. A link carrying a `data-link` is a tab stop
+with `role="link"`, so the keyboard reaches what the pointer does. A reference that resolves to no
+workspace file (an absolute URL, a `data:` URL, a protocol-relative `//host/path`, a climb above the
+root) is followed by nothing: such a link gets no `data-link` and no tab stop, keeping its text and
+link styling while doing nothing, and an image never becomes an `<img>` at all. A `#fragment` is
+resolved against the document's own headings, which the renderer gives GitHub-style slug ids
+(lowercased, trimmed, punctuation dropped, spaces hyphenated, repeats suffixed `-1`, `-2`); the
+fragment is percent-decoded before it is matched, and one naming no heading is left inert the same
+way a link out of the workspace is, so a table of contents works and a stale anchor is not a focus
+stop with nothing behind it. Rendering is two steps (`md.parse`, then `md.renderer.render`) so the
+heading ids are known before the link rule runs, since a table of contents names headings that come
+after it. Its alt text renders
+in a muted `.markdown-image-alt` span instead, since an `<img>` carrying that `src` would be fetched
+the instant the markup is assigned, and this bundle makes no network request.
+
+Image loading is bounded by four fixed rules. At most 4 reads are in flight at once, the rest
+waiting in a FIFO queue, so a document full of screenshots does not put the user's next save behind
+all of them on the daemon's per-workspace serial git queue; document order is request order, since
+the queue is filled by walking the rendered DOM. At most 200 distinct images resolve per document,
+and a reference past that renders its alt text exactly as a reference naming no workspace file does,
+which is also why an admitted path stays admitted while the document is retyped. The document also
+carries an aggregate byte budget, `MAX_DOCUMENT_IMAGE_BYTES` (64 MiB of encoded payload): the count
+cap alone bounds how many images render but not how large each one is, and a single image can
+approach the bridge's 10 MiB per-file limit, so 200 of them could otherwise retain roughly 2 GiB of
+base64 strings and decoded bitmaps until the document changes, enough to terminate the web-content
+process. Beside it sits an aggregate decoded-pixel budget, `MAX_DOCUMENT_IMAGE_PIXELS` (64 megapixels,
+roughly 256 MiB of decoded bitmaps at 4 bytes per pixel), charged once an image's `<img>` element has
+loaded and its natural size is known, since the byte budget bounds encoded size, not what an ordinary
+photo (a few MiB encoded, tens of megapixels decoded) costs once decoded. A workspace path cited more
+than once in a document is charged once, not once per citation: every citation gets its own `<img>`
+element and its own `load` listener (one reference's element can still be mid-decode, its listener
+not yet fired, when a re-render leaves a second listener on the fresh element that replaces it), but
+the cache entry the path shares across them records the charge, and every listener after the first to
+fire for an already-charged entry is a no-op. Every reference in a document is admitted, and its read dispatched, before any read
+settles, so the budget is enforced where a read settles rather than at admission: a result that
+would cross it is discarded rather than cached or rendered, and renders its alt text the same way a
+reference past the count cap does. That settle also closes the document's budget, so every image
+still queued for the document is dropped unfetched (rendering alt text too) and every later read for
+that document, queued or not yet requested, is refused the same way; an image already rendered from
+a read that settled under the budget is unaffected, since a closed budget only gates what has not
+rendered yet. The loaded data URLs belong to the open document: a keystroke re-render and a mode
+switch (which clears the rendered
+DOM, not the cache) reuse them. One `MarkdownPreview` instance serves the pane, so `previewSurface.ts`
+tells it (`beginDocument`) whenever a different document of any kind takes the surface, and that
+clears the rendered DOM alongside the cache, the admitted set, and whatever is still queued, so the
+`<img src="data:...">` nodes of the document being left do not stay reachable through this instance
+for as long as the pane stays open; reopening the first document reads its images again, whether a
+JSON, table, SVG, plain, or image file was shown in between. Tearing the pane down calls `dispose()`,
+which does the same and leaves the queue empty, so a document citing more images than the concurrency
+cap admits stops reading instead of working through the remainder after the pane is gone. A read
+already in flight either way settles and is dropped by its own generation check.
+
+The JSON tree (`src/app/jsonTreeView.ts`) is read-only, builds a container's children on its first
+expand, and is offered only for a `.json` file whose buffer parses as strict JSON, which is
+re-evaluated on every keystroke. That one parse is also what the tree is built from
+(`jsonTreeDocument` hands its result to `PreviewSurface.renderText`), so a keystroke parses the
+buffer once rather than once to offer the segment and again to render it. That parse runs through this bundle's own
+recursive-descent parser (`src/app/jsonDocument.ts`) rather than `JSON.parse`, and it builds the
+tree's model directly: a value carries its own `kind` tag, and a number carries the lexeme the file
+wrote, which the tree prints verbatim, so `9007199254740993` and `1.00` read as typed where
+`JSON.parse` hands over `9007199254740992` and `1`. Nothing is materialized as a JavaScript object,
+so a `"__proto__"` member is an ordinary member rather than a write through the prototype setter
+that `Object.entries` would then not report. The grammar accepted is exactly RFC 8259, the same
+strictness as `JSON.parse`: a repeated key keeps its first occurrence's position and takes its last
+value, and everything else (comments, trailing commas, single quotes, unquoted keys) throws a
+`SyntaxError` carrying the offset it stopped at, which is what leaves such a file on the Text view. Each disclosure button carries an `aria-label` naming the member it
+opens and that member's summary (`Expand items: array of 3`, `Collapse user: object with 4 keys`),
+kept in sync with the button's state, since the button's own content is a bare triangle. The CSV/TSV table (`src/app/tableView.ts`, parsed by
+`src/app/delimitedTable.ts`) is read-only with a sticky first row. It caps rendered columns at 200
+and rendered rows at 2000, further bounded by a 50,000-cell (rendered rows x rendered columns)
+budget on a wide file that shrinks the rendered row count, never the column count, below 2000; the
+JSON tree caps at 2000 children per container, and at 100,000 retained values across the whole
+document. A muted trailing note names the real count
+where a cap bites: "Showing first R of N rows" (R the rows actually rendered), "Showing first C
+of N columns" (C the columns actually rendered, set by the widest row the parse retained, which the
+row cap can leave narrower than the column cap), or "2000 of N items shown", one line per cap a file
+trips. The Markdown preview
+caps the same way, at whichever of 5000 source lines (`MAX_RENDERED_SOURCE_LINES`) or 1,000,000
+source characters (`MAX_PREVIEW_SOURCE_CHARS`, `src/app/markdownPreview.ts`) the source hits first,
+with "Showing first 5000 of N lines" or "Showing the first 1,000,000 characters of N" naming whichever
+bound applied; the character bound exists because the line bound alone lets a near-10 MiB document
+with almost no newlines (a single generated line) through whole, which can expand into millions of
+DOM nodes and hang or terminate the web-content process. `truncateSource` picks the more restrictive
+of the two candidates (the first 5000 lines, or the longest prefix of whole lines fitting the
+character budget, cutting mid-line only when the very first line alone exceeds it) and runs on every
+render, not only on open, so an edit that grows a document past either bound is caught the same way.
+The rendered part
+keeps its `data-source-line` stamps (stamped on every top-level block including a fenced or
+indented code block), so scroll sync works over it unchanged.
+The Markdown preview parses whole (one pass over a string the editor has already read), so its
+count is the file's real one. The table and the JSON tree parse to a budget instead. For the table,
+parser and renderer share one set of constants (`src/app/tableLimits.ts`), and `parseDelimitedTable`
+takes the retention budget they name, keeping the first 2000 rows and each row's first 200 fields as
+strings while everything past that is counted and dropped character by character rather than built.
+A near-10 MiB spreadsheet therefore costs the rows the table can show rather than every field it
+holds, and the result's `rowCount` and `widestRowWidth` are the whole file's, which is what keeps
+the notes naming real totals. The JSON parser holds the same shape, with two budgets of its own
+(`MAX_CONTAINER_CHILDREN` and `MAX_DOCUMENT_NODES` in `src/app/jsonDocument.ts`, the first read by
+the tree for its note): it retains a container's first 2000 members and at most 100,000 values across
+the document, validates everything past either bound without building a model for it, and gives each
+container a `count` of every member the document gave it beside what was kept. A near-10 MiB array of
+a few million scalars therefore costs the members the tree can show rather than one model object per
+value, on the open and on every keystroke after it, and the tree's note names the file's real total.
+The per-container cap alone would not bound the document: a matrix of 2000 arrays of 2000 scalars
+keeps every container inside it while building about four million models, which is what the document
+budget stops. Past that budget the parse retains nothing further, and every container it had already
+started keeps counting its remaining members, so such a container's note names the file's real total
+exactly as a container past the per-container cap does. A key repeated past the document budget still
+updates the retained member it names: the replacement is parsed like any value, charging one node for
+itself, and if the budget is already spent its own children land the same way an over-budget
+container's do elsewhere, counted but not retained. A key first seen past a bound is counted, not
+kept. A third budget, `MAX_NESTING_DEPTH` (512), bounds recursion itself rather than what gets
+retained: it applies on both the retaining and the skip path, and a container opening past it throws
+`JSONDepthError` rather than recursing further, since the JS engine's own recursion limit is a
+runtime detail rather than a language guarantee (`parseStrictJSON` disables Tree for a
+`JSONDepthError` the same way it does for a `JSONSyntaxError`). It is the element count, rebuilt on
+every keystroke, that decides
+whether the pane stays responsive. SVG previews and image files
+share one stage (`src/app/imageStage.ts`), which renders through `<img>` so no document script or
+subresource ever runs. The SVG preview is bounded by character count instead, at 1,000,000
+(`MAX_PREVIEW_SVG_CHARS` in `src/app/previewSurface.ts`, the same figure as the Markdown preview's
+`MAX_PREVIEW_SOURCE_CHARS`): past it the surface renders a muted note in place of the image rather
+than building a data URL from the buffer, since that cost is in the URL and its decode rather than
+in DOM elements. An image has no text buffer at all: it claims no file-signature
+subscription, contributes no workspace-state snapshot, and reports its byte size and decoded pixel
+dimensions in the bar instead. The mode a user picks is remembered per file for the pane's
+lifetime only, deliberately outside the persisted workspace document.
 
 A concurrent change produces the merge/conflict UI without discarding the user's buffer: clean
 buffers reload, non-overlapping edits merge with Undo, overlapping or deleted-file edits show
@@ -431,7 +608,7 @@ the plaintext fallback actually plaintext.
 targets that Rollup must code-split into a chunk per language regardless of which ones
 `preloadHighlighter` is ever asked to load. There's no public `@pierre/diffs` option to swap in
 a scoped highlighter that only knows about these files. As a result the built output is ~11MB
-across ~320 files, but only the entry chunk (~740KB) and its CSS load eagerly — `index.html` has
+across ~320 files, but only the entry chunk (~1.08MB, ~310KB gzipped) and its CSS load eagerly: `index.html` has
 a single `<script type="module">` tag and no `modulepreload` hints — and `resolveAllowedLanguage`
 guarantees only the 19 whitelisted languages' chunks can ever actually be requested at runtime,
 since anything else resolves to `"text"` first. The remaining ~300 files sit on disk unused.
@@ -571,5 +748,5 @@ native menu.
   Confirming this deviation against the mockup's intent is worth a look before Swift-host
   integration locks in the pane's overall layout.
   - **Shiki bundle size**, discussed above: whether the ~11MB/~320-file built output (only
-  ~740KB of which loads eagerly) is acceptable as-is, or worth a `shiki` aliasing pass to
+  ~1.08MB of which loads eagerly) is acceptable as-is, or worth a `shiki` aliasing pass to
   physically shrink it to the 19 languages.

@@ -362,6 +362,59 @@ export const NEW_FEATURE_FLAG = "new-feature-enabled";
 
 - Wire up Phase 4 comment surface.
 `,
+  "notes/preview.md": `# Preview harness
+
+A document for exercising the Markdown split preview: a [relative link](TODO.md), an image
+committed next to it, and enough structure to scroll.
+
+![Diagram](diagram.png)
+
+## Lists
+
+1. One
+2. Two
+
+- Bullet
+- Another bullet
+
+> A quote, with \`inline code\` beside it.
+
+\`\`\`ts
+export const answer = 42;
+\`\`\`
+`,
+  "config/settings.json": `{
+  "name": "spaces",
+  "version": 3,
+  "enabled": true,
+  "limits": { "files": 50000, "bytes": 10485760 },
+  "modes": ["diff", "editor"],
+  "retired": null
+}
+`,
+  "data/rows.csv": `name,role,note
+Ada,engineer,"Writes ""the"" compiler"
+Grace,admiral,"Two lines
+in one field"
+Alan,theorist,
+`,
+  "art/logo.svg": `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <circle cx="32" cy="32" r="28" fill="#59dbcd" />
+  <path d="M20 34 L29 43 L46 24" fill="none" stroke="#0f1517" stroke-width="6" />
+</svg>
+`,
+};
+
+/** Image files readable through `workspaceImageRead`, keyed by workspace-relative path. Values are
+ *  the exact bytes the host would hand back, base64-encoded, with the media type its extension
+ *  resolves to. One 1x1 PNG is enough for the harness: the stage and the Markdown preview both care
+ *  that bytes arrive and decode, not what the picture is. */
+export const FIXTURE_IMAGE_CONTENTS: Record<string, { base64Data: string; mediaType: string }> = {
+  "notes/diagram.png": {
+    base64Data:
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    mediaType: "image/png",
+  },
 };
 
 /** The mock's full workspace listing (`workspaceFileList`'s `paths`), backing Editor mode's Files
@@ -370,6 +423,7 @@ export const NEW_FEATURE_FLAG = "new-feature-enabled";
  *  that `paths` carries checked-out submodule contents rather than listing them separately. */
 export const FIXTURE_ALL_PATHS: string[] = [
   ...Object.keys(FIXTURE_FILE_CONTENTS),
+  ...Object.keys(FIXTURE_IMAGE_CONTENTS),
   "src/app/editorView.ts",
   "src/app/diffView.ts",
   "src/app/fileList.ts",

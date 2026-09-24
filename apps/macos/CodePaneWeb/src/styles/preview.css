@@ -1,0 +1,209 @@
+/*
+ * Styles for the Editor's four preview surfaces: the shared mode control (modeControl.ts), the
+ * JSON tree (jsonTreeView.ts), the delimited table (tableView.ts), and the image/SVG stage
+ * (imageStage.ts). Split layout, pane dividers, and `.editor-open-bar` chrome belong to the host
+ * (editorView.ts) and are not this file's concern.
+ */
+
+/*
+ * Preview mode segmented control. Its buttons reuse the house `.seg` class name, but here `.seg` is
+ * the segment button itself rather than app.css's wrapping wrapper div, so every rule below is
+ * scoped under `.preview-mode-control` to win over app.css's plain `.seg` selector on specificity
+ * regardless of stylesheet order.
+ */
+.preview-mode-control {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  flex: 0 0 auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.preview-mode-control .seg {
+  appearance: none;
+  height: 100%;
+  padding: 0 8px;
+  border: none;
+  border-radius: 0;
+  border-right: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--fg2);
+  font: inherit;
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.preview-mode-control .seg:last-child {
+  border-right: none;
+}
+
+.preview-mode-control .seg[aria-pressed="true"] {
+  background: var(--accent-tint);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.preview-mode-control .seg:disabled {
+  color: var(--fg3);
+  cursor: default;
+}
+
+/*
+ * JSON tree. Rows are single-line flex rows; `--json-depth`, set inline per row by jsonTreeView.ts,
+ * drives the indent.
+ */
+.json-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding-left: calc(4px + var(--json-depth, 0) * 14px);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.json-row:hover {
+  background: var(--row-hover);
+}
+
+/* Resets needed to show a plain triangle glyph in place of a button box. The glyph gets its own
+   color/size rather than inheriting the row's: container rows already mute their own text, which
+   left the triangle too faint to read as a hit target. `--fg2` (raised to `--fg` on hover/focus)
+   keeps it legible in both themes without matching the row's foreground exactly. */
+.json-disclosure {
+  appearance: none;
+  flex: 0 0 12px;
+  border: none;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  text-align: center;
+  color: var(--fg2);
+  cursor: default;
+}
+
+.json-row:hover .json-disclosure,
+.json-disclosure:focus-visible {
+  color: var(--fg);
+}
+
+.json-disclosure:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.json-key {
+  color: var(--sy-key);
+}
+
+.json-punct {
+  color: var(--fg2);
+}
+
+.json-summary {
+  color: var(--fg3);
+}
+
+/* The trailing "N of M items shown" row on a container the tree stopped materializing. */
+.json-truncated {
+  color: var(--fg3);
+  font-style: italic;
+}
+
+.json-string {
+  color: var(--sy-str);
+}
+
+.json-number {
+  color: var(--sy-num);
+}
+
+.json-keyword {
+  color: var(--fg2);
+}
+
+/* Delimited table. */
+.preview-table-empty {
+  padding: 10px;
+  color: var(--fg3);
+  font-size: 12px;
+}
+
+.preview-table {
+  border-collapse: collapse;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.preview-table th,
+.preview-table td {
+  border: 1px solid var(--line);
+  padding: 3px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.preview-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface2);
+  color: var(--fg2);
+  font-weight: 600;
+}
+
+/* The trailing "Showing first N of M rows" / "... of M columns" lines under a table that stopped
+   short of the file, one line each. */
+.preview-table-note {
+  padding: 6px 8px;
+  color: var(--fg3);
+  font-size: 12px;
+  font-style: italic;
+}
+
+/* The same trailing note under a Markdown document that stopped short of the file. */
+.markdown-preview-note {
+  padding: 6px 0;
+  color: var(--fg3);
+  font-size: 12px;
+  font-style: italic;
+}
+
+/* The scroll containers previewSurface.ts wraps the tree and the table in: a long document scrolls
+   inside the pane, and the table's sticky header row has something to stick to. */
+.json-tree {
+  height: 100%;
+  overflow: auto;
+  padding: 6px 0;
+}
+
+.preview-table-scroll {
+  height: 100%;
+  overflow: auto;
+}
+
+/* Image / SVG stage. */
+.image-stage {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface2);
+}
+
+.image-stage-picture {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.image-stage-error {
+  color: var(--fg3);
+  font-size: 12px;
+}

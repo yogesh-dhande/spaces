@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorView } from "../src/app/editorView";
+import { PreviewSurface } from "../src/app/previewSurface";
 import {
   CodePaneEditorState,
   FileSignatureEvent,
@@ -66,6 +67,21 @@ vi.mock("@pierre/diffs/edit", () => ({
   Editor: class {},
 }));
 
+// Counts strict-JSON parses. `parseJSONDocument` is the single entry point `previewMode.ts` parses
+// through, so a render that decides the Tree segment's availability and then builds the tree from a
+// second parse of the same string is visible here as two calls.
+const jsonParseCalls = vi.hoisted(() => ({ count: 0 }));
+vi.mock("../src/app/jsonDocument", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/app/jsonDocument")>();
+  return {
+    ...actual,
+    parseJSONDocument: (...args: Parameters<typeof actual.parseJSONDocument>) => {
+      jsonParseCalls.count += 1;
+      return actual.parseJSONDocument(...args);
+    },
+  };
+});
+
 /** Builds an `EditorView` and registers it for teardown: its autosave scheduler holds a real
  *  debounce timer, which must not outlive the test that armed it. */
 function newEditorView(
@@ -100,6 +116,7 @@ function makeBridge(overrides: Partial<SpacesBridge> = {}): SpacesBridge {
     workspaceDiffFileChunkCancel: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceDiffManifestRelease: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceFileRead: vi.fn().mockRejectedValue(new Error("not used")),
+    workspaceImageRead: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceRevisionFileRead: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceFileWrite: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceFileList: vi.fn().mockRejectedValue(new SpacesBridgeError("unavailable", "File search is not available yet.")),
@@ -109,6 +126,7 @@ function makeBridge(overrides: Partial<SpacesBridge> = {}): SpacesBridge {
     subscribeDiffSignature: vi.fn(() => () => {}),
     subscribeFileListSignature: vi.fn(() => () => {}),
     subscribeFileSignature: vi.fn(() => () => {}),
+    unsubscribeFileSignature: vi.fn(),
     notifyWorkspaceStateChanged: vi.fn(),
     notifyRenderMetric: vi.fn(),
     notifyEditsFlushed: vi.fn(),
@@ -3796,5 +3814,500 @@ describe("EditorView focused-line recovery", () => {
     expect(view.focusedLineNumber()).toBe(2);
     fakeCodeViewControl.editorSelection = undefined;
     container.remove();
+  });
+});
+
+/**
+ * The shared mode control and the preview surfaces it drives. These assert what the user sees in
+ * the open-file bar and which half of the pane is showing, not how either is built: the renderers
+ * have their own tests (markdownPreview, jsonTreeView, tableView, imageStage).
+ */
+describe("EditorView previews and the shared mode control", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    container.remove();
+  });
+
+  /** The mode control's segments as the bar shows them: label, pressed, disabled. */
+  function segments(): Array<[string, boolean, boolean]> {
+    const control = container.querySelector("#code-pane-editor-mode-control") as HTMLElement;
+    return [...control.querySelectorAll("button")].map((button) => [
+      button.textContent ?? "",
+      button.getAttribute("aria-pressed") === "true",
+      button.disabled,
+    ]);
+  }
+
+  function clickSegment(label: string): void {
+    const control = container.querySelector("#code-pane-editor-mode-control") as HTMLElement;
+    const button = [...control.querySelectorAll("button")].find((candidate) => candidate.textContent === label);
+    button?.click();
+  }
+
+  function sourceVisible(): boolean {
+    return (container.querySelector("#code-pane-editor-scroll") as HTMLElement).style.display !== "none";
+  }
+
+  function previewVisible(): boolean {
+    return (container.querySelector("#code-pane-editor-preview") as HTMLElement).style.display !== "none";
+  }
+
+  function previewEl(): HTMLElement {
+    return container.querySelector("#code-pane-editor-preview") as HTMLElement;
+  }
+
+  async function openText(view: EditorView, bridge: SpacesBridge, path: string): Promise<void> {
+    view.open(path);
+    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith(path, "editor"));
+  }
+
+  function textBridge(content: string): SpacesBridge {
+    return makeBridge({ workspaceFileRead: vi.fn().mockResolvedValue({ content, sha256: "sha-1", size: content.length }) });
+  }
+
+  /** Drives Pierre's document-change callback, the seam a keystroke arrives on. */
+  function typeInto(contents: string): void {
+    capturedCodeViewOptions.current?.onItemEditChange({ file: { contents } }, undefined);
+  }
+
+  it("shows no mode control for a plain source file, and the source alone", async () => {
+    const bridge = textBridge("export {}\n");
+    const view = newEditorView(container, bridge);
+    await openText(view, bridge, "src/app/root.ts");
+
+    expect(segments()).toEqual([]);
+    expect((container.querySelector("#code-pane-editor-mode-control") as HTMLElement).style.display).toBe("none");
+    expect([sourceVisible(), previewVisible()]).toEqual([true, false]);
+  });
+
+  it("opens Markdown split, with source and preview side by side and a draggable divider", async () => {
+    const bridge = textBridge("# Title\n\nBody text.\n");
+    const view = newEditorView(container, bridge);
+    await openText(view, bridge, "docs/notes.md");
+
+    expect(segments()).toEqual([
+      ["Split", true, false],
+      ["Source", false, false],
+      ["Preview", false, false],
+    ]);
+    expect([sourceVisible(), previewVisible()]).toEqual([true, true]);
+    expect((container.querySelector("#code-pane-editor-split-divider") as HTMLElement).style.display).not.toBe("none");
+    expect(previewEl().querySelector(".markdown-body h1")?.textContent).toBe("Title");
+  });
+
+  it("switches Markdown to one surface at a time, hiding the divider", async () => {
+    const bridge = textBridge("# Title\n");
+    const view = newEditorView(container, bridge);
+    await openText(view, bridge, "docs/notes.md");
+
+    clickSegment("Source");
+    expect([sourceVisible(), previewVisible()]).toEqual([true, false]);
+    expect((container.querySelector("#code-pane-editor-split-divider") as HTMLElement).style.display).toBe("none");
+
+    clickSegment("Preview");
+    expect([sourceVisible(), previewVisible()]).toEqual([false, true]);
+  });
+
+  it("re-renders the Markdown preview as the buffer is typed", async () => {
+    const bridge = textBridge("# One\n");
+    const view = newEditorView(container, bridge);
+    await openText(view, bridge, "docs/notes.md");
+    expect(previewEl().querySelector(".markdown-body h1")?.textContent).toBe("One");
+
+    typeInto("# Two\n");
+    await vi.waitFor(() => expect(previewEl().querySelector(".markdown-body h1")?.textContent).toBe("Two"));
+  });
+
+  it("remembers the mode picked for a file, per file, for the pane's lifetime", async () => {
+    const bridge = makeBridge({
+      workspaceFileRead: vi.fn(async (path: string) => ({
+        content: path.endsWith(".md") ? "# Doc\n" : '{"a": 1}\n',
+        sha256: `sha-${path}`,
+        size: 8,
+      })),
+    });
+    const view = newEditorView(container, bridge);
+    await openText(view, bridge, "docs/notes.md");
+    clickSegment("Preview");
+    expect([sourceVisible(), previewVisible()]).toEqual([false, true]);
+
+    view.open("config/settings.json");
+    await vi.waitFor(() => expect(segments()).toEqual([["Tree", true, false], ["Text", false, false]]));
+
+    view.open("docs/notes.md");
+    await vi.waitFor(() =>
+      expect(segments()).toEqual([
+        ["Split", false, false],
+        ["Source", false, false],
+        ["Preview", true, false],
+      ]),
+    );
+    expect([sourceVisible(), previewVisible()]).toEqual([false, true]);
+  });
+
+  it("opens strict JSON on its tree, and a file that does not parse as text with Tree disabled", async () => {
+    const parses = textBridge('{"a": 1}\n');
+    const view = newEditorView(container, parses);
+    await openText(view, parses, "config/settings.json");
+    expect(segments()).toEqual([
+      ["Tree", true, false],
+      ["Text", false, false],
+    ]);
+    expect([sourceVisible(), previewVisible()]).toEqual([false, true]);
+
+    const broken = document.createElement("div");
+    document.body.appendChild(broken);
+    const brokenBridge = textBridge('{"a": 1,}\n');
+    const brokenView = newEditorView(broken, brokenBridge);
+    brokenView.open("config/settings.json");
+    await vi.waitFor(() => expect(brokenBridge.workspaceFileRead).toHaveBeenCalled());
+    const brokenSegments = [...(broken.querySelector("#code-pane-editor-mode-control") as HTMLElement).querySelectorAll("button")].map(
+      (button) => [button.textContent, button.getAttribute("aria-pressed") === "true", button.disabled],
+    );
+    expect(brokenSegments).toEqual([
+      ["Tree", false, true],
+      ["Text", true, false],
+    ]);
+    broken.remove();
+  });
+
+  it("parses a JSON document once per render, not once to offer the tree and again to build it", async () => {
+    const bridge = textBridge('{"a": 1}\n');
+    const view = newEditorView(container, bridge);
+    jsonParseCalls.count = 0;
+    await openText(view, bridge, "config/settings.json");
+    await vi.waitFor(() => expect(previewEl().querySelector(".json-row")).not.toBeNull());
+    expect(jsonParseCalls.count).toBe(1);
+
+    jsonParseCalls.count = 0;
+    typeInto('{"a": 2}\n');
+    await vi.waitFor(() => expect(previewEl().textContent).toContain("2"));
+    expect(jsonParseCalls.count).toBe(1);
+  });
+
+  it("leaves the JSON tree when an edit makes the file stop parsing, and returns when it parses again", async () => {
+    const bridge = textBridge('{"a": 1}\n');
+    const view = newEditorView(container, bridge);
+    await openText(view, bridge, "config/settings.json");
+    expect(previewVisible()).toBe(true);
+
+    typeInto('{"a": 1,}\n');
+    await vi.waitFor(() =>
+      expect(segments()).toEqual([
+        ["Tree", false, true],
+        ["Text", true, false],
+      ]),
+    );
+    expect([sourceVisible(), previewVisible()]).toEqual([true, false]);
+
+    typeInto('{"a": 2}\n');
+    await vi.waitFor(() => expect(previewVisible()).toBe(true));
+  });
+
+  it("opens a CSV on its table and a TSV the same way", async () => {
+    const bridge = textBridge("name,role\nAda,engineer\n");
+    const view = newEditorView(container, bridge);
+    await openText(view, bridge, "data/rows.csv");
+
+    expect(segments()).toEqual([
+      ["Table", true, false],
+      ["Text", false, false],
+    ]);
+    expect([...previewEl().querySelectorAll("thead th")].map((cell) => cell.textContent)).toEqual(["name", "role"]);
+    expect([...previewEl().querySelectorAll("tbody td")].map((cell) => cell.textContent)).toEqual(["Ada", "engineer"]);
+
+    clickSegment("Text");
+    expect([sourceVisible(), previewVisible()]).toEqual([true, false]);
+  });
+
+  it("opens an SVG on its preview stage with an editable source behind it", async () => {
+    const bridge = textBridge('<svg xmlns="http://www.w3.org/2000/svg"></svg>\n');
+    const view = newEditorView(container, bridge);
+    await openText(view, bridge, "art/logo.svg");
+
+    expect(segments()).toEqual([
+      ["Preview", true, false],
+      ["Source", false, false],
+    ]);
+    expect(previewEl().querySelector("img.image-stage-picture")?.getAttribute("src")).toContain("data:image/svg+xml");
+
+    clickSegment("Source");
+    expect([sourceVisible(), previewVisible()]).toEqual([true, false]);
+  });
+
+  it("opens an image on its stage from the image read, with its byte size in the bar and no mode control", async () => {
+    const workspaceImageRead = vi.fn().mockResolvedValue({ base64Data: "AAAA", mediaType: "image/png", sha256: "sha-img", size: 2048 });
+    const workspaceFileRead = vi.fn().mockRejectedValue(new Error("an image is never read as text"));
+    const bridge = makeBridge({ workspaceImageRead, workspaceFileRead });
+    const view = newEditorView(container, bridge);
+
+    view.open("notes/diagram.png");
+    // The `editor` purpose is what tells the host this read is the pane navigating to a new
+    // document, so a text read still in flight for the file being left cannot claim the watcher.
+    await vi.waitFor(() => expect(workspaceImageRead).toHaveBeenCalledWith("notes/diagram.png", "editor"));
+
+    expect(workspaceFileRead).not.toHaveBeenCalled();
+    expect(container.querySelector(".editor-path")!.textContent).toBe("notes/diagram.png");
+    expect(segments()).toEqual([]);
+    expect([sourceVisible(), previewVisible()]).toEqual([false, true]);
+    expect(previewEl().querySelector("img.image-stage-picture")?.getAttribute("src")).toBe("data:image/png;base64,AAAA");
+    const info = container.querySelector("#code-pane-editor-file-info") as HTMLElement;
+    expect(info.textContent).toBe("2.0 KB");
+    expect(info.style.display).not.toBe("none");
+  });
+
+  it("keeps no editor buffer for an open image, so nothing about it is saved or restored", async () => {
+    const bridge = makeBridge({
+      workspaceImageRead: vi.fn().mockResolvedValue({ base64Data: "AAAA", mediaType: "image/png", sha256: "sha-img", size: 10 }),
+    });
+    const onFileOpened = vi.fn();
+    const view = newEditorView(container, bridge, { onFileOpened });
+
+    view.open("notes/diagram.png");
+    await vi.waitFor(() => expect(onFileOpened).toHaveBeenCalledWith("notes/diagram.png"));
+
+    expect(view.snapshot()).toBeUndefined();
+    expect(saveState(container)).toBe("idle");
+    expect(bridge.subscribeFileSignature).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed image read on the error banner and leaves the previous file showing", async () => {
+    const bridge = makeBridge({
+      workspaceFileRead: vi.fn().mockResolvedValue({ content: "export {}\n", sha256: "sha-1", size: 10 }),
+      workspaceImageRead: vi.fn().mockRejectedValue(new SpacesBridgeError("notFound", "No such file: gone.png")),
+    });
+    const view = newEditorView(container, bridge);
+    await openText(view, bridge, "src/app/root.ts");
+
+    view.open("gone.png");
+    await vi.waitFor(() => {
+      const banner = container.querySelector(".banner.error") as HTMLElement;
+      expect(banner?.textContent).toBe("No such file: gone.png");
+    });
+    expect(container.querySelector(".editor-path")!.textContent).toBe("src/app/root.ts");
+  });
+
+  it("loads a Markdown image through the image read, resolved against the document's directory", async () => {
+    const workspaceImageRead = vi.fn().mockResolvedValue({ base64Data: "BBBB", mediaType: "image/png", sha256: "sha-img", size: 4 });
+    const bridge = makeBridge({
+      workspaceFileRead: vi.fn().mockResolvedValue({ content: "![Shot](img/shot.png)\n", sha256: "sha-1", size: 22 }),
+      workspaceImageRead,
+    });
+    const view = newEditorView(container, bridge);
+    await openText(view, bridge, "docs/notes.md");
+
+    // An image the document displays is not the document: it reads with `markdownEmbed`, which
+    // leaves the pane's navigation alone.
+    await vi.waitFor(() => expect(workspaceImageRead).toHaveBeenCalledWith("docs/img/shot.png", "markdownEmbed"));
+    await vi.waitFor(() =>
+      expect(previewEl().querySelector(".markdown-body img")?.getAttribute("src")).toBe("data:image/png;base64,BBBB"),
+    );
+  });
+
+  it("opens a workspace file a Markdown link names", async () => {
+    const workspaceFileRead = vi.fn(async (path: string) => ({
+      content: path === "docs/notes.md" ? "[Other](other.md)\n" : "# Other\n",
+      sha256: `sha-${path}`,
+      size: 8,
+    }));
+    const bridge = makeBridge({ workspaceFileRead });
+    const view = newEditorView(container, bridge);
+    await openText(view, bridge, "docs/notes.md");
+
+    (previewEl().querySelector(".markdown-body a") as HTMLElement).click();
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("docs/other.md", "editor"));
+    expect(container.querySelector(".editor-path")!.textContent).toBe("docs/other.md");
+  });
+
+  it("gives the whole pane to the conflict compare view, taking the mode control away until it is resolved", async () => {
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({
+      workspaceFileRead: vi
+        .fn()
+        .mockResolvedValueOnce({ content: "# Mine\n", sha256: "sha-1", size: 7 })
+        .mockResolvedValue({ content: "# Theirs\n", sha256: "sha-2", size: 9 }),
+    });
+    const view = newEditorView(container, bridge);
+    await openText(view, bridge, "docs/notes.md");
+    expect(previewVisible()).toBe(true);
+
+    typeInto("# Mine edited\n");
+    fireFileSignature({ path: "docs/notes.md", sha256: "sha-2", missing: false });
+
+    await vi.waitFor(() => expect(container.querySelector(".banner.conflict")).not.toBeNull());
+    expect(segments()).toEqual([]);
+    expect([sourceVisible(), previewVisible()]).toEqual([true, false]);
+  });
+
+  it("keeps a failed open's own error while an image is the file left showing", async () => {
+    // The daemon's own answers: the file that could not be opened, and the standing image, which is
+    // refused as text the way any binary file is.
+    const workspaceFileRead = vi.fn(async (path: string) => {
+      throw path === "missing.ts"
+        ? new SpacesBridgeError("notFound", "No such file: missing.ts")
+        : new SpacesBridgeError("invalidArgument", "notes/diagram.png cannot be opened as text.");
+    });
+    const bridge = makeBridge({
+      workspaceImageRead: vi.fn().mockResolvedValue({ base64Data: "AAAA", mediaType: "image/png", sha256: "sha-img", size: 10 }),
+      workspaceFileRead,
+    });
+    const view = newEditorView(container, bridge);
+    view.open("notes/diagram.png");
+    await vi.waitFor(() => expect(container.querySelector(".editor-path")!.textContent).toBe("notes/diagram.png"));
+
+    view.open("missing.ts");
+    await vi.waitFor(() => expect((container.querySelector(".banner.error") as HTMLElement)?.textContent).toBe("No such file: missing.ts"));
+
+    // The retained file is an image: reading it as text would fail with "cannot be opened as text"
+    // and overwrite the banner above with a reason that has nothing to do with this open.
+    expect(workspaceFileRead).toHaveBeenCalledTimes(1);
+    expect(workspaceFileRead).toHaveBeenCalledWith("missing.ts", "editor");
+    expect(container.querySelector(".editor-path")!.textContent).toBe("notes/diagram.png");
+  });
+
+  it("ends the host's file-signature stream when an image becomes the current file", async () => {
+    const bridge = makeBridge({
+      workspaceFileRead: vi.fn().mockResolvedValue({ content: "export {}\n", sha256: "sha-1", size: 10 }),
+      workspaceImageRead: vi.fn().mockResolvedValue({ base64Data: "AAAA", mediaType: "image/png", sha256: "sha-img", size: 10 }),
+    });
+    const view = newEditorView(container, bridge);
+    await openText(view, bridge, "src/app/root.ts");
+    expect(bridge.unsubscribeFileSignature).not.toHaveBeenCalled();
+
+    view.open("notes/diagram.png");
+
+    // Dropping the page's own listener is not enough: the host keeps streaming signatures for the
+    // text file until it is told to stop, since only an editor-purpose read ever repoints it.
+    await vi.waitFor(() => expect(bridge.unsubscribeFileSignature).toHaveBeenCalledTimes(1));
+  });
+
+  /** Stamps a fixed `getBoundingClientRect()` result onto `el`: jsdom reports 0 for every real
+   *  layout value, so a scroll-position case has to supply the geometry it reads. */
+  function stubRect(el: Element, rect: Partial<DOMRect>): void {
+    Object.defineProperty(el, "getBoundingClientRect", { value: () => rect, configurable: true });
+  }
+
+  /** The preview's rendered blocks, each carrying the source line it was built from. */
+  function previewBlocks(): HTMLElement[] {
+    return [...previewEl().querySelectorAll<HTMLElement>("[data-source-line]")];
+  }
+
+  it("reads the reading position off the preview while Preview hides the source half", async () => {
+    const bridge = textBridge("one\n\ntwo\n\nthree\n");
+    const view = newEditorView(container, bridge);
+    await openText(view, bridge, "docs/notes.md");
+
+    clickSegment("Preview");
+    expect(sourceVisible()).toBe(false);
+
+    const blocks = previewBlocks();
+    expect(blocks.map((block) => block.dataset.sourceLine)).toEqual(["1", "3", "5"]);
+    // The preview is scrolled so the "two" block (source line 3) sits at its top edge.
+    stubRect(previewEl().firstElementChild!, { top: 0 });
+    stubRect(blocks[0]!, { bottom: -40 });
+    stubRect(blocks[1]!, { bottom: 80 });
+    stubRect(blocks[2]!, { bottom: 200 });
+
+    // What `captureViewPositions` records for the workspace snapshot, and what a hibernated pane
+    // comes back to.
+    expect(view.visibleLine()).toBe(3);
+  });
+
+  it("reads the reading position off the source half in Split, not the preview", async () => {
+    const bridge = textBridge("one\n\ntwo\n\nthree\n");
+    const view = newEditorView(container, bridge);
+    await openText(view, bridge, "docs/notes.md");
+    expect([sourceVisible(), previewVisible()]).toEqual([true, true]);
+
+    const host = container.querySelector<HTMLElement>("#code-pane-editor-scroll")!;
+    const line = document.createElement("div");
+    line.dataset.line = "5";
+    host.appendChild(line);
+    stubRect(host, { top: 0 });
+    stubRect(line, { bottom: 40 });
+
+    const blocks = previewBlocks();
+    stubRect(previewEl().firstElementChild!, { top: 0 });
+    stubRect(blocks[0]!, { bottom: 80 });
+
+    expect(view.visibleLine()).toBe(5);
+  });
+
+  it("reports the source's visible line before a mode switch hides it", async () => {
+    const bridge = textBridge("# Title\n");
+    const sampled: Array<number | null> = [];
+    let view: EditorView | undefined;
+    view = newEditorView(container, bridge, { onStateTransition: () => sampled.push(view?.visibleLine() ?? null) });
+    await openText(view, bridge, "docs/notes.md");
+
+    const host = container.querySelector<HTMLElement>("#code-pane-editor-scroll")!;
+    const line = document.createElement("div");
+    line.dataset.line = "12";
+    host.appendChild(line);
+    Object.defineProperty(host, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    // A display:none element reports an all-zero rect in a real browser, which is what makes
+    // `visibleLine()` answer null for a source half the mode switch has already hidden.
+    Object.defineProperty(line, "getBoundingClientRect", { value: () => ({ bottom: host.style.display === "none" ? 0 : 40 }) });
+    expect(view.visibleLine()).toBe(12);
+
+    sampled.length = 0;
+    clickSegment("Preview");
+
+    expect(sampled).toEqual([12]);
+    // Past the switch the line comes from the preview instead, which reports none of its own until
+    // it has geometry to read (jsdom gives its blocks an all-zero rect).
+    expect(view.visibleLine()).toBeNull();
+  });
+
+  it("aligns the preview to the source's line when switching from Source into Split", async () => {
+    const bridge = textBridge("one\n\ntwo\n\nthree\n");
+    const view = newEditorView(container, bridge);
+    await openText(view, bridge, "docs/notes.md");
+
+    clickSegment("Source");
+    expect([sourceVisible(), previewVisible()]).toEqual([true, false]);
+
+    const host = container.querySelector<HTMLElement>("#code-pane-editor-scroll")!;
+    const line = document.createElement("div");
+    line.dataset.line = "5";
+    host.appendChild(line);
+    stubRect(host, { top: 0 });
+    stubRect(line, { bottom: 40 }); // the source is reading line 5 when Split is picked
+
+    const scrollToSourceLineSpy = vi.spyOn(PreviewSurface.prototype, "scrollToSourceLine");
+    clickSegment("Split");
+
+    // The preview, the half Split just revealed, is aligned to the line the source was already on,
+    // rather than being left wherever it last scrolled (or nowhere, if never shown for this file).
+    expect(scrollToSourceLineSpy).toHaveBeenCalledWith(5);
+    scrollToSourceLineSpy.mockRestore();
+  });
+
+  it("aligns the source to the preview's line when switching from Preview into Split", async () => {
+    const bridge = textBridge("one\n\ntwo\n\nthree\n");
+    const view = newEditorView(container, bridge);
+    await openText(view, bridge, "docs/notes.md");
+
+    clickSegment("Preview");
+    expect([sourceVisible(), previewVisible()]).toEqual([false, true]);
+
+    const blocks = previewBlocks();
+    // The preview is reading the "two" block (source line 3) when Split is picked, the same
+    // geometry the "reads the reading position off the preview" case above stubs.
+    stubRect(previewEl().firstElementChild!, { top: 0 });
+    stubRect(blocks[0]!, { bottom: -40 });
+    stubRect(blocks[1]!, { bottom: 80 });
+    stubRect(blocks[2]!, { bottom: 200 });
+
+    fakeCodeViewControl.scrollToCalls = [];
+    clickSegment("Split");
+
+    // The source, the half Split just revealed, is aligned to the line the preview was already on.
+    expect(fakeCodeViewControl.scrollToCalls).toEqual([{ type: "line", id: "docs/notes.md", lineNumber: 3, behavior: "instant" }]);
   });
 });

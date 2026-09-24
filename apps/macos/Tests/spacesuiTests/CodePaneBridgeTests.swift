@@ -16,16 +16,17 @@ import spacesterminalcore
         diffEditorState: CodePaneBridge.DiffEditorState? = nil
     ) -> CodePaneBridge.WorkspaceState {
         CodePaneBridge.WorkspaceState(
-            mode: mode, scope: .uncommitted, diffLayout: "unified", diffSelectedPath: nil,
-            diffTreeExpandedPaths: diffTreeExpandedPaths, diffTreeSelectedPath: nil, fileTreeExpandedPaths: [], fileTreeSelectedPath: nil, editorSidebarMode: sidebarMode,
+            mode: mode, scope: .uncommitted, diffLayout: "unified", diffSelectedPath: nil, diffTreeExpandedPaths: diffTreeExpandedPaths,
+            diffTreeSelectedPath: nil, fileTreeExpandedPaths: [], fileTreeSelectedPath: nil, editorSidebarMode: sidebarMode,
             editorRecentPaths: recentPaths, diffScrollLine: diffScrollSide == nil ? nil : 0, diffScrollSide: diffScrollSide,
-            diffFocusedPath: diffFocusedSide == nil ? nil : "diff.swift", diffFocusedLine: diffFocusedSide == nil ? nil : 0, diffFocusedSide: diffFocusedSide, editorScrollLine: nil, editorFocusedLine: nil, editorState: editorState,
+            diffFocusedPath: diffFocusedSide == nil ? nil : "diff.swift", diffFocusedLine: diffFocusedSide == nil ? nil : 0,
+            diffFocusedSide: diffFocusedSide, editorScrollLine: nil, editorFocusedLine: nil, editorState: editorState,
             diffEditorState: diffEditorState, pendingReviewComments: nil)
     }
 
-    private func initPayload(
-        baseBranch: String? = nil, isGitRepository: Bool = true, state: CodePaneBridge.WorkspaceState? = nil
-    ) -> CodePaneBridge.InitPayload {
+    private func initPayload(baseBranch: String? = nil, isGitRepository: Bool = true, state: CodePaneBridge.WorkspaceState? = nil)
+        -> CodePaneBridge.InitPayload
+    {
         CodePaneBridge.InitPayload(
             workspaceId: "w1", workspaceName: "My Workspace", theme: "dark", baseBranch: baseBranch, isGitRepository: isGitRepository,
             workspaceState: state ?? workspaceState(), agents: [])
@@ -62,6 +63,16 @@ import spacesterminalcore
     @Test func isReadyRejectsAnythingWithAnId() { #expect(!CodePaneBridge.isReady(body: ["id": "1", "method": "ready"])) }
 
     @Test func isReadyRejectsOtherMethods() { #expect(!CodePaneBridge.isReady(body: ["method": "workspaceFileList"])) }
+
+    @Test func isUnsubscribeFileSignatureRecognizesTheFireAndForgetNotification() {
+        #expect(CodePaneBridge.isUnsubscribeFileSignature(body: ["method": "unsubscribeFileSignature"]))
+    }
+
+    @Test func isUnsubscribeFileSignatureRejectsAnythingWithAnId() {
+        #expect(!CodePaneBridge.isUnsubscribeFileSignature(body: ["id": "1", "method": "unsubscribeFileSignature"]))
+    }
+
+    @Test func isUnsubscribeFileSignatureRejectsOtherMethods() { #expect(!CodePaneBridge.isUnsubscribeFileSignature(body: ["method": "ready"])) }
 
     // MARK: - Diff scope decode
 
@@ -273,8 +284,8 @@ import spacesterminalcore
             path: "a.swift", baseSHA256: "base-sha", baseContent: "disk", comparisonOldContent: "comparison", content: "mine", dirty: true,
             conflict: false, conflictBaseSHA256: nil)
         let withoutComparison = CodePaneBridge.DiffEditorState(
-            path: "a.swift", baseSHA256: "base-sha", baseContent: "disk", comparisonOldContent: nil, content: "mine", dirty: false,
-            conflict: false, conflictBaseSHA256: nil)
+            path: "a.swift", baseSHA256: "base-sha", baseContent: "disk", comparisonOldContent: nil, content: "mine", dirty: false, conflict: false,
+            conflictBaseSHA256: nil)
 
         let withComparisonData = try JSONEncoder().encode(workspaceState(diffEditorState: withComparison))
         let withComparisonJSON = try #require(JSONSerialization.jsonObject(with: withComparisonData) as? [String: Any])
@@ -330,32 +341,28 @@ import spacesterminalcore
     @Test func workspaceStateChangedRequiresAnAbsoluteDeadlineForStartingAgentLaunches() throws {
         let data = try JSONEncoder().encode(workspaceState())
         var params = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        params["pendingAgentLaunch"] = [
-            "sessionId": "session-start", "command": "custom-agent --review", "status": "starting",
-            "message": NSNull(),
-        ]
+        params["pendingAgentLaunch"] = ["sessionId": "session-start", "command": "custom-agent --review", "status": "starting", "message": NSNull()]
         #expect(CodePaneBridge.decodeWorkspaceStateChanged(body: ["method": "workspaceStateChanged", "params": params]) == nil)
 
         params["pendingAgentLaunch"] = [
-            "sessionId": "session-start", "command": "custom-agent --review", "status": "starting",
-            "message": NSNull(), "deadlineEpochMilliseconds": 1_000,
+            "sessionId": "session-start", "command": "custom-agent --review", "status": "starting", "message": NSNull(),
+            "deadlineEpochMilliseconds": 1_000,
         ]
         #expect(CodePaneBridge.decodeWorkspaceStateChanged(body: ["method": "workspaceStateChanged", "params": params]) != nil)
 
         params["pendingAgentLaunch"] = [
-            "sessionId": "session-start", "command": "custom-agent --review", "status": "failed",
-            "message": "No agent detected", "deadlineEpochMilliseconds": 1_000,
+            "sessionId": "session-start", "command": "custom-agent --review", "status": "failed", "message": "No agent detected",
+            "deadlineEpochMilliseconds": 1_000,
         ]
         #expect(CodePaneBridge.decodeWorkspaceStateChanged(body: ["method": "workspaceStateChanged", "params": params]) == nil)
     }
 
     @Test func workspaceStateCarriesEachDiffPositionWithItsSide() throws {
         let state = CodePaneBridge.WorkspaceState(
-            mode: "diff", scope: .uncommitted, diffLayout: "split", diffSelectedPath: "Sources/App.swift",
-            diffTreeExpandedPaths: [], diffTreeSelectedPath: "Sources/App.swift",
-            fileTreeExpandedPaths: [], fileTreeSelectedPath: nil, editorSidebarMode: "files", editorRecentPaths: [],
-            diffScrollLine: 17, diffScrollSide: "old", diffFocusedPath: "Sources/App.swift", diffFocusedLine: 18, diffFocusedSide: "new",
-            editorScrollLine: nil, editorFocusedLine: nil, editorState: nil, diffEditorState: nil, pendingReviewComments: nil)
+            mode: "diff", scope: .uncommitted, diffLayout: "split", diffSelectedPath: "Sources/App.swift", diffTreeExpandedPaths: [],
+            diffTreeSelectedPath: "Sources/App.swift", fileTreeExpandedPaths: [], fileTreeSelectedPath: nil, editorSidebarMode: "files",
+            editorRecentPaths: [], diffScrollLine: 17, diffScrollSide: "old", diffFocusedPath: "Sources/App.swift", diffFocusedLine: 18,
+            diffFocusedSide: "new", editorScrollLine: nil, editorFocusedLine: nil, editorState: nil, diffEditorState: nil, pendingReviewComments: nil)
 
         let data = try JSONEncoder().encode(state)
         let decoded = try JSONDecoder().decode(CodePaneBridge.WorkspaceState.self, from: data)
@@ -410,10 +417,8 @@ import spacesterminalcore
         #expect(
             metric
                 == CodePaneBridge.RenderMetric(
-                    kind: .diff, trigger: .scope, elapsedMS: 42, fetchElapsedMS: 17,
-                    bridgeElapsedMS: nil, decodeElapsedMS: nil, updateElapsedMS: nil, paintElapsedMS: nil,
-                    fileCount: 3, contentBytes: 8192,
-                    path: nil, fileIndex: nil, selectedPriority: false, chunkCount: nil,
+                    kind: .diff, trigger: .scope, elapsedMS: 42, fetchElapsedMS: 17, bridgeElapsedMS: nil, decodeElapsedMS: nil, updateElapsedMS: nil,
+                    paintElapsedMS: nil, fileCount: 3, contentBytes: 8192, path: nil, fileIndex: nil, selectedPriority: false, chunkCount: nil,
                     mode: nil, scope: nil, layout: nil, scrollTop: nil, focusedLine: nil, dirty: nil))
     }
 
@@ -421,8 +426,8 @@ import spacesterminalcore
         let metric = CodePaneBridge.decodeRenderMetric(body: [
             "method": "renderMetric",
             "params": [
-                "kind": "diff", "trigger": "filePatch", "elapsedMs": 42, "fileCount": 3, "contentBytes": 8192,
-                "bridgeElapsedMs": 11, "decodeElapsedMs": 7, "updateElapsedMs": 5, "paintElapsedMs": 19,
+                "kind": "diff", "trigger": "filePatch", "elapsedMs": 42, "fileCount": 3, "contentBytes": 8192, "bridgeElapsedMs": 11,
+                "decodeElapsedMs": 7, "updateElapsedMs": 5, "paintElapsedMs": 19,
             ],
         ])
 
@@ -440,9 +445,7 @@ import spacesterminalcore
         #expect(
             CodePaneBridge.decodeRenderMetric(body: [
                 "method": "renderMetric",
-                "params": [
-                    "kind": "diff", "trigger": "initial", "elapsedMs": 1, "fetchElapsedMs": 2, "fileCount": 0, "contentBytes": 0,
-                ],
+                "params": ["kind": "diff", "trigger": "initial", "elapsedMs": 1, "fetchElapsedMs": 2, "fileCount": 0, "contentBytes": 0],
             ]) == nil)
         #expect(
             CodePaneBridge.decodeRenderMetric(body: [
@@ -471,7 +474,8 @@ import spacesterminalcore
     // MARK: - RPC-to-client-call mapping
 
     @Test func planForWorkspaceDiffManifestChunkDecodesItsScope() {
-        let request = CodePaneBridge.Request(id: "1", method: "workspaceDiffManifestChunk", params: ["scope": ["kind": "uncommitted"], "fileIndex": 0])
+        let request = CodePaneBridge.Request(
+            id: "1", method: "workspaceDiffManifestChunk", params: ["scope": ["kind": "uncommitted"], "fileIndex": 0])
 
         #expect(CodePaneBridge.plan(for: request) == .success(.workspaceDiffManifestChunk(scope: .uncommitted, manifestID: nil, fileIndex: 0)))
     }
@@ -480,7 +484,8 @@ import spacesterminalcore
         let request = CodePaneBridge.Request(
             id: "1", method: "workspaceDiffManifestChunk", params: ["scope": ["kind": "lastCommit"], "manifestID": "manifest-1", "fileIndex": 42])
 
-        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceDiffManifestChunk(scope: .lastCommit, manifestID: "manifest-1", fileIndex: 42)))
+        #expect(
+            CodePaneBridge.plan(for: request) == .success(.workspaceDiffManifestChunk(scope: .lastCommit, manifestID: "manifest-1", fileIndex: 42)))
     }
 
     @Test func planForWorkspaceDiffManifestChunkPropagatesAScopeDecodeFailure() {
@@ -493,16 +498,16 @@ import spacesterminalcore
         let request = CodePaneBridge.Request(
             id: "1", method: "workspaceDiffFileChunk",
             params: [
-                "scope": ["kind": "ref", "refName": "main"], "manifestID": "manifest-1", "relativePath": "Sources/App.swift",
-                "byteOffset": 1024, "transferID": "transfer-1",
+                "scope": ["kind": "ref", "refName": "main"], "manifestID": "manifest-1", "relativePath": "Sources/App.swift", "byteOffset": 1024,
+                "transferID": "transfer-1",
             ])
 
         #expect(
             CodePaneBridge.plan(for: request)
                 == .success(
                     .workspaceDiffFileChunk(
-                        scope: .ref("main"), manifestID: "manifest-1", relativePath: "Sources/App.swift", byteOffset: 1024,
-                        transferID: "transfer-1")))
+                        scope: .ref("main"), manifestID: "manifest-1", relativePath: "Sources/App.swift", byteOffset: 1024, transferID: "transfer-1"))
+        )
     }
 
     @Test func planRejectsAChunkWithoutTheManifestThatOwnsIt() {
@@ -525,14 +530,12 @@ import spacesterminalcore
             CodePaneBridge.plan(for: request)
                 == .success(
                     .workspaceDiffFileChunkCancel(
-                        scope: .lastCommit, manifestID: "manifest-1", relativePath: "Sources/App.swift", byteOffset: 2048,
-                        transferID: "transfer-1")))
+                        scope: .lastCommit, manifestID: "manifest-1", relativePath: "Sources/App.swift", byteOffset: 2048, transferID: "transfer-1")))
     }
 
     @Test func planForWorkspaceDiffManifestReleaseBindsItsScope() {
         let request = CodePaneBridge.Request(
-            id: "1", method: "workspaceDiffManifestRelease",
-            params: ["scope": ["kind": "uncommitted"], "manifestID": "manifest-1"])
+            id: "1", method: "workspaceDiffManifestRelease", params: ["scope": ["kind": "uncommitted"], "manifestID": "manifest-1"])
 
         #expect(CodePaneBridge.plan(for: request) == .success(.workspaceDiffManifestRelease(scope: .uncommitted, manifestID: "manifest-1")))
     }
@@ -555,8 +558,11 @@ import spacesterminalcore
     @Test func planForWorkspaceFileRead() {
         let request = CodePaneBridge.Request(id: "1", method: "workspaceFileRead", params: ["path": "src/a.swift", "purpose": "editor"])
 
-        #expect(CodePaneBridge.plan(for: request) == .success(
-            .workspaceFileRead(path: "src/a.swift", ownsFileSignature: true, comparisonBaseRevision: nil, oldPath: nil, requiresDirectPath: false)))
+        #expect(
+            CodePaneBridge.plan(for: request)
+                == .success(
+                    .workspaceFileRead(
+                        path: "src/a.swift", ownsFileSignature: true, comparisonBaseRevision: nil, oldPath: nil, requiresDirectPath: false)))
     }
 
     @Test func planForWorkspaceFileReadRequiresAPath() {
@@ -567,8 +573,7 @@ import spacesterminalcore
 
     @Test func planForWorkspaceRevisionFileRead() {
         let revision = String(repeating: "a", count: 40)
-        let request = CodePaneBridge.Request(
-            id: "1", method: "workspaceRevisionFileRead", params: ["path": "src/a.swift", "revision": revision])
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceRevisionFileRead", params: ["path": "src/a.swift", "revision": revision])
 
         #expect(CodePaneBridge.plan(for: request) == .success(.workspaceRevisionFileRead(path: "src/a.swift", revision: revision, oldPath: nil)))
     }
@@ -577,6 +582,56 @@ import spacesterminalcore
         let request = CodePaneBridge.Request(id: "1", method: "workspaceRevisionFileRead", params: ["path": "src/a.swift"])
 
         #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test func planForWorkspaceImageRead() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceImageRead", params: ["path": "assets/logo.png", "purpose": "editor"])
+
+        #expect(
+            CodePaneBridge.plan(for: request) == .success(.workspaceImageRead(path: "assets/logo.png", mediaType: "image/png", isOpenDocument: true)))
+    }
+
+    /// An image a Markdown document displays is not the pane's document, so it claims no navigation.
+    @Test func planForAMarkdownEmbedImageReadIsNotTheOpenDocument() {
+        let request = CodePaneBridge.Request(
+            id: "1", method: "workspaceImageRead", params: ["path": "docs/img/shot.png", "purpose": "markdownEmbed"])
+
+        #expect(
+            CodePaneBridge.plan(for: request)
+                == .success(.workspaceImageRead(path: "docs/img/shot.png", mediaType: "image/png", isOpenDocument: false)))
+    }
+
+    @Test func planForWorkspaceImageReadLowercasesTheExtension() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceImageRead", params: ["path": "assets/LOGO.PNG", "purpose": "editor"])
+
+        #expect(
+            CodePaneBridge.plan(for: request) == .success(.workspaceImageRead(path: "assets/LOGO.PNG", mediaType: "image/png", isOpenDocument: true)))
+    }
+
+    @Test func planForWorkspaceImageReadRejectsANonImagePath() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceImageRead", params: ["path": "notes.md", "purpose": "editor"])
+
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test func planForWorkspaceImageReadRejectsANonImageBinaryPath() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceImageRead", params: ["path": "docs/spec.pdf", "purpose": "editor"])
+
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test func planForWorkspaceImageReadRequiresAPath() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceImageRead", params: ["purpose": "editor"])
+
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test func planForWorkspaceImageReadRequiresAKnownPurpose() {
+        let missing = CodePaneBridge.Request(id: "1", method: "workspaceImageRead", params: ["path": "assets/logo.png"])
+        let unknown = CodePaneBridge.Request(id: "2", method: "workspaceImageRead", params: ["path": "assets/logo.png", "purpose": "inlineDiff"])
+
+        #expect(CodePaneBridge.plan(for: missing).isInvalidArgumentFailure)
+        #expect(CodePaneBridge.plan(for: unknown).isInvalidArgumentFailure)
     }
 
     @Test func planForWorkspaceFileWrite() {
@@ -612,13 +667,15 @@ import spacesterminalcore
     @Test func planForWorkspaceFileWriteTreatsAMissingBaseSHA256AsCreate() {
         let request = CodePaneBridge.Request(
             id: "1", method: "workspaceFileWrite", params: ["path": "a", "content": "hi", "options": ["purpose": "editor"]])
-        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileWrite(path: "a", content: "hi", baseSHA256: nil, requiresDirectPath: false)))
+        #expect(
+            CodePaneBridge.plan(for: request) == .success(.workspaceFileWrite(path: "a", content: "hi", baseSHA256: nil, requiresDirectPath: false)))
     }
 
     @Test func planForWorkspaceFileWriteTreatsAJSONNullBaseSHA256AsCreate() {
         let request = CodePaneBridge.Request(
             id: "1", method: "workspaceFileWrite", params: ["path": "a", "content": "hi", "options": ["baseSHA256": NSNull(), "purpose": "editor"]])
-        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileWrite(path: "a", content: "hi", baseSHA256: nil, requiresDirectPath: false)))
+        #expect(
+            CodePaneBridge.plan(for: request) == .success(.workspaceFileWrite(path: "a", content: "hi", baseSHA256: nil, requiresDirectPath: false)))
     }
 
     @Test func planForWorkspaceFileList() {
@@ -728,8 +785,7 @@ import spacesterminalcore
 
     @Test func uncommittedAddedFilePayloadExplicitlyEncodesANullComparisonSide() throws {
         let result = SpacesDeviceWorkspaceFileReadResult(
-            base64Data: Data("added".utf8).base64EncodedString(), sha256: "sha", size: 5, isBinaryGuess: false,
-            comparisonOldBase64Data: nil)
+            base64Data: Data("added".utf8).base64EncodedString(), sha256: "sha", size: 5, isBinaryGuess: false, comparisonOldBase64Data: nil)
         guard case .success(let payload) = CodePaneBridge.fileReadPayload(result) else {
             Issue.record("expected text payload")
             return
@@ -753,14 +809,35 @@ import spacesterminalcore
         #expect(CodePaneBridge.fileReadPayload(result).isInvalidArgumentFailure)
     }
 
+    /// This is the narrowed boundary `imageReadPayload`'s doc comment describes: the exact same daemon
+    /// result `fileReadPayloadRejectsBinaryGuesses`/`fileReadPayloadRejectsNonUTF8Bytes` refuse (a
+    /// binary guess, non-UTF-8 bytes) is accepted here, because an image's bytes are binary by
+    /// definition and this path never consults `isBinaryGuess` or attempts a UTF-8 decode.
+    @Test func imageReadPayloadPassesThroughBinaryBytes() {
+        let invalidUTF8 = Data([0xFF, 0xFE, 0xFD])
+        let result = SpacesDeviceWorkspaceFileReadResult(base64Data: invalidUTF8.base64EncodedString(), sha256: "sha", size: 3, isBinaryGuess: true)
+
+        #expect(
+            CodePaneBridge.imageReadPayload(result, mediaType: "image/png")
+                == .success(
+                    CodePaneBridge.ImageReadPayload(base64Data: invalidUTF8.base64EncodedString(), mediaType: "image/png", sha256: "sha", size: 3)))
+    }
+
+    @Test func imageReadPayloadRejectsUndecodableBase64() {
+        let result = SpacesDeviceWorkspaceFileReadResult(base64Data: "not valid base64!!", sha256: "sha", size: 3, isBinaryGuess: true)
+
+        #expect(CodePaneBridge.imageReadPayload(result, mediaType: "image/png").isInvalidArgumentFailure)
+    }
+
     @Test func revisionFileReadPayloadCarriesTheVerifiedLiveCASBaseline() {
         let result = SpacesDeviceWorkspaceRevisionFileReadResult(
             worktreeFile: .init(base64Data: Data("live text".utf8).base64EncodedString(), sha256: "live-sha", size: 9, isBinaryGuess: false),
             isWorktreeEquivalentToRevision: true, comparisonOldBase64Data: Data("old text".utf8).base64EncodedString())
 
-        #expect(CodePaneBridge.revisionFileReadPayload(result) == .success(.init(
-            content: "live text", sha256: "live-sha", size: 9,
-            isWorktreeEquivalentToRevision: true, comparisonOldContent: "old text")))
+        #expect(
+            CodePaneBridge.revisionFileReadPayload(result)
+                == .success(
+                    .init(content: "live text", sha256: "live-sha", size: 9, isWorktreeEquivalentToRevision: true, comparisonOldContent: "old text")))
     }
 
     @Test func lastCommitAddedFilePayloadExplicitlyEncodesANullComparisonSide() throws {
@@ -892,8 +969,7 @@ import spacesterminalcore
         // characters instead.
         let script = try #require(
             CodePaneBridge.dispatchEventScript(
-                name: "spaces:diffSignature", detail: CodePaneBridge.DiffSignaturePayload(scopeSignature: "a\"b`c\nd", liveRefreshError: nil))
-        )
+                name: "spaces:diffSignature", detail: CodePaneBridge.DiffSignaturePayload(scopeSignature: "a\"b`c\nd", liveRefreshError: nil)))
 
         let detailJSON = try #require(
             stripped(script, prefix: #"window.dispatchEvent(new CustomEvent("spaces:diffSignature", {detail: "#, suffix: "}));"))

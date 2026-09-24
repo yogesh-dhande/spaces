@@ -359,6 +359,7 @@ vi.mock("../src/bridge", () => ({
     subscribeDiffSignature: hoisted.subscribeDiffSignature,
     subscribeFileListSignature: hoisted.subscribeFileListSignature,
     subscribeFileSignature: vi.fn(() => () => {}),
+    unsubscribeFileSignature: vi.fn(),
     notifyWorkspaceStateChanged: hoisted.notifyWorkspaceStateChanged,
     notifyRenderMetric: hoisted.notifyRenderMetric,
     notifyEditsFlushed: hoisted.notifyEditsFlushed,

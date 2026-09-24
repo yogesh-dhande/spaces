@@ -21,6 +21,8 @@ import {
   WorkspaceFileListResult,
   WorkspaceFileReadResult,
   WorkspaceFileReadPurpose,
+  WorkspaceImageReadResult,
+  WorkspaceImageReadPurpose,
   WorkspaceFileWriteOptions,
   WorkspaceFileWriteResult,
   WorkspaceRefListResult,
@@ -68,7 +70,9 @@ import {
  *     no `id`. `workspaceStateChanged` atomically carries all workspace-local
  *     recovery state, including mode, editor source state, sidebar state,
  *     diff edit state, comments, and agent launch tracking. `editsFlushed`
- *     answers one `spaces:flushEdits` request, echoing its token. `retryLiveRefresh` takes an
+ *     answers one `spaces:flushEdits` request, echoing its token. `unsubscribeFileSignature` takes
+ *     no params and asks the host to end the file-signature stream outright, for the case where the
+ *     page has nothing open that a disk change could be reconciled into. `retryLiveRefresh` takes an
  *     empty params object and resolves with no payload once the host has stopped and reopened
  *     both signature streams, which is what makes the daemon re-attempt the workspace's watcher.
  */
@@ -209,6 +213,10 @@ class RealSpacesBridge implements SpacesBridge {
     })) as WorkspaceFileReadResult;
   }
 
+  async workspaceImageRead(path: string, purpose: WorkspaceImageReadPurpose): Promise<WorkspaceImageReadResult> {
+    return (await this.post("workspaceImageRead", { path, purpose })) as WorkspaceImageReadResult;
+  }
+
   async workspaceRevisionFileRead(request: { path: string; revision: string; oldPath?: string }): Promise<import("./types").WorkspaceRevisionFileReadResult> {
     return (await this.post("workspaceRevisionFileRead", request)) as import("./types").WorkspaceRevisionFileReadResult;
   }
@@ -296,6 +304,14 @@ class RealSpacesBridge implements SpacesBridge {
     };
     window.addEventListener(FILE_SIGNATURE_EVENT, handler);
     return () => window.removeEventListener(FILE_SIGNATURE_EVENT, handler);
+  }
+
+  /** Fire-and-forget request to end the host's file-signature stream; see `SpacesBridge`'s own doc
+   *  comment for when the Editor sends it. There is no matching subscribe message: an editor-purpose
+   *  `workspaceFileRead` is what points the stream. */
+  unsubscribeFileSignature(): void {
+    const handler = window.webkit?.messageHandlers?.spacesBridge;
+    handler?.postMessage({ method: "unsubscribeFileSignature" });
   }
 
   subscribeFileListSignature(listener: FileListSignatureListener): Unsubscribe {
