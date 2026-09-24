@@ -543,8 +543,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     private var subscribeFileFailuresRemaining = 0
     private(set) var revisionFileReadCalls: [(workspaceID: String, revision: String, relativePath: String, oldPath: String?)] = []
     private var revisionFileReadResult = SpacesDeviceWorkspaceRevisionFileReadResult(
-        worktreeFile: .init(
-            base64Data: Data("revision text".utf8).base64EncodedString(), sha256: "revision-sha", size: 13, isBinaryGuess: false),
+        worktreeFile: .init(base64Data: Data("revision text".utf8).base64EncodedString(), sha256: "revision-sha", size: 13, isBinaryGuess: false),
         isWorktreeEquivalentToRevision: true, comparisonOldBase64Data: Data("revision text".utf8).base64EncodedString())
 
     private struct InjectedFileSubscribeFailure: Error {}
@@ -552,9 +551,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     func workspaceFileRead(
         workspaceID: String, relativePath: String, comparisonBaseRevision: String?, oldPath: String?, requiresDirectPath _: Bool,
         device: SpacesPairedDeviceRecord
-    ) async throws
-        -> SpacesDeviceWorkspaceFileReadResult
-    {
+    ) async throws -> SpacesDeviceWorkspaceFileReadResult {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SpacesDeviceWorkspaceFileReadResult, any Error>) in
             let arrivalIndex = fileReadCallArrivalCount
             fileReadCallArrivalCount += 1
@@ -563,8 +560,8 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         }
     }
 
-    func workspaceRevisionFileRead(workspaceID: String, revision: String, relativePath: String, oldPath: String?, device: SpacesPairedDeviceRecord) async throws
-        -> SpacesDeviceWorkspaceRevisionFileReadResult
+    func workspaceRevisionFileRead(workspaceID: String, revision: String, relativePath: String, oldPath: String?, device: SpacesPairedDeviceRecord)
+        async throws -> SpacesDeviceWorkspaceRevisionFileReadResult
     {
         revisionFileReadCalls.append((workspaceID, revision, relativePath, oldPath))
         return revisionFileReadResult
@@ -771,6 +768,11 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
     func subscribedFilePath(at index: Int) -> String { subscribedFilePaths[index] }
 
+    /// Every path subscribed so far, in subscribe order. A test that waited on a bound rather than on
+    /// a count asserts against this, so a missing subscription reads as a failed expectation instead
+    /// of trapping on an out-of-range index.
+    func subscribedFilePathList() -> [String] { subscribedFilePaths }
+
     func fileSubscribeCallCount() -> Int { subscribedFilePaths.count }
 
     func triggerFileDisconnect(at index: Int) { subscribedFileDisconnectHandlers[index](nil) }
@@ -823,9 +825,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     func workspaceFileWrite(
         workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, requiresDirectPath _: Bool,
         device: SpacesPairedDeviceRecord
-    )
-        async throws -> SpacesDeviceWorkspaceFileWriteResult
-    {
+    ) async throws -> SpacesDeviceWorkspaceFileWriteResult {
         fileWriteCalls.append((workspaceID, relativePath, base64Data, expectedSHA256))
         let writeWaiters = fileWriteArrivalWaiters
         fileWriteArrivalWaiters.removeAll()
@@ -1103,6 +1103,21 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         if !predicate() { Issue.record("waitUntil timed out after \(timeout)", sourceLocation: sourceLocation) }
     }
 
+    /// The bounded counterpart to the gateway's own `waitFor…` helpers, which suspend forever on a
+    /// count that never arrives. A test asserting that something DOES happen uses this instead, so a
+    /// regression reports a failure rather than hanging the run.
+    private func waitUntilAsync(timeout: Duration = .seconds(5), sourceLocation: SourceLocation = #_sourceLocation, _ predicate: () async -> Bool)
+        async
+    {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while await !predicate(), clock.now < deadline {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        if await !predicate() { Issue.record("waitUntilAsync timed out after \(timeout)", sourceLocation: sourceLocation) }
+    }
+
     private func fakeDevice() -> SpacesPairedDeviceRecord {
         SpacesPairedDeviceRecord(
             id: "device-1", name: "Test Device", platform: "macos", hosts: ["127.0.0.1"], port: 47847, certificateFingerprint: "fingerprint",
@@ -1120,8 +1135,8 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
                 path: "Sources/App.swift", baseSHA256: "editor-base", baseContent: "let base = 1", content: "let edited = 2", dirty: true,
                 conflict: false),
             diffEditorState: .init(
-                path: "Sources/App.swift", baseSHA256: "diff-base", baseContent: "let base = 1", comparisonOldContent: nil, content: "let edited = 3", dirty: true,
-                conflict: true, conflictBaseSHA256: "disk-sha"),
+                path: "Sources/App.swift", baseSHA256: "diff-base", baseContent: "let base = 1", comparisonOldContent: nil, content: "let edited = 3",
+                dirty: true, conflict: true, conflictBaseSHA256: "disk-sha"),
             pendingReviewComments: [
                 .init(
                     id: "draft-1", provisional: true, filePath: "Sources/App.swift", side: .new, lineNumber: 42, lineText: "let edited = 2",
@@ -1185,6 +1200,12 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
     private func fileReadRequest(id: String, path: String) -> CodePaneBridge.Request {
         CodePaneBridge.Request(id: id, method: "workspaceFileRead", params: ["path": path, "purpose": "editor"])
+    }
+
+    /// An Editor image open: the image IS the pane's document, as opposed to the `markdownEmbed` reads
+    /// a Markdown document makes for the images it displays.
+    private func imageReadRequest(id: String, path: String) -> CodePaneBridge.Request {
+        CodePaneBridge.Request(id: id, method: "workspaceImageRead", params: ["path": path, "purpose": "editor"])
     }
 
     /// Waits out a window without asserting anything, so a "this must NOT happen" test can give the
@@ -1426,9 +1447,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
         _ = reloadButton.target?.perform(reloadButton.action, with: reloadButton)
 
-        #expect(
-            content.contentView.subviews.first { $0.accessibilityIdentifier() == "codePaneCrashNotice" } == nil,
-            "Reload removes the notice")
+        #expect(content.contentView.subviews.first { $0.accessibilityIdentifier() == "codePaneCrashNotice" } == nil, "Reload removes the notice")
         let secondWebView = content.contentView.subviews.first { $0 is WKWebView }
         #expect(secondWebView != nil, "Reload installs a fresh web view")
         #expect(secondWebView !== firstWebView, "the fresh web view is a new instance, not the dead one")
@@ -1460,8 +1479,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             at: 0, result: SpacesDeviceWorkspaceDiffManifestChunkResult(manifestID: "test-manifest", scopeSignature: "sig", files: []))
         await settle()
 
-        #expect(
-            !staleEvaluator.evaluatedScripts.contains { $0.contains("req-1") }, "the dead page's evaluator must never receive the stale reply")
+        #expect(!staleEvaluator.evaluatedScripts.contains { $0.contains("req-1") }, "the dead page's evaluator must never receive the stale reply")
         #expect(freshEvaluator.evaluatedScripts.isEmpty, "the fresh page never issued this request, so it must not receive a reply for it either")
     }
 
@@ -2570,10 +2588,12 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     }
 
     /// Interleaving (b): A's reread resolves FIRST this time, while `subscribedFilePath` is still
-    /// "foo.ts" (B hasn't navigated yet) — its guard passes, but the `resubscribeFileSignature` call it
-    /// triggers is a no-op (already subscribed to "foo.ts"), so it must not disturb anything. B's
-    /// navigation then resolves and resubscribes normally, exactly as if the reread had never happened.
-    @Test func aStaleSamePathRereadCompletingBeforeTheNavigationIsANoOpRefresh() async {
+    /// "foo.ts" (B hasn't navigated yet): its guard passes, and the `resubscribeFileSignature` call it
+    /// triggers reinstalls A's stream rather than short-circuiting on the path. B's dispatch already
+    /// bumped `fileSignatureSubscriptionGeneration`, which deafens the installed A stream (its own
+    /// `onFrame`/`onDisconnect` guards drop everything from then on), so a same-path resubscribe is a
+    /// repair, not churn. B's navigation then resolves and resubscribes to B normally.
+    @Test func aSamePathRereadReinstallsTheStreamTheInFlightNavigationDeafened() async {
         let gateway = RecordingCodePaneDeviceGateway()
         let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
         let content = makeController(hosting: hosting, deviceGateway: gateway)
@@ -2594,18 +2614,18 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         // A's reread resolves FIRST, while it's still the current/subscribed path.
         await gateway.completeFileReadCall(
             at: 2, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-a2", size: 0, isBinaryGuess: false))
-        await settle()
+        await waitUntilAsync { await gateway.fileSubscribeCallCount() >= 2 }
         #expect(
-            await gateway.fileSubscribeCallCount() == 1,
-            "A's same-path reread, still current when it completed, must behave as a no-op baseline refresh, not a fresh subscribe")
-        #expect(await gateway.subscribedFilePath(at: 0) == "foo.ts", "the existing subscription to A must be untouched")
+            await gateway.subscribedFilePathList() == ["foo.ts", "foo.ts"],
+            "A's same-path reread must reinstall A's stream, which B's dispatch left generation-stale")
 
-        // B's navigation resolves after — it still resubscribes normally, unaffected by A's earlier
-        // no-op refresh.
+        // B's navigation resolves after; it still resubscribes to B normally, unaffected by A's repair.
         await gateway.completeFileReadCall(
             at: 1, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-b", size: 0, isBinaryGuess: false))
-        await gateway.waitForFileSubscribeCallCount(2)
-        #expect(await gateway.subscribedFilePath(at: 1) == "bar.ts", "B's navigation must still resubscribe to bar.ts after A's no-op refresh")
+        await waitUntilAsync { await gateway.fileSubscribeCallCount() >= 3 }
+        #expect(
+            await gateway.subscribedFilePathList() == ["foo.ts", "foo.ts", "bar.ts"],
+            "B's navigation must still resubscribe to bar.ts after A's repair")
     }
 
     @Test func disconnectOnTheFileSignatureStreamSchedulesABackoffRetryThatResubscribesTheSamePath() async {
@@ -2653,6 +2673,191 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         await settle()
 
         #expect(fileSignatureScripts(evaluator).isEmpty, "a frame repeating the just-read file's own signature must not be forwarded")
+    }
+
+    /// The page sends `unsubscribeFileSignature` when it opens a file that watches nothing at all (an
+    /// image, which has no buffer a disk change could be reconciled into). Dropping the page's own
+    /// listener is not enough on its own: only an `editor`-purpose read ever repoints this stream, so
+    /// without the host-side stop the daemon keeps streaming signatures for the text file behind it.
+    @Test func anUnsubscribeFileSignatureNotificationStopsTheStreamAndClearsItsPath() async throws {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let webView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(
+            at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        content.handleScriptMessage(name: "spacesBridge", body: ["method": "unsubscribeFileSignature"], senderWebView: webView)
+
+        // A frame the stopped stream still had queued reaches nothing.
+        await gateway.triggerFileFrame(at: 0, path: "foo.ts", sha256: "sha-2", missing: false)
+        await settle()
+        #expect(fileSignatureScripts(evaluator).isEmpty, "a stopped stream must not forward frames")
+
+        // Reopening the very same file subscribes again, which only a cleared `subscribedFilePath`
+        // allows: `resubscribeFileSignature` treats a read for the path it already holds as a no-op.
+        content.dispatch(fileReadRequest(id: "req-2", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(2)
+        await gateway.completeFileReadCall(
+            at: 1, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-3", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(2)
+        #expect(await gateway.subscribedFilePath(at: 1) == "foo.ts")
+    }
+
+    /// The read for the file the page was showing can still be in flight when it opens an image, and
+    /// its success arm resubscribes. The stop has to invalidate that completion too, or the stream it
+    /// just ended comes straight back.
+    @Test func aFileReadStillInFlightWhenTheStreamIsStoppedDoesNotResubscribeIt() async throws {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let webView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+
+        content.handleScriptMessage(name: "spacesBridge", body: ["method": "unsubscribeFileSignature"], senderWebView: webView)
+        await gateway.completeFileReadCall(
+            at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await settle()
+
+        #expect(await gateway.fileSubscribeCallCount() == 0, "a read the page has moved on from must not open the stopped stream")
+    }
+
+    /// Opening an image as the pane's document is a navigation, even though the image itself watches
+    /// nothing: A is showing, B's text read is still in flight, and the image open fails. The page keeps
+    /// showing A (it drops B's reply, since a later open claimed the pane) and puts the image's own
+    /// failure on the banner, so B's late success must not point the watcher at a file that was never
+    /// displayed. The image read's dispatch-time `latestFileNavigationToken` bump is what invalidates it,
+    /// and it has to be the dispatch that claims it: a failed image read sends no
+    /// `unsubscribeFileSignature`, so nothing else in this sequence ever supersedes B.
+    @Test func aFailedImageOpenLeavesTheWatcherOnTheFileTheEditorIsStillShowing() async {
+        struct InjectedFileReadFailure: Error {}
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        // A ("foo.ts") is open and watched.
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(
+            at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-a", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+        #expect(await gateway.subscribedFilePath(at: 0) == "foo.ts")
+
+        // B ("bar.ts") starts opening; its read is held.
+        content.dispatch(fileReadRequest(id: "req-2", path: "bar.ts"))
+        await gateway.waitForFileReadCallCount(2)
+
+        // C, an image, is opened as the document while B is still in flight, and fails.
+        content.dispatch(imageReadRequest(id: "req-3", path: "shot.png"))
+        await gateway.waitForFileReadCallCount(3)
+        await gateway.failFileReadCall(at: 2, error: InjectedFileReadFailure())
+        await settle()
+
+        // B's read lands last, carrying a navigation token the image open has already moved past.
+        await gateway.completeFileReadCall(
+            at: 1, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-b", size: 0, isBinaryGuess: false))
+        await settle()
+
+        #expect(await gateway.fileSubscribeCallCount() == 1, "B's superseded read must not install a subscription of its own")
+        #expect(await gateway.subscribedFilePath(at: 0) == "foo.ts", "the watcher must stay on the file the page is still showing")
+    }
+
+    /// The sequel to the test above, and the reason a same-path resubscribe cannot short-circuit on the
+    /// path alone. B's dispatch bumped `fileSignatureSubscriptionGeneration`, which deafens the stream
+    /// still installed for A: its `onFrame` guard drops every later frame. B would normally have
+    /// replaced that stream, but the image open superseded it, so nothing installs one and the page goes
+    /// on showing A. The page's recovery reread of A is the only thing left that can repair it, and it
+    /// names the path already recorded in `subscribedFilePath`, so `resubscribeFileSignature` has to
+    /// admit a same-path call whenever the installed stream belongs to an older generation.
+    @Test func aRereadRepairsTheWatcherAFailedImageOpenLeftDeafened() async {
+        struct InjectedFileReadFailure: Error {}
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        content.handleReady()
+
+        // A ("foo.ts") is open and watched.
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(
+            at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-a", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        // B ("bar.ts") starts opening; its read is held. Its dispatch alone stales A's stream.
+        content.dispatch(fileReadRequest(id: "req-2", path: "bar.ts"))
+        await gateway.waitForFileReadCallCount(2)
+
+        // C, an image, is opened as the document while B is still in flight, and fails.
+        content.dispatch(imageReadRequest(id: "req-3", path: "shot.png"))
+        await gateway.waitForFileReadCallCount(3)
+        await gateway.failFileReadCall(at: 2, error: InjectedFileReadFailure())
+        await settle()
+
+        // B lands last and is correctly suppressed: the page never displayed it.
+        await gateway.completeFileReadCall(
+            at: 1, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-b", size: 0, isBinaryGuess: false))
+        await settle()
+        #expect(await gateway.fileSubscribeCallCount() == 1, "B's superseded read must not install a subscription of its own")
+
+        // The page is still showing A and re-reads it to reconcile after the failed open. That reread
+        // must install a fresh subscription for A, not skip on "already subscribed to foo.ts".
+        content.dispatch(fileReadRequest(id: "req-4", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(4)
+        await gateway.completeFileReadCall(
+            at: 3, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-a2", size: 0, isBinaryGuess: false))
+        await waitUntilAsync { await gateway.fileSubscribeCallCount() >= 2 }
+        #expect(await gateway.subscribedFilePathList() == ["foo.ts", "foo.ts"], "the recovery reread must resubscribe A's own path")
+
+        // And the repaired stream actually reaches the page: a disk change to A is delivered again.
+        // The bound above already recorded the failure if no second subscription arrived; stop here
+        // rather than indexing a stream that does not exist.
+        guard await gateway.fileSubscribeCallCount() >= 2 else { return }
+        await gateway.triggerFileFrame(at: 1, path: "foo.ts", sha256: "sha-a3", missing: false)
+        await waitUntil { !self.fileSignatureScripts(evaluator).isEmpty }
+        #expect(self.fileSignatureScripts(evaluator).first?.contains("foo.ts") == true)
+    }
+
+    /// The counterpart: an image a Markdown document displays is not a navigation at all, so a text read
+    /// in flight while the document loads its images still owns the watcher when it lands.
+    @Test func aMarkdownEmbedImageReadDoesNotSupersedeAFileReadInFlight() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "docs/notes.md"))
+        await gateway.waitForFileReadCallCount(1)
+
+        content.dispatch(
+            CodePaneBridge.Request(id: "req-2", method: "workspaceImageRead", params: ["path": "docs/shot.png", "purpose": "markdownEmbed"]))
+        await gateway.waitForFileReadCallCount(2)
+        await gateway.completeFileReadCall(
+            at: 1, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-img", size: 0, isBinaryGuess: false))
+        await settle()
+
+        await gateway.completeFileReadCall(
+            at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-md", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        #expect(await gateway.subscribedFilePath(at: 0) == "docs/notes.md")
     }
 
     @Test func aFrameWithADifferentFileSignatureIsForwardedAndRecordedAsActedOn() async {
@@ -2904,6 +3109,71 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(subscribeCount == 2, "a stale failed open must not resubscribe the first path over a newer path that already took over")
         let currentPath = await gateway.subscribedFilePath(at: 1)
         #expect(currentPath == "baz.ts", "the third (current) path must remain the one subscribed")
+    }
+
+    // MARK: - An explicit stop stands until the next successful open
+
+    /// Editor mode sends `unsubscribeFileSignature` when it opens an image, which has no buffer a disk
+    /// change could be reconciled into. A text file that then fails to open must not quietly re-arm the
+    /// stream for the text file the image replaced: the page holds no listener for it, and that file is
+    /// not what the pane is showing.
+    @Test func aFailedFileOpenAfterThePageStoppedTheStreamRestoresNothing() async throws {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let webView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(
+            at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        content.handleScriptMessage(name: "spacesBridge", body: ["method": "unsubscribeFileSignature"], senderWebView: webView)
+
+        struct InjectedFileReadFailure: Error {}
+        content.dispatch(fileReadRequest(id: "req-2", path: "bar.ts"))
+        await gateway.waitForFileReadCallCount(2)
+        await gateway.failFileReadCall(at: 1, error: InjectedFileReadFailure())
+        await settle()
+
+        let subscribeCount = await gateway.fileSubscribeCallCount()
+        #expect(subscribeCount == 1, "a failed open must not restore a stream the page deliberately stopped")
+
+        // Nothing is subscribed either: reopening the file that was watched before the stop subscribes
+        // again, which only a cleared `subscribedFilePath` allows (`resubscribeFileSignature` treats a
+        // read for the path it already holds as a no-op).
+        content.dispatch(fileReadRequest(id: "req-3", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(3)
+        await gateway.completeFileReadCall(
+            at: 2, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-2", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(2)
+        let reopenedPath = await gateway.subscribedFilePath(at: 1)
+        #expect(reopenedPath == "foo.ts", "only a successful editor read may install a subscription again")
+    }
+
+    /// The same stop with no file ever read: the notFound recovery subscription a first read's
+    /// authoritative "missing" answer would otherwise install must not be installed either, since the
+    /// page is showing an image and asked for no stream at all.
+    @Test func aFailedFileOpenAfterThePageStoppedTheStreamDoesNotSubscribeToTheFailedPath() async throws {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let webView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.handleScriptMessage(name: "spacesBridge", body: ["method": "unsubscribeFileSignature"], senderWebView: webView)
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.failFileReadCall(at: 0, error: SpacesDeviceClientError.requestRejected(message: "foo.ts is gone", code: .notFound))
+        await settle()
+
+        let subscribeCount = await gateway.fileSubscribeCallCount()
+        #expect(subscribeCount == 0, "a stopped stream must not be reopened for the path whose open failed")
     }
 
     // MARK: - notFound rehydration read still installs a file-signature stream
@@ -3262,7 +3532,8 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         await waitUntil { self.fileListSignatureScripts(evaluator).count == 2 }
 
         #expect(fileListSignatureScripts(evaluator)[1].contains("list-3"))
-        #expect(!fileListSignatureScripts(evaluator)[1].contains("liveRefreshError"), "a healthy frame must not carry the liveRefreshError key at all")
+        #expect(
+            !fileListSignatureScripts(evaluator)[1].contains("liveRefreshError"), "a healthy frame must not carry the liveRefreshError key at all")
     }
 
     /// Regression for the dedupe-key fix: a failed watch freezes `fileListSignature`, so the frame
@@ -4094,8 +4365,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             mode: .diff, editorState: nil,
             diffEditorState: .init(
                 path: "Sources/App.swift", baseSHA256: "old-sha", baseContent: "let old = 1", comparisonOldContent: "let comparison = 0",
-                content: "let saved = 2", dirty: true, conflict: false),
-            pendingReviewComments: nil
+                content: "let saved = 2", dirty: true, conflict: false), pendingReviewComments: nil
         ).bridgePayload
         evaluator.completeOldestPending(with: try workspaceStateJSON(collected))
         await gateway.completeHeldFileWriteCall(at: 0, result: .init(didWrite: true, sha256: "saved-sha"))
@@ -4133,8 +4403,8 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let collected = CodePaneWorkspaceState(
             mode: .diff, editorState: nil,
             diffEditorState: .init(
-                path: "Sources/App.swift", baseSHA256: "deleted-file-sha", baseContent: "let old = 1", comparisonOldContent: nil, content: "let typed after = 3", dirty: true,
-                conflict: false), pendingReviewComments: nil
+                path: "Sources/App.swift", baseSHA256: "deleted-file-sha", baseContent: "let old = 1", comparisonOldContent: nil,
+                content: "let typed after = 3", dirty: true, conflict: false), pendingReviewComments: nil
         ).bridgePayload
         evaluator.completeOldestPending(with: try workspaceStateJSON(collected))
         await gateway.completeHeldFileWriteCall(at: 0, result: .init(didWrite: true, sha256: "recreated-sha"))
@@ -4786,24 +5056,18 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
     @Test func seededModeStartsANonGitWorkspaceInEditorOnlyWhenNothingWasSaved() {
         // An explicit navigation is authoritative regardless of the project kind.
-        #expect(
-            CodePaneContentController.seededMode(policy: .useRequestedMode, requested: .diff, restored: nil, isGitRepository: false) == .diff)
-        #expect(
-            CodePaneContentController.seededMode(policy: .useRequestedMode, requested: .diff, restored: .editor, isGitRepository: false)
-                == .diff)
+        #expect(CodePaneContentController.seededMode(policy: .useRequestedMode, requested: .diff, restored: nil, isGitRepository: false) == .diff)
+        #expect(CodePaneContentController.seededMode(policy: .useRequestedMode, requested: .diff, restored: .editor, isGitRepository: false) == .diff)
         // A restoration with no saved mode: git keeps the requested default, non-git opens the Editor.
+        #expect(CodePaneContentController.seededMode(policy: .restoreWorkspaceMode, requested: .diff, restored: nil, isGitRepository: true) == .diff)
         #expect(
-            CodePaneContentController.seededMode(policy: .restoreWorkspaceMode, requested: .diff, restored: nil, isGitRepository: true) == .diff)
-        #expect(
-            CodePaneContentController.seededMode(policy: .restoreWorkspaceMode, requested: .diff, restored: nil, isGitRepository: false)
-                == .editor)
+            CodePaneContentController.seededMode(policy: .restoreWorkspaceMode, requested: .diff, restored: nil, isGitRepository: false) == .editor)
         // A saved mode wins over the non-git default in both directions.
         #expect(
-            CodePaneContentController.seededMode(policy: .restoreWorkspaceMode, requested: .editor, restored: .diff, isGitRepository: false)
-                == .diff)
+            CodePaneContentController.seededMode(policy: .restoreWorkspaceMode, requested: .editor, restored: .diff, isGitRepository: false) == .diff)
         #expect(
-            CodePaneContentController.seededMode(policy: .restoreWorkspaceMode, requested: .diff, restored: .editor, isGitRepository: true)
-                == .editor)
+            CodePaneContentController.seededMode(policy: .restoreWorkspaceMode, requested: .diff, restored: .editor, isGitRepository: true) == .editor
+        )
     }
 
     @Test func initPayloadReportsANonGitWorkspaceAndSeedsEditorMode() async throws {

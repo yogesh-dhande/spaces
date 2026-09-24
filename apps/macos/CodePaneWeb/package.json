@@ -14,10 +14,12 @@
   "dependencies": {
     "@pierre/diffs": "1.4.1",
     "diff": "9.0.0",
+    "markdown-it": "14.3.0",
     "node-diff3": "^3.2.1",
     "shiki": "4.4.3"
   },
   "devDependencies": {
+    "@types/markdown-it": "14.2.0",
     "@types/node": "^22.20.1",
     "jsdom": "26.1.0",
     "typescript": "5.9.3",

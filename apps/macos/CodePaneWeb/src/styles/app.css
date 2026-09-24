@@ -665,6 +665,63 @@
   color: var(--fg3);
 }
 
+/* An image's pixel dimensions and byte size, the one fact its stage cannot state for itself. Sits
+   between the path and the save chip, and is absent for every other kind. */
+.editor-open-bar .editor-file-info {
+  flex: 0 0 auto;
+  align-items: center;
+  font-size: 11px;
+  color: var(--fg3);
+  white-space: nowrap;
+}
+
+/* The content pane's two halves. Split is the layout; every single-surface mode is this same row
+   with one half hidden, which is what lets the source CodeView keep its document, caret, and scroll
+   position across a mode switch. */
+.editor-split {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: row;
+}
+
+.editor-split > .diff-view-root {
+  min-width: 0;
+}
+
+/* The Markdown split's grab handle, mirroring `.file-list-divider` above: a hairline whose hit area
+   is wider than what it paints. */
+.editor-split-divider {
+  flex: 0 0 5px;
+  cursor: col-resize;
+  touch-action: none;
+  background: linear-gradient(90deg, transparent 0 2px, var(--line) 2px 3px, transparent 3px);
+}
+
+.editor-split-divider:hover,
+.editor-split-divider.active,
+.editor-split-divider:focus-visible {
+  background: linear-gradient(90deg, transparent 0 1px, var(--accent) 1px 4px, transparent 4px);
+  outline: none;
+}
+
+/* The rendered half. Each surface brings its own scroll container, so this one only bounds them. */
+.editor-preview {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.editor-preview > * {
+  flex: 1;
+  min-height: 0;
+}
+
 /* ⌘P quick-open overlay (Design O) — a centered floating panel over the whole pane, available in
    both Diff and Editor mode. See quickOpen.ts's doc comment for the open semantics; this only
    covers layout/paint. */

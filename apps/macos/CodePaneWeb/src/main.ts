@@ -1,5 +1,7 @@
 import "./styles/tokens.css";
 import "./styles/app.css";
+import "./styles/preview.css";
+import "./styles/markdownPreview.css";
 import { mountRoot } from "./app/root";
 import { installGetComposedRangesCompat } from "./compat/getComposedRanges";
 import { preloadCodePaneHighlighter } from "./theme";

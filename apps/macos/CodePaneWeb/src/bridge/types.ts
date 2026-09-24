@@ -128,6 +128,17 @@ export interface WorkspaceFileReadResult {
   comparisonOldContent?: string | null;
 }
 
+/** One image file's exact bytes, for the Editor's image stage and for the images a Markdown preview
+ *  embeds. `mediaType` is what the file's extension resolves to on the host, so a caller builds its
+ *  `data:` URL from the answer rather than guessing from the path. `size` is the byte count, which
+ *  the open-file bar reports beside the decoded pixel dimensions. */
+export interface WorkspaceImageReadResult {
+  base64Data: string;
+  mediaType: string;
+  sha256: string;
+  size: number;
+}
+
 /** Last Commit safety and Git-filtered comparison input. `content`/`sha256` are the exact live
  * worktree baseline that the native operation verified against the pinned revision; the target
  * blob itself is existence/type checked but never transferred. */
@@ -141,6 +152,15 @@ export interface WorkspaceRevisionFileReadResult {
 
 /** Identifies whether a file read owns the native editor file-signature watcher. */
 export type WorkspaceFileReadPurpose = "editor" | "inlineDiff";
+
+/**
+ * Identifies what an image read is for. `editor` is the image the Editor is opening as the pane's
+ * document, which is a navigation: the host must count it as one so a text read still in flight for
+ * the file being left cannot point the file-signature watcher at itself afterwards. `markdownEmbed`
+ * is an image a Markdown document displays, which is not the open file and changes nothing about
+ * what the pane is showing.
+ */
+export type WorkspaceImageReadPurpose = "editor" | "markdownEmbed";
 
 export interface WorkspaceFileWriteOptions {
   /**
@@ -417,6 +437,17 @@ export interface SpacesBridge {
   workspaceFileRead(
     path: string, purpose: WorkspaceFileReadPurpose, comparison?: { baseRevision: string; oldPath?: string },
   ): Promise<WorkspaceFileReadResult>;
+  /**
+   * Reads one image file's bytes, for the image stage and for the images a Markdown preview embeds.
+   * Only the image types the Editor previews are readable this way; every other file the daemon
+   * guesses is binary is still refused by `workspaceFileRead` as unopenable text.
+   *
+   * No purpose retargets the native file-signature watcher, so an open image does not live-refresh
+   * when it changes on disk. `editor` does tell the host that this read is the pane navigating to a
+   * new document, which is what invalidates a text read still in flight for the file it is leaving;
+   * `markdownEmbed` names an image inside a document and leaves the pane's navigation alone.
+   */
+  workspaceImageRead(path: string, purpose: WorkspaceImageReadPurpose): Promise<WorkspaceImageReadResult>;
   /** Reads a file from an immutable revision named by streamed diff metadata. This deliberately
    * has no read purpose: it must never retarget the standalone Editor's worktree watcher. */
   workspaceRevisionFileRead(request: { path: string; revision: string; oldPath?: string }): Promise<WorkspaceRevisionFileReadResult>;
@@ -450,9 +481,18 @@ export interface SpacesBridge {
    * `subscribeDiffSignature`'s one-scope-at-a-time model) — the host decides which path the
    * underlying stream points at, driven by completions of `workspaceFileRead` calls with the
    * `editor` purpose; inline-diff reads use `inlineDiff` and never retarget it. There is no
-   * explicit subscribe/unsubscribe RPC here; see README.md for the event-delivery mechanism.
+   * subscribe RPC here; see README.md for the event-delivery mechanism.
    */
   subscribeFileSignature(path: string, listener: FileSignatureListener): Unsubscribe;
+  /**
+   * Ends the host's file-signature stream outright. The `Unsubscribe` above only detaches this
+   * page's listener; the host keeps the daemon streaming signatures for whichever path an `editor`
+   * read last named, because that read is the only thing that ever points it. The Editor sends this
+   * when it opens a file that watches nothing at all, an image, which has no buffer to reconcile a
+   * disk change into, so the previous file's stream stops instead of polling on behind it. A read
+   * for any other file repoints the stream again in the ordinary way.
+   */
+  unsubscribeFileSignature(): void;
   /**
    * Subscribe to workspace-listing-signature push events for the shared `workspaceFileList`
    * cache. The host opens this only after the first successful `workspaceFileList` pull, so a

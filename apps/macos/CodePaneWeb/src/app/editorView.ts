@@ -9,9 +9,24 @@ import {
   Unsubscribe,
   WorkspaceFileReadResult,
   WorkspaceFileWriteResult,
+  WorkspaceImageReadResult,
 } from "../bridge/types";
 import { CODE_PANE_THEME_NAME, resolveAllowedLanguage } from "../theme";
 import { AutosaveScheduler, AutosaveStatus, retryDelayMs, SaveOutcome } from "./autosave";
+import { attachEditorSplitDivider, DEFAULT_EDITOR_SPLIT_FRACTION } from "./editorSplitDivider";
+import { ImagePixelSize } from "./imageStage";
+import { PreviewModeControl } from "./modeControl";
+import {
+  jsonTreeDocument,
+  modeShowsPreview,
+  modeShowsSource,
+  PreviewKind,
+  previewKind,
+  PreviewMode,
+  previewModeSegments,
+  resolvePreviewMode,
+} from "./previewMode";
+import { PreviewSurface } from "./previewSurface";
 import { afterBrowserPaint } from "./renderMetrics";
 
 /** Trailing debounce for recovery-state pushes on buffer edits (see `scheduleEditorStatePush`). */
@@ -86,6 +101,21 @@ function saveStatusText(status: AutosaveStatus): string {
 }
 
 /**
+ * What one `loadFile` read produced: a text buffer the pane edits, or an image's bytes the pane
+ * paints. Both travel through the same guards in `loadFile` and differ only in what is adopted at
+ * the end of it.
+ */
+type LoadedFile = { kind: "text"; result: WorkspaceFileReadResult } | ({ kind: "image" } & WorkspaceImageReadResult);
+
+/** A file's byte size as the open-file bar reports it beside an image's pixel dimensions: whole
+ *  bytes below a kibibyte, then one decimal against 1024-based units. */
+function formatByteSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
  * Editor mode: a single-file `@pierre/diffs` `CodeView` in edit mode, saved through the CAS
  * `workspaceFileWrite` call. This class owns no file-picking UI of its own — every file this view
  * shows arrives via its public `open()`, called by root.ts from the ⌘P quick-open overlay, Editor
@@ -136,6 +166,39 @@ export class EditorView {
    *  without this view knowing anything about that notice. */
   private readonly contentArea: HTMLElement;
   private codeView: CodeView | undefined;
+  /** The one shared segmented mode control, at the trailing end of the open-file bar. Its segments
+   *  come from the open file's kind, so one control drives every preview (see `previewMode.ts`). */
+  private readonly modeControl: PreviewModeControl;
+  /** The bar's image readout: pixel dimensions and byte size. Shown for an image and nothing else,
+   *  because it is the only kind whose content the source view cannot describe on its own. */
+  private readonly fileInfo: HTMLElement;
+  /** The rendered half of the content pane; see `previewSurface.ts`. */
+  private readonly previewSurface: PreviewSurface;
+  /** The row that holds the source host, the divider, and the preview. */
+  private readonly splitEl: HTMLElement;
+  private readonly divider: HTMLElement;
+  /** The mode the user picked, per file, for this pane's lifetime only. A preview mode is a reading
+   *  posture for the file in front of the user rather than durable state, so it is deliberately
+   *  absent from `CodePaneEditorState`: a relaunched pane opens every file on its kind's default. A
+   *  file nobody has switched is simply absent here. */
+  private readonly modeByPath = new Map<string, PreviewMode>();
+  /** The mode currently applied to the open file, or undefined for a kind with no mode control (a
+   *  plain source file, an image) and while a conflict owns the pane. */
+  private currentMode: PreviewMode | undefined;
+  /** The open image's bytes as a data URL and its byte size, held so a re-render repaints the stage
+   *  without re-reading the file. Both stay undefined for every other kind, and `latestContent`
+   *  stays undefined for an image: there is no text buffer to edit, save, or snapshot. */
+  private imageDataURL: string | undefined;
+  private imageByteSize: number | undefined;
+  private imagePixelSize: ImagePixelSize | undefined;
+  /** The fraction of the split the source half occupies; see `editorSplitDivider.ts`. */
+  private splitFraction = DEFAULT_EDITOR_SPLIT_FRACTION;
+  /** True while one half's scroll is being mirrored onto the other, so the scroll event that
+   *  mirroring itself provokes does not bounce straight back and fight the user. */
+  private mirroringScroll = false;
+  /** Coalesces the live preview re-render to one per frame, so a burst of keystrokes re-renders the
+   *  document once rather than once per character. */
+  private previewRenderFrame: number | undefined;
 
   private currentPath: string | undefined;
   private baseSHA256: string | undefined;
@@ -266,6 +329,12 @@ export class EditorView {
     this.setPathLabel(undefined);
     openBar.appendChild(this.pathLabel);
 
+    this.fileInfo = document.createElement("span");
+    this.fileInfo.className = "editor-file-info";
+    this.fileInfo.id = "code-pane-editor-file-info";
+    this.fileInfo.style.display = "none";
+    openBar.appendChild(this.fileInfo);
+
     this.saveStatusChip = document.createElement("span");
     this.saveStatusChip.className = "save-status";
     this.saveStatusChip.id = "code-pane-editor-save-status";
@@ -283,6 +352,11 @@ export class EditorView {
     this.retrySaveBtn.textContent = "Retry now";
     this.retrySaveBtn.addEventListener("click", () => void this.scheduler.flush());
     openBar.appendChild(this.retrySaveBtn);
+
+    // Trailing in the bar, right of the path and the save chip: one control for every previewable
+    // kind, whose segments name what THIS file can be shown as (docs/design.md's open-file bar).
+    this.modeControl = new PreviewModeControl((mode) => this.selectPreviewMode(mode));
+    openBar.appendChild(this.modeControl.element);
 
     this.scheduler = new AutosaveScheduler({
       isDirty: () => this.dirty,
@@ -305,7 +379,37 @@ export class EditorView {
     this.codeHost = document.createElement("div");
     this.codeHost.className = "diff-view-root";
     this.codeHost.id = "code-pane-editor-scroll";
-    codeArea.appendChild(this.codeHost);
+    this.codeHost.addEventListener("scroll", () => this.mirrorSourceScrollToPreview());
+
+    this.previewSurface = new PreviewSurface({
+      loadImage: (path) => this.readImageDataURL(path),
+      onOpenPath: (path) => void this.open(path),
+      onImageSize: (size) => {
+        this.imagePixelSize = size;
+        this.renderFileInfo();
+      },
+      onPreviewScrolled: () => this.mirrorPreviewScrollToSource(),
+    });
+
+    // The source host and the preview sit side by side in one row, so Split is the layout and the
+    // single-surface modes are the same layout with one side hidden.
+    this.splitEl = document.createElement("div");
+    this.splitEl.className = "editor-split";
+    this.splitEl.appendChild(this.codeHost);
+    this.divider = document.createElement("div");
+    this.divider.className = "editor-split-divider";
+    this.divider.id = "code-pane-editor-split-divider";
+    this.splitEl.appendChild(this.divider);
+    this.splitEl.appendChild(this.previewSurface.element);
+    attachEditorSplitDivider(this.divider, {
+      container: this.splitEl,
+      fraction: () => this.splitFraction,
+      setFraction: (fraction) => {
+        this.splitFraction = fraction;
+        this.applySplitLayout();
+      },
+    });
+    codeArea.appendChild(this.splitEl);
 
     this.banner = document.createElement("div");
     this.banner.className = "banner conflict";
@@ -314,6 +418,7 @@ export class EditorView {
 
     container.appendChild(openBar);
     container.appendChild(codeArea);
+    this.renderPreview();
   }
 
   /** Sets the top bar's path display: the open file's path, or the "⌘P to open a file" hint when
@@ -321,6 +426,182 @@ export class EditorView {
   private setPathLabel(path: string | undefined): void {
     this.pathLabel.textContent = path ?? "⌘P to open a file";
     this.pathLabel.classList.toggle("hint", path === undefined);
+  }
+
+  /** Records the user's pick for the open file and repaints. The pick is remembered per file (see
+   *  `modeByPath`), so switching away and back returns to the surface they were reading.
+   *
+   *  The state push happens BEFORE the repaint, not after: a mode that shows no source hides
+   *  `codeHost`, and a hidden element has no geometry, so `visibleLine()` would answer null for
+   *  every sample the pane takes from then on. The owning pane samples both surfaces on this
+   *  transition (see root.ts's `captureViewPositions`), so pushing first is what persists the line
+   *  the user was actually reading rather than whatever the last unrelated push happened to catch. */
+  private selectPreviewMode(mode: PreviewMode): void {
+    if (this.currentPath === undefined) return;
+    // Only a transition into Split needs to align the two halves: Source and Preview each show one
+    // half, so there is nothing to line up against yet. `visibleLine()` already picks the right
+    // reading for whichever half is showing via `showsSource()` (the source editor's own scan, or
+    // the preview's `visibleSourceLine()`); `cameFromSource` records which one it used, since that
+    // decides which half Split is about to reveal and therefore which one needs aligning. Both are
+    // read before the state push below, for the reason that push's own comment gives: a mode that
+    // hides a half leaves it with no geometry to read a line from afterwards.
+    const enteringSplit = mode === "split" && this.currentMode !== "split";
+    const cameFromSource = this.showsSource();
+    const alignmentLine = enteringSplit ? this.visibleLine() : null;
+    const path = this.currentPath;
+    this.modeByPath.set(this.currentPath, mode);
+    this.pushEditorStateNow();
+    this.renderPreview();
+    // Split rerenders both halves from the live buffer, but a rerender does not scroll either one:
+    // the half that was already showing keeps its own position, and the half Split just revealed
+    // keeps whatever position it last had (or none), so without this the two halves can show
+    // different source lines until the next scroll. This aligns the revealed half to the line the
+    // other one was already on, the same alignment `mirrorSourceScrollToPreview`/
+    // `mirrorPreviewScrollToSource` keep in step on every later scroll, run once for the transition
+    // itself and guarded by `withScrollMirroring` for the same reason those two are.
+    if (alignmentLine === null) return;
+    if (cameFromSource) {
+      this.withScrollMirroring(() => this.previewSurface.scrollToSourceLine(alignmentLine));
+    } else {
+      this.withScrollMirroring(() => this.codeView?.scrollTo({ type: "line", id: path, lineNumber: alignmentLine, behavior: "instant" }));
+    }
+  }
+
+  /**
+   * Repaints the mode control, the rendered half, and the split layout from the open file and its
+   * live buffer. The one entry point for all three, so the control can never offer a segment the
+   * surface is not showing: every open, every mode pick, and every edit goes through here.
+   *
+   * A conflict (or a file deleted under the pane) takes the control away entirely and leaves the
+   * source alone: the compare view that resolves it owns the pane until the user answers it, and a
+   * preview of a buffer that is mid-negotiation with disk would only compete with that.
+   */
+  private renderPreview(): void {
+    const path = this.currentPath;
+    const kind = path === undefined ? "text" : previewKind(path);
+    const content = this.latestContent;
+    if (path === undefined || this.conflict || (kind !== "image" && content === undefined)) {
+      this.currentMode = undefined;
+      this.modeControl.render([], undefined);
+      this.previewSurface.clear();
+      this.applySplitLayout();
+      this.renderFileInfo();
+      return;
+    }
+    // One parse serves both decisions this render makes about a `.json` buffer: whether the Tree
+    // segment is selectable, and what the tree is built from. The surface takes the parsed document
+    // rather than parsing the same string again (see `PreviewSurface.renderText`).
+    const jsonDocument = content === undefined ? undefined : jsonTreeDocument(path, content);
+    const treeAvailable = jsonDocument !== undefined;
+    const mode = resolvePreviewMode(kind, this.modeByPath.get(path), { treeAvailable });
+    this.currentMode = mode;
+    this.modeControl.render(previewModeSegments(kind, { treeAvailable }), mode);
+    if (kind === "image") {
+      if (this.imageDataURL !== undefined) this.previewSurface.renderImage(path, this.imageDataURL);
+    } else if (content !== undefined) {
+      this.previewSurface.renderText(path, kind, mode, content, jsonDocument);
+    }
+    this.applySplitLayout();
+    this.renderFileInfo();
+  }
+
+  /** Shows or hides each half for the current kind and mode, and sizes the split. Hiding a half
+   *  rather than unmounting it keeps the source `CodeView` intact across a mode switch, so
+   *  returning to Source finds the same document, caret, and scroll position. */
+  private applySplitLayout(): void {
+    const kind: PreviewKind = this.currentPath === undefined ? "text" : previewKind(this.currentPath);
+    // `currentMode` is undefined exactly when nothing is being previewed (a plain file, an image, a
+    // conflict, no open file), and both predicates already answer for that, so the conflict and
+    // no-control cases need no branch of their own here.
+    const showsSource = this.showsSource();
+    const showsPreview = modeShowsPreview(kind, this.currentMode);
+    this.codeHost.style.display = showsSource ? "" : "none";
+    this.previewSurface.element.style.display = showsPreview ? "" : "none";
+    const isSplit = showsSource && showsPreview;
+    this.divider.style.display = isSplit ? "" : "none";
+    this.codeHost.style.flex = isSplit ? `0 0 ${(this.splitFraction * 100).toFixed(2)}%` : "1 1 0";
+  }
+
+  /** Whether the current file and mode show the editable source half. Read by `applySplitLayout`,
+   *  which hides the half when it says no, and by `visibleLine()`, which has to know that a null
+   *  reading from a hidden half is the layout rather than the document. */
+  private showsSource(): boolean {
+    const kind: PreviewKind = this.currentPath === undefined ? "text" : previewKind(this.currentPath);
+    return modeShowsSource(kind, this.currentMode);
+  }
+
+  /** Paints the bar's image readout. An image reports its byte size as soon as its bytes arrive and
+   *  gains its pixel dimensions once the browser has decoded them; every other kind shows nothing,
+   *  since the source view already says everything there is to say about it. */
+  private renderFileInfo(): void {
+    if (this.imageByteSize === undefined) {
+      this.fileInfo.style.display = "none";
+      this.fileInfo.textContent = "";
+      return;
+    }
+    const size = this.imagePixelSize;
+    this.fileInfo.textContent =
+      size === undefined ? formatByteSize(this.imageByteSize) : `${size.width} × ${size.height} · ${formatByteSize(this.imageByteSize)}`;
+    this.fileInfo.style.display = "inline-flex";
+  }
+
+  /** Reads one image a Markdown document embeds as a `data:` URL. The `markdownEmbed` purpose is
+   *  what keeps it out of the pane's navigation: the image is part of the open document, not the
+   *  document itself. A file that cannot be read resolves to `undefined` rather than throwing: an
+   *  embedded image that is missing is the document's own business, shown as its alt text, and must
+   *  not put an error over the whole preview. */
+  private async readImageDataURL(path: string): Promise<string | undefined> {
+    try {
+      const image = await this.bridge.workspaceImageRead(path, "markdownEmbed");
+      return `data:${image.mediaType};base64,${image.base64Data}`;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Re-renders the preview from the live buffer at most once per frame; see
+   *  `previewRenderFrame`. */
+  private schedulePreviewRender(): void {
+    // A plain source file has no rendered half and no mode control, which is the common case: a
+    // keystroke in one has nothing to repaint, so it never even schedules a frame.
+    if (this.currentPath === undefined || previewKind(this.currentPath) === "text") return;
+    if (this.previewRenderFrame !== undefined) return;
+    this.previewRenderFrame = requestAnimationFrame(() => {
+      this.previewRenderFrame = undefined;
+      if (this.disposed) return;
+      this.renderPreview();
+    });
+  }
+
+  /** Scroll sync, source to preview: the preview follows the line the source is showing. Only the
+   *  Markdown split has two scrollable halves at once, and `PreviewSurface` answers for no other
+   *  surface, so this is inert everywhere else. */
+  private mirrorSourceScrollToPreview(): void {
+    if (this.mirroringScroll || this.currentMode !== "split") return;
+    const line = this.visibleLine();
+    if (line === null) return;
+    this.withScrollMirroring(() => this.previewSurface.scrollToSourceLine(line));
+  }
+
+  /** Scroll sync, preview to source: the same relationship in the other direction, so scrolling
+   *  either half keeps the two reading the same part of the document. */
+  private mirrorPreviewScrollToSource(): void {
+    if (this.mirroringScroll || this.currentMode !== "split" || this.currentPath === undefined) return;
+    const line = this.previewSurface.visibleSourceLine();
+    if (line === null) return;
+    const path = this.currentPath;
+    this.withScrollMirroring(() => this.codeView?.scrollTo({ type: "line", id: path, lineNumber: line, behavior: "instant" }));
+  }
+
+  /** Runs a mirrored scroll with the guard set, releasing it on the next frame: the scroll it
+   *  performs raises its own `scroll` event, which must not mirror back onto the half the user is
+   *  actually dragging. */
+  private withScrollMirroring(apply: () => void): void {
+    this.mirroringScroll = true;
+    apply();
+    requestAnimationFrame(() => {
+      this.mirroringScroll = false;
+    });
   }
 
   /** Builds (once) or returns the shared `CodeView` instance backing both this view's edit-mode
@@ -368,6 +649,10 @@ export class EditorView {
             this.banner.style.display = "none";
           }
           this.scheduleEditorStatePush();
+          // A rendered surface is a view of the buffer, so it follows the buffer: the Markdown
+          // preview re-renders as the document is typed, and an edit that makes a `.json` file stop
+          // parsing takes its Tree segment away on the same beat.
+          this.schedulePreviewRender();
         },
       });
       this.codeView.setup(this.codeHost);
@@ -403,6 +688,10 @@ export class EditorView {
     };
     codeView.setItems([item]);
     this.completeEditorAttach(codeView, item);
+    // Every path that replaces the buffer funnels through here (an open, a restore, a silent
+    // reload, an auto-merge, and both conflict resolutions), which makes this the one place the
+    // rendered half has to be repainted from.
+    this.renderPreview();
   }
 
   /**
@@ -460,8 +749,19 @@ export class EditorView {
     return this.contentArea;
   }
 
-  /** Logical source-line recovery avoids retaining a stale pixel offset after virtualization. */
+  /**
+   * The source line the pane is reading, which is what the workspace snapshot persists and a
+   * hibernated pane comes back to. A logical line rather than a pixel offset, so nothing stale
+   * survives the virtualizer rebuilding the document.
+   *
+   * A mode that shows no source (Markdown in Preview) hides the source half, and a hidden element
+   * reports an all-zero rect, so the line has to come from the half the user is actually reading:
+   * the preview answers with the source line of the block at its scroll top, the same line Split's
+   * scroll sync would put the source on. Without it, reading a document in Preview and hibernating
+   * would bring the pane back at whatever line was showing when Preview was picked.
+   */
   visibleLine(): number | null {
+    if (!this.showsSource()) return this.previewSurface.visibleSourceLine();
     if (!this.codeHost.isConnected) return null;
     const top = this.codeHost.getBoundingClientRect().top;
     for (const node of this.renderedElements<HTMLElement>("[data-line]")) {
@@ -620,6 +920,9 @@ export class EditorView {
   dispose(): void {
     this.disposed = true;
     this.scheduler.cancel();
+    if (this.previewRenderFrame !== undefined) cancelAnimationFrame(this.previewRenderFrame);
+    this.previewRenderFrame = undefined;
+    this.previewSurface.dispose();
     this.fileSignatureUnsubscribe?.();
     this.fileSignatureUnsubscribe = undefined;
     clearTimeout(this.externalChangeRetryTimer);
@@ -668,13 +971,22 @@ export class EditorView {
    * which is the only thing that decides whether this load may proceed. Re-picking the file already
    * open claims the pane without loading anything, so it moves the token and not `openGeneration`,
    * and a load already in flight for some other file has to stand down on it.
+   *
+   * An image is loaded through the same method, and the same guards, as text: only the read and the
+   * adoption differ (bytes for the stage instead of a buffer, see `LoadedFile`). Splitting it into a
+   * second method would mean a second copy of the flush gate, the generation checks, and the failed
+   * open's reconcile, which is where every subtle ordering rule in this class lives.
    */
   private async loadFile(path: string, request: number, opts?: { revealLine?: number }): Promise<void> {
     const renderStartedAt = performance.now();
     this.openGeneration += 1;
-    let result: WorkspaceFileReadResult;
+    const kind = previewKind(path);
+    let loaded: LoadedFile;
     try {
-      result = await this.bridge.workspaceFileRead(path, "editor");
+      loaded =
+        kind === "image"
+          ? { kind: "image", ...(await this.bridge.workspaceImageRead(path, "editor")) }
+          : { kind: "text", result: await this.bridge.workspaceFileRead(path, "editor") };
     } catch (err) {
       if (request !== this.openRequestGeneration) return; // a later open() already claimed the pane
       const message = err instanceof SpacesBridgeError ? err.message : "Failed to open file.";
@@ -689,7 +1001,12 @@ export class EditorView {
       // extra read; if it did, this is the only thing that will ever catch it (see
       // `CodePaneContentController.swift`'s `restoreFileSignatureMonitoringAfterFailedOpen` doc comment
       // for the paired Swift-side reasoning).
-      if (this.currentPath !== undefined) void this.handleExternalChange();
+      //
+      // Only for a retained file that HAS a text buffer. An open image has none, watches nothing, and
+      // is not readable as text at all, so reconciling it would issue a `workspaceFileRead` whose
+      // certain "cannot be opened as text" rejection would land on this very banner and replace the
+      // real reason this open failed.
+      if (this.currentPath !== undefined && this.latestContent !== undefined) void this.handleExternalChange();
       return; // leave the previous file's path label as-is; the failed target was never adopted
     }
     if (request !== this.openRequestGeneration) return; // a later open() already claimed the pane
@@ -716,9 +1033,6 @@ export class EditorView {
     }
     this.setPathLabel(path);
     this.currentPath = path;
-    this.baseSHA256 = result.sha256;
-    this.baseContent = result.content;
-    this.latestContent = result.content;
     this.dirty = false;
     this.conflict = false;
     this.diskMissing = false;
@@ -742,13 +1056,43 @@ export class EditorView {
     // After the flush above, so the previous file's own pending write is never dropped by this.
     this.scheduler.reset();
 
-    this.loadIntoCodeView(path, result.content);
-    if (opts?.revealLine !== undefined) this.restorePosition(opts.revealLine, opts.revealLine);
-    afterBrowserPaint(() => {
-      if (request !== this.openRequestGeneration || this.currentPath !== path) return;
-      this.callbacks.onFileRendered?.(path, Math.max(performance.now() - renderStartedAt, 0), result.content.length);
-    });
-    this.subscribeToFileSignature(path);
+    if (loaded.kind === "image") {
+      // An image has no text buffer at all: no baseline, no content, and therefore nothing for
+      // autosave, the external-change ladder, or `collectEditorState` to act on. It also claims no
+      // file-signature subscription (the host's image read deliberately does not retarget the
+      // watcher either, see `SpacesBridge.workspaceImageRead`), so the previous file's listener is
+      // dropped rather than repointed: an open image does not live-refresh.
+      //
+      // Dropping the browser-side listener is only half of that. The host's watcher is retargeted by
+      // an editor-purpose `workspaceFileRead` and by nothing else, so without the explicit stop below
+      // it would keep the daemon streaming signatures for the text file opened before this image, for
+      // as long as the image stays open. `unsubscribeFileSignature` is what ends that stream.
+      this.baseSHA256 = undefined;
+      this.baseContent = undefined;
+      this.latestContent = undefined;
+      this.fileSignatureUnsubscribe?.();
+      this.fileSignatureUnsubscribe = undefined;
+      this.bridge.unsubscribeFileSignature();
+      this.imageDataURL = `data:${loaded.mediaType};base64,${loaded.base64Data}`;
+      this.imageByteSize = loaded.size;
+      this.imagePixelSize = undefined;
+      this.renderPreview();
+    } else {
+      this.imageDataURL = undefined;
+      this.imageByteSize = undefined;
+      this.imagePixelSize = undefined;
+      const result = loaded.result;
+      this.baseSHA256 = result.sha256;
+      this.baseContent = result.content;
+      this.latestContent = result.content;
+      this.loadIntoCodeView(path, result.content);
+      if (opts?.revealLine !== undefined) this.restorePosition(opts.revealLine, opts.revealLine);
+      afterBrowserPaint(() => {
+        if (request !== this.openRequestGeneration || this.currentPath !== path) return;
+        this.callbacks.onFileRendered?.(path, Math.max(performance.now() - renderStartedAt, 0), result.content.length);
+      });
+      this.subscribeToFileSignature(path);
+    }
     // Immediate, not debounced: a file open is a discrete transition, not a buffer edit.
     this.pushEditorStateNow();
     // The one place a load actually completes (see `EditorViewCallbacks.onFileOpened`'s doc
@@ -1146,6 +1490,8 @@ export class EditorView {
     this.banner.className = "banner conflict";
     this.banner.replaceChildren(text, keepMineBtn, takeDiskBtn);
     this.banner.style.display = "flex";
+    // The compare view owns the whole pane while it is up; see `renderPreview`.
+    this.renderPreview();
   }
 
   /** Conflict compare view's "Keep mine": the user's decision to overwrite disk with the frozen
@@ -1239,6 +1585,8 @@ export class EditorView {
         version: this.editGeneration,
       },
     ]);
+    // There is no buffer left to render, so the mode control and the rendered half go with it.
+    this.renderPreview();
     this.pushEditorStateNow();
   }
 

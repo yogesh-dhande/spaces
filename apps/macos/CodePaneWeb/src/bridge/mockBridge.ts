@@ -2,6 +2,7 @@ import {
   FIXTURE_AGENTS,
   FIXTURE_ALL_PATHS,
   FIXTURE_FILE_CONTENTS,
+  FIXTURE_IMAGE_CONTENTS,
   FIXTURE_INIT_PAYLOAD,
   FIXTURE_LIVE_REFRESH_ERROR,
   FIXTURE_REF_LIST,
@@ -29,6 +30,8 @@ import {
   WorkspaceDiffManifestChunkResult,
   WorkspaceFileListResult,
   WorkspaceFileReadResult,
+  WorkspaceImageReadResult,
+  WorkspaceImageReadPurpose,
   WorkspaceRevisionFileReadResult,
   WorkspaceFileReadPurpose,
   WorkspaceFileWriteOptions,
@@ -221,6 +224,19 @@ export class MockSpacesBridge implements SpacesBridge {
     return delay({ content: entry.content, sha256: entry.sha256, size: entry.content.length });
   }
 
+  async workspaceImageRead(path: string, _purpose: WorkspaceImageReadPurpose): Promise<WorkspaceImageReadResult> {
+    // Deliberately does not touch `currentReadPath`: no image read claims the harness's live
+    // watcher, matching the host's own `performWorkspaceImageRead`.
+    const image = FIXTURE_IMAGE_CONTENTS[path];
+    if (!image) throw new SpacesBridgeError("notFound", `No such image in the mock workspace: ${path}`);
+    return delay({
+      base64Data: image.base64Data,
+      mediaType: image.mediaType,
+      sha256: fixtureHash(image.base64Data),
+      size: Math.floor((image.base64Data.length * 3) / 4),
+    });
+  }
+
   async workspaceRevisionFileRead(request: { path: string; revision: string; oldPath?: string }): Promise<WorkspaceRevisionFileReadResult> {
     if (!request.revision) throw new SpacesBridgeError("invalidArgument", "A revision is required.");
     const entry = this.files.get(request.path);
@@ -283,6 +299,10 @@ export class MockSpacesBridge implements SpacesBridge {
     this.fileSignatureListeners.add(listener);
     return () => this.fileSignatureListeners.delete(listener);
   }
+
+  /** The harness has no host stream to stop: `simulateFileChange`/`simulateFileDeleted` drive the
+   *  listeners directly, and the caller has already dropped its own listener before calling this. */
+  unsubscribeFileSignature(): void {}
 
   subscribeFileListSignature(listener: FileListSignatureListener): Unsubscribe {
     this.fileListSignatureListeners.add(listener);

@@ -226,6 +226,10 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// interleavings this two-branch scheme closes (this replaced a single request-token guard that
     /// covered every read indiscriminately and could let a stale reread's completion resubscribe the
     /// stream to the wrong file after a navigation had already moved on).
+    ///
+    /// An Editor image open bumps it too, from `performWorkspaceImageRead`: it watches nothing itself,
+    /// but it is still the pane moving to a different document, so a text read left in flight by it has
+    /// to lose the same way it loses to a text navigation.
     private var latestFileNavigationToken = 0
 
     /// The workspace-relative path the live file-signature stream is pointed at, or `nil` when nothing
@@ -238,6 +242,25 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// method never messages Swift; see `CodePaneWeb/src/bridge/realBridge.ts`'s doc comment) for
     /// `subscribeDiffSignature`'s.
     private var subscribedFilePath: String?
+
+    /// The value `fileSignatureSubscriptionGeneration` held when the stream for `subscribedFilePath`
+    /// was started. It falls behind the current generation whenever a dispatch bumps that generation
+    /// without replacing the stream (a path-changing `performFileRead`, or an Editor image open)
+    /// which is exactly the state where a stream is still installed and pointed at
+    /// `subscribedFilePath` while every frame it delivers is dropped by its own generation guard.
+    /// `resubscribeFileSignature` compares the two so a same-path call repairs such a stream instead
+    /// of short-circuiting on the path alone. Meaningless while `subscribedFilePath` is `nil`, which
+    /// is why nothing resets it there: the path check already fails first.
+    private var subscribedFileGeneration = 0
+
+    /// Whether the page stopped the file-signature stream outright (`unsubscribeFileSignature`, sent
+    /// when Editor mode opens an image) and has not opened a watchable file since. The page holds no
+    /// listener in this state, so nothing may point the stream at a file behind its back: a failed
+    /// open's `restoreFileSignatureMonitoringAfterFailedOpen` would otherwise re-arm the text file the
+    /// image replaced, or subscribe to the failed path itself when no file was ever read, leaving the
+    /// daemon polling for a pane that is showing an image. Only a successful `editor`-purpose read
+    /// clears it, because that read is the one thing that legitimately installs a new subscription.
+    private var fileSignatureStoppedByPage = false
 
     /// Mirrors `SpacesDeviceAPIServer.WorkspaceFileSignatureValue`: Swift tuples aren't `Equatable`, and
     /// this needs to be compared as a whole (`sha256` alone can't distinguish "still missing" from "a
@@ -535,9 +558,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// the mode it requested. A restoration keeps the workspace's own saved mode when it has one;
     /// with no saved mode, a workspace whose project is not a git repository starts in Editor,
     /// because Diff has no comparison it could show there.
-    static func seededMode(
-        policy: CodePaneInitialModePolicy, requested: CodePaneMode, restored: CodePaneMode?, isGitRepository: Bool
-    ) -> CodePaneMode {
+    static func seededMode(policy: CodePaneInitialModePolicy, requested: CodePaneMode, restored: CodePaneMode?, isGitRepository: Bool) -> CodePaneMode
+    {
         switch policy {
         case .useRequestedMode: return requested
         case .restoreWorkspaceMode: return restored ?? (isGitRepository ? requested : .editor)
@@ -856,6 +878,9 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         fileSignatureStream?.stop()
         fileSignatureStream = nil
         subscribedFilePath = nil
+        // A rehydrated pane starts a fresh watcher lifecycle: whatever the previous page was showing
+        // when it stopped the stream is not what the replacement page will ask for.
+        fileSignatureStoppedByPage = false
         lastActedFileSignatureValue = nil
         lastActedFilePath = nil
         fileSignatureSubscriptionGeneration += 1
@@ -925,8 +950,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         notice.translatesAutoresizingMaskIntoConstraints = false
         notice.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.centerXAnchor.constraint(equalTo: notice.centerXAnchor),
-            stack.centerYAnchor.constraint(equalTo: notice.centerYAnchor),
+            stack.centerXAnchor.constraint(equalTo: notice.centerXAnchor), stack.centerYAnchor.constraint(equalTo: notice.centerYAnchor),
             stack.leadingAnchor.constraint(greaterThanOrEqualTo: notice.leadingAnchor, constant: 24),
             stack.trailingAnchor.constraint(lessThanOrEqualTo: notice.trailingAnchor, constant: -24),
         ])
@@ -1015,8 +1039,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
             // fresh comparison rather than carrying the old disk hash into a new baseline.
             return CodePaneBridge.DiffEditorState(
                 path: state.path, baseSHA256: write.sha256, baseContent: write.content, comparisonOldContent: state.comparisonOldContent,
-                content: state.content, dirty: newDirty,
-                conflict: newConflict, conflictBaseSHA256: nil)
+                content: state.content, dirty: newDirty, conflict: newConflict, conflictBaseSHA256: nil)
         }
         editorState = adoptEditor(editorState)
         diffEditorState = adoptDiffEditor(diffEditorState)
@@ -1060,6 +1083,10 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         guard senderWebView != nil, senderWebView === webView else { return }
         if CodePaneBridge.isReady(body: body) {
             handleReady()
+            return
+        }
+        if CodePaneBridge.isUnsubscribeFileSignature(body: body) {
+            stopFileSignatureSubscription()
             return
         }
         if let metric = CodePaneBridge.decodeRenderMetric(body: body) {
@@ -1345,10 +1372,12 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         case .workspaceFileRead(let path, let ownsFileSignature, let comparisonBaseRevision, let oldPath, let requiresDirectPath):
             performFileRead(
                 path: path, ownsFileSignature: ownsFileSignature, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath,
-                requiresDirectPath: requiresDirectPath,
-                id: id, generation: generation, hosting: hosting)
+                requiresDirectPath: requiresDirectPath, id: id, generation: generation, hosting: hosting)
         case .workspaceRevisionFileRead(let path, let revision, let oldPath):
             performWorkspaceRevisionFileRead(path: path, revision: revision, oldPath: oldPath, id: id, generation: generation, hosting: hosting)
+        case .workspaceImageRead(let path, let mediaType, let isOpenDocument):
+            performWorkspaceImageRead(
+                path: path, mediaType: mediaType, isOpenDocument: isOpenDocument, id: id, generation: generation, hosting: hosting)
         case .workspaceFileWrite(let path, let content, let baseSHA256, let requiresDirectPath):
             performFileWrite(
                 path: path, content: content, baseSHA256: baseSHA256, requiresDirectPath: requiresDirectPath, id: id, generation: generation,
@@ -1519,8 +1548,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     }
 
     private func performFileRead(
-        path: String, ownsFileSignature: Bool, comparisonBaseRevision: String?, oldPath: String?, requiresDirectPath: Bool, id: String, generation: Int,
-        hosting: any CodePaneHosting
+        path: String, ownsFileSignature: Bool, comparisonBaseRevision: String?, oldPath: String?, requiresDirectPath: Bool, id: String,
+        generation: Int, hosting: any CodePaneHosting
     ) {
         guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
             reply(
@@ -1589,11 +1618,11 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                     //      completes after it → A's reread is skipped, since `subscribedFilePath` is
                     //      now B and its `== path` check (path == A) fails.
                     //  (b) A's reread completes BEFORE B's navigation does → it passes
-                    //      (`subscribedFilePath` is still A at that moment), but the
-                    //      `resubscribeFileSignature` call below is a no-op for it — that method guards
-                    //      on `subscribedFilePath != path`, already equal — so it's just a harmless
-                    //      baseline refresh. B's navigation resubscribes normally once its own read
-                    //      lands.
+                    //      (`subscribedFilePath` is still A at that moment), and the
+                    //      `resubscribeFileSignature` call below reinstalls A's stream, because B's
+                    //      dispatch already staled it (see that method's generation guard). B's
+                    //      navigation resubscribes to B normally once its own read lands, and a B that
+                    //      never lands leaves A watched rather than stranded.
                     //  (c) two navigations, B then C, in flight concurrently → B's completion carries
                     //      the now-stale `navToken` and is skipped once C's navigation has bumped
                     //      `latestFileNavigationToken` past it; C's (latest) completion passes. This
@@ -1609,6 +1638,9 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                     // `lastActedScopeSignature`/`lastActedScope` bookkeeping.
                     self.lastActedFileSignatureValue = FileSignatureValue(sha256: result.sha256, missing: false)
                     self.lastActedFilePath = path
+                    // The page is showing a watchable file again, so an explicit stop is spent: this
+                    // read is the successful `editor` open that installs the next subscription.
+                    self.fileSignatureStoppedByPage = false
                     self.resubscribeFileSignature(path: path, device: device)
                 case .failure(let error):
                     self.reply(id: id, generation: generation, error: error)
@@ -1645,9 +1677,51 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                 case .success(let payload): self.reply(id: id, generation: generation, result: payload)
                 case .failure(let error): self.reply(id: id, generation: generation, error: error)
                 }
-            } catch {
-                self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
-            }
+            } catch { self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error)) }
+        }
+    }
+
+    /// Reads raw bytes for an image preview. Modelled on `performWorkspaceRevisionFileRead`, not
+    /// `performFileRead`: it deliberately never touches `subscribedFilePath`,
+    /// `fileSignatureSubscriptionGeneration`, or `lastActedFileSignatureValue`. An image read is a read
+    /// of bytes to paint, not a read that claims the pane's one external-change watcher, and this same
+    /// method also serves an image embedded in a Markdown preview, which is not the open file at all
+    /// and must not be treated as one. The tradeoff this accepts: an open image does not live-refresh
+    /// if it changes on disk while the pane is showing it.
+    ///
+    /// `isOpenDocument` is the one thing that does move pane state: opening an image AS the document is
+    /// a navigation, so it claims a fresh `latestFileNavigationToken` before dispatch, exactly as a
+    /// path-changing `performFileRead` does. Without that claim, a text read still in flight for the
+    /// file the pane is leaving would pass its own navigation guard when it lands and point the watcher
+    /// at a file the page never displayed: the page drops that reply (a later open claimed it) and,
+    /// when the image read itself fails, the page goes on showing the file it had. The bump happens at
+    /// dispatch, before the read's own outcome is known, because the navigation is the user's pick, not
+    /// the read's success: a successful image read separately stops the stream outright
+    /// (`unsubscribeFileSignature`), which is the page's own message, not this read's doing. An
+    /// embedded Markdown image claims nothing: it does not change what the pane is showing.
+    private func performWorkspaceImageRead(
+        path: String, mediaType: String, isOpenDocument: Bool, id: String, generation: Int, hosting: any CodePaneHosting
+    ) {
+        guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
+            return
+        }
+        if isOpenDocument { latestFileNavigationToken += 1 }
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        Task { [weak self] in
+            do {
+                let result = try await deviceGateway.workspaceFileRead(
+                    workspaceID: workspaceID, relativePath: path, comparisonBaseRevision: nil, oldPath: nil, requiresDirectPath: false, device: device
+                )
+                guard let self else { return }
+                switch CodePaneBridge.imageReadPayload(result, mediaType: mediaType) {
+                case .success(let payload): self.reply(id: id, generation: generation, result: payload)
+                case .failure(let error): self.reply(id: id, generation: generation, error: error)
+                }
+            } catch { self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error)) }
         }
     }
 
@@ -1686,6 +1760,10 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         // path-changing dispatch has since bumped the generation again and its own success/failure arm
         // now owns this state — either way, this stale completion must not interfere.
         guard pathChanged, fileSignatureSubscriptionGeneration == dispatchGeneration else { return }
+        // The page stopped the stream outright (it opened an image) and has not opened a watchable file
+        // since: it holds no listener, and the file this would restore is not what it is showing. Only
+        // the next successful `editor` read may install a subscription again.
+        guard !fileSignatureStoppedByPage else { return }
         // `lastActedFilePath` is still the previous file's path in both stranding sub-cases: the
         // live-stream case (nothing on this failed path ever clears it), and the disconnected-with-
         // pending-retry case (cleared only by a different-path resubscribe, which never ran since this
@@ -1740,7 +1818,9 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
             return
         }
         // Stop and drop whatever is (or isn't) currently installed, then resubscribe fresh. Clearing
-        // `subscribedFilePath` first is what lets `resubscribeFileSignature`'s own `!= path` guard pass.
+        // `subscribedFilePath` first states plainly that nothing is subscribed here, so the restore
+        // reads the same whichever way `resubscribeFileSignature`'s guard would have admitted it (this
+        // dispatch's own generation bump already staled whatever was installed).
         // Restoring over a still-healthy A stream (failure arrived before any disconnect ever happened)
         // just stops and reopens it — brief, harmless churn, not special-cased away.
         //
@@ -2527,8 +2607,17 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// `workspaceFileRead` call for the same path (e.g. a save's own read-back, or a redundant refetch)
     /// is a no-op here — only actually opening a different file tears down and reopens the stream.
     /// Mirrors `resubscribeDiffSignature` exactly.
+    ///
+    /// Same path is not on its own enough to skip: the installed stream also has to still be LIVE for
+    /// the current generation. A navigation dispatched while this path is subscribed bumps
+    /// `fileSignatureSubscriptionGeneration` at dispatch time without touching the stream, so a
+    /// navigation that never installs a stream of its own (its read loses the newest-navigation guard,
+    /// or an Editor image open superseded it) leaves this path's stream installed with every frame
+    /// dropped by its own generation guard. Skipping on the path alone would strand the file the page
+    /// is still showing: nothing else resubscribes it, and its recovery reread lands here. Comparing
+    /// `subscribedFileGeneration` makes that reread reinstall the stream instead.
     private func resubscribeFileSignature(path: String, device: SpacesPairedDeviceRecord) {
-        guard subscribedFilePath != path else { return }
+        guard subscribedFilePath != path || subscribedFileGeneration != fileSignatureSubscriptionGeneration else { return }
         if lastActedFilePath != path {
             lastActedFileSignatureValue = nil
             lastActedFilePath = nil
@@ -2537,6 +2626,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         fileSignatureStream = nil
         subscribedFilePath = path
         fileSignatureSubscriptionGeneration += 1
+        subscribedFileGeneration = fileSignatureSubscriptionGeneration
         let subscriptionGeneration = fileSignatureSubscriptionGeneration
         let workspaceID = workspaceID
         let deviceGateway = deviceGateway
@@ -2587,6 +2677,42 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                 self.scheduleFileSignatureReconnect(path: path, generation: subscriptionGeneration)
             }
         }
+    }
+
+    /// Ends the file-signature stream at the page's request (`unsubscribeFileSignature`), with no
+    /// reconnect: the page is showing something no disk change could be reconciled into, so there is
+    /// nothing to watch for until it opens a file again, and that open's own `editor` read repoints
+    /// the stream through `resubscribeFileSignature`.
+    ///
+    /// Clearing `subscribedFilePath` is what lets that later read count as a path change even when it
+    /// names the file this stream was just watching. Bumping the generation is what makes the stop
+    /// final: a frame already queued on the stopped stream, and any reconnect the backoff loop still
+    /// has scheduled, both check it and drop out. `lastActedFileSignatureValue`/`lastActedFilePath`
+    /// are deliberately left alone, exactly as a `resubscribeFileSignature` to the same path leaves
+    /// them: they record what the web app has already read, which a stop does not change, and
+    /// discarding them would let the first frame after a reopen re-announce content the page already
+    /// has.
+    ///
+    /// The `latestFileNavigationToken` bump is the same one teardown makes, for the same reason: a
+    /// read for the file the page was showing until it opened this image can still be in flight, and
+    /// its success arm would otherwise resubscribe the very stream just stopped (case (d) of
+    /// `performFileRead`'s success-arm comment). Clearing `subscribedFilePath` alone only covers the
+    /// same-path-reread half of that guard.
+    ///
+    /// `fileSignatureStoppedByPage` is what makes the stop hold across the reads that come *after* it:
+    /// a failed open dispatched while the image is showing carries its own fresh generation, so the
+    /// generation guards cannot tell it apart from an ordinary failed open, and
+    /// `restoreFileSignatureMonitoringAfterFailedOpen` would re-arm the file the image replaced (or
+    /// subscribe to the failed path itself when no file was ever read). The flag stays set until a
+    /// successful `editor` read installs the next subscription.
+    private func stopFileSignatureSubscription() {
+        fileSignatureStream?.stop()
+        fileSignatureStream = nil
+        subscribedFilePath = nil
+        fileSignatureStoppedByPage = true
+        fileSignatureSubscriptionGeneration += 1
+        fileSignatureReconnectFailures = 0
+        latestFileNavigationToken += 1
     }
 
     /// Clears `subscribedFilePath`/`fileSignatureStream` after a real disconnect and starts a
@@ -2728,8 +2854,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         guard
             let script = CodePaneBridge.dispatchEventScript(
                 name: Self.fileListSignatureEventName,
-                detail: CodePaneBridge.FileListSignaturePayload(
-                    fileListSignature: frame.fileListSignature, liveRefreshError: frame.liveRefreshError))
+                detail: CodePaneBridge.FileListSignaturePayload(fileListSignature: frame.fileListSignature, liveRefreshError: frame.liveRefreshError))
         else { return }
         lastActedFileListLiveRefreshError = frame.liveRefreshError
         scriptEvaluator.evaluateCodePaneScript(script)
@@ -2776,8 +2901,7 @@ extension CodePaneContentController: WKNavigationDelegate {
         guard webView === self.webView else { return }
         fputs("spaces: code_pane_web_view_died workspace=\(workspaceID) reason=terminated\n", stderr)
         teardownWebView()
-        showCrashNotice(
-            message: "The page behind this pane quit unexpectedly. Reload to pick up where you left off.")
+        showCrashNotice(message: "The page behind this pane quit unexpectedly. Reload to pick up where you left off.")
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {

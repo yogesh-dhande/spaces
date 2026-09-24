@@ -105,6 +105,8 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 - Put infrequent or contextual actions behind an overflow menu instead of overcrowding the main UI.
 - Use a segmented control in a sheet's or view's toolbar/navigation-bar principal position to switch between a small, fixed set of content-rendering modes (e.g. Rendered/Raw) instead of separate screens, buttons, or menu items.
 - In a crowded Editor toolbar, represent agent assignment as a compact selector when running agents exist, with a separated `Start new…` menu item; when none exist, use a compact `Start agent…` action that opens the command-entry dialog without widening the row.
+- When a file can be shown more than one way, put one segmented control at the trailing end of the surface's own header rather than a control per rendering. In the Editor's open-file bar that means the path leads, any read-only facts about the file follow it, and the segmented control sits last, so its position stays put as the labels beside it change. Its segments name what this file can be shown as, so a file with only one rendering shows no control at all. A rendering that exists but is unavailable for this particular file stays visible and disabled, with its reason as the tooltip: hiding it would say the feature is missing rather than that the file does not qualify.
+- A drag divider between two halves of one view is a hairline whose hit area is wider than what it paints, tints to the accent color on hover and while dragging, takes a tab stop, and resizes from the arrow keys. A divider that splits a view evenly by default carries its position for as long as the view is open rather than persisting it.
 
 ## Forms
 - Keep forms compact and aligned.

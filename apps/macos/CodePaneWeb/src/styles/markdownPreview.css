@@ -1,0 +1,168 @@
+/*
+ * Markdown preview styling for the Editor's rendered surface, scoped entirely under
+ * `.markdown-preview` / `.markdown-body`.
+ *
+ * This is an adapted copy of `apps/ios/Resources/terminal-markdown.css`, not a shared import.
+ * That file styles `html`/`body` for a full-page WKWebView document with no shell around it, and
+ * drives its palette from `prefers-color-scheme` because it has no host to tell it which theme is
+ * active. This stylesheet loads into the Editor page instead, which already has its own shell and
+ * whose theme is driven only by `[data-theme]` on `<html>`, set by the Swift host (see
+ * `tokens.css`'s own header comment), never by the OS appearance. Importing the iOS file verbatim
+ * would restyle the whole Editor page and follow the wrong appearance signal, so the rules below
+ * carry over its structure and proportions but read every color from the app's own tokens.
+ */
+
+.markdown-preview {
+  overflow: auto;
+  min-width: 0;
+  background: var(--bg);
+  padding: 16px 20px;
+}
+
+.markdown-body {
+  max-width: 44rem;
+  margin: 0 auto;
+  color: var(--fg);
+}
+
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  line-height: 1.25;
+  margin: 1.4em 0 0.5em;
+  font-weight: 600;
+  color: var(--fg);
+}
+.markdown-body h1 {
+  font-size: 1.6em;
+}
+.markdown-body h2 {
+  font-size: 1.35em;
+  padding-bottom: 0.2em;
+  border-bottom: 1px solid var(--line);
+}
+.markdown-body h3 {
+  font-size: 1.15em;
+}
+.markdown-body h4 {
+  font-size: 1em;
+}
+.markdown-body h5,
+.markdown-body h6 {
+  font-size: 0.9em;
+  color: var(--fg3);
+}
+
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body blockquote,
+.markdown-body table,
+.markdown-body pre {
+  margin: 0 0 0.9em;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 1.5em;
+}
+.markdown-body li + li {
+  margin-top: 0.2em;
+}
+
+.markdown-body a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.markdown-body a:hover {
+  text-decoration: underline;
+}
+
+/* A link the preview can act on carries no href (see markdownPreview.ts), so it gets neither the
+   pointer cursor nor the tab stop's focus ring on its own. */
+.markdown-body a[data-link] {
+  cursor: pointer;
+}
+.markdown-body a[data-link]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.markdown-body code,
+.markdown-body pre {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.88em;
+}
+
+.markdown-body code {
+  background: var(--chip);
+  padding: 0.15em 0.35em;
+  border-radius: 4px;
+}
+
+.markdown-body pre {
+  background: var(--chip);
+  padding: 12px 14px;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.markdown-body pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+}
+
+.markdown-body blockquote {
+  margin-left: 0;
+  padding: 0.1em 1em;
+  color: var(--fg3);
+  border-left: 3px solid var(--line);
+}
+
+.markdown-body hr {
+  height: 1px;
+  border: 0;
+  background: var(--line);
+  margin: 1.5em 0;
+}
+
+.markdown-body table {
+  border-collapse: collapse;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--line);
+  padding: 6px 10px;
+  text-align: left;
+}
+.markdown-body th {
+  font-weight: 600;
+}
+
+.markdown-body img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+
+/* Stands in for an image whose source names nothing in the workspace (see markdownPreview.ts's
+   image rule): the author's alt text, muted, where the picture would have been. */
+.markdown-body .markdown-image-alt {
+  color: var(--fg3);
+  font-style: italic;
+}
