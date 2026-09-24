@@ -9934,6 +9934,51 @@
             XCTAssertFalse(model.isShowingLocalScrollFrame, "the phone paints no replay over an application's own screen")
         }
 
+        /// A tap in a session whose application is tracking the mouse reaches that application as a
+        /// click: one press and one release at the tapped cell, in that order, each carrying the same
+        /// normalized pointer the host view measured (#764).
+        func testATapForwardsAPressAndAReleaseAtTheTappedCell() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript, mouseReportingActive: true)
+            defer { model.stop() }
+
+            XCTAssertTrue(model.sendMouseClick(button: 1, at: TerminalScrollPointerPosition(x: 0.25, y: 0.5)))
+
+            let reachedDaemon = try await waitForTerminalControlAction(.mouseButton, count: 2, recorder: recorder)
+            XCTAssertTrue(reachedDaemon, "the tap reaches the application as a press and a release")
+            let clicks = Self.mouseButtonRequests(in: await recorder.snapshot())
+            XCTAssertEqual(clicks.map(\.mousePressed), [true, false], "the release follows the press it belongs to")
+            XCTAssertEqual(clicks.map(\.mouseButton), [1, 1], "a tap is a left click")
+            XCTAssertEqual(clicks.map(\.mousePointerX), [0.25, 0.25])
+            XCTAssertEqual(clicks.map(\.mousePointerY), [0.5, 0.5])
+            XCTAssertEqual(clicks.map(\.mousePointerMods), [0, 0], "a tap carries no modifiers")
+        }
+
+        /// While this client is reading its own replay of the session's history, the rows under the finger
+        /// are rows this client painted rather than the screen the application is drawing, so a tap names
+        /// no cell the application would recognize and is not forwarded at all. The offer the host view
+        /// makes is refused here, which is what leaves the tap focusing the keyboard.
+        func testATapWhileReadingLocalHistoryForwardsNoClick() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+
+            model.noteScrollGestureBegan()
+            model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
+            await waitUntil("the replay to paint the gesture") { model.isShowingLocalScrollFrame }
+
+            XCTAssertFalse(model.sendMouseClick(button: 1, at: TerminalScrollPointerPosition(x: 0.25, y: 0.5)))
+
+            try await Task.sleep(for: .milliseconds(100))
+            let clickCount = await recorder.countTerminalControlAction(.mouseButton)
+            XCTAssertEqual(clickCount, 0, "a tap over history reaches the application as nothing")
+        }
+
         /// A replay left showing from an earlier gesture must not survive the program switching into the
         /// alternate screen underneath it: a fresh gesture that resolves to the daemon has to drop the
         /// stale replay before forwarding, or the swipe would drive a hidden screen the phone still paints
@@ -10937,6 +10982,14 @@
                     emittedAt: "2026-06-04T14:23:31Z", alternateScreenActive: alternateScreenActive, mouseReportingActive: mouseReportingActive),
                 isOutOfBand: false)
             return model
+        }
+
+        /// The forwarded mouse buttons inside an already-taken `snapshot()`, in the order they were sent.
+        private static func mouseButtonRequests(in requests: [SpacesDeviceAPIRequest]) -> [SpacesDeviceTerminalControlRequest] {
+            requests.compactMap { request in
+                guard case .terminalControl(let payload) = request.command, payload.action == .mouseButton else { return nil }
+                return payload
+            }
         }
 
         private static func transcriptServingClient(

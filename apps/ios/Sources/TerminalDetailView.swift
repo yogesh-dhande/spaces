@@ -116,7 +116,8 @@ struct TerminalDetailView: View {
                             onSendScroll: { horizontal, vertical, scrollMods, pointerPosition in
                                 sendTerminalScroll(
                                     horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
-                            }, onOpenLink: { link in openTerminalLink(link) }, onOpenComposer: { isShowingComposer = true },
+                            }, onSendMouseClick: { button, pointerPosition in sendTerminalMouseClick(button: button, at: pointerPosition) },
+                            onOpenLink: { link in openTerminalLink(link) }, onOpenComposer: { isShowingComposer = true },
                             // A clipboard image pasted at the terminal lands in the composer pre-attached
                             // rather than in the session: sending an image stays a deliberate composer action.
                             onPasteClipboardImage: {
@@ -397,6 +398,14 @@ struct TerminalDetailView: View {
     private func sendTerminalScroll(horizontal: Double, vertical: Double, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?) {
         writeE2EEventIfNeeded(kind: "send_scroll", detail: "\(horizontal),\(vertical)")
         model.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
+    }
+
+    /// A tap forwarded to an application tracking the mouse. Answers whether it was sent, because the
+    /// terminal view raises the keyboard only for a tap the application did not take.
+    private func sendTerminalMouseClick(button: UInt8, at pointerPosition: TerminalScrollPointerPosition) -> Bool {
+        guard model.sendMouseClick(button: button, at: pointerPosition) else { return false }
+        writeE2EEventIfNeeded(kind: "mouse_click", detail: "\(pointerPosition.x),\(pointerPosition.y)")
+        return true
     }
 
     private func openTerminalLink(_ link: String) {

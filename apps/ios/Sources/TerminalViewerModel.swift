@@ -1928,6 +1928,34 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     func flushPendingScroll() { scrollCoalescer.flush() }
 
+    /// Forwards a tap as one click at the cell under the finger, reporting whether it was sent. The host
+    /// view has already established that the application on the other end is tracking the mouse and that
+    /// no link claimed the tap; this adds the half of the gate that is client state.
+    ///
+    /// A local replay is this client's own screen of history held above the session's live frames, so the
+    /// cell under the finger there is not a cell the application drew and the tap keeps its focus-only
+    /// handling until the reader is back at the live bottom.
+    ///
+    /// Press and release ride the same serial input queue as keys and scroll batches, enqueued in that
+    /// order, so the pair can neither reorder against each other nor interleave with a keystroke. Pending
+    /// input is flushed ahead of them for the same reason: a click after typed text has to reach the
+    /// application after that text.
+    @discardableResult func sendMouseClick(button: UInt8, at pointerPosition: TerminalScrollPointerPosition) -> Bool {
+        guard isOwner, acceptsInput, hasConfirmedOwnerInputReadiness else { return false }
+        guard !isShowingLocalScrollFrame else { return false }
+        flushPendingScroll()
+        flushBufferedInputText()
+        enqueueInputSend(kind: "mouse_button", detail: "press") { [weak self, button, pointerPosition] in
+            guard let self else { return }
+            try await self.performMouseButtonRequest(button: button, pressed: true, pointerPosition: pointerPosition)
+        }
+        enqueueInputSend(kind: "mouse_button", detail: "release") { [weak self, button, pointerPosition] in
+            guard let self else { return }
+            try await self.performMouseButtonRequest(button: button, pressed: false, pointerPosition: pointerPosition)
+        }
+        return true
+    }
+
     /// Returns the screen to the session's newest frame, for the jump-to-bottom control offered while
     /// `isScrolledIntoScrollback` is true.
     ///
@@ -2757,6 +2785,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             try await bridgeClient.scroll(
                 context: context, horizontal: horizontal, vertical: vertical, scrollMods: scrollMods == 0 ? nil : scrollMods,
                 pointerPosition: pointerPosition, timeout: Self.inputRequestTimeout, commandChannel: commandChannel)
+        }
+    }
+
+    private func performMouseButtonRequest(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition) async throws {
+        let context = TerminalCommandContext(sessionID: session.id, clientID: remoteClient.id, ownerEpoch: currentOwnerEpoch)
+        try await performRequestUsingInputChannel { [bridgeClient, context] commandChannel in
+            try await bridgeClient.mouseButton(
+                context: context, button: button, pressed: pressed, pointerPosition: pointerPosition, timeout: Self.inputRequestTimeout,
+                commandChannel: commandChannel)
         }
     }
 

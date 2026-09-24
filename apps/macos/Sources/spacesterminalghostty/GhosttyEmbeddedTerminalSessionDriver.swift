@@ -96,7 +96,7 @@
         /// PTY winsize pixel dimensions and as mode-2048 in-band size reports. It stays at the Retina
         /// factor these sessions have always reported so that pixel-sized output (sixel, Kitty graphics)
         /// is unaffected by the session having no view.
-        private static let contentScale = 2.0
+        private nonisolated static let contentScale = 2.0
 
         /// A null session is all `ghostty_session_new_headless` can report across the C boundary: the
         /// reason stays inside libghostty's log, and one cause — GhosttyKit artifacts whose compiled
@@ -632,15 +632,48 @@
         @discardableResult func sendMouseButton(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) -> Bool {
             guard let session, let surface else { return false }
             let mods = ghostty_input_mods_e(pointerPosition?.mods ?? GHOSTTY_MODS_NONE.rawValue)
-            if let pointerPosition { guard movePointer(to: pointerPosition, session: session, surface: surface) else { return false } }
+            if let pointerPosition { guard movePointerToClickedCell(pointerPosition, session: session, surface: surface) else { return false } }
             _ = ghostty_surface_mouse_button(
                 surface, pressed ? GHOSTTY_MOUSE_PRESS : GHOSTTY_MOUSE_RELEASE, ghostty_input_mouse_button_e(UInt32(button)), mods)
             requestSurfaceRefresh()
             return true
         }
 
+        /// Puts the pointer on the cell a click named, rather than on a place proportional to the
+        /// surface's pixels. A click's normalized position is a cell center in the sender's grid
+        /// (`TerminalControlMouseButtonPayload`), so it is resolved against this surface's grid and
+        /// expanded to the pixel center of that cell; expanding the fraction over the full pixel width the
+        /// way `movePointer(to:session:surface:)` does would shift it by the padding and by the leftover
+        /// pixels the grid does not cover, landing on the neighbouring cell in the later columns and rows.
+        private func movePointerToClickedCell(
+            _ pointerPosition: TerminalScrollPointerPosition, session: ghostty_session_t, surface: ghostty_surface_t
+        ) -> Bool {
+            guard pointerPosition.isValid else { return false }
+            let size = ghostty_session_size(session)
+            guard size.columns > 0, size.rows > 0, size.cell_width_px > 0, size.cell_height_px > 0 else { return false }
+            let pixels = Self.clickedCellCenterPixels(
+                for: pointerPosition, columns: Int(size.columns), rows: Int(size.rows), cellWidthPx: Double(size.cell_width_px),
+                cellHeightPx: Double(size.cell_height_px))
+            ghostty_surface_mouse_pos(surface, pixels.x / Self.contentScale, pixels.y / Self.contentScale, ghostty_input_mods_e(pointerPosition.mods))
+            return true
+        }
+
+        /// The center, in this surface's pixels, of the cell a click's normalized position names.
+        ///
+        /// Ghostty resolves a pointer to a cell as `floor((pixel - padding) / cellSize)`
+        /// (`renderer/size.zig`, `Coordinate.convert`), so a cell center is the position that resolves
+        /// back to the cell it came from whatever the leftover pixels beyond the last cell are.
+        nonisolated static func clickedCellCenterPixels(
+            for pointerPosition: TerminalScrollPointerPosition, columns: Int, rows: Int, cellWidthPx: Double, cellHeightPx: Double
+        ) -> (x: Double, y: Double) {
+            let cell = TerminalPointerGrid.cell(x: pointerPosition.x, y: pointerPosition.y, columns: columns, rows: rows)
+            let padding = GhosttySurfaceGridPadding.perSidePixels(scale: contentScale)
+            return (x: padding + (Double(cell.column) + 0.5) * cellWidthPx, y: padding + (Double(cell.row) + 0.5) * cellHeightPx)
+        }
+
         /// Converts a client's normalized pointer into this surface's own point coordinates. Raw client
-        /// pixels are never transported because client and daemon display scales differ.
+        /// pixels are never transported because client and daemon display scales differ. This is the
+        /// scroll pointer's meaning: a place on a continuous surface, padding included.
         private func movePointer(to pointerPosition: TerminalScrollPointerPosition, session: ghostty_session_t, surface: ghostty_surface_t) -> Bool {
             guard pointerPosition.isValid else { return false }
             let size = ghostty_session_size(session)

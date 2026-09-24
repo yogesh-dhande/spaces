@@ -93,6 +93,10 @@ import Foundation
         public let onSendText: @MainActor (String, Bool) -> Void
         public let onSendKey: @MainActor (String) -> Void
         public let onSendScroll: @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void
+        /// A tap that no link claimed, in a session whose application is tracking the mouse, forwarded as
+        /// a click at the tapped cell. Answers whether the click was actually sent, because the rest of
+        /// the gate is client state the host view cannot see (see `handleTapToActivateInput`).
+        public let onSendMouseClick: (@MainActor (UInt8, TerminalScrollPointerPosition) -> Bool)?
         public let onOpenLink: @MainActor (String) -> Void
         public let onOpenComposer: (@MainActor () -> Void)?
         public let onPasteClipboardImage: (@MainActor () -> Bool)?
@@ -117,6 +121,7 @@ import Foundation
             onRenderedViewportChanged: (@MainActor (GhosttyTerminalSnapshotViewport.Window) -> Void)? = nil,
             onSendText: @escaping @MainActor (String, Bool) -> Void, onSendKey: @escaping @MainActor (String) -> Void,
             onSendScroll: @escaping @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void = { _, _, _, _ in },
+            onSendMouseClick: (@MainActor (UInt8, TerminalScrollPointerPosition) -> Bool)? = nil,
             onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil,
             onPasteClipboardImage: (@MainActor () -> Bool)? = nil, onClearSelectionTapped: (@MainActor () -> Void)? = nil
         ) {
@@ -136,6 +141,7 @@ import Foundation
             self.onSendText = onSendText
             self.onSendKey = onSendKey
             self.onSendScroll = onSendScroll
+            self.onSendMouseClick = onSendMouseClick
             self.onOpenLink = onOpenLink
             self.onOpenComposer = onOpenComposer
             self.onPasteClipboardImage = onPasteClipboardImage
@@ -168,6 +174,11 @@ import Foundation
             // between the finger and the screen.
             hostView.onSendScroll = { horizontal, vertical, scrollMods, pointerPosition in
                 MainActor.assumeIsolated { onSendScroll(horizontal, vertical, scrollMods, pointerPosition) }
+            }
+            // Synchronous, like the paste handler below: the tap's own handling needs the answer before
+            // it decides whether to raise the keyboard, and UIKit delivers the tap on the main thread.
+            hostView.onSendMouseClick = onSendMouseClick.map { callback in
+                { button, pointerPosition in MainActor.assumeIsolated { callback(button, pointerPosition) } }
             }
             hostView.onOpenLink = { link in _ = Task { @MainActor in onOpenLink(link) } }
             hostView.onOpenComposer = onOpenComposer.map { callback in { _ = Task { @MainActor in callback() } } }
@@ -229,6 +240,7 @@ import Foundation
         enum TapActivationResult: String, Equatable {
             case ignored
             case openedLink
+            case forwardedClick
             case focused
             case clearedSelection
         }
@@ -396,6 +408,10 @@ import Foundation
         public var onSendText: ((String, Bool) -> Void)?
         public var onSendKey: ((String) -> Void)?
         public var onSendScroll: ((Double, Double, Int32, TerminalScrollPointerPosition?) -> Void)?
+        /// Forwards a tap the link probe did not claim as a click at the tapped cell, and answers whether
+        /// it was sent. See `forwardMouseClick(at:)` for the half of the gate that lives here and the half
+        /// the app layer owns.
+        public var onSendMouseClick: ((UInt8, TerminalScrollPointerPosition) -> Bool)?
         public var onOpenLink: ((String) -> Void)?
         public var onOpenComposer: (() -> Void)?
         /// Handles a paste whose clipboard declares an image. The app layer reads and validates the image
@@ -786,7 +802,7 @@ import Foundation
             sendScroll(
                 horizontal: horizontal, vertical: vertical,
                 scrollMods: Self.makeScrollMods(hasPreciseDeltas: hasPreciseDeltas, momentumState: momentumState),
-                pointerPosition: location.flatMap(scrollPointerPosition))
+                pointerPosition: location.flatMap(pointerPosition))
         }
 
         public static func makeScrollMods(hasPreciseDeltas: Bool, momentumState: UIGestureRecognizer.State) -> Int32 {
@@ -806,13 +822,16 @@ import Foundation
             _ = handleTapToActivateInput(at: recognizer.location(in: self))
         }
 
-        /// An iOS tap never drives the remote application's mouse: the phone cannot know what the
-        /// remote TUI considers a link, so a forwarded plain click that lands on a URL is
+        /// A link under the tap opens on the device and is never forwarded: the phone cannot know what
+        /// the remote TUI considers a link, so a forwarded plain click that lands on a URL is
         /// indistinguishable, to a Ghostty-aware TUI, from a link-open gesture, and that gesture
-        /// executes on the session host Mac (#465). A link under the tap opens locally instead; every
-        /// other tap only focuses the keyboard. Click-driven TUI interaction (vim cursor placement,
-        /// tmux pane taps) is intentionally dropped: every such TUI has a keyboard equivalent, and
-        /// scrolling stays a separate path that keeps working.
+        /// executes on the session host Mac (#465). Links therefore win over every other reading of a
+        /// tap.
+        ///
+        /// A tap no link claimed reaches the application as a click when the frame on screen reports
+        /// mouse capture (see `forwardMouseClick(at:)`), which is how a phone drives the controls such an
+        /// application draws. A forwarded tap belongs to the application alone and does not also raise
+        /// the keyboard; in every other session a tap focuses the keyboard exactly as it did before.
         ///
         /// While the daemon's shared selection is present, a plain tap is exclusively a clear gesture
         /// instead: it neither opens a link nor focuses the keyboard, matching a tap that dismisses a
@@ -842,9 +861,33 @@ import Foundation
             // unconditionally on the ended path, to keep the surface canonical.
             reapplyActiveEndedRenderFrameIfNeeded()
             if openedLink { return .openedLink }
+            if forwardMouseClick(at: location) { return .forwardedClick }
             guard acceptsTerminalInput else { return .ignored }
             becomeFirstResponder()
             return .focused
+        }
+
+        /// Hands a tap the link probe did not claim to the application on the other end, as a left press
+        /// and release at the tapped cell, and reports whether it was sent.
+        ///
+        /// The mirror surface carries the session terminal's own mouse mode, so asking it whether it
+        /// captures the mouse is the same question a Mac pane asks before forwarding a click
+        /// (`GhosttyMirrorTerminalView.mouseButtonBelongsToSession`). The other half of the gate belongs
+        /// to the app layer, which answers here: while the phone is scrolled into its own scrollback
+        /// replay the rows under the finger are history this client painted, not the screen the
+        /// application is drawing, so the cell they name is not a cell the application would recognize.
+        ///
+        /// A tap carries no modifiers, so the pointer's mods stay empty and the application receives the
+        /// same report a plain unmodified click from a Mac pane produces.
+        private func forwardMouseClick(at location: CGPoint) -> Bool {
+            guard acceptsTerminalInput, mirrorCapturesMouse, let onSendMouseClick else { return false }
+            guard let position = tappedCellPointerPosition(for: location) else { return false }
+            // A finger can land on a running flick without moving far enough to start a new pan, so the
+            // flick is ended here rather than by the pan recognizer: its display link would otherwise keep
+            // firing and deliver wheel reports after the press and release. `stopMomentum` emits the
+            // gesture's own ended scroll, which the app layer flushes ahead of the press it sends next.
+            stopMomentum()
+            return onSendMouseClick(UInt8(clamping: GHOSTTY_MOUSE_LEFT.rawValue), position)
         }
 
         @objc private func handleScrollPan(_ recognizer: UIPanGestureRecognizer) {
@@ -865,7 +908,7 @@ import Foundation
             scrollGestureCancelledByInput = false
             lastScrollTranslation = translation
             stopMomentum()
-            lastScrollPointerPosition = scrollPointerPosition(for: location)
+            lastScrollPointerPosition = pointerPosition(for: location)
             beginScrollInteraction()
             onScrollGestureBegan?()
         }
@@ -876,7 +919,7 @@ import Foundation
             lastScrollTranslation = translation
             let scrollDelta = GhosttyRemoteTerminalScrollMapper.scrollDelta(forPanDelta: delta, scaleFactor: Double(window?.screen.scale ?? 1))
             let scrollMods = Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .changed)
-            lastScrollPointerPosition = scrollPointerPosition(for: location)
+            lastScrollPointerPosition = pointerPosition(for: location)
             if sendScroll(horizontal: scrollDelta.x, vertical: scrollDelta.y, scrollMods: scrollMods, pointerPosition: lastScrollPointerPosition) {
                 didScrollDuringCurrentPan = true
             }
@@ -885,7 +928,7 @@ import Foundation
         /// The finger lifted. A lift fast enough to carry the content hands the gesture to momentum, which
         /// is still the same gesture; any other lift ends the interaction here.
         private func endScrollGesture(location: CGPoint, velocity: CGPoint) {
-            lastScrollPointerPosition = scrollPointerPosition(for: location) ?? lastScrollPointerPosition
+            lastScrollPointerPosition = pointerPosition(for: location) ?? lastScrollPointerPosition
             if didScrollDuringCurrentPan {
                 _ = sendScroll(
                     horizontal: 0, vertical: 0, scrollMods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .ended),
@@ -1581,7 +1624,8 @@ import Foundation
             Self.cellMetricsCache.recordCellPixelSize(fontSizePoints: fontSize.rawValue, scale: scale, width: cellWidthPx, height: cellHeightPx)
         }
 
-        /// Where a touch sits in the grid the daemon holds, not in the area this client shows.
+        /// Where a scroll gesture's touch sits in the grid the daemon holds, not in the area this client
+        /// shows.
         ///
         /// The daemon expands a normalized pointer over the whole session surface, and under the software
         /// keyboard the visible area is a crop of that surface rather than all of it, so a position
@@ -1589,13 +1633,45 @@ import Foundation
         /// position is normalized over the visible area first and then rebased through the crop the last
         /// render used, which is the crop the finger is actually pointing at. With no crop yet (nothing
         /// rendered) the visible area is all there is to point into.
-        private func scrollPointerPosition(for location: CGPoint) -> TerminalScrollPointerPosition? {
+        private func pointerPosition(for location: CGPoint) -> TerminalScrollPointerPosition? {
             let renderBounds = visibleRenderBounds()
             guard
                 let visible = TerminalScrollPointerPosition.normalized(
                     x: Double(location.x - renderBounds.minX), y: Double(location.y - renderBounds.minY), width: Double(renderBounds.width),
                     height: Double(renderBounds.height))
             else { return nil }
+            guard let renderedCrop else { return visible }
+            return renderedCrop.gridPosition(forVisible: visible)
+        }
+
+        /// The center of the cell a tap landed on, expressed in the grid the daemon holds.
+        ///
+        /// A click names one cell rather than a place on a continuous surface
+        /// (`TerminalControlMouseButtonPayload`), and the session host resolves it by flooring the
+        /// normalized position over its own grid, so a position taken from anywhere in the tapped cell
+        /// would resolve to the neighbouring cell whenever the finger lands near a boundary. The touch is
+        /// quantized first and the cell's center is what travels, which is the position that floors back
+        /// onto the cell the finger was on.
+        ///
+        /// Quantizing uses the geometry the surface renders the grid with, so the click and the tap's
+        /// link probe (which resolves the same touch inside Ghostty) agree on the cell: the grid sits
+        /// inside Ghostty's own padding, `GhosttyTerminalCellMetricsCache.paddingPerSidePx(scale:)`, and
+        /// is laid out with the cell size that cache recorded from a live `ghostty_surface_size()` read
+        /// (`GhosttyRemoteTerminalViewport.cellMetrics(fontSize:scale:)`). The resulting cell is then
+        /// rebased through the crop the last render used, exactly as a scroll's pointer is, so the
+        /// software keyboard cannot shift which row the daemon expands it to.
+        private func tappedCellPointerPosition(for location: CGPoint) -> TerminalScrollPointerPosition? {
+            let renderBounds = visibleRenderBounds()
+            guard renderBounds.width > 0, renderBounds.height > 0 else { return nil }
+            let scale = currentScaleFactor
+            let padding = Double(GhosttyTerminalCellMetricsCache.paddingPerSidePx(scale: scale)) / scale
+            let cell = GhosttyRemoteTerminalViewport.cellMetrics(fontSize: fontSize, scale: CGFloat(scale))
+            guard cell.width > 0, cell.height > 0 else { return nil }
+            let visibleGrid = renderedCrop.map { (columns: $0.window.columns, rows: $0.window.rows) } ?? renderedViewportSize()
+            let column = Int(((Double(location.x - renderBounds.minX) - padding) / Double(cell.width)).rounded(.down))
+            let row = Int(((Double(location.y - renderBounds.minY) - padding) / Double(cell.height)).rounded(.down))
+            let center = TerminalPointerGrid.center(column: column, row: row, columns: visibleGrid.columns, rows: visibleGrid.rows)
+            let visible = TerminalScrollPointerPosition(x: center.x, y: center.y)
             guard let renderedCrop else { return visible }
             return renderedCrop.gridPosition(forVisible: visible)
         }
