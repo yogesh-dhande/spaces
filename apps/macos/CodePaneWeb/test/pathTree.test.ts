@@ -11,7 +11,7 @@ function files(nodes: readonly PathTreeNode[]): PathTreeFileNode[] {
 
 describe("buildPathTree", () => {
   it("returns root-level files with no wrapping directory for paths with no slash", () => {
-    const tree = buildPathTree(["README.md", "package.json"], []);
+    const tree = buildPathTree(["README.md", "package.json"], [], []);
 
     expect(tree).toHaveLength(2);
     expect(files(tree).map((f) => f.name)).toEqual(["README.md", "package.json"]);
@@ -20,7 +20,7 @@ describe("buildPathTree", () => {
   });
 
   it("nests a single file under its one parent directory", () => {
-    const tree = buildPathTree(["src/main.ts"], []);
+    const tree = buildPathTree(["src/main.ts"], [], []);
 
     expect(tree).toHaveLength(1);
     const dir = tree[0] as PathTreeDirNode;
@@ -33,7 +33,7 @@ describe("buildPathTree", () => {
   });
 
   it("compacts a chain of single-child directories into one row", () => {
-    const tree = buildPathTree(["apps/ios/Sources/ViewerResync.swift"], []);
+    const tree = buildPathTree(["apps/ios/Sources/ViewerResync.swift"], [], []);
 
     expect(tree).toHaveLength(1);
     const dir = tree[0] as PathTreeDirNode;
@@ -48,7 +48,7 @@ describe("buildPathTree", () => {
       "apps/ios/Sources/ViewerResync.swift",
       "apps/ios/Sources/MobileRootView.swift",
       "apps/macos/Foo.swift",
-    ], []);
+    ], [], []);
 
     // `apps` has two children (`ios`, `macos`), so the chain stops there instead of folding further.
     expect(tree).toHaveLength(1);
@@ -58,14 +58,14 @@ describe("buildPathTree", () => {
   });
 
   it("does not compact a directory holding exactly one file (only directory chains compact)", () => {
-    const tree = buildPathTree(["src/main.ts"], []);
+    const tree = buildPathTree(["src/main.ts"], [], []);
 
     const dir = tree[0] as PathTreeDirNode;
     expect(dir.label).toBe("src"); // not folded into "src/main.ts" — main.ts is a file, not a directory
   });
 
   it("keeps a directory with both files and subdirectories as siblings under one row", () => {
-    const tree = buildPathTree(["apps/README.md", "apps/macos/Foo.swift"], []);
+    const tree = buildPathTree(["apps/README.md", "apps/macos/Foo.swift"], [], []);
 
     expect(tree).toHaveLength(1);
     const apps = tree[0] as PathTreeDirNode;
@@ -75,7 +75,7 @@ describe("buildPathTree", () => {
   });
 
   it("preserves sibling order matching the input path list order", () => {
-    const tree = buildPathTree(["b.ts", "a.ts", "dir/z.ts", "dir/y.ts"], []);
+    const tree = buildPathTree(["b.ts", "a.ts", "dir/z.ts", "dir/y.ts"], [], []);
 
     expect(files(tree).map((f) => f.name)).toEqual(["b.ts", "a.ts"]);
     const dir = dirs(tree)[0]!;
@@ -83,7 +83,7 @@ describe("buildPathTree", () => {
   });
 
   it("groups a second file under an already-created directory instead of duplicating the row", () => {
-    const tree = buildPathTree(["src/a.ts", "src/b.ts"], []);
+    const tree = buildPathTree(["src/a.ts", "src/b.ts"], [], []);
 
     expect(dirs(tree)).toHaveLength(1);
     const dir = tree[0] as PathTreeDirNode;
@@ -95,7 +95,7 @@ describe("buildPathTree", () => {
       "apps/macos/Sources/a.swift",
       "apps/macos/Sources/b.swift",
       "apps/ios/Sources/c.swift",
-    ], []);
+    ], [], []);
 
     expect(tree).toHaveLength(1);
     const apps = tree[0] as PathTreeDirNode;
@@ -108,13 +108,13 @@ describe("buildPathTree", () => {
   });
 
   it("returns an empty tree for an empty path list", () => {
-    expect(buildPathTree([], [])).toEqual([]);
+    expect(buildPathTree([], [], [])).toEqual([]);
   });
 });
 
 describe("buildPathTree: submodule checkout boundaries (PR D, nested submodules)", () => {
   it("marks a submodule checkout directory with the commit it sits at", () => {
-    const tree = buildPathTree(["sbc_hal/.bumpversion.cfg"], [{ path: "sbc_hal", commit: "1".repeat(40) }]);
+    const tree = buildPathTree(["sbc_hal/.bumpversion.cfg"], [{ path: "sbc_hal", commit: "1".repeat(40) }], []);
 
     const dir = tree[0] as PathTreeDirNode;
     expect(dir.path).toBe("sbc_hal");
@@ -125,7 +125,7 @@ describe("buildPathTree: submodule checkout boundaries (PR D, nested submodules)
     // An empty checkout, or one holding only files the lister excludes (ignored, oversized, a
     // symlink out of the workspace), contributes no path at all. The submodule is still checked out,
     // so its folder and its commit must still be there to see.
-    const tree = buildPathTree([], [{ path: "vendor/lib", commit: "3".repeat(40) }]);
+    const tree = buildPathTree([], [{ path: "vendor/lib", commit: "3".repeat(40) }], []);
 
     expect(tree).toHaveLength(1);
     const vendor = tree[0] as PathTreeDirNode;
@@ -140,6 +140,7 @@ describe("buildPathTree: submodule checkout boundaries (PR D, nested submodules)
     const tree = buildPathTree(
       ["apps/main.ts", "vendor/lib/parser.c"],
       [{ path: "vendor/lib", commit: "4".repeat(40) }],
+      [],
     );
 
     // Seeding a submodule's folder must not hoist it ahead of the sorted listing around it.
@@ -151,6 +152,7 @@ describe("buildPathTree: submodule checkout boundaries (PR D, nested submodules)
     const tree = buildPathTree(
       ["vendor/lib/src/parser.c"],
       [{ path: "vendor/lib", commit: "2".repeat(40) }],
+      [],
     );
 
     // Without the boundary this whole path would compact into one "vendor/lib/src" row, leaving the
@@ -162,5 +164,58 @@ describe("buildPathTree: submodule checkout boundaries (PR D, nested submodules)
     expect(lib.label).toBe("lib");
     expect(lib.submoduleCommit).toBe("2".repeat(40));
     expect(dirs(lib.children)[0]!.label).toBe("src");
+  });
+});
+
+describe("buildPathTree: emptyDirectories", () => {
+  it("gives an empty directory a row", () => {
+    const tree = buildPathTree([], [], ["notes"]);
+
+    expect(tree).toHaveLength(1);
+    const dir = tree[0] as PathTreeDirNode;
+    expect(dir.kind).toBe("dir");
+    expect(dir.label).toBe("notes");
+    expect(dir.path).toBe("notes");
+    expect(dir.children).toEqual([]);
+  });
+
+  it("keeps an empty directory at its own sorted position when a sibling path has files", () => {
+    const tree = buildPathTree(["apps/main.ts"], [], ["apps/empty"]);
+
+    expect(tree).toHaveLength(1);
+    const apps = tree[0] as PathTreeDirNode;
+    expect(apps.label).toBe("apps"); // two children (a file and the empty dir), so it does not compact further
+    // "apps/empty" sorts before "apps/main.ts", so the folder takes its place among its siblings
+    // instead of being appended below every file the listing named.
+    expect(apps.children.map((child) => (child.kind === "dir" ? child.label : child.name))).toEqual(["empty", "main.ts"]);
+    const emptyDir = dirs(apps.children).find((d) => d.label === "empty")!;
+    expect(emptyDir.path).toBe("apps/empty");
+    expect(emptyDir.children).toEqual([]);
+  });
+
+  it("places an empty directory among root-level siblings by its sorted position", () => {
+    const tree = buildPathTree(["a.ts", "m/inner.ts", "z.ts"], [], ["b", "n"]);
+
+    expect(tree.map((node) => (node.kind === "dir" ? node.label : node.name))).toEqual(["a.ts", "b", "m", "n", "z.ts"]);
+  });
+
+  it("keeps a listed file above an empty directory that sorts after it", () => {
+    const tree = buildPathTree(["apps/main.ts"], [], ["apps/zzz"]);
+
+    const apps = tree[0] as PathTreeDirNode;
+    expect(apps.children.map((child) => (child.kind === "dir" ? child.label : child.name))).toEqual(["main.ts", "zzz"]);
+  });
+
+  it("compacts an empty directory that is itself a single-child compaction target, ending the row at its own path", () => {
+    const tree = buildPathTree([], [], ["x/y"]);
+
+    // "x" has a single child ("y"), a directory, so it compacts into one row exactly like any other
+    // single-child chain; the row's `path` (what `setSelected`/the pointer menu address it by) must
+    // land on "x/y", the empty directory itself, not "x", the chain's start.
+    expect(tree).toHaveLength(1);
+    const dir = tree[0] as PathTreeDirNode;
+    expect(dir.label).toBe("x/y");
+    expect(dir.path).toBe("x/y");
+    expect(dir.children).toEqual([]);
   });
 });

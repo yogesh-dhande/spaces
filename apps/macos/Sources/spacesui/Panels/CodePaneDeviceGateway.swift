@@ -23,11 +23,13 @@ extension SpacesDeviceWorkspaceFileListSignatureStreamClient: CodePaneFileListSi
 /// Seam over the `SpacesDeviceClient` calls whose completions `CodePaneContentController`'s
 /// staleness guards (page generation, diff-request/file-read token, diff/file-signature subscription
 /// generation) protect against races with hibernation and scope/path changes, plus the review-comment
-/// CRUD/send calls and `workspaceFileWrite` (kept here too, rather than called directly, so
-/// `CodePaneContentControllerTests` can assert exactly which comment/args a dispatched RPC resolves to
-/// without a live device) — `workspaceFileWrite`'s completion feeds the flushed-snapshot baseline
-/// adoption and the deferred-ready gate (`adoptCommittedWriteIntoEditorState`,
-/// `outstandingFileWriteCount`), exactly the class of completion this seam exists for.
+/// CRUD/send calls, `workspaceFileWrite`, and the Files tree's mutation calls
+/// (`workspaceFileCreateDirectory`/`workspaceFileRename`/`workspaceFileDelete`, kept here too, rather
+/// than called directly, so `CodePaneContentControllerTests` can assert exactly which comment/args/
+/// mutation a dispatched RPC resolves to without a live device). `workspaceFileWrite`'s completion
+/// feeds the flushed-snapshot baseline adoption and the deferred-ready gate
+/// (`adoptCommittedWriteIntoEditorState`, `outstandingFileWriteCount`), exactly the class of completion
+/// this seam exists for.
 protocol CodePaneDeviceGateway: Sendable {
     func workspaceDiffManifestChunk(
         workspaceID: String, refName: String?, lastCommit: Bool, manifestID: String?, fileIndex: Int, device: SpacesPairedDeviceRecord
@@ -48,21 +50,26 @@ protocol CodePaneDeviceGateway: Sendable {
     func workspaceFileRead(
         workspaceID: String, relativePath: String, comparisonBaseRevision: String?, oldPath: String?, requiresDirectPath: Bool,
         device: SpacesPairedDeviceRecord
-    ) async throws
-        -> SpacesDeviceWorkspaceFileReadResult
+    ) async throws -> SpacesDeviceWorkspaceFileReadResult
 
-    func workspaceRevisionFileRead(workspaceID: String, revision: String, relativePath: String, oldPath: String?, device: SpacesPairedDeviceRecord) async throws
-        -> SpacesDeviceWorkspaceRevisionFileReadResult
+    func workspaceRevisionFileRead(workspaceID: String, revision: String, relativePath: String, oldPath: String?, device: SpacesPairedDeviceRecord)
+        async throws -> SpacesDeviceWorkspaceRevisionFileReadResult
 
     func workspaceFileList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceFileListResult
 
     func workspaceRefList(workspaceID: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceWorkspaceRefListResult
 
     func workspaceFileWrite(
-        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, requiresDirectPath: Bool,
+        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, purpose: SpacesDeviceWorkspaceFileWritePurpose,
         device: SpacesPairedDeviceRecord
-    )
-        async throws -> SpacesDeviceWorkspaceFileWriteResult
+    ) async throws -> SpacesDeviceWorkspaceFileWriteResult
+
+    func workspaceFileCreateDirectory(workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord) async throws
+
+    func workspaceFileRename(workspaceID: String, relativePath: String, destinationRelativePath: String, device: SpacesPairedDeviceRecord)
+        async throws
+
+    func workspaceFileDelete(workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord) async throws
 
     func subscribeWorkspaceDiffSignature(
         workspaceID: String, refName: String?, lastCommit: Bool, device: SpacesPairedDeviceRecord,
@@ -142,16 +149,15 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
     {
         try await Task.detached(priority: .utility) {
             try SpacesDeviceClient.cancelWorkspaceDiffManifest(
-                workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID, context: DeviceRequestContext(device: device))
+                workspaceID: workspaceID, refName: refName, lastCommit: lastCommit, manifestID: manifestID,
+                context: DeviceRequestContext(device: device))
         }.value
     }
 
     func workspaceFileRead(
         workspaceID: String, relativePath: String, comparisonBaseRevision: String?, oldPath: String?, requiresDirectPath: Bool,
         device: SpacesPairedDeviceRecord
-    ) async throws
-        -> SpacesDeviceWorkspaceFileReadResult
-    {
+    ) async throws -> SpacesDeviceWorkspaceFileReadResult {
         try await Task.detached(priority: .userInitiated) {
             try SpacesDeviceClient.workspaceFileRead(
                 workspaceID: workspaceID, relativePath: relativePath, comparisonBaseRevision: comparisonBaseRevision, oldPath: oldPath,
@@ -159,12 +165,13 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
         }.value
     }
 
-    func workspaceRevisionFileRead(workspaceID: String, revision: String, relativePath: String, oldPath: String?, device: SpacesPairedDeviceRecord) async throws
-        -> SpacesDeviceWorkspaceRevisionFileReadResult
+    func workspaceRevisionFileRead(workspaceID: String, revision: String, relativePath: String, oldPath: String?, device: SpacesPairedDeviceRecord)
+        async throws -> SpacesDeviceWorkspaceRevisionFileReadResult
     {
         try await Task.detached(priority: .userInitiated) {
             try SpacesDeviceClient.workspaceRevisionFileRead(
-                workspaceID: workspaceID, revision: revision, relativePath: relativePath, oldPath: oldPath, context: DeviceRequestContext(device: device))
+                workspaceID: workspaceID, revision: revision, relativePath: relativePath, oldPath: oldPath,
+                context: DeviceRequestContext(device: device))
         }.value
     }
 
@@ -181,15 +188,37 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
     }
 
     func workspaceFileWrite(
-        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, requiresDirectPath: Bool,
+        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, purpose: SpacesDeviceWorkspaceFileWritePurpose,
         device: SpacesPairedDeviceRecord
-    )
-        async throws -> SpacesDeviceWorkspaceFileWriteResult
-    {
+    ) async throws -> SpacesDeviceWorkspaceFileWriteResult {
         try await Task.detached(priority: .userInitiated) {
             try SpacesDeviceClient.workspaceFileWrite(
-                workspaceID: workspaceID, relativePath: relativePath, base64Data: base64Data, expectedSHA256: expectedSHA256,
-                requiresDirectPath: requiresDirectPath, context: DeviceRequestContext(device: device))
+                workspaceID: workspaceID, relativePath: relativePath, base64Data: base64Data, expectedSHA256: expectedSHA256, purpose: purpose,
+                context: DeviceRequestContext(device: device))
+        }.value
+    }
+
+    func workspaceFileCreateDirectory(workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            _ = try SpacesDeviceClient.workspaceFileCreateDirectory(
+                workspaceID: workspaceID, relativePath: relativePath, context: DeviceRequestContext(device: device))
+        }.value
+    }
+
+    func workspaceFileRename(workspaceID: String, relativePath: String, destinationRelativePath: String, device: SpacesPairedDeviceRecord)
+        async throws
+    {
+        try await Task.detached(priority: .userInitiated) {
+            _ = try SpacesDeviceClient.workspaceFileRename(
+                workspaceID: workspaceID, relativePath: relativePath, destinationRelativePath: destinationRelativePath,
+                context: DeviceRequestContext(device: device))
+        }.value
+    }
+
+    func workspaceFileDelete(workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            _ = try SpacesDeviceClient.workspaceFileDelete(
+                workspaceID: workspaceID, relativePath: relativePath, context: DeviceRequestContext(device: device))
         }.value
     }
 
@@ -259,7 +288,8 @@ struct LiveCodePaneDeviceGateway: CodePaneDeviceGateway {
 
     func startWorkspaceCommand(workspaceID: String, command: String, device: SpacesPairedDeviceRecord) async throws -> SpacesDeviceAPIResponse {
         try await Task.detached(priority: .userInitiated) {
-            try SpacesDeviceClient.startWorkspaceCommandSession(workspaceID: workspaceID, command: command, context: DeviceRequestContext(device: device))
+            try SpacesDeviceClient.startWorkspaceCommandSession(
+                workspaceID: workspaceID, command: command, context: DeviceRequestContext(device: device))
         }.value
     }
 

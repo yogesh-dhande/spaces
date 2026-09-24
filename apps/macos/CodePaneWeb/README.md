@@ -65,7 +65,8 @@ production build.
   is never `dirty` or `unmerged`.
 - `workspaceFileRead(path, purpose, comparison?)` — content, `sha256`, size. `editor` makes the
   native host's single file-signature watcher follow the standalone editor; `inlineDiff` does not
-  retarget that watcher. An inline-diff request with an immutable `comparison.baseRevision` also
+  retarget that watcher, and a confirmed rename or move retargets it through the
+  `retargetFileSignature` notification instead, having read nothing. An inline-diff request with an immutable `comparison.baseRevision` also
   returns Git-filtered `comparisonOldContent` for that revision (and its optional rename
   `oldPath`), without adding old text to the streamed patch. Every caller must identify one of
   these purposes.
@@ -191,6 +192,15 @@ branch on `.code`.
   continuous edits and immediately reports discrete changes through one complete, self-contained
   workspace document; the host persists the latest document keyed by `(deviceID, workspaceID)`.
   There are no separate Editor, mode, or Editor-UI state notification streams.
+- **File-signature retarget (JS -> Swift, fire-and-forget):**
+  `{method:"retargetFileSignature", params:{from, to}}` moves the host's one file-signature stream
+  from the workspace-relative path a confirmed Files-tree rename or move emptied to the
+  workspace-relative path it carried the open file to, somewhere the editor never read it from. The
+  host stops the current stream and subscribes to `to`, but only while its watcher still follows
+  `from`: a notification overtaken by another file's editor-purpose read leaves that file's stream
+  alone. A path that is not workspace-relative is refused and the stream stays where it is. A device
+  that is away carries the destination into the file-signature reconnect loop, so the attempt that
+  finds it subscribes to the destination rather than the path the move emptied.
 - **Render metrics (JS -> Swift, fire-and-forget):** `{method:"renderMetric", params}` reports
   validated post-render diagnostics to the native DEBUG performance log. It contains only bounded
   timing and aggregate-size metadata, not source text.
@@ -280,8 +290,8 @@ directory node, as sibling rows; the pointer row is identified as a change entry
 submodule directory is also a compaction boundary in both directions, so its row is never folded
 into a chain. `fileList.ts` renders that row with a chip in place of the +/- stat, carrying the
 pointer's 7-character commit and the whole `submoduleLabel` string as its tooltip, orange when
-`checkedOut` is false (such a row has no children, so it gets no disclosure triangle and no toggle
-either). The chip reads "submodule" from the manifest's `isSubmodule` flag alone and is rebuilt by
+`checkedOut` is false (such a row has no children, so its disclosure slot stays empty and the row is
+no toggle). The chip reads "submodule" from the manifest's `isSubmodule` flag alone and is rebuilt by
 `updateFileListRow` when the metadata-only chunk lands. Clicking the row discloses the submodule's
 files; clicking the chip selects the pointer entry, which scrolls the diff to its placeholder and is
 a no-op in Editor mode (it names a directory, not a file). `pathTree.ts`/`filesTree.ts` mark the
@@ -315,7 +325,26 @@ below), with an Editor sidebar sharing the Changes list element.
 Files uses a lazily fetched full workspace listing and a collapsed, lazy-materialized directory
 tree; that listing is sorted and capped at 50,000 paths with a `truncated` flag. Changes
 reparents the existing changed-files list, so toggling the sidebar does not rebuild its rows.
-The shared tree state and selected file are restored from the workspace document.
+The shared tree state and selected file are restored from the workspace document; a confirmed
+rename or move of a directory re-keys that expansion onto the destination, the moved directory and
+every directory under it, before the listing refetch repaints the tree.
+
+Both lists lead every row with one disclosure slot (`src/app/disclosureChevron.ts`): an inline
+chevron on a directory that holds something, turned down by the `.tri.open` class while it is
+expanded, and the same slot left empty elsewhere so names line up down the column.
+
+The Files tree's own right-click menu (`src/app/filesTree.ts`) offers New file, New folder, Rename,
+Move to…, Delete, and, for a file the Editor cannot open as text in a local workspace, Open in
+system viewer. New file/New folder/Rename run through the in-row field (`src/app/inlineRowEditor.ts`);
+Move to… picks a destination in `src/app/folderPicker.ts`, the same overlay quick-open uses
+(`src/app/pickerOverlay.ts` owns the panel, filtering, keyboard model, and focus restore for both),
+listing the folders `workspaceFolderPaths` derives from the current listing with the item's own
+subtree left out and its current parent marked unpickable. Every mutation resolves against the
+daemon before the tree changes: the row reads as busy while a move runs, and a refusal renders as an
+`.inline-error` under it. A listing refresh arriving while an inline field is open, or while a row
+action is still awaiting its answer, is held and applied once that surface settles; a refusal the
+action settled with is repainted under the row the applied listing draws, so the held refresh cannot
+swallow it.
 
 The ⌘P quick-open overlay, Files tree, and Changes list all call `EditorView.open(path)`.
 Opening a file already in the current Changes set keeps the Changes view and focuses that file;

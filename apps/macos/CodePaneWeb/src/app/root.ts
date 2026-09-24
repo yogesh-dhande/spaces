@@ -24,9 +24,10 @@ import { createContextMenu } from "./contextMenu";
 import { DIFF_EDIT_INPUT_ID, DiffView, type PreparedDiffEdit } from "./diffView";
 import { EditorSidebar } from "./editorSidebar";
 import { EditorView } from "./editorView";
-import { diff3MergeLines } from "./editorView";
+import { diff3MergeLines, pathAfterMove } from "./editorView";
 import { renderFileList, updateFileListRow } from "./fileList";
 import { attachFileListDivider } from "./fileListDivider";
+import { FolderPicker } from "./folderPicker";
 import { createLiveRefreshNotice } from "./liveRefreshNotice";
 import { QuickOpen } from "./quickOpen";
 import { RefSearchDialog } from "./refSearchDialog";
@@ -259,6 +260,10 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
   // not be clipped by, or scroll with, the region the right-click landed in.
   const contextMenu = createContextMenu(pane);
 
+  // Mounted on the pane for the same reason, and because it is the same centered overlay ⌘P uses:
+  // the Files tree it serves lives inside a scrolling sidebar that would clip it.
+  const folderPicker = new FolderPicker(pane);
+
   const body = document.createElement("div");
   body.className = "code-body";
   pane.appendChild(body);
@@ -402,6 +407,15 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
     initialCommentsLoad ??= comments.loadInitial();
     return initialCommentsLoad;
   }
+  // Paths the Editor has reported it cannot open as text (`EditorViewCallbacks.onFileUnopenable`).
+  // Owned here, not by EditorSidebar or EditorView themselves: the Files tree's pointer menu is the
+  // only consumer, and only root.ts sees both the Editor's open failures and the tree's menu
+  // requests. There is no eviction; a path that becomes readable again (rewritten as valid UTF-8,
+  // shrunk under the size cap) just stops being asked about until its next failed open, which is
+  // harmless since Open in system viewer merely stays offered one interaction longer than strictly
+  // necessary in that rare case.
+  const unopenablePaths = new Set<string>();
+
   const editorView = new EditorView(editorContainerEl, bridge, {
     // The success-only seam (see `EditorViewCallbacks.onFileOpened`'s doc comment): fires only once
     // `loadFile()` actually replaces the buffer with `path`'s content, so a refused open (the
@@ -427,6 +441,7 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
     },
     onStateChanged: () => scheduleWorkspaceStatePush(),
     onStateTransition: () => pushWorkspaceState(),
+    onFileUnopenable: (path) => unopenablePaths.add(path),
   });
 
   // Scroll offsets are not durable under a virtualizer; source lines are. Capture the current
@@ -444,6 +459,9 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
   const editorSidebar = new EditorSidebar(
     changesListEl,
     fileListCache,
+    bridge,
+    contextMenu,
+    folderPicker,
     // `workspaceState.editorState?.path` (not anything EditorView reports back) is the source for the
     // initial selected row: it's available synchronously at construction time, before
     // `editorView.restoreState` below has even run.
@@ -452,6 +470,7 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
       selectedPath: initPayload.workspaceState.fileTreeSelectedPath ?? initPayload.workspaceState.editorState?.path ?? undefined,
       expandedPaths: fileTreeExpandedPaths,
       changesAvailable: initPayload.isGitRepository,
+      isLocalWorkspace: initPayload.isLocalWorkspace,
     },
     openInEditor,
     {
@@ -466,6 +485,53 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
       onTreeStateChange: (treeState) => {
         fileTreeExpandedPaths = [...treeState.expandedPaths];
         pushWorkspaceState();
+      },
+      isUnopenable: (path) => unopenablePaths.has(path),
+      // A confirmed Rename or Move to… changes where a file lives, never what is in it: everything
+      // this pane remembers about the moved entry follows it to the destination in one step, so the
+      // listing refetch this mutation triggers finds the tree's selection and expansion, the persisted
+      // `fileTreeSelectedPath`, the recent-path list, and the Editor itself already agreeing on
+      // where the file is.
+      onEntryMoved: (path, destinationPath) => {
+        // Rewritten whether or not the open buffer was what moved: both collections are keyed by
+        // path, so a move the Editor did not follow would otherwise leave Quick Open offering a
+        // path the daemon has emptied, and an already-known unopenable file asking to be opened as
+        // text again at its new path.
+        const rewrittenRecents = editorUIState.recentPaths.map((recent) => pathAfterMove(recent, path, destinationPath) ?? recent);
+        // A rewrite can land on a path already in the list (something that lived at the destination
+        // earlier and has since moved away or been deleted), and `recentPaths` is deduped by
+        // contract, so the most recent mention of a path is the one kept.
+        const recentPaths = [...new Set(rewrittenRecents)];
+        const recentsChanged =
+          recentPaths.length !== editorUIState.recentPaths.length || recentPaths.some((recent, index) => recent !== editorUIState.recentPaths[index]);
+        if (recentsChanged) editorUIState = { ...editorUIState, recentPaths };
+        for (const unopenable of [...unopenablePaths]) {
+          const movedUnopenable = pathAfterMove(unopenable, path, destinationPath);
+          if (movedUnopenable === undefined) continue;
+          unopenablePaths.delete(unopenable);
+          unopenablePaths.add(movedUnopenable);
+        }
+        // The Files tree's expansion is keyed by path as well, and a move is the one thing that
+        // relocates a directory without the user touching its disclosure: left alone, the refetch
+        // below would paint the destination collapsed while the persisted set kept naming a source
+        // that no longer exists.
+        editorSidebar.retargetExpandedPaths(path, destinationPath);
+        // The destination of the file the Editor is DISPLAYING, if the move touched it. An open whose
+        // read is still in flight is reissued at the destination by the same call, but reports itself
+        // through `onFileOpened` only if it lands (see `EditorView.retargetOpenFile`), so a refused or
+        // failed open cannot leave the persisted path and this selection on a file the pane never showed.
+        const moved = editorView.retargetOpenFile(path, destinationPath);
+        if (moved !== undefined) {
+          state = codePaneReducer(state, { type: "openFile", path: moved });
+          editorSidebar.setSelectedPath(moved);
+        }
+        // The inline diff editor is a second, independent buffer this pane can be holding over the
+        // moved bytes: it survives the switch into Editor mode the Files tree lives in, so a move
+        // that rewrote only the Editor would leave it autosaving into the emptied source path.
+        const movedDiffEdit = retargetDiffEdit(path, destinationPath);
+        // One push for the whole step: the recents list, the open path, and the inline draft are all
+        // part of the same workspace document, and `unopenablePaths` lives only for this pane's life.
+        if (recentsChanged || moved !== undefined || movedDiffEdit !== undefined) pushWorkspaceState();
       },
     },
   );
@@ -492,9 +558,10 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
     },
   );
 
-  /** Both overlays park themselves on a shared backdrop element that is only displayed while they
-   * are open. Reading that is what keeps the pane-level shortcuts below from acting on an Escape or
-   * a ⌘S that belongs to whichever overlay currently owns the keyboard. */
+  /** Every overlay (quick open, the ref search, the Files tree's folder picker) parks itself on a
+   * backdrop element of the same class that is only displayed while it is open. Reading that is what
+   * keeps the pane-level shortcuts below from acting on an Escape or a ⌘S that belongs to whichever
+   * overlay currently owns the keyboard. */
   function isOverlayOpen(): boolean {
     return [...pane.querySelectorAll<HTMLElement>(".quick-open-backdrop")].some((backdrop) => backdrop.style.display !== "none");
   }
@@ -2123,6 +2190,49 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
     afterBrowserPaint(() => {
       bridge.notifyRenderMetric({ kind: "diff", trigger: "diffEditEnd", elapsedMs: 0, fileCount: files.length, contentBytes, path });
     });
+  }
+
+  /**
+   * Moves a live inline diff edit's identity from `from` to `to` after the daemon has confirmed a
+   * Files-tree rename or move, and returns the path the edit now sits at (or `undefined` when the
+   * move left it alone). The standalone editor's `EditorView.retargetOpenFile` answers the same
+   * question for the same move; this is the inline editor's half of it.
+   *
+   * The Files tree lives in the Editor sidebar, so this edit is never the surface the user is
+   * looking at when a move lands, which is exactly why it needs rewriting rather than ending:
+   * hidden or not, its autosave keeps writing, and left at the source path it would recreate the
+   * file the user just moved away.
+   *
+   * Only the path moves. The draft, its dirty/conflict state and its CAS baseline are all still
+   * true of the bytes now sitting at `to`, so keeping them is what carries an unsaved edit through
+   * to the destination. Nothing has to be re-scheduled either: `diffAutosaveHost.performSave` reads
+   * `diffEditorState` when a write actually runs rather than capturing a path when the scheduler
+   * arms, so a pending debounce or backoff retry already writes to `to`.
+   *
+   * `diffEditSessionToken` moves for the same reason `retargetOpenFile` bumps `openGeneration`: a
+   * write or a reconcile already in flight was issued against the emptied source path, so its
+   * result must not be adopted here. `saveDiffEdit`'s `ownsEdit` compares the session token as well
+   * as the path, and the token is what keeps such a write standing down even when a later move
+   * carries this edit back onto the path it named. A session suspended by hibernation is retired
+   * for the same reason: its pending write names the source path too.
+   *
+   * The rendered surface cannot follow synchronously (Pierre keys items by path and the diff still
+   * carries the source path until its next manifest), so the stale editor is unmounted here and the
+   * next diff render reinstalls it from `diffEditorState` at the destination, the same handoff
+   * hibernation already uses. Leaving it mounted would be worse than leaving it blank: its
+   * keystrokes arrive under the source path and `onDiffEditChange` drops them.
+   */
+  function retargetDiffEdit(from: string, to: string): string | undefined {
+    const edit = diffEditorState;
+    if (edit === undefined) return undefined;
+    const moved = pathAfterMove(edit.path, from, to);
+    if (moved === undefined) return undefined;
+    diffEditRequestToken += 1;
+    diffEditSessionToken += 1;
+    suspendedDiffEditSession = undefined;
+    diffView.endEdit(edit.path);
+    diffEditorState = { ...edit, path: moved };
+    return moved;
   }
 
   /** One CAS write of the live inline buffer, driven exclusively by `diffAutosave`. It reports the

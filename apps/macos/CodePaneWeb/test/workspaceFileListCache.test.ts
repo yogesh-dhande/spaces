@@ -3,7 +3,7 @@ import { WorkspaceFileListResult } from "../src/bridge/types";
 import { WorkspaceFileListCache } from "../src/app/workspaceFileListCache";
 
 function makeResult(paths: string[], truncated = false): WorkspaceFileListResult {
-  return { paths, truncated, submodules: [] };
+  return { paths, truncated, submodules: [], emptyDirectories: [] };
 }
 
 /** A manually-resolved/rejected promise, used to prove in-flight de-duplication: two `get()` calls

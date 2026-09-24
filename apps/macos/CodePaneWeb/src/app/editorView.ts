@@ -43,6 +43,13 @@ export interface EditorViewCallbacks {
    *  selection (see its `openInEditor`), which is what keeps a refused or failed open from
    *  polluting either. */
   onFileOpened?(path: string): void;
+  /** Fires whenever a read for `path` comes back with the daemon's durable `invalidArgument` answer
+   *  for a file that cannot be read as text (see `handleExternalChange`'s catch branch for the full
+   *  explanation of that code), both when opening the file fresh and when an already-open file is
+   *  rewritten into that state underneath the pane. root.ts uses this to gate the Files tree pointer
+   *  menu's Open in system viewer item; it has nothing to offer a file the Editor CAN open, and
+   *  root.ts keeps no other record of which paths this is true for. */
+  onFileUnopenable?(path: string): void;
   /** Fires only after CodeView has received the file and the browser has crossed two paint frames,
    *  making it the real-system visible-render endpoint rather than the earlier read completion.
    *  A same-file signature reconcile does not cancel this milestone; only a newer file open does. */
@@ -78,6 +85,23 @@ export function diff3MergeLines(mine: string, base: string, theirs: string): { m
     if (region.ok) merged.push(...region.ok);
   }
   return { merged: merged.join("\n") };
+}
+
+/**
+ * Where `path` ends up when a confirmed Files-tree rename or move carried `from` to `to`, or
+ * `undefined` when the move left `path` alone. `from` is whatever moved: the path itself, or a
+ * directory above it, whose tail is spliced onto `to` so every path under a moved directory follows
+ * it. The `${from}/` prefix is what keeps a sibling that merely starts with the same characters
+ * (`a` against `a.ts`) out of the move, since only a whole path component boundary makes a path part
+ * of what moved.
+ *
+ * Shared by `EditorView.retargetOpenFile` and `root.ts`'s `onEntryMoved`: the open buffer, the
+ * recent-path list, and the unopenable-path set all have to answer the same question about the same
+ * move, and one rule answering it is what keeps them naming the same destination.
+ */
+export function pathAfterMove(path: string, from: string, to: string): string | undefined {
+  if (path === from) return to;
+  return path.startsWith(`${from}/`) ? to + path.slice(from.length) : undefined;
 }
 
 /** The chip's wording for each save state (docs/spec.md's Editor section owns this copy). The failed
@@ -249,6 +273,12 @@ export class EditorView {
    *  a baseline. Conflating them would make an in-flight write stand down for an open that has not
    *  replaced anything yet, leaving the buffer dirty against a baseline the write already moved. */
   private openRequestGeneration = 0;
+  /** The path of the open that currently owns the pane, for as long as it has not finished: from the
+   *  moment `open()` claims `openRequestGeneration` until its `loadFile` returns. `currentPath` still
+   *  names the file on screen throughout that window (a refused or failed open must leave it there),
+   *  so it is the only thing that can answer "which file is this pane on its way to", which is what
+   *  `retargetOpenFile` needs when a move lands on a file whose read has not come back yet. */
+  private pendingOpenPath: string | undefined;
   /** Bumped at the start of every `handleExternalChange` fetch; a fetch superseded by a later one
    *  (two external-change triggers arriving close together) drops its result — same latest-wins
    *  shape as `openGeneration`, but scoped to this one flow since it must survive within a single
@@ -873,25 +903,139 @@ export class EditorView {
     // user's latest selection, so a pending open of some other file must stand down rather than
     // swap that file in once its flush settles.
     const request = ++this.openRequestGeneration;
-    // Re-picking the file already open (its own row in Files/Changes, or ⌘P again) must not fall
-    // into the flush gate below: the file is already on screen, so there is nothing to open that
-    // isn't already showing, and re-reading disk would destroy the very edits the flush is trying to
-    // protect. A standing conflict is dirty by construction and never clears `currentPath`, so
-    // re-picking the same path mid-conflict also lands here and just stays put.
-    if (path === this.currentPath && this.dirty) return;
-    if (this.dirty && this.currentPath !== undefined) {
-      const outcome = await this.scheduler.flush();
-      if (request !== this.openRequestGeneration) return; // a later open() already won
-      if (outcome === "failed") {
-        this.showSaveIssueBanner();
-        return;
+    this.pendingOpenPath = path;
+    try {
+      // Re-picking the file already open (its own row in Files/Changes, or ⌘P again) must not fall
+      // into the flush gate below: the file is already on screen, so there is nothing to open that
+      // isn't already showing, and re-reading disk would destroy the very edits the flush is trying to
+      // protect. A standing conflict is dirty by construction and never clears `currentPath`, so
+      // re-picking the same path mid-conflict also lands here and just stays put.
+      if (path === this.currentPath && this.dirty) return;
+      if (this.dirty && this.currentPath !== undefined) {
+        const outcome = await this.scheduler.flush();
+        if (request !== this.openRequestGeneration) return; // a later open() already won
+        if (outcome === "failed") {
+          this.showSaveIssueBanner();
+          return;
+        }
+        // A blocked flush is a standing conflict, and the conflict compare view on screen holds the
+        // only two controls that can clear it. Its reason is already on the chip ("Save blocked: ..."),
+        // so the refusal says nothing more rather than replacing those controls with plain text.
+        if (outcome === "blocked") return;
       }
-      // A blocked flush is a standing conflict, and the conflict compare view on screen holds the
-      // only two controls that can clear it. Its reason is already on the chip ("Save blocked: ..."),
-      // so the refusal says nothing more rather than replacing those controls with plain text.
-      if (outcome === "blocked") return;
+      await this.loadFile(path, request, { revealLine: options?.revealLine });
+    } finally {
+      // Only the open that still owns the pane retires the marker. A superseded one clearing it
+      // would erase the pending path of the open that superseded it, which is still on its way.
+      if (request === this.openRequestGeneration) this.pendingOpenPath = undefined;
     }
-    await this.loadFile(path, request, { revealLine: options?.revealLine });
+  }
+
+  /**
+   * Moves the open file's identity from `from` to `to` after the daemon has confirmed a Files-tree
+   * rename or move of `from` (see `FilesTreeActions.move`), and returns the path the file ON SCREEN
+   * now sits at, or `undefined` when this pane shows no file the move touched. `from` is whatever was
+   * renamed: the open file itself, or any directory above it, so a moved parent carries every file
+   * under it, which is why the tail below is spliced onto `to` rather than `to` being adopted whole.
+   *
+   * Two things in this pane can be on the moved path: the file on screen, and an open whose read is
+   * still in flight. They are handled separately (`retargetShownFile`, `retargetPendingOpen`)
+   * because `currentPath` speaks only for the first (see `pendingOpenPath`).
+   *
+   * Only the shown file answers the caller. root.ts's `onEntryMoved` treats the returned path as the
+   * file the pane is displaying: it persists it as the open path and moves the Files tree's
+   * selection onto it. A pending open has not displayed anything yet and may never: its reissue at
+   * the destination can be refused (a blocked or failed flush of a dirty buffer) or fail (a file
+   * that cannot be read as text), which leaves the previous buffer on screen. Reporting it here
+   * would persist and select a file the pane never showed, so the reissued open speaks for itself
+   * through `onFileOpened` if and when it lands, the same success-only seam every other open uses.
+   *
+   * Only the path moved, never the bytes: the buffer, its dirty flag, and the CAS baseline
+   * (`baseSHA256`/`baseContent`) are all still true of the file at `to`, so keeping them is what lets
+   * an unsaved edit save straight through to the destination. Without this the pane would keep
+   * pointing at a path the daemon has emptied: the next signature reconcile would read the old path
+   * as deleted, a dirty buffer would enter a "deleted on disk" conflict, and accepting it would write
+   * the file back into existence at the path the user just moved it away from.
+   *
+   * The rendered document is reinstalled under the new id because Pierre keys items by path (see
+   * `loadIntoCodeView`), and so does every lookup this view makes through `currentPath`
+   * (`getEditor`, `scrollTo`); the language the new extension implies is picked up by the same
+   * reinstall. Whichever of the three surfaces is on screen is the one rebuilt: the conflict compare
+   * view, the deleted-on-disk placeholder, or the editable buffer.
+   */
+  retargetOpenFile(from: string, to: string): string | undefined {
+    const moved = this.retargetShownFile(from, to);
+    // Ordered after the shown file's own move so the reissued open below, whose mandatory flush
+    // writes the dirty buffer before it loads anything, writes it to the destination rather than to
+    // the path the daemon has just emptied.
+    this.retargetPendingOpen(from, to);
+    return moved;
+  }
+
+  /** `retargetOpenFile`'s first half: the file actually on screen. */
+  private retargetShownFile(from: string, to: string): string | undefined {
+    const path = this.currentPath;
+    if (path === undefined) return undefined;
+    const moved = pathAfterMove(path, from, to);
+    if (moved === undefined) return undefined;
+    // Pierre keys items by path, so the reinstall below (`loadIntoCodeView` / `renderConflictCompareView`)
+    // mounts a brand-new item under `moved` rather than renaming the one on screen: its caret and
+    // scroll default back to the top. Sampling the live position now, while `currentPath` still names
+    // the item Pierre actually has mounted, and restoring it after the reinstall keeps a rename/move
+    // from reading to the user as a jump back to the start of the file.
+    const scrollLine = this.visibleLine();
+    const focusedLine = this.focusedLineNumber();
+    // A write submitted before the move landed carries the OLD path and can only recreate it. It is
+    // already gone from this pane's point of view, so the same generation bump a new open uses makes
+    // that write's late arms stand down instead of adopting its baseline for the file at `moved`,
+    // which leaves the buffer dirty and lets the scheduler write it to the new path.
+    this.openGeneration += 1;
+    this.currentPath = moved;
+    this.setPathLabel(moved);
+    this.subscribeToFileSignature(moved);
+    // The line above only re-registers this page's own listener. The host points the live daemon
+    // stream at a path off the back of an editor-purpose `workspaceFileRead`, and a move performs
+    // none: without this notification the daemon keeps watching the emptied source path, so an
+    // external edit at the destination never reaches the listener at all. The path the file moved
+    // FROM travels with it because the host applies the move only while its watcher still follows
+    // that path: another file's read can have taken the stream natively while its own reply is
+    // still queued for this page, and this move must not pull the watcher off it.
+    this.bridge.retargetFileSignature(path, moved);
+    if (this.conflict) {
+      this.renderConflictCompareView();
+      this.restorePosition(scrollLine, focusedLine);
+    } else if (this.latestContent !== undefined) {
+      this.loadIntoCodeView(moved, this.latestContent);
+      this.restorePosition(scrollLine, focusedLine);
+    } else {
+      this.showDeletedPlaceholder(moved); // pushes the snapshot itself
+      return moved;
+    }
+    this.pushEditorStateNow();
+    return moved;
+  }
+
+  /**
+   * `retargetOpenFile`'s second half: an open whose read has not come back yet. `currentPath` still
+   * names the previously shown file during that window, so without this the move would miss the
+   * pending open entirely and its late reply would adopt the emptied source path as the open file.
+   *
+   * Reissuing the open at the destination is what actually shows the file: the read in flight named
+   * the source path, and reusing its reply would hand the pane bytes labelled with a path that no
+   * longer exists. `open()`'s own claim on `openRequestGeneration` is what drops that reply (the
+   * same supersede any newer open performs) and its flush gate is what protects a buffer the
+   * previous file left dirty.
+   *
+   * Reports nothing back (see `retargetOpenFile`): that reissued open is subject to every refusal
+   * and failure an ordinary open is, so `onFileOpened` landing is the only thing that can say the
+   * destination is what the pane holds.
+   */
+  private retargetPendingOpen(from: string, to: string): void {
+    const pending = this.pendingOpenPath;
+    if (pending === undefined) return;
+    const moved = pathAfterMove(pending, from, to);
+    if (moved === undefined) return;
+    void this.open(moved);
   }
 
   /** ⌘S and the host's teardown flush: writes any pending edit immediately instead of waiting out
@@ -993,6 +1137,11 @@ export class EditorView {
       this.banner.className = "banner error";
       this.banner.textContent = message;
       this.banner.style.display = "flex";
+      // `invalidArgument` is the daemon's durable answer for a file that can never be read as text;
+      // see `handleExternalChange`'s catch branch below for the full explanation. This is the other
+      // place a read for a never-openable file can first surface (opening it fresh, rather than an
+      // external change to an already-open one), so it reports the same fact through the same callback.
+      if (err instanceof SpacesBridgeError && err.code === "invalidArgument") this.callbacks.onFileUnopenable?.(path);
       // A failed open leaves the previously-open file (if any) fully displayed but its own pending
       // external-change reconcile — if one was in flight — was just discarded by the `openGeneration`
       // bump above. Fire a fresh one for it: `handleExternalChange` captures the CURRENT generation and
@@ -1171,6 +1320,12 @@ export class EditorView {
         this.banner.className = "banner error";
         this.banner.textContent = err.message;
         this.banner.style.display = "flex";
+        // Same durable fact `loadFile`'s own catch reports, reached the other way round: the file was
+        // openable when it was opened and became unreadable underneath the pane (rewritten as binary,
+        // as invalid UTF-8, or grown past the read cap). Without this the Files tree would never learn
+        // the path is unopenable, so its pointer menu would never offer Open in system viewer for
+        // exactly the file that most needs it.
+        this.callbacks.onFileUnopenable?.(path);
         return;
       }
       if (!(err instanceof SpacesBridgeError) || err.code !== "notFound") {

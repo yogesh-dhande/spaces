@@ -29,7 +29,7 @@ import spacesterminalcore
     {
         CodePaneBridge.InitPayload(
             workspaceId: "w1", workspaceName: "My Workspace", theme: "dark", baseBranch: baseBranch, isGitRepository: isGitRepository,
-            workspaceState: state ?? workspaceState(), agents: [])
+            isLocalWorkspace: true, workspaceState: state ?? workspaceState(), agents: [])
     }
 
     // MARK: - Request / ready decode
@@ -641,7 +641,28 @@ import spacesterminalcore
 
         #expect(
             CodePaneBridge.plan(for: request)
-                == .success(.workspaceFileWrite(path: "src/a.swift", content: "hi", baseSHA256: "abc123", requiresDirectPath: true)))
+                == .success(.workspaceFileWrite(path: "src/a.swift", content: "hi", baseSHA256: "abc123", purpose: .inlineDiff)))
+    }
+
+    /// The Files tree's New file. It shares `workspaceFileWrite` with the Editor's own saves, so the
+    /// purpose is the only thing that tells the daemon this write resolves its path directly and must not
+    /// land on a file that already exists: an `editor` write follows symlinks, which would create the file
+    /// at a dangling link's target or under a symlinked prefix rather than at the path the tree row names,
+    /// and would adopt an existing empty file as a creation.
+    @Test func planForWorkspaceFileWriteCarriesTheCreateFilePurpose() {
+        let request = CodePaneBridge.Request(
+            id: "1", method: "workspaceFileWrite", params: ["path": "src/new.swift", "content": "", "options": ["purpose": "createFile"]])
+
+        #expect(
+            CodePaneBridge.plan(for: request)
+                == .success(.workspaceFileWrite(path: "src/new.swift", content: "", baseSHA256: nil, purpose: .createFile)))
+    }
+
+    @Test func planForWorkspaceFileWriteRejectsAnUnknownPurpose() {
+        let request = CodePaneBridge.Request(
+            id: "1", method: "workspaceFileWrite", params: ["path": "a", "content": "hi", "options": ["purpose": "whatever"]])
+
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
     }
 
     // `[String: Any]` isn't `Sendable`, so these are separate tests rather than one parameterized
@@ -667,15 +688,120 @@ import spacesterminalcore
     @Test func planForWorkspaceFileWriteTreatsAMissingBaseSHA256AsCreate() {
         let request = CodePaneBridge.Request(
             id: "1", method: "workspaceFileWrite", params: ["path": "a", "content": "hi", "options": ["purpose": "editor"]])
-        #expect(
-            CodePaneBridge.plan(for: request) == .success(.workspaceFileWrite(path: "a", content: "hi", baseSHA256: nil, requiresDirectPath: false)))
+        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileWrite(path: "a", content: "hi", baseSHA256: nil, purpose: .editor)))
     }
 
     @Test func planForWorkspaceFileWriteTreatsAJSONNullBaseSHA256AsCreate() {
         let request = CodePaneBridge.Request(
             id: "1", method: "workspaceFileWrite", params: ["path": "a", "content": "hi", "options": ["baseSHA256": NSNull(), "purpose": "editor"]])
-        #expect(
-            CodePaneBridge.plan(for: request) == .success(.workspaceFileWrite(path: "a", content: "hi", baseSHA256: nil, requiresDirectPath: false)))
+        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileWrite(path: "a", content: "hi", baseSHA256: nil, purpose: .editor)))
+    }
+
+    // MARK: - Files tree mutations
+
+    /// Paths `isWorkspaceRelativePath` must refuse regardless of which parameter carries them: an
+    /// absolute path, a path with a `..` component, and a path with a `.` component.
+    private static let malformedWorkspaceRelativePaths = ["/etc/passwd", "src/../secrets", "src/./a.swift"]
+
+    @Test func planForWorkspaceFileCreateDirectory() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceFileCreateDirectory", params: ["path": "Sources/NewFolder"])
+
+        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileCreateDirectory(path: "Sources/NewFolder")))
+    }
+
+    @Test func planForWorkspaceFileCreateDirectoryRequiresAPath() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceFileCreateDirectory", params: [:])
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test func planForWorkspaceFileCreateDirectoryRejectsAnEmptyPath() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceFileCreateDirectory", params: ["path": ""])
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test(arguments: malformedWorkspaceRelativePaths) func planForWorkspaceFileCreateDirectoryRejectsAMalformedPath(path: String) {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceFileCreateDirectory", params: ["path": path])
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test func planForWorkspaceFileRename() {
+        let request = CodePaneBridge.Request(
+            id: "1", method: "workspaceFileRename", params: ["path": "Sources/Old.swift", "destinationPath": "Sources/New.swift"])
+
+        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileRename(path: "Sources/Old.swift", destinationPath: "Sources/New.swift")))
+    }
+
+    @Test func planForWorkspaceFileRenameRequiresAPath() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceFileRename", params: ["destinationPath": "Sources/New.swift"])
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test func planForWorkspaceFileRenameRejectsAnEmptyPath() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceFileRename", params: ["path": "", "destinationPath": "Sources/New.swift"])
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test func planForWorkspaceFileRenameRequiresADestinationPath() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceFileRename", params: ["path": "Sources/Old.swift"])
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test func planForWorkspaceFileRenameRejectsAnEmptyDestinationPath() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceFileRename", params: ["path": "Sources/Old.swift", "destinationPath": ""])
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test(arguments: malformedWorkspaceRelativePaths) func planForWorkspaceFileRenameRejectsAMalformedPath(path: String) {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceFileRename", params: ["path": path, "destinationPath": "Sources/New.swift"])
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test(arguments: malformedWorkspaceRelativePaths) func planForWorkspaceFileRenameRejectsAMalformedDestinationPath(destinationPath: String) {
+        let request = CodePaneBridge.Request(
+            id: "1", method: "workspaceFileRename", params: ["path": "Sources/Old.swift", "destinationPath": destinationPath])
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test func planForWorkspaceFileDelete() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceFileDelete", params: ["path": "Sources/Obsolete.swift"])
+
+        #expect(CodePaneBridge.plan(for: request) == .success(.workspaceFileDelete(path: "Sources/Obsolete.swift")))
+    }
+
+    @Test func planForWorkspaceFileDeleteRequiresAPath() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceFileDelete", params: [:])
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test func planForWorkspaceFileDeleteRejectsAnEmptyPath() {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceFileDelete", params: ["path": ""])
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test(arguments: malformedWorkspaceRelativePaths) func planForWorkspaceFileDeleteRejectsAMalformedPath(path: String) {
+        let request = CodePaneBridge.Request(id: "1", method: "workspaceFileDelete", params: ["path": path])
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test func planForOpenInSystemViewer() {
+        let request = CodePaneBridge.Request(id: "1", method: "openInSystemViewer", params: ["path": "Assets/logo.png"])
+
+        #expect(CodePaneBridge.plan(for: request) == .success(.openInSystemViewer(path: "Assets/logo.png")))
+    }
+
+    @Test func planForOpenInSystemViewerRequiresAPath() {
+        let request = CodePaneBridge.Request(id: "1", method: "openInSystemViewer", params: [:])
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test func planForOpenInSystemViewerRejectsAnEmptyPath() {
+        let request = CodePaneBridge.Request(id: "1", method: "openInSystemViewer", params: ["path": ""])
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
+    }
+
+    @Test(arguments: malformedWorkspaceRelativePaths) func planForOpenInSystemViewerRejectsAMalformedPath(path: String) {
+        let request = CodePaneBridge.Request(id: "1", method: "openInSystemViewer", params: ["path": path])
+        #expect(CodePaneBridge.plan(for: request).isInvalidArgumentFailure)
     }
 
     @Test func planForWorkspaceFileList() {

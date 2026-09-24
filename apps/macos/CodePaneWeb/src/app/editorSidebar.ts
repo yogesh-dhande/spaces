@@ -1,8 +1,18 @@
-import { WorkspaceSubmodule } from "../bridge/types";
-import { FilesTreeHandle, renderFilesTree } from "./filesTree";
+import { SpacesBridge, WorkspaceSubmodule } from "../bridge/types";
+import { ContextMenu } from "./contextMenu";
+import { FilesTreeActions, FilesTreeHandle, renderFilesTree } from "./filesTree";
+import { FolderPicker } from "./folderPicker";
 import { WorkspaceFileListCache } from "./workspaceFileListCache";
 
 export type EditorSidebarMode = "files" | "changes";
+
+/** The `SpacesBridge` methods `EditorSidebar` needs for the Files tree's pointer-menu mutations;
+ *  mirrors `WorkspaceFileListCache`'s own narrowed constructor parameter, so a test double only has
+ *  to implement what this class actually calls. */
+export type EditorSidebarBridge = Pick<
+  SpacesBridge,
+  "workspaceFileWrite" | "workspaceFileCreateDirectory" | "workspaceFileRename" | "workspaceFileDelete" | "openInSystemViewer"
+>;
 
 export interface EditorSidebarCallbacks {
   /** Fired whenever the Files/Changes toggle is clicked to a new value — root.ts persists this into
@@ -10,6 +20,17 @@ export interface EditorSidebarCallbacks {
    *  fetched at least once (see root.ts's `onModeChange` wiring). */
   onModeChange(mode: EditorSidebarMode): void;
   onTreeStateChange?(state: { expandedPaths: readonly string[]; selectedPath: string | undefined }): void;
+  /** True once the Editor has reported a path as one it cannot open as text (see
+   *  `EditorViewCallbacks.onFileUnopenable`); threaded straight through to the Files tree's
+   *  `FilesTreeActions.isUnopenable`, which is what gates the pointer menu's Open in system viewer
+   *  item. root.ts owns the actual set of unopenable paths; this sidebar has no state of its own. */
+  isUnopenable(path: string): boolean;
+  /** Fired once the daemon has confirmed a Rename or a Move to… of `path` (a file, or a directory
+   *  carrying everything under it) to `destinationPath`, before the listing refetch the same
+   *  mutation triggers. root.ts answers it by retargeting the Editor onto the destination when the
+   *  open file is the thing that moved (see `EditorView.retargetOpenFile`) and by re-keying this
+   *  sidebar's expansion state through `retargetExpandedPaths`. */
+  onEntryMoved(path: string, destinationPath: string): void;
 }
 
 /**
@@ -37,11 +58,17 @@ export class EditorSidebar {
 
   private mode: EditorSidebarMode;
   private readonly changesAvailable: boolean;
+  /** Fixed for this pane's life: a pane is rebuilt when it retargets to another workspace. */
+  private readonly isLocalWorkspace: boolean;
   private selectedPath: string | undefined;
   private paths: readonly string[] = [];
   /** The checked-out submodules of the same listing `paths` came from, always updated together
    *  with it, so the Files tree's submodule chips can never describe a listing it is not showing. */
   private submodules: readonly WorkspaceSubmodule[] = [];
+  /** The empty directories of the same listing `paths` came from, updated together with it for the
+   *  same reason `submodules` is; this is what gives a just-created (or otherwise empty) folder a
+   *  row in the Files tree. */
+  private emptyDirectories: readonly string[] = [];
   private truncated = false;
   /** Handle from the last full `renderFilesTreeNow()` render — lets `setSelectedPath` move the
    *  highlight in place instead of rebuilding the whole tree (see its own doc comment). `undefined`
@@ -53,10 +80,19 @@ export class EditorSidebar {
    *  `diffRequestToken`. */
   private fetchToken = 0;
   private expandedPaths: readonly string[];
+  /** Built once in the constructor from `bridge`/`callbacks`, since both are fixed for this
+   *  instance's lifetime; the Files tree's pointer-menu mutations, handed to `renderFilesTree` on
+   *  every render. */
+  private readonly actions: FilesTreeActions;
 
   constructor(
     private readonly changesListEl: HTMLElement,
     private readonly fileListCache: WorkspaceFileListCache,
+    private readonly bridge: EditorSidebarBridge,
+    private readonly contextMenu: ContextMenu,
+    /** Mounted on the pane by root.ts, like `contextMenu`, and threaded straight through to the
+     *  Files tree: an overlay inside this sidebar would be clipped by the scrolling list. */
+    private readonly folderPicker: FolderPicker,
     initial: {
       sidebarMode: EditorSidebarMode;
       selectedPath: string | undefined;
@@ -64,14 +100,43 @@ export class EditorSidebar {
       /** False for a workspace whose project is not a git repository: it has no changed-file list,
        *  so this sidebar carries the Files tree alone and renders no segmented header at all. */
       changesAvailable: boolean;
+      /** Whether this workspace's files are on this Mac (`CodePaneInitPayload.isLocalWorkspace`);
+       *  threaded straight through to the Files tree, which offers Open in system viewer only then. */
+      isLocalWorkspace: boolean;
     },
     private readonly onSelectFile: (path: string) => void,
     private readonly callbacks: EditorSidebarCallbacks,
   ) {
     this.changesAvailable = initial.changesAvailable;
+    this.isLocalWorkspace = initial.isLocalWorkspace;
     this.mode = initial.changesAvailable ? initial.sidebarMode : "files";
     this.selectedPath = initial.selectedPath;
     this.expandedPaths = initial.expandedPaths ?? [];
+    this.actions = {
+      // The `createFile` purpose is what makes this write a strict create on the device: it resolves
+      // the path directly, refusing a symbolic-link component exactly as the
+      // create-directory/rename/delete commands do, and refuses a path that already holds anything.
+      // Both matter here. An `editor` write resolves through symlinks, which would let New file land
+      // on a dangling link's target or under a symlinked prefix instead of the path the tree shows;
+      // and an ordinary compare-and-swap create would treat an empty file already at the path as this
+      // very write having already landed, reporting a creation that never happened and opening
+      // someone else's file. A refusal arrives as a rejection, which the Files tree's generic
+      // pointer-menu error handling (a `.inline-error` under the row) shows in place, the same way it
+      // shows the other three mutations' refusals.
+      createFile: async (path) => {
+        await this.bridge.workspaceFileWrite(path, "", { baseSHA256: undefined, purpose: "createFile" });
+      },
+      createFolder: (path) => this.bridge.workspaceFileCreateDirectory(path),
+      // Reported to root.ts only once the daemon has actually moved the bytes: a refused move leaves
+      // everything, the Editor's open path included, exactly where it was.
+      move: async (path, destinationPath) => {
+        await this.bridge.workspaceFileRename(path, destinationPath);
+        this.callbacks.onEntryMoved(path, destinationPath);
+      },
+      remove: (path) => this.bridge.workspaceFileDelete(path),
+      openInSystemViewer: (path) => this.bridge.openInSystemViewer(path),
+      isUnopenable: (path) => this.callbacks.isUnopenable(path),
+    };
 
     this.el = document.createElement("div");
     this.el.className = "editor-sidebar";
@@ -139,6 +204,21 @@ export class EditorSidebar {
     // ever be observed as "files" — by the constructor if it starts there, or by setMode/renderList
     // before the mode assignment they follow takes effect for any caller.
     this.filesTreeHandle!.setSelected(path);
+    this.expandedPaths = this.filesTreeHandle!.expandedPaths();
+    this.callbacks.onTreeStateChange?.({ expandedPaths: this.expandedPaths, selectedPath: this.selectedPath });
+  }
+
+  /** Re-keys the Files tree's remembered expansion onto a confirmed move's destination (see
+   *  `FilesTreeHandle.retargetExpandedPaths`), so the listing refetch the same move triggers paints
+   *  the moved directory as expanded as its source was instead of collapsed beside entries no path
+   *  in the listing answers to any more. root.ts calls this from `onEntryMoved`, which only ever
+   *  fires from this sidebar's own tree, so a tree has always been rendered by then. The live
+   *  tree's own set is the source this instance's copy is read back from, exactly as
+   *  `setSelectedPath` does, so the two cannot drift apart while the tree waits for the refetch;
+   *  persistence goes through the same `onTreeStateChange` callback every other expansion change
+   *  uses. */
+  retargetExpandedPaths(from: string, to: string): void {
+    this.filesTreeHandle!.retargetExpandedPaths(from, to);
     this.expandedPaths = this.filesTreeHandle!.expandedPaths();
     this.callbacks.onTreeStateChange?.({ expandedPaths: this.expandedPaths, selectedPath: this.selectedPath });
   }
@@ -212,6 +292,7 @@ export class EditorSidebar {
       this.paths = snapshot.paths;
       this.submodules = snapshot.submodules;
       this.truncated = snapshot.truncated;
+      this.emptyDirectories = snapshot.emptyDirectories;
     }
     this.renderFilesTreeNow();
     this.noteEl.hidden = !this.truncated;
@@ -241,6 +322,7 @@ export class EditorSidebar {
         this.paths = result.paths;
         this.submodules = result.submodules;
         this.truncated = result.truncated;
+        this.emptyDirectories = result.emptyDirectories;
         this.renderFilesTreeNow();
         this.noteEl.hidden = !this.truncated;
       })
@@ -254,13 +336,30 @@ export class EditorSidebar {
   }
 
   private renderFilesTreeNow(): void {
-    this.filesTreeHandle = renderFilesTree(this.filesTreeEl, this.paths, this.submodules, this.selectedPath, {
-      onSelect: (path) => this.onSelectFile(path),
-      onExpandedPathsChange: (expandedPaths) => {
-        this.expandedPaths = expandedPaths;
-        this.callbacks.onTreeStateChange?.({ expandedPaths, selectedPath: this.selectedPath });
+    this.filesTreeHandle = renderFilesTree({
+      container: this.filesTreeEl,
+      listing: { paths: this.paths, submodules: this.submodules, emptyDirectories: this.emptyDirectories },
+      selectedPath: this.selectedPath,
+      callbacks: {
+        onSelect: (path) => this.onSelectFile(path),
+        onExpandedPathsChange: (expandedPaths) => {
+          this.expandedPaths = expandedPaths;
+          this.callbacks.onTreeStateChange?.({ expandedPaths, selectedPath: this.selectedPath });
+        },
+        // A mutation never edits this instance's own `paths`/`submodules`/`emptyDirectories`; the
+        // shared cache is the only source of truth, so a mutation's effect reaches this tree the
+        // same way any other outside change does: invalidate, then re-fetch and re-render.
+        onMutated: () => {
+          this.fileListCache.invalidate();
+          this.renderList();
+        },
       },
-    }, this.expandedPaths);
+      expandedPaths: this.expandedPaths,
+      contextMenu: this.contextMenu,
+      folderPicker: this.folderPicker,
+      actions: this.actions,
+      canOpenInSystemViewer: this.isLocalWorkspace,
+    });
     this.expandedPaths = this.filesTreeHandle.expandedPaths();
   }
 }

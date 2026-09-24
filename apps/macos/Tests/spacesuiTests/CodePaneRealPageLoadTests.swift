@@ -16,6 +16,7 @@ import spacesterminalcore
     func codePaneCurrentAppearance() -> ThemeAppearance { .dark }
     func codePaneRunningAgents(workspaceID: String) -> [CodePaneRunningAgent] { [] }
     func codePaneInstallBackgroundCommandSession(workspaceID: String, deviceID: String, response: SpacesDeviceAPIResponse) {}
+    func codePaneLocalWorkspaceDirectory(workspaceID: String) -> String? { nil }
 }
 
 /// Drives a REAL `WKWebView` through `CodePaneContentController`'s real `activate()`/`deactivate()`
@@ -40,9 +41,7 @@ import spacesterminalcore
     private func waitUntilReady(_ controller: CodePaneContentController, timeout: Duration = .seconds(30)) async -> Bool {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
-        while !controller.isReady, clock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(50))
-        }
+        while !controller.isReady, clock.now < deadline { try? await Task.sleep(for: .milliseconds(50)) }
         return controller.isReady
     }
 

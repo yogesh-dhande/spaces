@@ -18,7 +18,7 @@ vi.mock("../src/app/fuzzyMatch", async (importOriginal) => {
 });
 
 function makeResult(paths: string[], truncated = false): WorkspaceFileListResult {
-  return { paths, truncated, submodules: [] };
+  return { paths, truncated, submodules: [], emptyDirectories: [] };
 }
 
 /** Builds a real `WorkspaceFileListCache` over a `vi.fn()` bridge stub — exercises the real

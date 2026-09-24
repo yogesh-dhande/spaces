@@ -1,6 +1,7 @@
 import AppKit
 import WebKit
 import spacesclientcore
+import spacesdeviceapi
 import spacesdevicecore
 import spacesterminalcore
 import spacesterminalghostty
@@ -278,6 +279,14 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     private var fileSignatureSubscriptionGeneration = 0
     /// Mirrors `diffSignatureReconnectFailures` exactly.
     private var fileSignatureReconnectFailures = 0
+    /// The path a scheduled reconnect attempt will subscribe to, i.e. the file the watcher is chasing
+    /// while `subscribedFilePath` is `nil` (a disconnect, a failed attempt, or a device away for its
+    /// daemon's restart). `retargetFileSignature` needs it: a rename landing inside that window has no
+    /// live subscription to compare itself against, and the watcher still has a target the move can
+    /// rename. Set wherever a reconnect is scheduled and cleared once a subscription is pointed at a
+    /// path, so it names a reconnect target only while one is outstanding. The diff-signature stream
+    /// needs no equivalent because nothing renames a diff scope out from under it.
+    private var pendingFileSignatureReconnectPath: String?
     /// Mirrors `diffSignatureReconnectFloor`/`diffSignatureReconnectCap` exactly — internal so a test
     /// can pin these to a short delay too.
     var fileSignatureReconnectFloor: Duration = .seconds(1)
@@ -419,6 +428,32 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// resume tracking from the replacement pane or after app restart.
     private var outstandingStartWorkspaceCommandCount = 0
 
+    /// Request ids of the Files-tree rename/move RPCs still awaiting the daemon (`workspaceFileRename`
+    /// serves both Rename and Move to…). A set keyed by request id rather than a count, because what is
+    /// being waited for is a specific reply and each one carries its own id; the page issues these one
+    /// at a time, so the set normally holds nothing or a single element.
+    ///
+    /// A confirmed move is the one mutation whose reply the page turns into a retarget of the open
+    /// buffer and of the path it persists (`EditorView.retargetOpenFile`, then the state push).
+    /// Tearing the page down while one is in flight would replace it first, the generation guard would
+    /// drop the reply, and the snapshot this pane restores from would still name a source path the
+    /// daemon has emptied: the restored pane would open a file that no longer exists, and a dirty buffer
+    /// could conflict against it or write it back. Hibernation and close therefore both hold the page
+    /// open until this drains (`teardownWebViewWhenEntryMovesSettle()`), and close additionally fences
+    /// its owner release on it (`closeLifecycleWorkIsSettled`).
+    ///
+    /// An id leaves this set only once the move has an outcome to report, successfully or not. A transport
+    /// failure that could have landed after the daemon held the request is not an outcome: the daemon runs
+    /// the mutation when its serial queue reaches it and the answer can be lost on the way back, so a
+    /// client that gave up would report a failure for a move that landed. Those failures are therefore
+    /// reconciled against the listing before the page is answered, and the id stays here for that
+    /// reconciliation too (see `performFileRename`). Both stages are bounded by their own command
+    /// deadlines, so the wait this holds teardown for can never be open-ended.
+    private var inFlightEntryMoveRequestIDs: Set<String> = []
+    /// True while a deferred hibernation or a deferred close is holding the page open for
+    /// `inFlightEntryMoveRequestIDs` to drain.
+    private var isEntryMoveTeardownDeferred = false
+
     /// The termination edits flush in flight: the token dispatched to the page and the completion
     /// waiting for it. Non-nil only between `flushEditsBeforeTermination` and whichever of the page's
     /// `editsFlushed` answer or the flush's timeout lands first. A single slot rather than a keyed
@@ -427,10 +462,13 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
 
     /// Owner release has the same recovery ordering requirement as `ready`: the final WebKit
     /// collection and every mutation that can refine it must settle before a replacement may restore
-    /// the workspace or termination may drain persistence.
+    /// the workspace or termination may drain persistence. An in-flight rename/move is one of those
+    /// mutations: its reply retargets the open buffer and pushes the retargeted state, so releasing the
+    /// owner ahead of it would persist a snapshot still naming the source path, the same loss
+    /// hibernation defers to avoid, reached through close instead.
     private var closeLifecycleWorkIsSettled: Bool {
         outstandingTeardownFlushCount == 0 && outstandingReviewCommentMutationCount == 0 && outstandingFileWriteCount == 0
-            && outstandingStartWorkspaceCommandCount == 0
+            && outstandingStartWorkspaceCommandCount == 0 && inFlightEntryMoveRequestIDs.isEmpty
     }
 
     /// The page generation `handleReady()` was called for when it deferred sending `spaces:init`
@@ -580,6 +618,11 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     }
 
     func activate(focus: Bool) {
+        // Becoming visible again inside a deferred hibernation window is this same page coming back, so
+        // the wait ends here: the rename it was waiting for still has the page it must reply to. A
+        // deferred close is not cancellable that way: the pane is going away, and only the rename's own
+        // answer releases it.
+        if !closeStarted { isEntryMoveTeardownDeferred = false }
         if webView == nil { installWebView() }
         if focus { _ = makeContentFirstResponder() }
     }
@@ -587,7 +630,41 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// Tears the web view down; `rootView` is left in place so the pane tree keeps a stable view to
     /// re-parent the next time this pane becomes visible. `editorState`/`currentMode` are left
     /// untouched — hibernation must not lose them (see their doc comments).
-    func deactivate() { teardownWebView() }
+    ///
+    /// A Files-tree rename or move still awaiting the daemon holds the teardown off until it settles
+    /// (see `teardownWebViewWhenEntryMovesSettle()`).
+    func deactivate() { teardownWebViewWhenEntryMovesSettle() }
+
+    /// Tears the page down, or holds it open while a rename/move is still awaiting the daemon. The page
+    /// owns the retarget that reply drives (see `inFlightEntryMoveRequestIDs`), so the page has to still
+    /// be there to run it; waiting inside `teardownWebView()` is not available, since every lifecycle
+    /// entry point into it is synchronous. Hibernation and close share this wait: close needs the reply
+    /// and the page's state push behind it to land before the final collection takes the snapshot the
+    /// pane restores from. A dead web process is the one teardown that does not wait, because the page it
+    /// would wait for is already gone.
+    ///
+    /// The wait ends when the move has an outcome for the page, which is the daemon's answer, or, when the
+    /// request fails without one, what the listing then says became of the two paths (see
+    /// `performFileRename`).
+    /// Both stages carry their own command deadline, so this deferral is always bounded.
+    private func teardownWebViewWhenEntryMovesSettle() {
+        if webView != nil, !inFlightEntryMoveRequestIDs.isEmpty {
+            isEntryMoveTeardownDeferred = true
+            return
+        }
+        teardownWebView()
+    }
+
+    /// Drops a settled rename/move from the in-flight set, performs a teardown that was deferred for it,
+    /// and lets a close that was fenced on it finish. Called after the reply has been evaluated, so the
+    /// page's retarget and its state push are already queued ahead of the teardown's own state
+    /// collection.
+    private func settleEntryMove(id: String) {
+        inFlightEntryMoveRequestIDs.remove(id)
+        guard inFlightEntryMoveRequestIDs.isEmpty else { return }
+        if isEntryMoveTeardownDeferred { teardownWebView() }
+        finishCloseIfReady()
+    }
 
     /// The pane itself is going away. The final WebKit collection remains live until its callback
     /// supplies the page's latest complete snapshot; this method itself stays nonblocking.
@@ -661,7 +738,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         closeStarted = true
         closeLifetimeRetainer = self
         CodePaneWorkspaceStateHandoff.collectorStarted(storageKey: workspaceStateStore.workspaceStateStorageKey, workspaceID: workspaceID)
-        teardownWebView()
+        teardownWebViewWhenEntryMovesSettle()
         removeCrashNotice()
         finishCloseIfReady()
     }
@@ -846,6 +923,9 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     }
 
     private func teardownWebView() {
+        // Whatever reached here (a settled rename releasing a deferred teardown, an undeferred hibernation
+        // or close, or a dead web process), the page is going now, so no deferral outlives this call.
+        isEntryMoveTeardownDeferred = false
         // A page that is being torn down can never answer `spaces:flushEdits`, and the state snapshot
         // this teardown collects below carries the unsaved buffer forward, so settle the flush now
         // rather than leaving it for its timeout to fire against a possibly-deallocated controller.
@@ -881,6 +961,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         // A rehydrated pane starts a fresh watcher lifecycle: whatever the previous page was showing
         // when it stopped the stream is not what the replacement page will ask for.
         fileSignatureStoppedByPage = false
+        pendingFileSignatureReconnectPath = nil
         lastActedFileSignatureValue = nil
         lastActedFilePath = nil
         fileSignatureSubscriptionGeneration += 1
@@ -1128,6 +1209,10 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
             completeEditsFlush(token: token)
             return
         }
+        if let move = CodePaneBridge.decodeRetargetFileSignature(body: body) {
+            retargetFileSignature(from: move.from, to: move.to)
+            return
+        }
         guard let request = CodePaneBridge.decodeRequest(body: body) else { return }
         dispatch(request)
     }
@@ -1247,7 +1332,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         }
         let payload = CodePaneBridge.InitPayload(
             workspaceId: workspaceID, workspaceName: workspaceName, theme: appearance.rawValue, baseBranch: baseBranch,
-            isGitRepository: isGitRepository, workspaceState: workspaceStatePayload(),
+            isGitRepository: isGitRepository, isLocalWorkspace: hosting.codePaneLocalWorkspaceDirectory(workspaceID: workspaceID) != nil,
+            workspaceState: workspaceStatePayload(),
             agents: agents.map { CodePaneBridge.AgentPayload(id: $0.id, label: $0.label, sessionId: $0.sessionID) })
         guard let script = CodePaneBridge.dispatchEventScript(name: Self.initEventName, detail: payload) else { return }
         scriptEvaluator.evaluateCodePaneScript(script)
@@ -1378,10 +1464,13 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         case .workspaceImageRead(let path, let mediaType, let isOpenDocument):
             performWorkspaceImageRead(
                 path: path, mediaType: mediaType, isOpenDocument: isOpenDocument, id: id, generation: generation, hosting: hosting)
-        case .workspaceFileWrite(let path, let content, let baseSHA256, let requiresDirectPath):
-            performFileWrite(
-                path: path, content: content, baseSHA256: baseSHA256, requiresDirectPath: requiresDirectPath, id: id, generation: generation,
-                hosting: hosting)
+        case .workspaceFileWrite(let path, let content, let baseSHA256, let purpose):
+            performFileWrite(path: path, content: content, baseSHA256: baseSHA256, purpose: purpose, id: id, generation: generation, hosting: hosting)
+        case .workspaceFileCreateDirectory(let path): performFileCreateDirectory(path: path, id: id, generation: generation, hosting: hosting)
+        case .workspaceFileRename(let path, let destinationPath):
+            performFileRename(path: path, destinationPath: destinationPath, id: id, generation: generation, hosting: hosting)
+        case .workspaceFileDelete(let path): performFileDelete(path: path, id: id, generation: generation, hosting: hosting)
+        case .openInSystemViewer(let path): performOpenInSystemViewer(path: path, id: id, generation: generation, hosting: hosting)
         case .reviewCommentList: performReviewCommentList(id: id, generation: generation, hosting: hosting)
         case .reviewCommentUpsert(let commentID, let filePath, let side, let lineNumber, let lineText, let body):
             performReviewCommentUpsert(
@@ -1844,7 +1933,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     }
 
     private func performFileWrite(
-        path: String, content: String, baseSHA256: String?, requiresDirectPath: Bool, id: String, generation: Int, hosting: any CodePaneHosting
+        path: String, content: String, baseSHA256: String?, purpose: SpacesDeviceWorkspaceFileWritePurpose, id: String, generation: Int,
+        hosting: any CodePaneHosting
     ) {
         guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
             reply(
@@ -1862,8 +1952,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         Task { [weak self] in
             do {
                 let result = try await deviceGateway.workspaceFileWrite(
-                    workspaceID: workspaceID, relativePath: path, base64Data: base64Data, expectedSHA256: baseSHA256,
-                    requiresDirectPath: requiresDirectPath, device: device)
+                    workspaceID: workspaceID, relativePath: path, base64Data: base64Data, expectedSHA256: baseSHA256, purpose: purpose, device: device
+                )
                 switch CodePaneBridge.fileWritePayload(result) {
                 case .success(let payload):
                     // Only an actually-committed write (never a CAS conflict, which wrote
@@ -1886,6 +1976,192 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
                 self?.settleFileWrite()
             }
         }
+    }
+
+    /// Creates one directory inside the workspace checkout, for the Files tree's New folder item. Not a
+    /// file write: it deliberately touches none of `outstandingFileWriteCount`, `lastCommittedFileWrite`,
+    /// or editor-state adoption (unlike `performFileWrite` above), since there is no buffer content to
+    /// adopt into anything.
+    private func performFileCreateDirectory(path: String, id: String, generation: Int, hosting: any CodePaneHosting) {
+        guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
+            return
+        }
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        Task { [weak self] in
+            do {
+                try await deviceGateway.workspaceFileCreateDirectory(workspaceID: workspaceID, relativePath: path, device: device)
+                self?.reply(id: id, generation: generation, result: CodePaneBridge.AckPayload())
+            } catch { self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error)) }
+        }
+    }
+
+    /// Moves or renames one workspace entry, for the Files tree's Rename and Move to… items. Not a
+    /// file write: see `performFileCreateDirectory`'s comment above, same reasoning.
+    ///
+    /// Unlike the other two mutations, this one is registered in `inFlightEntryMoveRequestIDs` until it
+    /// has an outcome for the page: its reply is what moves the open buffer to the destination, so
+    /// hibernation and close both wait for it (see `teardownWebViewWhenEntryMovesSettle()` and
+    /// `closeLifecycleWorkIsSettled`).
+    ///
+    /// The daemon's own answer, success or refusal, is that outcome directly. A transport failure that
+    /// could have landed after the request reached the daemon is not: the daemon runs the mutation when
+    /// its per-workspace queue reaches it, and its answer can be lost on the way back, so reporting a
+    /// failure for a move that did happen would leave the open buffer anchored on a path the daemon has
+    /// emptied. Those failures are an unknown outcome, and the listing is what resolves them
+    /// (`SpacesDeviceAPIRequestOutcome.mayHaveBeenPerformed`, then `reconcileUnansweredFileRename`). A
+    /// failure that proves the request never went out (no candidate address answered the dial) is a plain
+    /// refusal, reported as it is.
+    private func performFileRename(path: String, destinationPath: String, id: String, generation: Int, hosting: any CodePaneHosting) {
+        guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
+            return
+        }
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        inFlightEntryMoveRequestIDs.insert(id)
+        Task { [weak self] in
+            do {
+                try await deviceGateway.workspaceFileRename(
+                    workspaceID: workspaceID, relativePath: path, destinationRelativePath: destinationPath, device: device)
+                self?.reply(id: id, generation: generation, result: CodePaneBridge.AckPayload())
+            } catch {
+                if SpacesDeviceAPIRequestOutcome.mayHaveBeenPerformed(error) {
+                    await self?.reconcileUnansweredFileRename(
+                        path: path, destinationPath: destinationPath, id: id, generation: generation, device: device)
+                } else {
+                    self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error))
+                }
+            }
+            self?.settleEntryMove(id: id)
+        }
+    }
+
+    /// Answers a move whose request failed without an answer by asking the listing what actually
+    /// happened, rather than reporting a failure the daemon may be about to contradict. The listing is the
+    /// only source of truth left: the daemon may have performed the move, may still be about to, or may
+    /// never have received it, and the client cannot tell those apart from a deadline or a connection that
+    /// broke under the request.
+    ///
+    /// Presence in the listing is evidence; absence is evidence only when the listing is complete. The
+    /// destination present with the source gone is the move: the page is answered as it would have been by
+    /// the daemon, so its retarget of the open buffer and its refresh run normally. The source still there
+    /// is a device that did not answer and did not move anything, which the row reports so the user can
+    /// retry. A complete listing accounting for neither path cannot be read as either answer and is
+    /// reported as exactly that.
+    ///
+    /// A truncated listing (a workspace past `workspaceFileList`'s path cap) is where that last case stops
+    /// being conclusive: either path could sit beyond the cap, so neither being listed proves nothing. The
+    /// row then says the outcome is unknown rather than that the entry is still where it was, because a
+    /// move the daemon did perform reads identically and the user would go looking at the wrong path.
+    ///
+    /// The pull carries `workspaceFileList`'s own deadline, so this stage is bounded exactly like the
+    /// request it reconciles, and the teardown deferred on this move's id is released the moment it ends.
+    private func reconcileUnansweredFileRename(path: String, destinationPath: String, id: String, generation: Int, device: SpacesPairedDeviceRecord)
+        async
+    {
+        let listing: SpacesDeviceWorkspaceFileListResult
+        do { listing = try await deviceGateway.workspaceFileList(workspaceID: workspaceID, device: device) } catch {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(
+                    code: .unavailable, message: "The device did not answer the move, and the file listing could not be re-read."))
+            return
+        }
+        let sourceExists = Self.listingContains(path, in: listing)
+        let destinationExists = Self.listingContains(destinationPath, in: listing)
+        if destinationExists, !sourceExists {
+            reply(id: id, generation: generation, result: CodePaneBridge.AckPayload())
+            return
+        }
+        let message: String
+        if sourceExists {
+            message = "The device did not answer the move. '\(path)' is still where it was."
+        } else if listing.truncated {
+            message =
+                "The device did not answer the move, and this workspace has too many files for the listing to confirm whether '\(path)' moved to '\(destinationPath)'."
+        } else {
+            message = "The device did not answer the move, and the listing shows neither '\(path)' nor '\(destinationPath)'."
+        }
+        reply(id: id, generation: generation, error: CodePaneBridge.BridgeError(code: .unavailable, message: message))
+    }
+
+    /// Whether the listing still accounts for `path`: as a listed file, an empty directory, or a submodule
+    /// checkout, or, when `path` names a directory, as anything sitting under it. A directory has no entry
+    /// of its own in `paths`, so a moved folder is recognised only by what the listing carries beneath it.
+    private static func listingContains(_ path: String, in listing: SpacesDeviceWorkspaceFileListResult) -> Bool {
+        let prefix = path + "/"
+        let matches = { (candidate: String) in candidate == path || candidate.hasPrefix(prefix) }
+        return listing.paths.contains(where: matches) || listing.emptyDirectories.contains(where: matches)
+            || listing.submodules.contains { matches($0.path) }
+    }
+
+    /// Deletes one workspace entry, for the Files tree's Delete item. Not a file write: see
+    /// `performFileCreateDirectory`'s comment above, same reasoning.
+    private func performFileDelete(path: String, id: String, generation: Int, hosting: any CodePaneHosting) {
+        guard let device = hosting.codePaneDevice(workspaceID: workspaceID) else {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace's device is not available."))
+            return
+        }
+        let workspaceID = workspaceID
+        let deviceGateway = deviceGateway
+        Task { [weak self] in
+            do {
+                try await deviceGateway.workspaceFileDelete(workspaceID: workspaceID, relativePath: path, device: device)
+                self?.reply(id: id, generation: generation, result: CodePaneBridge.AckPayload())
+            } catch { self?.reply(id: id, generation: generation, error: CodePaneBridge.mapClientError(error)) }
+        }
+    }
+
+    /// Hands one workspace file to macOS, for a file the Editor cannot open as text (the Files tree's
+    /// Open in system viewer item, offered only in a workspace whose files are on this Mac). Unlike
+    /// every other RPC in this file, this never reaches the daemon:
+    /// it resolves the workspace's local checkout directory, confines the requested path inside it, and
+    /// asks `NSWorkspace` to open it, all synchronously on the main actor already running this method, so
+    /// there is no `Task` to wrap.
+    private func performOpenInSystemViewer(path: String, id: String, generation: Int, hosting: any CodePaneHosting) {
+        // The page never asks for this on a workspace whose files are on another device: locality
+        // travels in `spaces:init` (`InitPayload.isLocalWorkspace`) and the Files tree omits the menu
+        // item entirely for a remote workspace. What remains here is the workspace row itself having
+        // gone (deleted while this pane was open), which every other handler in this file reports the
+        // same way its own device lookup does.
+        guard let workspaceDirectory = hosting.codePaneLocalWorkspaceDirectory(workspaceID: workspaceID) else {
+            reply(id: id, generation: generation, error: CodePaneBridge.BridgeError(code: .unavailable, message: "This workspace is not available."))
+            return
+        }
+        // The same containment the daemon's own Files-tree mutations apply to the same path, from the
+        // same resolver: the workspace root is resolved through symlinks and each component of `path` is
+        // required not to be one. A lexical check would not do here: `standardizedFileURL` never touches
+        // the filesystem, so a listed path that is, or passes through, a link out of the workspace reads
+        // as contained and `NSWorkspace` would then follow it and open the file it points at, outside the
+        // workspace entirely.
+        let candidateURL: URL
+        do {
+            candidateURL = URL(
+                fileURLWithPath: try SpacesDeviceWorkspacePathResolver.resolveDirectPath(relativePath: path, workspaceDir: workspaceDirectory))
+        } catch SpacesDeviceWorkspacePathResolver.PathError.containsSymbolicLink {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .invalidArgument, message: "Path passes through a symbolic link."))
+            return
+        } catch {
+            reply(
+                id: id, generation: generation,
+                error: CodePaneBridge.BridgeError(code: .invalidArgument, message: "Path escapes the workspace directory."))
+            return
+        }
+        guard NSWorkspace.shared.open(candidateURL) else {
+            reply(id: id, generation: generation, error: CodePaneBridge.BridgeError(code: .internalError, message: "macOS could not open '\(path)'."))
+            return
+        }
+        reply(id: id, generation: generation, result: CodePaneBridge.AckPayload())
     }
 
     /// Lists every path in the workspace's checkout for the Editor pane's file tree and quick-open.
@@ -2603,6 +2879,60 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         scriptEvaluator.evaluateCodePaneScript(script)
     }
 
+    /// Points the live file-signature stream at `to` because the page moved the open file there from
+    /// `from`: a confirmed Files-tree rename or move is the one transition that changes which file the Editor
+    /// shows without an editor-purpose `workspaceFileRead` to drive the retarget (the bytes never left
+    /// the page, so there is nothing to read). Left alone, the daemon would keep watching the emptied
+    /// source path and an external edit at the destination would never reach the pane.
+    ///
+    /// A move renames the watcher's target in place, so this is not a navigation and must not claim
+    /// `latestFileNavigationToken`: claiming it would strand an open that is still in flight for a
+    /// different file. That open's reply is adopted by the page either way, but its success arm is the
+    /// only code that can point the watcher at the file it opened (`subscribeFileSignature` never
+    /// messages Swift, see `CodePaneWeb/src/bridge/realBridge.ts`), and a token claimed here would fail
+    /// its stale-token check, leaving the daemon on this move's destination while the editor shows the
+    /// opened file. Leaving the token alone lets that open take the stream when its read lands, and the
+    /// guard below is what stops this move from taking the stream away from a file it never moved: the
+    /// retarget applies only while the watcher still follows `from`, the path the move emptied, which is
+    /// `subscribedFilePath` or, while the device is away, `pendingFileSignatureReconnectPath`.
+    ///
+    /// Requiring the watched path to equal `from`, rather than merely to differ from `to`, is what makes
+    /// a notification that arrives late harmless. A read for another file subscribes here the moment the
+    /// daemon answers it, while its reply is still queued for the page, so the page can send this move
+    /// (decided against the file it still shows) after the watcher has already followed that other file.
+    /// Retargeting then would point the daemon at this move's destination while the page goes on to
+    /// display the other file, whose own subscribe step has already run, so external changes to it would
+    /// stop reaching the pane until it was reread or reopened. A destination the watcher already follows
+    /// is left alone by the same rule: a live or attempting subscription for it is what a resubscribe
+    /// would leave behind anyway, so tearing it down to re-enter the backoff would only cost a delay.
+    ///
+    /// `fileSignatureReconnectFailures` IS claimed, for the same reason a navigation claims it at
+    /// `performFileRead`'s dispatch: a destination that has to retry starts from the floor rather than
+    /// inheriting the previous file's backoff. `resubscribeFileSignature` owns the rest: stopping the
+    /// current stream, storing `subscribedFilePath`, and the subscription-generation bump that
+    /// invalidates a pending old-path reconnect.
+    ///
+    /// The device is unavailable by contract for the window its daemon spends restarting, and this
+    /// notification has no reply to defer: dropping the destination there would leave the stream, or a
+    /// reconnect loop already running for it, watching the emptied source path forever, while the page
+    /// filters every frame that path produces (its own path is the destination). External changes would
+    /// stop reaching the pane until the file is reread or reopened. The destination is therefore handed
+    /// to the reconnect loop, which is the one thing that keeps trying until the device answers, and the
+    /// generation bump retires the pending reconnect still naming the source.
+    private func retargetFileSignature(from: String, to: String) {
+        guard let watchedPath = subscribedFilePath ?? pendingFileSignatureReconnectPath, watchedPath == from else { return }
+        fileSignatureReconnectFailures = 0
+        if let hosting, let device = hosting.codePaneDevice(workspaceID: workspaceID) {
+            resubscribeFileSignature(path: to, device: device)
+            return
+        }
+        fileSignatureStream?.stop()
+        fileSignatureStream = nil
+        subscribedFilePath = nil
+        fileSignatureSubscriptionGeneration += 1
+        scheduleFileSignatureReconnect(path: to, generation: fileSignatureSubscriptionGeneration)
+    }
+
     /// (Re)points the live file-signature stream at `path` if it isn't already there. A repeat
     /// `workspaceFileRead` call for the same path (e.g. a save's own read-back, or a redundant refetch)
     /// is a no-op here — only actually opening a different file tears down and reopens the stream.
@@ -2625,6 +2955,9 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         fileSignatureStream?.stop()
         fileSignatureStream = nil
         subscribedFilePath = path
+        // The watcher has a target again, so no reconnect target is outstanding: the generation bump
+        // below retires whatever reconnect was still scheduled for the path this one replaces.
+        pendingFileSignatureReconnectPath = nil
         fileSignatureSubscriptionGeneration += 1
         subscribedFileGeneration = fileSignatureSubscriptionGeneration
         let subscriptionGeneration = fileSignatureSubscriptionGeneration
@@ -2732,6 +3065,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// exponential curve `scheduleDiffSignatureReconnect` uses (see its doc comment), against this
     /// stream's own floor/cap/failure-count fields.
     private func scheduleFileSignatureReconnect(path: String, generation: Int) {
+        pendingFileSignatureReconnectPath = path
         fileSignatureReconnectFailures += 1
         let delay = RemoteConnectionBackoff.delay(
             consecutiveFailures: fileSignatureReconnectFailures, floor: fileSignatureReconnectFloor, cap: fileSignatureReconnectCap, jitterFraction: 0

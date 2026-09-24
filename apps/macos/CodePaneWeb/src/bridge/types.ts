@@ -162,6 +162,14 @@ export type WorkspaceFileReadPurpose = "editor" | "inlineDiff";
  */
 export type WorkspaceImageReadPurpose = "editor" | "markdownEmbed";
 
+/** What a write is for, which is what decides how the host resolves its path. `editor` saves the
+ *  open buffer and keeps the workspace's contained-symlink resolution, since the file it writes is
+ *  one the Editor already opened through that same resolution. `inlineDiff` and `createFile` both
+ *  resolve the path directly, refusing any symbolic-link component: an inline diff save must land on
+ *  exactly the file the patch names, and the Files tree's New file must create exactly the path the
+ *  tree shows rather than following a link out of the row the user right-clicked. */
+export type WorkspaceFileWritePurpose = "editor" | "inlineDiff" | "createFile";
+
 export interface WorkspaceFileWriteOptions {
   /**
    * The sha256 the caller last read. The write is rejected as a conflict if the file's current
@@ -172,10 +180,10 @@ export interface WorkspaceFileWriteOptions {
    * — there is no prior hash to compare against, only "did anyone else recreate it first".
    */
   baseSHA256: string | undefined;
-  /** Required on the host wire: inline diff saves reject symbolic links while ordinary Editor saves
-   * retain the workspace's contained-symlink behavior. Optional here keeps lightweight test bridges
-   * focused on their asserted behavior; `realBridge` rejects a missing value instead of inferring one. */
-  purpose?: WorkspaceFileReadPurpose;
+  /** Required on the host wire: it is what selects the write's path resolution (see
+   * `WorkspaceFileWritePurpose`). Optional here keeps lightweight test bridges focused on their
+   * asserted behavior; `realBridge` rejects a missing value instead of inferring one. */
+  purpose?: WorkspaceFileWritePurpose;
 }
 
 export interface WorkspaceFileWriteOk {
@@ -212,6 +220,10 @@ export interface WorkspaceFileListResult {
    *  submodule's own directory from an ordinary one without re-deriving it from file paths, and
    *  label it with the commit its checkout sits at. */
   submodules: WorkspaceSubmodule[];
+  /** Every directory in the workspace holding no file counted in `paths`, workspace-relative,
+   *  sorted, no trailing slash. `paths` alone can't name a directory with nothing in it; this is
+   *  what gives a just-created (or otherwise empty) folder a row in the Files tree. */
+  emptyDirectories: string[];
 }
 
 /** One checked-out git submodule in the workspace listing. `path` is the checkout's
@@ -452,6 +464,23 @@ export interface SpacesBridge {
    * has no read purpose: it must never retarget the standalone Editor's worktree watcher. */
   workspaceRevisionFileRead(request: { path: string; revision: string; oldPath?: string }): Promise<WorkspaceRevisionFileReadResult>;
   workspaceFileWrite(path: string, content: string, options: WorkspaceFileWriteOptions): Promise<WorkspaceFileWriteResult>;
+  /** Creates an empty directory at `path`. Never overwrites: rejects `conflict` if anything already
+   *  exists there. Resolves with no payload; the caller refetches `workspaceFileList` afterwards
+   *  rather than editing its local tree, since that refetch is also what gives the new folder a row
+   *  (via `emptyDirectories`). */
+  workspaceFileCreateDirectory(path: string): Promise<void>;
+  /** Moves `path` to `destinationPath`, both workspace-relative. Rename and Move to… are the same
+   *  call: they differ only in the destination path. Never overwrites: rejects `conflict` if
+   *  something already exists at `destinationPath`. Resolves with no payload; the caller refetches
+   *  `workspaceFileList` afterwards rather than editing its local tree. */
+  workspaceFileRename(path: string, destinationPath: string): Promise<void>;
+  /** Deletes the file or directory at `path`. Resolves with no payload; the caller refetches
+   *  `workspaceFileList` afterwards rather than editing its local tree. */
+  workspaceFileDelete(path: string): Promise<void>;
+  /** Hands the file at `path` to macOS to open in whatever application owns it, for a file the
+   *  Editor cannot open as text. Never overwrites anything (it opens, it does not write); resolves
+   *  with no payload once the host has handed it off. */
+  openInSystemViewer(path: string): Promise<void>;
   /**
    * The full workspace file listing, backing Editor mode's Files tree and the ⌘P quick-open
    * overlay. Callers fetch this lazily (first use), cache it in memory, and refetch on a
@@ -480,8 +509,9 @@ export interface SpacesBridge {
    * returned function unsubscribes. Only one path is observed at a time (mirroring
    * `subscribeDiffSignature`'s one-scope-at-a-time model) — the host decides which path the
    * underlying stream points at, driven by completions of `workspaceFileRead` calls with the
-   * `editor` purpose; inline-diff reads use `inlineDiff` and never retarget it. There is no
-   * subscribe RPC here; see README.md for the event-delivery mechanism.
+   * `editor` purpose and by `retargetFileSignature` below; inline-diff reads use `inlineDiff` and
+   * never retarget it. There is no subscribe RPC here; see README.md for the event-delivery
+   * mechanism.
    */
   subscribeFileSignature(path: string, listener: FileSignatureListener): Unsubscribe;
   /**
@@ -493,6 +523,21 @@ export interface SpacesBridge {
    * for any other file repoints the stream again in the ordinary way.
    */
   unsubscribeFileSignature(): void;
+  /**
+   * Moves the host's live file-signature stream from `from` to `to`, both workspace-relative. A
+   * confirmed rename or move carries the open file to a path the editor never read, so it is the
+   * one transition that moves the open file without an editor-purpose `workspaceFileRead` to drive
+   * the retarget, and without this the daemon would keep watching the emptied source path.
+   * Fire-and-forget: the host stops the current stream and subscribes to `to`, and the stream's own
+   * frames are the only answer.
+   *
+   * `from` is what makes a late notification safe. The host retargets only while its watcher still
+   * follows `from`, so a move whose notification is overtaken by another file's editor-purpose read
+   * (that read subscribes natively the moment it completes, while its reply is still queued for
+   * this page) cannot pull the watcher off the file that read subscribed to. A path that is not
+   * workspace-relative is refused by the host and nothing is retargeted.
+   */
+  retargetFileSignature(from: string, to: string): void;
   /**
    * Subscribe to workspace-listing-signature push events for the shared `workspaceFileList`
    * cache. The host opens this only after the first successful `workspaceFileList` pull, so a
@@ -691,6 +736,10 @@ export interface CodePaneInitPayload {
    *  Diff mode renders a neutral notice instead of fetching one, the compare control is omitted, and
    *  the editor sidebar carries the Files tree alone. */
   isGitRepository: boolean;
+  /** Whether this workspace's files live on this Mac. Handing a file to macOS (the Files tree's Open
+   *  in system viewer) needs a path that exists on this machine, so that item is offered only when
+   *  this is true. */
+  isLocalWorkspace: boolean;
   /** Agents running in this workspace at startup, for the assigned-agent dropdown (see
    *  `reviewComments.ts`'s `selectDefaultAgentId`). Kept current after startup by `spaces:agents`. */
   agents: CodePaneAgentSummary[];

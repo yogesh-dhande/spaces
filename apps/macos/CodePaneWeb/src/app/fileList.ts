@@ -1,4 +1,5 @@
 import { DiffFileEntry, FileChangeStatus } from "../bridge/types";
+import { createDisclosureChevron, createDisclosureSpacer, setDisclosureExpanded } from "./disclosureChevron";
 import { buildFileTree, FileTreeDirNode, FileTreeFileNode, FileTreeNode } from "./fileTree";
 import { submoduleLabel } from "./submoduleLabel";
 
@@ -186,7 +187,7 @@ function renderNode(
  * item in the diff.
  *
  * A pointer with nothing nested under it (never checked out, or checked out with no changes of its
- * own) has nothing to disclose, so it renders without a triangle and without the toggle: its chip
+ * own) has nothing to disclose, so it renders without a chevron and without the toggle: its chip
  * is then the row's only control, rather than a tab stop that does nothing when activated. Whether
  * a pointer has children is fixed by the manifest, so this never changes under a row that is
  * already on screen.
@@ -225,9 +226,7 @@ function renderDirNode(
     dirrow.setAttribute("role", "button");
     dirrow.tabIndex = 0;
 
-    const tri = document.createElement("span");
-    tri.className = "tri";
-    tri.textContent = "▾";
+    const tri = createDisclosureChevron();
     dirrow.appendChild(tri);
 
     let expanded = expandedPaths.has(node.path);
@@ -243,7 +242,7 @@ function renderDirNode(
 
     const applyExpandedState = (): void => {
       childrenEl.style.display = expanded ? "" : "none";
-      tri.textContent = expanded ? "▾" : "▸";
+      setDisclosureExpanded(tri, expanded);
       dirrow.setAttribute("aria-expanded", String(expanded));
     };
 
@@ -265,6 +264,10 @@ function renderDirNode(
       if (event.repeat) return; // a held key would oscillate the disclosure
       toggle();
     });
+  } else {
+    // The same slot, empty, so a pointer row with nothing to disclose keeps its label in the column
+    // its siblings' labels sit in.
+    dirrow.appendChild(createDisclosureSpacer());
   }
 
   const label = document.createElement("span");
@@ -347,6 +350,10 @@ function renderFileNode(
     if (event.repeat) return;
     callbacks.onSelect(file.path);
   });
+
+  // A file has nothing to disclose, but it takes the same leading slot a directory's chevron
+  // occupies, so its name starts in the same column as a sibling folder's label.
+  row.appendChild(createDisclosureSpacer());
 
   const status = document.createElement("span");
   status.className = `status ${file.status}`;

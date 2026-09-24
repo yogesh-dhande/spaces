@@ -1,14 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import { WorkspaceFileListResult } from "../src/bridge/types";
+import { SpacesBridgeError, WorkspaceFileListResult } from "../src/bridge/types";
+import { ContextMenu, ContextMenuRequest } from "../src/app/contextMenu";
+import { EditorSidebar, EditorSidebarBridge, EditorSidebarCallbacks } from "../src/app/editorSidebar";
+import { FolderPicker } from "../src/app/folderPicker";
 import { WorkspaceFileListCache } from "../src/app/workspaceFileListCache";
-import { EditorSidebar, EditorSidebarCallbacks } from "../src/app/editorSidebar";
 
 // jsdom has no scrollIntoView; the Files tree's FilesTreeHandle.setSelected calls it on every
 // selection change (see setSelectedPath's tests below).
 Element.prototype.scrollIntoView = function scrollIntoView(): void {};
 
 function makeResult(paths: string[], truncated = false): WorkspaceFileListResult {
-  return { paths, truncated, submodules: [] };
+  return { paths, truncated, submodules: [], emptyDirectories: [] };
 }
 
 /** Builds a real `WorkspaceFileListCache` over a `vi.fn()` bridge stub — exercises the real
@@ -22,7 +24,38 @@ function makeCache(workspaceFileList = vi.fn().mockResolvedValue(makeResult([]))
 }
 
 function makeCallbacks(): EditorSidebarCallbacks {
-  return { onModeChange: vi.fn() };
+  return { onModeChange: vi.fn(), isUnopenable: () => false, onEntryMoved: vi.fn() };
+}
+
+/** The narrowed bridge slice EditorSidebar needs for the Files tree's pointer-menu mutations; none
+ *  of the tests below exercise those mutations directly (see filesTreeMenu.test.ts for that), so
+ *  every method just rejects, matching the "not used" convention `test/root.test.ts` uses for
+ *  bridge methods a given test doesn't care about. */
+function makeBridge(): EditorSidebarBridge {
+  return {
+    workspaceFileWrite: vi.fn().mockRejectedValue(new Error("not used")),
+    workspaceFileCreateDirectory: vi.fn().mockRejectedValue(new Error("not used")),
+    workspaceFileRename: vi.fn().mockRejectedValue(new Error("not used")),
+    workspaceFileDelete: vi.fn().mockRejectedValue(new Error("not used")),
+    openInSystemViewer: vi.fn().mockRejectedValue(new Error("not used")),
+  };
+}
+
+/** A real `FolderPicker` on a throwaway host: the sidebar only threads it through to the Files
+ *  tree, and the Move to… flow itself is covered in filesTreeMenu.test.ts. */
+function makeFolderPicker(): FolderPicker {
+  return new FolderPicker(document.createElement("div"));
+}
+
+function makeContextMenu(): ContextMenu {
+  return { show: vi.fn(), hide: vi.fn(), isOpen: () => false };
+}
+
+/** A context menu that records what it was asked to show, so a test can pick an item by label the
+ *  way the real menu's `activate()` does. */
+function makeRecordingContextMenu(): ContextMenu & { calls: ContextMenuRequest[] } {
+  const calls: ContextMenuRequest[] = [];
+  return { calls, show: (request) => calls.push(request), hide: vi.fn(), isOpen: () => false };
 }
 
 function makeChangesListEl(): HTMLElement {
@@ -44,7 +77,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -63,7 +99,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -82,7 +121,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "changes", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "changes", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -101,7 +143,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       changesListEl,
       cache,
-      { sidebarMode: "changes", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "changes", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -120,7 +165,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       changesListEl,
       cache,
-      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       vi.fn(),
       callbacks,
     );
@@ -146,7 +194,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       vi.fn(),
       callbacks,
     );
@@ -163,7 +214,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       onSelectFile,
       makeCallbacks(),
     );
@@ -183,7 +237,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -205,7 +262,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       changesListEl,
       cache,
-      { sidebarMode: "changes", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "changes", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -224,7 +284,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -258,7 +321,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -288,7 +354,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -310,7 +379,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "changes", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "changes", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -327,7 +399,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -351,7 +426,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -383,7 +461,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -414,7 +495,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -455,7 +539,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       makeChangesListEl(),
       cache,
-      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
       vi.fn(),
       makeCallbacks(),
     );
@@ -488,7 +575,10 @@ describe("EditorSidebar", () => {
     const sidebar = new EditorSidebar(
       changesListEl,
       cache,
-      { sidebarMode: "changes", selectedPath: undefined, changesAvailable: false },
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      { sidebarMode: "changes", selectedPath: undefined, changesAvailable: false, isLocalWorkspace: true },
       vi.fn(),
       callbacks,
     );
@@ -505,5 +595,167 @@ describe("EditorSidebar", () => {
     expect(sidebar.getMode()).toBe("files");
     expect(callbacks.onModeChange).not.toHaveBeenCalled();
     expect(sidebar.el.contains(changesListEl)).toBe(false);
+  });
+});
+
+describe("EditorSidebar: the Files tree's New file write", () => {
+  // `editor` is the one write purpose that resolves through symlinks, which is exactly wrong for a
+  // path the user just named in the tree: it would create the file at a dangling link's target, or
+  // under a symlinked prefix, instead of at the row's own path. `createFile` makes the daemon resolve
+  // the path directly, the same rule the create-directory/rename/delete commands follow.
+  it("writes through the createFile purpose so the daemon refuses a symlinked path instead of following it", async () => {
+    const { cache } = makeCache(vi.fn().mockResolvedValue(makeResult(["a.ts"])));
+    const bridge = makeBridge();
+    bridge.workspaceFileWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-new" });
+    const menu = makeRecordingContextMenu();
+    const sidebar = new EditorSidebar(
+      makeChangesListEl(),
+      cache,
+      bridge,
+      menu,
+      makeFolderPicker(),
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
+      vi.fn(),
+      makeCallbacks(),
+    );
+    sidebar.reattach();
+    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
+
+    const tree = sidebar.el.querySelector(".editor-sidebar-list")!.firstElementChild as HTMLElement;
+    tree.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    menu.calls[0]!.items.find((item) => item.label === "New file")!.onSelect();
+
+    const field = sidebar.el.querySelector("input.inline-name") as HTMLInputElement;
+    field.value = "created.ts";
+    field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() =>
+      expect(bridge.workspaceFileWrite).toHaveBeenCalledWith("created.ts", "", { baseSHA256: undefined, purpose: "createFile" }),
+    );
+  });
+
+  // The device refuses a create onto an existing path (an empty file at that path included, which a
+  // compare-and-swap create would otherwise adopt as an already-landed write). The refusal has to reach
+  // the user in place, under the row, with the field still open to correct the name.
+  it("shows the device's conflict under the row and keeps the field open when the path already exists", async () => {
+    const { cache } = makeCache(vi.fn().mockResolvedValue(makeResult(["taken.ts"])));
+    const bridge = makeBridge();
+    bridge.workspaceFileWrite = vi.fn().mockRejectedValue(new SpacesBridgeError("conflict", "'taken.ts' already exists."));
+    const menu = makeRecordingContextMenu();
+    const sidebar = new EditorSidebar(
+      makeChangesListEl(),
+      cache,
+      bridge,
+      menu,
+      makeFolderPicker(),
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
+      vi.fn(),
+      makeCallbacks(),
+    );
+    sidebar.reattach();
+    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
+
+    const tree = sidebar.el.querySelector(".editor-sidebar-list")!.firstElementChild as HTMLElement;
+    tree.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    menu.calls[0]!.items.find((item) => item.label === "New file")!.onSelect();
+
+    const field = sidebar.el.querySelector("input.inline-name") as HTMLInputElement;
+    field.value = "taken.ts";
+    field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => expect(sidebar.el.querySelector(".inline-error")).not.toBeNull());
+    expect(sidebar.el.querySelector(".inline-error")?.textContent).toBe("'taken.ts' already exists.");
+    expect(sidebar.el.querySelector("input.inline-name")).toBe(field);
+    expect(field.disabled).toBe(false);
+  });
+});
+
+// Rename and Move to… both land on `workspaceFileRename`, and both move bytes the Editor may hold
+// open. root.ts answers `onEntryMoved` by retargeting the Editor onto the destination, so the
+// report has to be made once the device has actually moved the entry and never before.
+describe("EditorSidebar: reporting a confirmed move", () => {
+  async function renameFirstRow(
+    bridge: EditorSidebarBridge,
+    callbacks: EditorSidebarCallbacks,
+    newName: string,
+  ): Promise<EditorSidebar> {
+    const { cache } = makeCache(vi.fn().mockResolvedValue(makeResult(["a.ts"])));
+    const menu = makeRecordingContextMenu();
+    const sidebar = new EditorSidebar(
+      makeChangesListEl(),
+      cache,
+      bridge,
+      menu,
+      makeFolderPicker(),
+      { sidebarMode: "files", selectedPath: undefined, changesAvailable: true, isLocalWorkspace: true },
+      vi.fn(),
+      callbacks,
+    );
+    sidebar.reattach();
+    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
+
+    const row = sidebar.el.querySelector(".row") as HTMLElement;
+    row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    menu.calls[0]!.items.find((item) => item.label === "Rename")!.onSelect();
+    const field = sidebar.el.querySelector("input.inline-name") as HTMLInputElement;
+    field.value = newName;
+    field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    return sidebar;
+  }
+
+  it("reports the source and destination once the device confirms the rename", async () => {
+    const bridge = makeBridge();
+    bridge.workspaceFileRename = vi.fn().mockResolvedValue(undefined);
+    const callbacks = makeCallbacks();
+    await renameFirstRow(bridge, callbacks, "b.ts");
+
+    await vi.waitFor(() => expect(callbacks.onEntryMoved).toHaveBeenCalledWith("a.ts", "b.ts"));
+  });
+
+  it("reports nothing when the device refuses the rename, and shows the refusal under the row", async () => {
+    const bridge = makeBridge();
+    bridge.workspaceFileRename = vi
+      .fn()
+      .mockRejectedValue(new SpacesBridgeError("invalidArgument", "Path is or contains a git submodule; move or delete it with git."));
+    const callbacks = makeCallbacks();
+    const sidebar = await renameFirstRow(bridge, callbacks, "b.ts");
+
+    await vi.waitFor(() => expect(sidebar.el.querySelector(".inline-error")).not.toBeNull());
+    expect(sidebar.el.querySelector(".inline-error")?.textContent).toBe(
+      "Path is or contains a git submodule; move or delete it with git.",
+    );
+    expect(callbacks.onEntryMoved).not.toHaveBeenCalled();
+  });
+
+  it("re-keys the tree's expansion onto a moved directory's destination and reports it for persistence", async () => {
+    const { cache } = makeCache(vi.fn().mockResolvedValue(makeResult(["src/b.ts", "src/util/a.ts", "other/c.ts"])));
+    const onTreeStateChange = vi.fn();
+    const sidebar = new EditorSidebar(
+      makeChangesListEl(),
+      cache,
+      makeBridge(),
+      makeContextMenu(),
+      makeFolderPicker(),
+      {
+        sidebarMode: "files",
+        selectedPath: undefined,
+        expandedPaths: ["src", "src/util", "other"],
+        changesAvailable: true,
+        isLocalWorkspace: true,
+      },
+      vi.fn(),
+      { ...makeCallbacks(), onTreeStateChange },
+    );
+    sidebar.reattach();
+    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".dirrow").length).toBeGreaterThan(0));
+
+    sidebar.retargetExpandedPaths("src", "lib");
+
+    // The moved directory's own entry and every descendant's follow it; an unrelated directory's
+    // expansion is untouched. Compared as a set, since the tree's own insertion order is not part
+    // of what expansion means.
+    const [reported] = onTreeStateChange.mock.calls.at(-1)! as [{ expandedPaths: readonly string[]; selectedPath: string | undefined }];
+    expect([...reported.expandedPaths].sort()).toEqual(["lib", "lib/util", "other"]);
+    expect(reported.selectedPath).toBeUndefined();
   });
 });

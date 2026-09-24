@@ -86,6 +86,16 @@ describe("RealSpacesBridge", () => {
     expect(postMessage).toHaveBeenCalledWith({ method: "ready" });
   });
 
+  // A confirmed rename or move is the one transition that changes the editor's file with no read
+  // behind it, so the page reports it here. Both paths travel: the host retargets only while its
+  // watcher still follows the source, which is what keeps a notification that arrives after another
+  // file's read took the stream from pulling the watcher off that file.
+  it("sends a file-signature retarget carrying the move's source and destination, with no request id", () => {
+    const bridge = createRealBridge();
+    bridge.retargetFileSignature("a.ts", "renamed/b.ts");
+    expect(postMessage).toHaveBeenCalledWith({ method: "retargetFileSignature", params: { from: "a.ts", to: "renamed/b.ts" } });
+  });
+
   it("sends a render milestone with no request id", () => {
     const bridge = createRealBridge();
     bridge.notifyRenderMetric({
@@ -238,6 +248,26 @@ describe("MockSpacesBridge", () => {
     const recreated = await bridge.workspaceFileWrite("notes/TODO.md", "# TODO\n\n- recreated\n", { baseSHA256: undefined });
     expect(recreated).toEqual({ ok: true, sha256: expect.any(String) });
     expect(onMembership).toHaveBeenCalledTimes(2);
+  });
+
+  // The mock's one simulated file-signature stream follows a move for the same reason the host's
+  // does, and refuses one whose source is not the path it follows for the same reason too.
+  it("moves the simulated file-signature stream with a rename, but only while it still follows the source", async () => {
+    const bridge = createMockBridge();
+    const changed: string[] = [];
+    bridge.subscribeFileSignature("notes/TODO.md", (event) => changed.push(event.path));
+
+    await bridge.workspaceFileRead("notes/TODO.md", "editor");
+    bridge.retargetFileSignature("notes/TODO.md", "notes/DONE.md");
+    bridge.simulateFileChange("# TODO\n\n- moved\n");
+    expect(changed).toEqual(["notes/DONE.md"]);
+
+    // Another file's read has since taken the stream. A move of the file it left behind must leave
+    // that file's stream alone.
+    await bridge.workspaceFileRead("src/app/toolbar.ts", "editor");
+    bridge.retargetFileSignature("notes/DONE.md", "notes/ARCHIVE.md");
+    bridge.simulateFileChange("export {};\n");
+    expect(changed).toEqual(["notes/DONE.md", "src/app/toolbar.ts"]);
   });
 
   it("delivers a signature-change event to every subscribed listener, and stops after unsubscribe", () => {

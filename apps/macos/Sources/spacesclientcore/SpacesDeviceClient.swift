@@ -629,20 +629,44 @@ public enum SpacesDeviceClient {
     /// A mismatch is not thrown as an error: `didWrite` is `false` and the result carries the disk content
     /// the caller can merge against.
     public static func workspaceFileWrite(
-        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String? = nil, requiresDirectPath: Bool = false,
-        context: DeviceRequestContext
+        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String? = nil,
+        purpose: SpacesDeviceWorkspaceFileWritePurpose = .editor, context: DeviceRequestContext
     ) throws -> SpacesDeviceWorkspaceFileWriteResult {
         let response = try request(
             .init(
                 command: .workspaceFileWrite(
                     .init(
-                        workspaceID: workspaceID, relativePath: relativePath, base64Data: base64Data, expectedSHA256: expectedSHA256,
-                        requiresDirectPath: requiresDirectPath))), context: context)
+                        workspaceID: workspaceID, relativePath: relativePath, base64Data: base64Data, expectedSHA256: expectedSHA256, purpose: purpose
+                    ))), context: context)
         guard let result = response.workspaceFileWrite else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
         return result
     }
+
+    /// Creates an empty directory inside a workspace's checkout on a paired device, for the Editor's Files
+    /// tree "New Folder" action. Refused with `.conflict` when something already exists at the path.
+    @discardableResult public static func workspaceFileCreateDirectory(workspaceID: String, relativePath: String, context: DeviceRequestContext)
+        throws -> SpacesDeviceAPIResponse
+    { try request(.init(command: .workspaceFileCreateDirectory(.init(workspaceID: workspaceID, relativePath: relativePath))), context: context) }
+
+    /// Renames or moves one Files-tree entry to `destinationRelativePath` on a paired device. The same
+    /// command serves both a plain rename and a drag-to-move, since the destination is just a path.
+    /// Refused with `.conflict` when the destination already exists, `.notFound` when the source does not.
+    @discardableResult public static func workspaceFileRename(
+        workspaceID: String, relativePath: String, destinationRelativePath: String, context: DeviceRequestContext
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(
+                command: .workspaceFileRename(
+                    .init(workspaceID: workspaceID, relativePath: relativePath, destinationRelativePath: destinationRelativePath))), context: context)
+    }
+
+    /// Deletes one Files-tree entry, and everything under it when it is a directory, on a paired device.
+    /// Confirming a non-empty folder's deletion with the user is this client's concern, not the daemon's.
+    @discardableResult public static func workspaceFileDelete(workspaceID: String, relativePath: String, context: DeviceRequestContext) throws
+        -> SpacesDeviceAPIResponse
+    { try request(.init(command: .workspaceFileDelete(.init(workspaceID: workspaceID, relativePath: relativePath))), context: context) }
 
     /// Reads one bounded changed-file metadata chunk before the Editor begins fetching patch bodies.
     public static func workspaceDiffManifestChunk(

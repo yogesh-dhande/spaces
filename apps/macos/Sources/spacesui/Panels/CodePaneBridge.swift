@@ -400,6 +400,29 @@ enum CodePaneBridge {
         return token
     }
 
+    /// Decodes the page's `retargetFileSignature` notification, returning the workspace-relative path
+    /// the move emptied and the one the file-signature stream is to follow. A confirmed Files-tree
+    /// rename or move carries the open file to a path the editor never read, so it is the one
+    /// transition that moves the open file without an editor-purpose `workspaceFileRead` to drive the
+    /// retarget.
+    ///
+    /// Both paths are carried because the host applies the move only while its watcher still follows
+    /// the source (see `CodePaneContentController.retargetFileSignature(from:to:)`): the destination
+    /// alone cannot tell "the watcher has not followed the move yet" apart from "the watcher has since
+    /// been taken by another file's read".
+    ///
+    /// Each path is held to the same `isWorkspaceRelativePath` rule every path-bearing command is, so a
+    /// stale or malformed path is refused before the host acts on it. A notification carries no `id`
+    /// and so has nothing to reject: a refusal here simply leaves the stream where it is, and the page
+    /// learns nothing is coming from the frames it does not receive.
+    static func decodeRetargetFileSignature(body: Any) -> (from: String, to: String)? {
+        guard let dict = body as? [String: Any], dict["id"] == nil, dict["method"] as? String == "retargetFileSignature",
+            let params = dict["params"] as? [String: Any], let from = params["from"] as? String, isWorkspaceRelativePath(from),
+            let to = params["to"] as? String, isWorkspaceRelativePath(to)
+        else { return nil }
+        return (from: from, to: to)
+    }
+
     /// One locally pending review-comment entry, carried as part of the complete workspace recovery
     /// document rather than through a separate notification or collector.
     struct ReviewCommentEntryPayload: Codable, Equatable, Sendable {
@@ -558,7 +581,16 @@ enum CodePaneBridge {
         /// path does not exist yet. This is how "Keep mine" recreates a file the daemon reports as
         /// missing (see `FileWritePayload`'s `fileMissing` case) instead of being unable to ever write
         /// past that state.
-        case workspaceFileWrite(path: String, content: String, baseSHA256: String?, requiresDirectPath: Bool)
+        case workspaceFileWrite(path: String, content: String, baseSHA256: String?, purpose: SpacesDeviceWorkspaceFileWritePurpose)
+        /// Creates one directory inside the workspace checkout, for the Files tree's New folder item.
+        case workspaceFileCreateDirectory(path: String)
+        /// Moves `path` to `destinationPath`, both workspace-relative. One command serves both the tree's
+        /// Rename (a destination in the same folder) and its Move to… (a destination folder), since a
+        /// rename and a move differ only in the destination path.
+        case workspaceFileRename(path: String, destinationPath: String)
+        case workspaceFileDelete(path: String)
+        /// Hands one workspace file to macOS, for a file the Editor cannot open as text.
+        case openInSystemViewer(path: String)
         /// Lists every path in the workspace's checkout, for the Editor pane's file tree and
         /// quick-open. No params.
         case workspaceFileList
@@ -581,6 +613,18 @@ enum CodePaneBridge {
         case reviewCommentsSend(sessionID: String, text: String, comments: [SpacesDeviceReviewCommentSendEntry])
         case startWorkspaceCommand(command: String)
         case resumeWorkspaceCommandTracking(sessionID: String)
+    }
+
+    /// Whether `path` is a plain workspace-relative path the host may act on: non-empty, not absolute,
+    /// no NUL, and no empty, `.` or `..` component. The daemon re-validates and confines every path it
+    /// is given; this is the same check applied at the bridge so a malformed path is refused before a
+    /// round trip, and so `openInSystemViewer`, whose whole job runs on this Mac and never reaches the
+    /// daemon, has a containment rule of its own.
+    private static func isWorkspaceRelativePath(_ path: String) -> Bool {
+        guard !path.isEmpty, !path.hasPrefix("/"), !path.utf8.contains(0) else { return false }
+        return !path.split(separator: "/", omittingEmptySubsequences: false).contains { component in
+            component.isEmpty || component == "." || component == ".."
+        }
     }
 
     /// Maps a decoded request to a `Plan`, or a `BridgeError` if its method is unrecognized or its
@@ -685,13 +729,49 @@ enum CodePaneBridge {
             guard let purpose = options["purpose"] as? String else {
                 return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileWrite options require a purpose."))
             }
-            let requiresDirectPath: Bool
-            switch purpose {
-            case "editor": requiresDirectPath = false
-            case "inlineDiff": requiresDirectPath = true
-            default: return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileWrite purpose must be editor or inlineDiff."))
+            // The page's purpose string is the daemon's own write purpose (see
+            // `SpacesDeviceWorkspaceFileWritePurpose`), which is what decides both how the write's path
+            // resolves and whether it may land on a file that already exists; it is carried through
+            // rather than collapsed into a flag here.
+            guard let writePurpose = SpacesDeviceWorkspaceFileWritePurpose(rawValue: purpose) else {
+                return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileWrite purpose must be editor, inlineDiff, or createFile."))
             }
-            return .success(.workspaceFileWrite(path: path, content: content, baseSHA256: baseSHA256, requiresDirectPath: requiresDirectPath))
+            return .success(.workspaceFileWrite(path: path, content: content, baseSHA256: baseSHA256, purpose: writePurpose))
+        case "workspaceFileCreateDirectory":
+            guard let path = request.params["path"] as? String, !path.isEmpty else {
+                return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileCreateDirectory requires a path."))
+            }
+            guard isWorkspaceRelativePath(path) else {
+                return .failure(BridgeError(code: .invalidArgument, message: "Path must be workspace-relative."))
+            }
+            return .success(.workspaceFileCreateDirectory(path: path))
+        case "workspaceFileRename":
+            guard let path = request.params["path"] as? String, !path.isEmpty else {
+                return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileRename requires a path."))
+            }
+            guard let destinationPath = request.params["destinationPath"] as? String, !destinationPath.isEmpty else {
+                return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileRename requires a destinationPath."))
+            }
+            guard isWorkspaceRelativePath(path), isWorkspaceRelativePath(destinationPath) else {
+                return .failure(BridgeError(code: .invalidArgument, message: "Path must be workspace-relative."))
+            }
+            return .success(.workspaceFileRename(path: path, destinationPath: destinationPath))
+        case "workspaceFileDelete":
+            guard let path = request.params["path"] as? String, !path.isEmpty else {
+                return .failure(BridgeError(code: .invalidArgument, message: "workspaceFileDelete requires a path."))
+            }
+            guard isWorkspaceRelativePath(path) else {
+                return .failure(BridgeError(code: .invalidArgument, message: "Path must be workspace-relative."))
+            }
+            return .success(.workspaceFileDelete(path: path))
+        case "openInSystemViewer":
+            guard let path = request.params["path"] as? String, !path.isEmpty else {
+                return .failure(BridgeError(code: .invalidArgument, message: "openInSystemViewer requires a path."))
+            }
+            guard isWorkspaceRelativePath(path) else {
+                return .failure(BridgeError(code: .invalidArgument, message: "Path must be workspace-relative."))
+            }
+            return .success(.openInSystemViewer(path: path))
         case "workspaceFileList": return .success(.workspaceFileList)
         case "workspaceRefList": return .success(.workspaceRefList)
         case "retryLiveRefresh": return .success(.retryLiveRefresh)
@@ -943,8 +1023,9 @@ enum CodePaneBridge {
         return .success(FileWritePayload(ok: nil, conflict: true, currentSHA256: currentSHA256, fileMissing: nil, sha256: nil))
     }
 
-    /// The success reply for `reviewCommentDelete`/`reviewCommentsSend`: both are pure side effects
-    /// with nothing worth handing back beyond confirmation.
+    /// The success reply for `reviewCommentDelete`/`reviewCommentsSend` and the file-tree mutations
+    /// (`workspaceFileCreateDirectory`/`workspaceFileRename`/`workspaceFileDelete`/`openInSystemViewer`):
+    /// all are pure side effects with nothing worth handing back beyond confirmation.
     struct AckPayload: Encodable, Equatable { let ok = true }
 
     /// The immediate result of launching an arbitrary command. A session is always retained even
@@ -1023,6 +1104,11 @@ enum CodePaneBridge {
         /// show: the page renders a neutral Diff notice, hides the compare control and the sidebar's
         /// Changes tab, and never fetches a diff or subscribes a diff signature.
         let isGitRepository: Bool
+        /// Whether the workspace's checkout is on THIS Mac. Handing a file to macOS (the Files tree's
+        /// Open in system viewer) needs a path that exists on this machine, so the page omits that menu
+        /// item entirely for a workspace on another device rather than offering an action the host
+        /// could only refuse.
+        let isLocalWorkspace: Bool
         /// The client-local, durable recovery state for this workspace. This is the only restore
         /// payload; independently-restored editor/sidebar/comment fields are deliberately not sent
         /// so the page never combines values from different moments.

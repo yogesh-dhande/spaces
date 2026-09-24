@@ -16,14 +16,20 @@ import spacesruntimecore
 
 /// Path containment for the workspace file-read/write Device API commands: a client-supplied
 /// `relativePath` must resolve to somewhere inside the workspace's checkout, even through symlinks.
-enum SpacesDeviceWorkspacePathResolver {
-    enum PathError: Error { case escapesWorkspace, containsSymbolicLink }
+///
+/// `resolveDirectPath` is public because the Mac app applies the same rule without going through a
+/// daemon command at all: the Editor's Open in system viewer hands a local workspace path to
+/// `NSWorkspace`, and a path the user picked in the Files tree has to be confined exactly as a daemon
+/// mutation of that same path would be, down to the refusal text. A second implementation of
+/// containment would be a second chance to get it wrong.
+public enum SpacesDeviceWorkspacePathResolver {
+    public enum PathError: Error { case escapesWorkspace, containsSymbolicLink }
 
     /// Returns the lexical workspace path only when every existing component is a non-symlink.
     /// Inline diff editing renders a patch for this exact path, so following a contained symlink would
     /// let Save update a different file than the patch's identity. Ordinary Editor access continues to
     /// use `resolveContainedPath`, where contained symlinks are intentional.
-    static func resolveDirectPath(relativePath: String, workspaceDir: String, fileManager: FileManager = .default) throws -> String {
+    public static func resolveDirectPath(relativePath: String, workspaceDir: String, fileManager: FileManager = .default) throws -> String {
         guard !relativePath.isEmpty, !relativePath.hasPrefix("/") else { throw PathError.escapesWorkspace }
         let components = relativePath.split(separator: "/", omittingEmptySubsequences: true)
         guard !components.isEmpty, !components.contains(where: { $0 == ".." || $0 == "." }) else { throw PathError.escapesWorkspace }
@@ -63,10 +69,8 @@ enum SpacesDeviceWorkspacePathResolver {
     /// which every caller already has an honest representation for (a pointer-only row, an unlisted
     /// submodule, a path that belongs to the repository above it).
     static func isContainedGitlinkCheckout(repoDir: String, repoRelativePath: String, fileManager: FileManager = .default) -> Bool {
-        guard
-            let checkoutPath = try? resolveDirectPath(relativePath: repoRelativePath, workspaceDir: repoDir, fileManager: fileManager),
-            let attributes = try? fileManager.attributesOfItem(atPath: checkoutPath),
-            attributes[.type] as? FileAttributeType == .typeDirectory
+        guard let checkoutPath = try? resolveDirectPath(relativePath: repoRelativePath, workspaceDir: repoDir, fileManager: fileManager),
+            let attributes = try? fileManager.attributesOfItem(atPath: checkoutPath), attributes[.type] as? FileAttributeType == .typeDirectory
         else { return false }
         return fileManager.fileExists(atPath: (checkoutPath as NSString).appendingPathComponent(".git"))
     }
@@ -568,9 +572,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
             if let attributes = try? fileManager.attributesOfItem(atPath: fullPath), let size = attributes[.size] as? Int,
                 let modified = attributes[.modificationDate] as? Date
             {
-                if attributes[.type] as? FileAttributeType == .typeDirectory {
-                    directoryEntries.append(entry)
-                }
+                if attributes[.type] as? FileAttributeType == .typeDirectory { directoryEntries.append(entry) }
                 // `mode` (raw POSIX permission bits, -1 if unavailable) is folded in alongside size/mtime
                 // because a chmod (e.g. flipping the executable bit) on an already-dirty tracked file changes
                 // none of HEAD, the porcelain status letter, size, or mtime (chmod only touches ctime, which
@@ -637,9 +639,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // wholly untracked nested repository is excluded: it is not a submodule, has no pointer row, and
         // therefore contributes no nested entries to keep fresh.
         for entry in directoryEntries where entry.status != "??" {
-            guard SpacesDeviceWorkspacePathResolver.isContainedGitlinkCheckout(repoDir: workspaceDir, repoRelativePath: entry.path) else {
-                continue
-            }
+            guard SpacesDeviceWorkspacePathResolver.isContainedGitlinkCheckout(repoDir: workspaceDir, repoRelativePath: entry.path) else { continue }
             let subDir = (workspaceDir as NSString).appendingPathComponent(entry.path)
             let subSignature = try contributionCache.combinedSignature(for: subDir, touched: touched) {
                 try submoduleScopeSignature(
@@ -696,8 +696,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
     ) throws -> Data {
         guard !candidatePaths.isEmpty else { return Data() }
         var arguments = [
-            "-C", repoDir, "-c", "core.quotepath=false", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--submodule=short",
-            "--relative",
+            "-C", repoDir, "-c", "core.quotepath=false", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--submodule=short", "--relative",
         ]
         let compareRevision: String
         if headSHA.isEmpty {
@@ -711,8 +710,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
         arguments.append(compareRevision)
         arguments.append("--")
         arguments.append(contentsOf: candidatePaths.map { ":(literal)\($0)" })
-        let submoduleOutput = try gitClient.runGitAndCapture(
-            arguments, timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout)
+        let submoduleOutput = try gitClient.runGitAndCapture(arguments, timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout)
         return Data("submodules:\n\(submoduleOutput)".utf8)
     }
 
@@ -730,8 +728,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
         touched: RepositoryTouchedSet
     ) throws -> String {
         let headSHA = try gitClient.runGitAndCapture(
-            ["-C", subDir, "rev-parse", "--verify", "--quiet", "HEAD"],
-            timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout, allowedExitCodes: [0, 1]
+            ["-C", subDir, "rev-parse", "--verify", "--quiet", "HEAD"], timeout: try deadlineStart.map(remainingTimeout(start:)) ?? gitCommandTimeout,
+            allowedExitCodes: [0, 1]
         ).trimmingCharacters(in: .whitespacesAndNewlines)
         let statusOutput = try gitClient.runGitAndCapture(
             ["-C", subDir, "status", "--porcelain", "-z", "--untracked-files=all"],
@@ -766,8 +764,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // here would change.
         input.append(
             try gitlinkPointerSignatureInput(
-                repoDir: subDir, headSHA: headSHA, candidatePaths: directoryEntries.map(\.path), gitClient: gitClient,
-                deadlineStart: deadlineStart))
+                repoDir: subDir, headSHA: headSHA, candidatePaths: directoryEntries.map(\.path), gitClient: gitClient, deadlineStart: deadlineStart))
 
         // Mirrors the depth bound the diff itself honors: past it there are no nested entries to keep
         // fresh, so there is nothing left for a signature to notice.
@@ -1119,8 +1116,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // empirically). The porcelain block below synthesizes that one row from the status entry, rather
         // than this flag forcing every configured-away row back in with it.
         var rawArguments = [
-            "-C", repoDir, "diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv", "--submodule=short", "--relative", "--raw",
-            "--no-abbrev", "-z", compareRef,
+            "-C", repoDir, "diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv", "--submodule=short", "--relative", "--raw", "--no-abbrev",
+            "-z", compareRef,
         ]
         if let targetRef { rawArguments.append(targetRef) }
         let rawOutput = try gitClient.runGitAndCapture(rawArguments, timeout: try remainingTimeout(start: deadlineStart))
@@ -1130,8 +1127,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
             // prefix back off for the per-file pathspecs the patch writers hand to git.
             return DiffFilePlan(
                 path: pathPrefix + entry.path, oldPath: entry.oldPath.map { pathPrefix + $0 }, status: entry.status,
-                source: .tracked(baseRef: compareRef, targetRef: targetRef), repoDir: repoDir, submodulePath: submodulePath,
-                gitlink: entry.gitlink)
+                source: .tracked(baseRef: compareRef, targetRef: targetRef), repoDir: repoDir, submodulePath: submodulePath, gitlink: entry.gitlink)
         }
 
         // A committed comparison has no worktree, so nothing a policy could hide is in the picture and the
@@ -1166,8 +1162,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
                         path: plan.path, oldPath: plan.oldPath, status: plan.status, source: plan.source, repoDir: plan.repoDir,
                         submodulePath: plan.submodulePath,
                         gitlink: Gitlink(
-                            baseCommit: gitlink.baseCommit, unmerged: true, checkedOut: gitlink.checkedOut,
-                            ignorePolicy: gitlink.ignorePolicy))
+                            baseCommit: gitlink.baseCommit, unmerged: true, checkedOut: gitlink.checkedOut, ignorePolicy: gitlink.ignorePolicy))
                 }
             }
 
@@ -1371,10 +1366,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
                 targetRef == nil
                 ? changedEntries(
                     fromPorcelainZ: try gitClient.runGitAndCapture(
-                        ["-C", subDir, "status", "--porcelain", "-z", "--untracked-files=all"],
-                        timeout: try remainingTimeout(start: deadlineStart))
-                ).filter { policy != .untracked || $0.status != "??" }
-                : nil
+                        ["-C", subDir, "status", "--porcelain", "-z", "--untracked-files=all"], timeout: try remainingTimeout(start: deadlineStart))
+                ).filter { policy != .untracked || $0.status != "??" } : nil
             // A descended submodule owns its whole subtree: the checkout is what lives at those paths now,
             // and the nested plans below describe every one of its files against the submodule's own base.
             // The superproject can still have rows of its own down there, because a tracked directory
@@ -1403,14 +1396,11 @@ enum SpacesDeviceWorkspaceDiffEngine {
 
     /// The submodule's own pointer row, rebuilt with the readability this expansion resolved. Every other
     /// field is the plan `parseRawZ` produced.
-    private static func pointerPlan(_ plan: DiffFilePlan, gitlink: Gitlink, checkedOut: Bool, ignorePolicy: SubmoduleIgnorePolicy)
-        -> DiffFilePlan
-    {
+    private static func pointerPlan(_ plan: DiffFilePlan, gitlink: Gitlink, checkedOut: Bool, ignorePolicy: SubmoduleIgnorePolicy) -> DiffFilePlan {
         DiffFilePlan(
             path: plan.path, oldPath: plan.oldPath, status: plan.status, source: plan.source, repoDir: plan.repoDir,
             submodulePath: plan.submodulePath,
-            gitlink: Gitlink(
-                baseCommit: gitlink.baseCommit, unmerged: gitlink.unmerged, checkedOut: checkedOut, ignorePolicy: ignorePolicy))
+            gitlink: Gitlink(baseCommit: gitlink.baseCommit, unmerged: gitlink.unmerged, checkedOut: checkedOut, ignorePolicy: ignorePolicy))
     }
 
     /// The commit id `treeish` records for the gitlink at `repoRelativePath`, or nil when that tree has no
@@ -1445,11 +1435,12 @@ enum SpacesDeviceWorkspaceDiffEngine {
     private static func submoduleIgnoreSettings(repoDir: String, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date) throws
         -> SubmoduleIgnoreSettings
     {
-        let repositoryDefault = SubmoduleIgnorePolicy(
-            rawValue: try gitClient.runGitAndCapture(
-                ["-C", repoDir, "config", "--get", "diff.ignoreSubmodules"], timeout: try remainingTimeout(start: deadlineStart),
-                allowedExitCodes: [0, 1]
-            ).trimmingCharacters(in: .whitespacesAndNewlines)) ?? .none
+        let repositoryDefault =
+            SubmoduleIgnorePolicy(
+                rawValue: try gitClient.runGitAndCapture(
+                    ["-C", repoDir, "config", "--get", "diff.ignoreSubmodules"], timeout: try remainingTimeout(start: deadlineStart),
+                    allowedExitCodes: [0, 1]
+                ).trimmingCharacters(in: .whitespacesAndNewlines)) ?? .none
         // `.gitmodules` lives at the repository's top level, and `repoDir` is not that for a workspace
         // rooted below it (a monorepo subpackage, which `Orchestrator.normalizeDir` accepts as its own
         // project). Naming the file relative to `repoDir` would simply not find it, and its `path` values
@@ -1464,8 +1455,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
         }
         let workspacePrefix = lines[1]
         let moduleEntries = try submoduleConfigEntries(
-            repoDir: repoDir, file: (lines[0] as NSString).appendingPathComponent(".gitmodules"), gitClient: gitClient,
-            deadlineStart: deadlineStart)
+            repoDir: repoDir, file: (lines[0] as NSString).appendingPathComponent(".gitmodules"), gitClient: gitClient, deadlineStart: deadlineStart)
         guard !moduleEntries.isEmpty else { return SubmoduleIgnoreSettings(repositoryDefault: repositoryDefault, byPath: [:]) }
         // The repository's own config is found through its git dir rather than the working directory, so
         // this read answers the same from any depth and needs no prefix handling (confirmed empirically).
@@ -1489,14 +1479,13 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// safe: a config value may contain newlines, and only the NUL record separator tells one entry from
     /// the next (git writes each record as `key\nvalue`). Exit code 1 means the pattern matched nothing, or
     /// the file is not there at all, which are the same answer here: no submodule keys.
-    private static func submoduleConfigEntries(
-        repoDir: String, file: String?, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date
-    ) throws -> [String: String] {
+    private static func submoduleConfigEntries(repoDir: String, file: String?, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date) throws
+        -> [String: String]
+    {
         var arguments = ["-C", repoDir, "config"]
         if let file { arguments += ["-f", file] }
         arguments += ["-z", "--get-regexp", "^submodule\\."]
-        let output = try gitClient.runGitAndCapture(
-            arguments, timeout: try remainingTimeout(start: deadlineStart), allowedExitCodes: [0, 1])
+        let output = try gitClient.runGitAndCapture(arguments, timeout: try remainingTimeout(start: deadlineStart), allowedExitCodes: [0, 1])
         var entries: [String: String] = [:]
         for record in output.split(separator: "\0", omittingEmptySubsequences: true) {
             guard let newline = record.firstIndex(of: "\n") else { continue }
@@ -1516,9 +1505,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
     private static func submoduleIsReadable(
         repoDir: String, repoRelativePath: String, recordedCommits: [String], gitClient: RemoteWorkspaceGitClient, deadlineStart: Date
     ) throws -> Bool {
-        guard SpacesDeviceWorkspacePathResolver.isContainedGitlinkCheckout(repoDir: repoDir, repoRelativePath: repoRelativePath) else {
-            return false
-        }
+        guard SpacesDeviceWorkspacePathResolver.isContainedGitlinkCheckout(repoDir: repoDir, repoRelativePath: repoRelativePath) else { return false }
         let subDir = (repoDir as NSString).appendingPathComponent(repoRelativePath)
         for commit in recordedCommits {
             let resolved = try gitClient.runGitAndCapture(
@@ -1536,8 +1523,9 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// (`4b825dc642cb6eb9a060e54bf8d69288fbee4904`), so it stays correct for a repository created with a
     /// non-SHA-1 object format (`git init --object-format=sha256`), where that constant resolves to nothing.
     private static func emptyTreeObject(repoDir: String, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date) throws -> String {
-        try gitClient.runGitAndCapture(["-C", repoDir, "hash-object", "-t", "tree", "/dev/null"], timeout: try remainingTimeout(start: deadlineStart))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try gitClient.runGitAndCapture(
+            ["-C", repoDir, "hash-object", "-t", "tree", "/dev/null"], timeout: try remainingTimeout(start: deadlineStart)
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// The immutable metadata and patch-file length for one daemon-owned patch transfer. The patch itself
@@ -1558,15 +1546,14 @@ enum SpacesDeviceWorkspaceDiffEngine {
 
         let wrotePatch = try writePatch(for: plan, outputURL: outputURL, gitClient: gitClient, deadlineStart: deadlineStart)
         let patchByteCount = wrotePatch ? fileByteCount(at: outputURL) : 0
-        let metadata =
-            wrotePatch ? patchMetadata(at: outputURL, gitlink: plan.gitlink) : (isBinary: false, oldSHA: nil, newSHA: nil, submodule: nil)
+        let metadata = wrotePatch ? patchMetadata(at: outputURL, gitlink: plan.gitlink) : (isBinary: false, oldSHA: nil, newSHA: nil, submodule: nil)
         let file = SpacesDeviceWorkspaceDiffFileMetadata(
-            path: plan.path, oldPath: plan.oldPath, status: plan.status, isBinary: metadata.isBinary, oldSHA: metadata.oldSHA, newSHA: metadata.newSHA,
+            path: plan.path, oldPath: plan.oldPath, status: plan.status, isBinary: metadata.isBinary, oldSHA: metadata.oldSHA,
+            newSHA: metadata.newSHA,
             targetRevision: {
                 guard case .tracked(_, let targetRef?) = plan.source else { return nil }
                 return targetRef
-            }(), submodule: metadata.submodule, submodulePath: plan.submodulePath
-        )
+            }(), submodule: metadata.submodule, submodulePath: plan.submodulePath)
         return FilePatchTransfer(scopeSignature: snapshot.scopeSignature, file: file, patchByteCount: patchByteCount)
     }
 
@@ -1580,8 +1567,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
             try gitClient.runGitWithFileOutput(
                 trackedDiffArguments(for: plan, baseRef: baseRef, targetRef: targetRef, outputURL: outputURL), timeout: timeout)
             return true
-        case .untracked:
-            return try writeUntrackedPatch(for: plan, outputURL: outputURL, gitClient: gitClient, timeout: timeout)
+        case .untracked: return try writeUntrackedPatch(for: plan, outputURL: outputURL, gitClient: gitClient, timeout: timeout)
         case .deletedButUntrackedInWorktree(let compareRef):
             return try writeCoalescedDeletedButUntrackedPatch(
                 for: plan, compareRef: compareRef, outputURL: outputURL, gitClient: gitClient, deadlineStart: deadlineStart)
@@ -1650,8 +1636,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
 
     /// The transfer path retains the old untracked safety rules but intentionally removes the old visible
     /// patch-size cap: its output goes to a private file and reaches the client only through 4 MiB chunks.
-    private static func writeUntrackedPatch(for plan: DiffFilePlan, outputURL: URL, gitClient: RemoteWorkspaceGitClient, timeout: TimeInterval)
-        throws -> Bool
+    private static func writeUntrackedPatch(for plan: DiffFilePlan, outputURL: URL, gitClient: RemoteWorkspaceGitClient, timeout: TimeInterval) throws
+        -> Bool
     {
         let fullPath = (plan.repoDir as NSString).appendingPathComponent(plan.repoRelativePath)
         let fileManager = FileManager.default
@@ -1663,8 +1649,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
             if stat(fullPath, &targetStat) == 0, (targetStat.st_mode & S_IFMT) != S_IFREG { return false }
         }
         var arguments = [
-            "-C", plan.repoDir, "-c", "core.quotepath=false", "diff", "--output=\(outputURL.path)", "--no-color", "--no-ext-diff",
-            "--no-textconv", "--no-index",
+            "-C", plan.repoDir, "-c", "core.quotepath=false", "diff", "--output=\(outputURL.path)", "--no-color", "--no-ext-diff", "--no-textconv",
+            "--no-index",
         ]
         arguments.append(contentsOf: patchPrefixArguments(for: plan))
         arguments.append(contentsOf: ["--", "/dev/null", plan.repoRelativePath])
@@ -1712,8 +1698,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
             environmentOverrides: scratchIndexEnvironment)
         let diffTimeout = try remainingTimeout(start: deadlineStart)
         var diffArguments = [
-            "-C", repoDir, "-c", "core.quotepath=false", "diff", "--output=\(outputURL.path)", "--no-color", "--no-ext-diff",
-            "--no-textconv", "--relative",
+            "-C", repoDir, "-c", "core.quotepath=false", "diff", "--output=\(outputURL.path)", "--no-color", "--no-ext-diff", "--no-textconv",
+            "--relative",
         ]
         diffArguments.append(contentsOf: patchPrefixArguments(for: plan))
         diffArguments.append(contentsOf: [compareRef, "--", ":(literal)\(path)"])
@@ -1760,8 +1746,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // untracked side. A submodule nested under this scope is compared the same way, between the pointers
         // its two commits record.
         let plans = try buildRepoPlans(
-            repoDir: workspaceDir, compareRef: parent, targetRef: headSHA, submodulePath: nil, statusEntries: nil, inheritedIgnore: .none,
-            depth: 0, gitClient: gitClient, deadlineStart: deadlineStart)
+            repoDir: workspaceDir, compareRef: parent, targetRef: headSHA, submodulePath: nil, statusEntries: nil, inheritedIgnore: .none, depth: 0,
+            gitClient: gitClient, deadlineStart: deadlineStart)
 
         return DiffPlanSnapshot(scopeSignature: signature, plans: plans)
     }
@@ -1779,9 +1765,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// it (`UU`), both added it (`AA`), both deleted it (`DD`), or one side deleted while the other side
     /// changed it (`AU`/`UA`/`DU`/`UD`). Used to flag a submodule gitlink whose per-file patch git prints
     /// empty because there is no merged content to diff (see `Gitlink`'s doc comment).
-    private static func isUnmergedPorcelainStatus(_ status: String) -> Bool {
-        ["DD", "AU", "UD", "UA", "DU", "AA", "UU"].contains(status)
-    }
+    private static func isUnmergedPorcelainStatus(_ status: String) -> Bool { ["DD", "AU", "UD", "UA", "DU", "AA", "UU"].contains(status) }
 
     /// Parses NUL-delimited `git status --porcelain -z` output. Each record is `XY PATH`, except for a
     /// rename/copy (`X` or `Y` is `R`/`C`), whose original path follows as its own NUL-terminated record
@@ -1906,9 +1890,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
             // snapshot is in hand.
             let gitlink: Gitlink? =
                 isSubmodule
-                    ? Gitlink(
-                        baseCommit: fields[0] == "160000" ? String(fields[2]) : nil, unmerged: false, checkedOut: false, ignorePolicy: .none)
-                    : nil
+                ? Gitlink(baseCommit: fields[0] == "160000" ? String(fields[2]) : nil, unmerged: false, checkedOut: false, ignorePolicy: .none) : nil
             guard let statusLetter = fields[4].first else { continue }
             switch statusLetter {
             case "R", "C":
@@ -1948,9 +1930,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
     private static func parsePatchMetadata(_ patchText: String, gitlink: Gitlink?) -> (
         isBinary: Bool, oldSHA: String?, newSHA: String?, submodule: SpacesDeviceWorkspaceDiffSubmoduleChange?
     ) {
-        if let gitlink {
-            return (false, nil, nil, submoduleChange(from: patchText, gitlink: gitlink))
-        }
+        if let gitlink { return (false, nil, nil, submoduleChange(from: patchText, gitlink: gitlink)) }
         var isBinary = false
         var oldSHA: String?
         var newSHA: String?
@@ -2008,8 +1988,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // the normal patch-parsing path above reports dirtiness again as usual.
         guard sawSubprojectLine else {
             return SpacesDeviceWorkspaceDiffSubmoduleChange(
-                oldCommit: gitlink.baseCommit, newCommit: gitlink.baseCommit, dirty: false, unmerged: gitlink.unmerged,
-                checkedOut: gitlink.checkedOut)
+                oldCommit: gitlink.baseCommit, newCommit: gitlink.baseCommit, dirty: false, unmerged: gitlink.unmerged, checkedOut: gitlink.checkedOut
+            )
         }
         return SpacesDeviceWorkspaceDiffSubmoduleChange(
             oldCommit: oldCommit, newCommit: newCommit, dirty: dirty, unmerged: gitlink.unmerged, checkedOut: gitlink.checkedOut)
@@ -2275,13 +2255,21 @@ enum SpacesDeviceWorkspaceFileListEngine {
     /// capped to what remains of the single `gitCommandTimeout` budget the tick's top-level `git status`
     /// used to have to itself, so a stalled submodule fails the tick (with the error a stalled status
     /// throws, which the poller already handles) rather than adding another 30 seconds per repository.
+    ///
+    /// Accepted consequence: this detector tracks files only, never `emptyDirectories`, so creating or
+    /// removing an EMPTY directory outside the Editor (a shell `mkdir`, `rmdir`, or an agent) does not push
+    /// a live `subscribeWorkspaceFileListSignature` frame. The Editor itself refetches the listing after
+    /// every mutation it makes, and the Files tab and quick-open both revalidate on every show, so such a
+    /// folder appears on the next show rather than instantly. Adding empty-directory tracking to this
+    /// cheap per-tick detector would mean another `git ls-files --others --directory` per tick (see
+    /// `SpacesDeviceWorkspaceFileListEngine.listGitFiles`'s much heavier, request-scoped computation) for a
+    /// staleness window that already self-heals on the next open.
     static func gitMembershipChangeToken(context: GitMembershipContext, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date = Date()) throws
         -> String
     {
         let statusOutput = try gitClient.runGitAndCapture(
             ["-C", context.workspaceDir, "status", "--porcelain", "-z", "--untracked-files=all", "--ignored=matching", "--", "."],
-            timeout: try remainingTimeout(start: deadlineStart, budget: gitCommandTimeout),
-            environmentOverrides: ["GIT_OPTIONAL_LOCKS": "0"])
+            timeout: try remainingTimeout(start: deadlineStart, budget: gitCommandTimeout), environmentOverrides: ["GIT_OPTIONAL_LOCKS": "0"])
         let entries = membershipEntries(fromPorcelainZ: statusOutput, workspacePrefix: context.workspacePrefix)
         let paths = try context.repositoryPaths.paths(for: context.workspaceDir) {
             try repositoryPaths(workspaceDir: context.workspaceDir, gitClient: gitClient, deadlineStart: deadlineStart)
@@ -2376,9 +2364,9 @@ enum SpacesDeviceWorkspaceFileListEngine {
         // window instead of spending a fresh 30 seconds per repository.
         if context.depth < SpacesDeviceWorkspaceDiffEngine.maxSubmoduleDepth {
             for path in indexEntries.gitlinkPaths {
-                guard
-                    SpacesDeviceWorkspacePathResolver.isContainedGitlinkCheckout(repoDir: context.workspaceDir, repoRelativePath: path)
-                else { continue }
+                guard SpacesDeviceWorkspacePathResolver.isContainedGitlinkCheckout(repoDir: context.workspaceDir, repoRelativePath: path) else {
+                    continue
+                }
                 let subDir = (context.workspaceDir as NSString).appendingPathComponent(path)
                 let subContext = GitMembershipContext(
                     workspaceDir: subDir, workspacePrefix: "", indexCache: context.submoduleCaches.cache(forDirectory: subDir),
@@ -2405,8 +2393,10 @@ enum SpacesDeviceWorkspaceFileListEngine {
     /// layout is asked for once per subscription lifetime regardless of which producer asks first.
     static func repositoryPaths(workspaceDir: String, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date) throws -> RepositoryPaths {
         let output = try gitClient.runGitAndCapture(
-            ["-C", workspaceDir, "rev-parse", "--git-path", "index", "--git-path", "info/sparse-checkout", "--git-path", "HEAD",
-             "--git-common-dir", "--git-dir"], timeout: try remainingTimeout(start: deadlineStart, budget: gitCommandTimeout))
+            [
+                "-C", workspaceDir, "rev-parse", "--git-path", "index", "--git-path", "info/sparse-checkout", "--git-path", "HEAD",
+                "--git-common-dir", "--git-dir",
+            ], timeout: try remainingTimeout(start: deadlineStart, budget: gitCommandTimeout))
         // Git answers relative to the repository when the command runs inside it and absolutely for a
         // submodule's own git dir, so each line is resolved against the directory it was asked in. The base
         // URL is built with the `isDirectory: true` hint rather than left to Foundation to infer by
@@ -2541,8 +2531,255 @@ enum SpacesDeviceWorkspaceFileListEngine {
             }
             openablePaths.append(path)
         }
+
+        // `listedPrefixes` is every ancestor directory of every path in the FULL pre-openability, pre-cap
+        // `paths` (not `openablePaths`): truncation must never make a real directory look empty, and
+        // neither must a file this listing cannot open (oversized, a dangling symlink): a directory
+        // holding only such a file still genuinely holds something.
+        let listedPrefixes = Set(paths.flatMap(ancestorDirectories(of:)))
+        let (emptyDirectories, emptyDirectoriesTruncated) = try gitEmptyDirectories(
+            workspaceDir: workspaceDir, submodulePaths: submodules.map(\.path).sorted(), listedPrefixes: listedPrefixes, maxPaths: maxPaths,
+            gitClient: gitClient, deadlineStart: deadlineStart)
+
         return SpacesDeviceWorkspaceFileListResult(
-            paths: openablePaths, truncated: truncated, submodules: submodules.sorted { $0.path < $1.path })
+            paths: openablePaths, truncated: truncated || emptyDirectoriesTruncated, submodules: submodules.sorted { $0.path < $1.path },
+            emptyDirectories: emptyDirectories)
+    }
+
+    /// Every strict ancestor directory of a workspace-relative path, shallowest first: `"a/b/c.txt"` yields
+    /// `["a", "a/b"]`. Shared by both listing strategies to decide which directories a listed path makes
+    /// non-empty.
+    private static func ancestorDirectories(of path: String) -> [String] {
+        var components = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard components.count > 1 else { return [] }
+        components.removeLast()
+        var result: [String] = []
+        var current = ""
+        for component in components {
+            current = current.isEmpty ? component : current + "/" + component
+            result.append(current)
+        }
+        return result
+    }
+
+    /// Bounds the number of `git ls-files --others --directory` calls one `emptyDirectories` computation
+    /// spawns (see `gitEmptyDirectories`): every untracked directory holding subdirectories of its own
+    /// needs one more call to expand one level, so a workspace with many such levels could otherwise spawn
+    /// unboundedly many. This is the single bound on the walk, depth included: a deep, entirely untracked
+    /// tree costs one call per level and stops here, so no separate depth cutoff is needed and no folder
+    /// the user just created is dropped for sitting deep.
+    /// 256 mirrors the order of magnitude a real workspace's untracked-directory nesting reaches in
+    /// practice; hitting it reports `truncated` rather than spending the request's whole `fileListDeadline`
+    /// on expansion.
+    private static let maxEmptyDirectoryExpansions = 256
+
+    /// Asks git which directories under `repoDir` (optionally narrowed to `pathspecs`) are untracked and
+    /// not ignored. Entries come back `-z`-delimited with a trailing `/`, which is stripped.
+    ///
+    /// Verified empirically: `git -C <repoDir> ls-files --others --exclude-standard --directory -z`
+    /// reports an EMPTY untracked directory directly (e.g. `src/emptyfolder/`), honors `.gitignore`, and
+    /// never enters a submodule checkout (submodules are gitlinks, invisible to `--others` regardless of
+    /// `--directory`). It COLLAPSES an untracked directory holding anything at all into its own root
+    /// (`newdir/`, hiding both `newdir/file.txt` and `newdir/emptysub/` beneath it), so
+    /// `gitEmptyDirectories` is what expands a collapsed entry one level at a time by re-calling this with
+    /// that directory's on-disk subdirectories as `pathspecs`, which still honors `.gitignore` at each
+    /// level (confirmed empirically: `ls-files --others --exclude-standard --directory -- newdir/nested
+    /// newdir/node_modules newdir/emptysub` returns `newdir/emptysub/` and `newdir/nested/`, correctly
+    /// omitting the ignored `newdir/node_modules`).
+    ///
+    /// `pathspecs` is on-disk directory names (`immediateSubdirectories`'s output), not anything this
+    /// daemon chose, so a folder the user actually created can contain pathspec metacharacters (a Next.js
+    /// route folder `app/[id]`, a literal `*` in a name). Each entry is wrapped in `:(literal)`, the same
+    /// mechanism every other user-derived pathspec in this file uses (see `gitlinkPointerSignatureInput`),
+    /// so git matches it as an exact path instead of a glob. Without it, `[id]` parses as a character
+    /// class and matches nothing, `ls-files` answers as if `app` held nothing further to expand, and
+    /// `expand` keeps re-collapsing that same untracked root instead of ever reporting the created leaf.
+    private static func gitUntrackedDirectories(repoDir: String, pathspecs: [String], gitClient: RemoteWorkspaceGitClient, deadlineStart: Date) throws
+        -> [String]
+    {
+        var arguments = ["-C", repoDir, "ls-files", "--others", "--exclude-standard", "--directory", "-z"]
+        if !pathspecs.isEmpty {
+            arguments.append("--")
+            arguments.append(contentsOf: pathspecs.map { ":(literal)\($0)" })
+        }
+        let output = try gitClient.runGitAndCapture(arguments, timeout: try remainingTimeout(start: deadlineStart, budget: fileListDeadline))
+        return splitNULDelimited(output).compactMap { entry in entry.hasSuffix("/") ? String(entry.dropLast()) : nil }
+    }
+
+    /// The paths `repoDir`'s index still tracks that are missing from the worktree right now, relative to
+    /// `repoDir`. `listGitFiles` subtracts them from what it lists; `gitEmptyDirectories` asks the same
+    /// question again for the directories they leave behind.
+    private static func gitDeletedPaths(repoDir: String, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date) throws -> [String] {
+        let output = try gitClient.runGitAndCapture(
+            ["-C", repoDir, "ls-files", "--deleted", "-z"], timeout: try remainingTimeout(start: deadlineStart, budget: fileListDeadline))
+        return splitNULDelimited(output)
+    }
+
+    /// Every untracked, non-ignored, EMPTY directory the workspace's checkout holds, workspace-relative
+    /// and sorted ascending. Git's own untracked-directory listing stops at a gitlink (see
+    /// `gitUntrackedDirectories`), so the same scan is re-run inside each initialized submodule
+    /// (`submodulePaths`, exactly the checkouts the file listing itself walked) with that submodule's
+    /// path as a prefix. Without that pass, a folder created inside a submodule would vanish from the
+    /// tree on the very next refetch, since the Editor treats a submodule's files as ordinary workspace
+    /// files everywhere else.
+    ///
+    /// What git reports is the ROOT of each untracked tree, whether that tree holds files, more
+    /// directories, or both, so any reported directory that has on-disk subdirectories is expanded into
+    /// them (skipping a symlink: `lstat`-style `attributesOfItem` reports the link itself, never a
+    /// directory type, so a symlinked child is silently excluded from the pathspecs) and this recurses
+    /// into what git reports for those. Expanding only the directories that hold a listed file would leave
+    /// a nested empty `foo/bar` invisible, since `foo` holds no file either and git names `foo` alone, so
+    /// a folder created inside a just-created folder would vanish on the next listing.
+    ///
+    /// What the recursion collects are the empty LEAVES. A directory is collected when it holds no listed
+    /// file (`listedPrefixes`, every ancestor of a real listed file, is what says otherwise) and nothing
+    /// beneath it was collected either. That second condition is what keeps a directory whose entire
+    /// contents are ignored (a `foo/` holding only an ignored `node_modules/`) listed: its expansion
+    /// reports nothing, so `foo` is itself the empty leaf. The client rebuilds the intermediate
+    /// directories from a leaf's own path, so collecting the leaves alone still gives every one of them a
+    /// row.
+    ///
+    /// A second kind of empty directory is invisible to that walk entirely: git never names a directory
+    /// its index still holds entries under, so a `foo` whose only tracked file was deleted through the
+    /// Files tree (or moved out of it) is reported by neither listing: `listGitFiles` subtracts the
+    /// deleted path from `paths`, and `--others` skips `foo` because the index still names `foo/a`. The
+    /// directories the repository's `ls-files --deleted` paths sit under are therefore collected too, by
+    /// the same leaf rule and against the same budgets, deepest candidate first so a chain of them
+    /// reports its deepest directory the way the untracked walk does. Without it a folder would
+    /// disappear from the tree the moment its last file was deleted, even though it is still on disk.
+    ///
+    /// Bounded three ways, across every repository this walks and both kinds of scan rather than per
+    /// repository: every git call shares the request's `fileListDeadline` window like the rest of the
+    /// listing (`remainingTimeout`), collection stops and reports `truncated` once `emptyDirectories`
+    /// reaches `maxPaths`, and the total number of git calls is capped at `maxEmptyDirectoryExpansions`.
+    /// That call cap is what bounds depth as well, so the walk follows a chain as deep as it goes and
+    /// reports `truncated` when the cap is what stopped it.
+    private static func gitEmptyDirectories(
+        workspaceDir: String, submodulePaths: [String], listedPrefixes: Set<String>, maxPaths: Int, gitClient: RemoteWorkspaceGitClient,
+        deadlineStart: Date
+    ) throws -> (directories: [String], truncated: Bool) {
+        var result: [String] = []
+        var truncated = false
+        var expansions = 0
+        /// `result` as a set, plus every directory above a collected one, both filled in once the
+        /// untracked walk below has run: the deleted pass reads them to answer "is anything beneath this
+        /// candidate already listed", which is the leaf rule it shares with that walk.
+        var collected: Set<String> = []
+        var collectedAncestors: Set<String> = []
+
+        /// One repository's own scan. `repoDir` is what the git calls and the on-disk walk are scoped to,
+        /// while `pathPrefix` (empty for the workspace's own repository, `"<submodule path>/"` inside a
+        /// checkout) is what turns the repo-relative directories git reports into the workspace-relative
+        /// paths this collects and tests against `listedPrefixes`.
+        func expand(repoDir: String, pathPrefix: String, pathspecs: [String]) throws {
+            guard !truncated else { return }
+            guard expansions < maxEmptyDirectoryExpansions else {
+                truncated = true
+                return
+            }
+            expansions += 1
+            let directories = try gitUntrackedDirectories(repoDir: repoDir, pathspecs: pathspecs, gitClient: gitClient, deadlineStart: deadlineStart)
+            for directory in directories {
+                guard result.count < maxPaths else {
+                    truncated = true
+                    return
+                }
+                let path = pathPrefix + directory
+                let holdsListedFile = listedPrefixes.contains(path)
+                // The walk follows a chain as deep as it goes, held only by the shared call cap above. A
+                // deep, entirely untracked tree (e.g. a freshly `npm install`ed but ungitignored
+                // `node_modules`) costs one call per level and stops at that cap, reporting `truncated`;
+                // cutting the walk off at a fixed depth instead would silently drop the deeper empty
+                // directories while still reporting a complete listing, so a folder created deep in the
+                // Files tree would vanish on the next refetch.
+                let children = immediateSubdirectories(of: directory, repoDir: repoDir)
+                guard !children.isEmpty else {
+                    if !holdsListedFile { result.append(path) }
+                    continue
+                }
+                let collectedBefore = result.count
+                try expand(repoDir: repoDir, pathPrefix: pathPrefix, pathspecs: children)
+                guard !truncated else { return }
+                if !holdsListedFile, result.count == collectedBefore { result.append(path) }
+            }
+        }
+        /// The directories one repository's tracked-but-deleted paths leave behind (see this function's
+        /// doc comment for why git's untracked listing cannot see them). Candidates are the ancestors of
+        /// `ls-files --deleted`'s own paths, held to exactly the rules `expand` collects by: still a real
+        /// directory on disk, holding no listed file, and holding nothing already collected. Deepest
+        /// candidate first, so a candidate that holds a deeper collected one is passed over rather than
+        /// listed alongside it.
+        func collectDeletedLeaves(repoDir: String, pathPrefix: String) throws {
+            guard !truncated else { return }
+            guard expansions < maxEmptyDirectoryExpansions else {
+                truncated = true
+                return
+            }
+            expansions += 1
+            let deletedPaths = try gitDeletedPaths(repoDir: repoDir, gitClient: gitClient, deadlineStart: deadlineStart)
+            let candidates = Set(deletedPaths.flatMap(ancestorDirectories(of:)))
+            for candidate in candidates.sorted(by: { $0.count == $1.count ? $0 < $1 : $0.count > $1.count }) {
+                guard result.count < maxPaths else {
+                    truncated = true
+                    return
+                }
+                let path = pathPrefix + candidate
+                guard !collected.contains(path), !collectedAncestors.contains(path), !listedPrefixes.contains(path) else { continue }
+                guard isDirectoryOnDisk(relativePath: candidate, repoDir: repoDir) else { continue }
+                result.append(path)
+                collected.insert(path)
+                collectedAncestors.formUnion(ancestorDirectories(of: path))
+            }
+        }
+
+        try expand(repoDir: workspaceDir, pathPrefix: "", pathspecs: [])
+        for submodulePath in submodulePaths {
+            guard !truncated else { break }
+            try expand(repoDir: (workspaceDir as NSString).appendingPathComponent(submodulePath), pathPrefix: submodulePath + "/", pathspecs: [])
+        }
+
+        // Seeded from everything the untracked walk collected, since a collected directory is what says
+        // "something beneath me is listed" to the deleted pass below, for its own path and for every
+        // directory above it.
+        collected = Set(result)
+        collectedAncestors = Set(result.flatMap(ancestorDirectories(of:)))
+        // Deepest checkout first, and the workspace's own repository last, for the same reason the
+        // candidates within one repository are ordered deepest first: a superproject directory holding a
+        // submodule is an empty leaf only when nothing inside that checkout was collected either.
+        for submodulePath in submodulePaths.sorted(by: >) {
+            guard !truncated else { break }
+            try collectDeletedLeaves(repoDir: (workspaceDir as NSString).appendingPathComponent(submodulePath), pathPrefix: submodulePath + "/")
+        }
+        try collectDeletedLeaves(repoDir: workspaceDir, pathPrefix: "")
+        return (result.sorted(), truncated)
+    }
+
+    /// `relativePath`'s immediate on-disk subdirectories, relative to the same `repoDir` the caller's git
+    /// calls are scoped to, skipping a symlink: lstat-style `attributesOfItem` reports a symlink's own
+    /// type, never `.typeDirectory`, so a symlinked child is excluded without a separate check. Used only
+    /// to narrow the next `gitUntrackedDirectories` pathspec expansion; unreadable or missing entries are
+    /// silently skipped.
+    /// Whether `relativePath` is a real directory on disk under `repoDir`. Same lstat-style rule
+    /// `immediateSubdirectories` applies: a symbolic link reports its own type rather than
+    /// `.typeDirectory`, so a link left standing where a directory used to be is never reported as an
+    /// empty directory of the workspace.
+    private static func isDirectoryOnDisk(relativePath: String, repoDir: String) -> Bool {
+        let fullPath = (repoDir as NSString).appendingPathComponent(relativePath)
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: fullPath) else { return false }
+        return attributes[.type] as? FileAttributeType == .typeDirectory
+    }
+
+    private static func immediateSubdirectories(of relativePath: String, repoDir: String) -> [String] {
+        let fullPath = (repoDir as NSString).appendingPathComponent(relativePath)
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: fullPath) else { return [] }
+        return entries.compactMap { entry -> String? in
+            let childRelative = relativePath + "/" + entry
+            let childFullPath = (repoDir as NSString).appendingPathComponent(childRelative)
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath: childFullPath),
+                attributes[.type] as? FileAttributeType == .typeDirectory
+            else { return nil }
+            return childRelative
+        }
     }
 
     /// One repository's own paths, prefixed to workspace-relative form, plus every initialized submodule's,
@@ -2562,12 +2799,10 @@ enum SpacesDeviceWorkspaceFileListEngine {
         let presentOutput = try gitClient.runGitAndCapture(
             ["-C", repoDir, "ls-files", "--cached", "--others", "--exclude-standard", "--deduplicate", "-z"],
             timeout: try remainingTimeout(start: deadlineStart, budget: fileListDeadline))
-        let deletedOutput = try gitClient.runGitAndCapture(
-            ["-C", repoDir, "ls-files", "--deleted", "-z"], timeout: try remainingTimeout(start: deadlineStart, budget: fileListDeadline))
         // Compare path bytes, not Strings: Swift String equality uses canonical Unicode equivalence, while
         // Git (and Linux filesystems) permits NFC and NFD spellings to be distinct names. This also keeps a
         // deleted NFD path from accidentally filtering a still-present NFC path (or vice versa).
-        let deleted = Set(splitNULDelimited(deletedOutput).map { Array($0.utf8) })
+        let deleted = Set(try gitDeletedPaths(repoDir: repoDir, gitClient: gitClient, deadlineStart: deadlineStart).map { Array($0.utf8) })
         // Ask Git to collapse duplicate index stages, rather than putting paths in Set<String>. Git's
         // deduplicator compares the raw path bytes, so two distinct Linux filenames that happen to
         // normalize to the same Swift String remain distinct. The unresolved-conflict case still emits
@@ -2575,6 +2810,23 @@ enum SpacesDeviceWorkspaceFileListEngine {
         var paths = splitNULDelimited(presentOutput).filter { !deleted.contains(Array($0.utf8)) }.map { pathPrefix + $0 }
 
         guard depth < SpacesDeviceWorkspaceDiffEngine.maxSubmoduleDepth else { return paths }
+        for checkout in try checkedOutSubmodules(repoDir: repoDir, pathPrefix: pathPrefix, gitClient: gitClient, deadlineStart: deadlineStart) {
+            submodules.append(checkout.submodule)
+            paths += try gitRepositoryPaths(
+                repoDir: checkout.dir, pathPrefix: checkout.submodule.path + "/", depth: depth + 1, gitClient: gitClient,
+                deadlineStart: deadlineStart, submodules: &submodules)
+        }
+        return paths
+    }
+
+    /// One repository's checked-out submodules: every tracked gitlink whose checkout has a resolvable
+    /// `HEAD`, paired with its on-disk directory. This is the exact per-repository step `gitRepositoryPaths`
+    /// uses to grow `submodules` and to know which directories to recurse into, factored out here so
+    /// `submodulePaths` below can walk the same checkouts without also listing files.
+    private static func checkedOutSubmodules(repoDir: String, pathPrefix: String, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date) throws
+        -> [(submodule: SpacesDeviceWorkspaceFileListSubmodule, dir: String)]
+    {
+        var result: [(submodule: SpacesDeviceWorkspaceFileListSubmodule, dir: String)] = []
         for gitlink in try trackedGitlinkPaths(repoDir: repoDir, gitClient: gitClient, deadlineStart: deadlineStart) {
             // Without this check git's ancestor search would resolve `ls-files` inside an uninitialized
             // submodule against the repository above it, listing that repository's files a second time under
@@ -2591,12 +2843,35 @@ enum SpacesDeviceWorkspaceFileListEngine {
                     timeout: try remainingTimeout(start: deadlineStart, budget: fileListDeadline), allowedExitCodes: [0, 1]))
             guard !commit.isEmpty else { continue }
             let submodulePath = pathPrefix + gitlink
-            submodules.append(SpacesDeviceWorkspaceFileListSubmodule(path: submodulePath, commit: commit))
-            paths += try gitRepositoryPaths(
-                repoDir: subDir, pathPrefix: submodulePath + "/", depth: depth + 1, gitClient: gitClient, deadlineStart: deadlineStart,
-                submodules: &submodules)
+            result.append((SpacesDeviceWorkspaceFileListSubmodule(path: submodulePath, commit: commit), subDir))
         }
-        return paths
+        return result
+    }
+
+    /// Every checked-out submodule under `workspaceDir`, workspace-relative and sorted: the same set
+    /// `listFiles` reports in `SpacesDeviceWorkspaceFileListResult.submodules`, discovered by the same
+    /// per-repository step (`checkedOutSubmodules`) that `gitRepositoryPaths` uses to build that field.
+    /// Returns `[]` for a directory that is not itself a git repository, mirroring `listFiles`'s own
+    /// `isRepoStrict` guard.
+    ///
+    /// The Files-tree mutation handlers (`workspaceFileRename`, `workspaceFileDelete`) call this to refuse
+    /// a raw filesystem move or delete of a submodule checkout, or of a directory that contains one: doing
+    /// either directly breaks the superproject's gitlink and the submodule's own relative `.git` file,
+    /// consistency only `git mv`/`git rm` (never plumbed through these handlers) preserve. Deliberately
+    /// does not reuse `gitRepositoryPaths` itself, which also runs the much heavier `ls-files` file listing
+    /// at every level: a mutation only needs to know where the submodules are, not the full file tree.
+    static func submodulePaths(workspaceDir: String, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date = Date()) throws -> [String] {
+        guard try gitClient.isRepoStrict(path: workspaceDir) else { return [] }
+        var paths: [String] = []
+        func walk(repoDir: String, pathPrefix: String, depth: Int) throws {
+            guard depth < SpacesDeviceWorkspaceDiffEngine.maxSubmoduleDepth else { return }
+            for checkout in try checkedOutSubmodules(repoDir: repoDir, pathPrefix: pathPrefix, gitClient: gitClient, deadlineStart: deadlineStart) {
+                paths.append(checkout.submodule.path)
+                try walk(repoDir: checkout.dir, pathPrefix: checkout.submodule.path + "/", depth: depth + 1)
+            }
+        }
+        try walk(repoDir: workspaceDir, pathPrefix: "", depth: 0)
+        return paths.sorted()
     }
 
     /// Every gitlink (git object mode `160000`) this repository's index records, repo-relative. `ls-files
@@ -2689,18 +2964,41 @@ enum SpacesDeviceWorkspaceFileListEngine {
     /// almost always a git checkout, which takes the bounded path above), and the enumerator already pays
     /// one stat per entry for the type check regardless of where the cap ultimately lands, so there is no
     /// cheaper walk available here to fall back to.
+    ///
+    /// Also collects `emptyDirectories`: every directory the enumerator visits that is not an ancestor of
+    /// any entry in `paths`, mirroring `listGitFiles`'s own rule. Built from `paths` before the `maxPaths`
+    /// cap below, same reasoning as the git branch, so truncation never makes a real directory look empty.
     private static func listFilesystemFiles(workspaceDir: String, maxPaths: Int) -> SpacesDeviceWorkspaceFileListResult {
         guard let enumerator = FileManager.default.enumerator(atPath: workspaceDir) else {
             return SpacesDeviceWorkspaceFileListResult(paths: [], truncated: false)
         }
         var paths: [String] = []
+        var directories: [String] = []
+        // Every ancestor of every non-directory entry the walk saw, openable or not, exactly as the git
+        // strategy builds `listedPrefixes` from its pre-openability path set: a directory holding only a
+        // file this listing cannot open still genuinely holds something and is not an empty directory.
+        var nonDirectoryPrefixes: Set<String> = []
         while let relativePath = enumerator.nextObject() as? String {
+            let fullPath = (workspaceDir as NSString).appendingPathComponent(relativePath)
+            if let attributes = try? FileManager.default.attributesOfItem(atPath: fullPath), attributes[.type] as? FileAttributeType == .typeDirectory
+            {
+                directories.append(relativePath)
+                continue
+            }
+            nonDirectoryPrefixes.formUnion(ancestorDirectories(of: relativePath))
             guard isOpenableFile(path: relativePath, workspaceDir: workspaceDir) else { continue }
             paths.append(relativePath)
         }
         paths.sort()
-        guard paths.count > maxPaths else { return SpacesDeviceWorkspaceFileListResult(paths: paths, truncated: false) }
-        return SpacesDeviceWorkspaceFileListResult(paths: Array(paths.prefix(maxPaths)), truncated: true)
+        var emptyDirectories = directories.filter { !nonDirectoryPrefixes.contains($0) }.sorted()
+        // The same cap the path list carries, for the same reason: one listing response must stay bounded.
+        var truncated = paths.count > maxPaths
+        if emptyDirectories.count > maxPaths {
+            emptyDirectories = Array(emptyDirectories.prefix(maxPaths))
+            truncated = true
+        }
+        return SpacesDeviceWorkspaceFileListResult(
+            paths: paths.count > maxPaths ? Array(paths.prefix(maxPaths)) : paths, truncated: truncated, emptyDirectories: emptyDirectories)
     }
 
     /// Splits `-z` (NUL-delimited) `ls-files` output into individual paths, dropping the empty trailing

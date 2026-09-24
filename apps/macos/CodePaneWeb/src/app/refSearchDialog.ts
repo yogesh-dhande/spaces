@@ -1,5 +1,6 @@
 import { WorkspaceRefListResult } from "../bridge/types";
 import { fuzzyMatch } from "./fuzzyMatch";
+import { renderHighlighted } from "./pickerOverlay";
 
 /** Which of the two "search a ref" flows the dialog is opened in — set fresh on every `show()`
  *  call from `toolbar.ts`'s "Branch…" / "Commit or ref…" compare-menu items. */
@@ -312,34 +313,4 @@ export class RefSearchDialog {
       if (isSelected) rowEl.scrollIntoView({ block: "nearest" });
     });
   }
-}
-
-/** Builds `text` as a fragment with every position in `indices` wrapped in a `<mark>`, coalescing
- *  adjacent matched (or unmatched) runs into single nodes rather than one node per character.
- *  Duplicated from `quickOpen.ts`'s identical helper: small enough (a dozen lines) not to warrant a
- *  shared module for its only two call sites. */
-function renderHighlighted(text: string, indices: readonly number[]): DocumentFragment {
-  const frag = document.createDocumentFragment();
-  const matched = new Set(indices);
-  let buf = "";
-  let bufIsMatch = false;
-  const flush = (): void => {
-    if (!buf) return;
-    if (bufIsMatch) {
-      const mark = document.createElement("mark");
-      mark.textContent = buf;
-      frag.appendChild(mark);
-    } else {
-      frag.appendChild(document.createTextNode(buf));
-    }
-    buf = "";
-  };
-  for (let i = 0; i < text.length; i++) {
-    const isMatch = matched.has(i);
-    if (buf && isMatch !== bufIsMatch) flush();
-    bufIsMatch = isMatch;
-    buf += text[i];
-  }
-  flush();
-  return frag;
 }

@@ -414,7 +414,9 @@
 .file-list .dirrow {
   display: flex;
   align-items: center;
-  gap: 5px;
+  /* The same gap a `.row` uses, so the two row kinds' leading disclosure slots are followed by the
+     same space and a file name starts in the column its sibling folder's label starts in. */
+  gap: 7px;
   padding: 5px 10px;
   font-size: 12px;
   font-weight: 600;
@@ -430,6 +432,18 @@
      their `padding` shorthand expands to a `padding-left` that would win on source order otherwise
      and flatten the tree indent. */
   padding-left: calc(10px + var(--depth, 0) * 14px);
+}
+
+/* Files tree rows (filesTree.ts, which marks its container `.files-tree`) carry no text worth
+   copying by selection: Copy path on the row's own pointer menu is how a path leaves the tree.
+   Unselectable rows keep WebKit from auto-selecting the name under the pointer on right-click,
+   which would otherwise show WebKit's own text menu instead of the tree's. Scoped to `.files-tree`
+   so the Changes list (fileList.ts), which shares `.file-list .row`/`.dirrow`'s layout rules above,
+   keeps normal text selection. */
+.file-list .files-tree .row,
+.file-list .files-tree .dirrow {
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .file-list .dirrow:hover {
@@ -451,11 +465,26 @@
   outline-offset: -2px;
 }
 
-.file-list .dirrow .tri {
-  flex: 0 0 10px;
-  text-align: center;
-  font-size: 9px;
-  color: var(--fg3);
+/* The disclosure slot every row leads with (disclosureChevron.ts): a chevron on a directory that
+   has something to disclose, and the same width left empty on a file row or a childless directory,
+   so every row's text starts in one column. */
+.file-list .tri {
+  flex: 0 0 16px;
+  height: 16px;
+  color: var(--fg2);
+}
+
+.file-list .tri svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+  transition: transform 120ms ease;
+}
+
+/* Right when collapsed, a quarter turn down when expanded: one glyph turning rather than two
+   glyphs swapping, which is what makes the state change readable as a movement. */
+.file-list .tri.open svg {
+  transform: rotate(90deg);
 }
 
 .file-list .dirrow .dirlabel {
@@ -564,6 +593,57 @@
   padding: 10px;
   color: var(--fg3);
   font-size: 12px;
+}
+
+/* The Files tree's pointer-menu mutations (filesTree.ts/inlineRowEditor.ts): a draft row awaiting
+   its name (New file/New folder), the in-row field New file/New folder/Rename/Move to… mount in
+   place of a row's usual content, and a refused mutation's message underneath. Only ever appear
+   inside the Files tree, itself always inside `.editor-sidebar`, itself inside `.file-list`; kept
+   on the `.file-list` prefix rather than `.editor-sidebar` to match every other row rule above. */
+.file-list .row.draft {
+  /* Dimmed rather than styled as a normal row: there is nothing named here yet for the dim to hide,
+     and it reads as "in progress" the moment it appears, before the field beneath it even paints. */
+  opacity: 0.75;
+}
+
+.file-list input.inline-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 2px 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11.5px;
+}
+
+.file-list input.inline-name:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.file-list input.inline-name:disabled {
+  /* While a commit is in flight (inlineRowEditor.ts); the field reads as busy, not broken. */
+  opacity: 0.6;
+}
+
+/* While a Move to… the folder picker asked for is in flight (filesTree.ts's `performMove`); the row
+   reads as busy for exactly as long as the inline field it replaced would have. */
+.file-list .row.in-flight,
+.file-list .dirrow.in-flight {
+  opacity: 0.6;
+}
+
+.file-list .inline-error {
+  /* `--depth` is copied from the row it follows (filesTree.ts's `showInlineError`/
+     `inlineRowEditor.ts`'s own rejection path) so the message lines up under that row's own indent. */
+  padding: 2px 10px 6px;
+  padding-left: calc(10px + var(--depth, 0) * 14px);
+  color: var(--orange);
+  font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 /* Editor mode's Files/Changes sidebar (Design K) — the sole child `.file-list` shows in Editor
@@ -806,6 +886,20 @@
   font-weight: 600;
 }
 
+/* A muted trailing marker on a picker row: refSearchDialog.ts's base branch, and the folder the
+   item being moved already sits in. */
+.quick-open .list .row .badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--chip);
+  color: var(--fg3);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
 .quick-open .list .empty {
   padding: 10px 12px;
   color: var(--fg3);
@@ -827,18 +921,6 @@
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.ref-search .list .row .badge {
-  flex: 0 0 auto;
-  padding: 1px 6px;
-  border-radius: 3px;
-  background: var(--chip);
-  color: var(--fg3);
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
 }
 
 .ref-search .list .row .sha {
@@ -868,6 +950,39 @@
 
 .ref-search .list .row.literal.sel {
   color: var(--fg);
+}
+
+/* The line naming what a picker acts on, above its field; only the folder picker carries one. */
+.quick-open .title {
+  flex: 0 0 auto;
+  padding: 9px 12px 7px;
+  border-bottom: 1px solid var(--line);
+  color: var(--fg2);
+  font-size: 12px;
+}
+
+.quick-open .title .name {
+  font-family: ui-monospace, Menlo, monospace;
+  color: var(--fg);
+}
+
+/* filesTree.ts's Move to… folder picker: a `.quick-open` panel (inheriting all its rules above)
+   plus rows that pair a folder path with the badge marking where the item already sits. */
+.folder-picker .list .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.folder-picker .list .row .path {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The folder the item already sits in: listed so the move reads against where it is coming from,
+   dimmed because it is the one row Return and the arrow keys pass over. */
+.folder-picker .list .row.unselectable .path {
+  color: var(--fg3);
 }
 
 /* Non-blocking conflict/status banner, per docs/design.md's rule: a

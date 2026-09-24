@@ -119,6 +119,12 @@ function makeBridge(overrides: Partial<SpacesBridge> = {}): SpacesBridge {
     workspaceImageRead: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceRevisionFileRead: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceFileWrite: vi.fn().mockRejectedValue(new Error("not used")),
+    // Not used by EditorView (the Files tree's pointer menu owns these); stubbed so this satisfies
+    // `SpacesBridge` without any of these tests needing to care about tree mutations.
+    workspaceFileCreateDirectory: vi.fn().mockRejectedValue(new Error("not used")),
+    workspaceFileRename: vi.fn().mockRejectedValue(new Error("not used")),
+    workspaceFileDelete: vi.fn().mockRejectedValue(new Error("not used")),
+    openInSystemViewer: vi.fn().mockRejectedValue(new Error("not used")),
     workspaceFileList: vi.fn().mockRejectedValue(new SpacesBridgeError("unavailable", "File search is not available yet.")),
     // Not used by EditorView (ref search is diff-mode only) — stubbed so this satisfies
     // `SpacesBridge` without any of these tests needing to care about the compare menu.
@@ -130,6 +136,7 @@ function makeBridge(overrides: Partial<SpacesBridge> = {}): SpacesBridge {
     notifyWorkspaceStateChanged: vi.fn(),
     notifyRenderMetric: vi.fn(),
     notifyEditsFlushed: vi.fn(),
+    retargetFileSignature: vi.fn(),
     // Not used by EditorView (comments are diff-mode only) — stubbed so this satisfies
     // `SpacesBridge` without any of these tests needing to care about the comment surface.
     reviewCommentList: vi.fn().mockRejectedValue(new Error("not used")),
@@ -3185,6 +3192,27 @@ describe("EditorView — external-change execution-failure retry: invalidArgumen
     expect(workspaceFileRead).toHaveBeenCalledTimes(2);
   });
 
+  // The Files tree's Open in system viewer is offered only for a path the Editor has reported it
+  // cannot open. A file that was openable when opened and was rewritten as binary/invalid UTF-8/too
+  // large underneath the pane reaches that state HERE, not through a fresh open, so this branch has
+  // to report it too or the menu never offers the one action left for that file.
+  it("reports the path as unopenable so the Files tree can offer Open in system viewer for it", async () => {
+    const workspaceFileRead = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 })
+      .mockRejectedValueOnce(new SpacesBridgeError("invalidArgument", "a.ts is not a UTF-8 text file"));
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead });
+    const onFileUnopenable = vi.fn();
+    const view = newEditorView(container, bridge, { onFileUnopenable });
+    view.open("a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(1));
+    expect(onFileUnopenable).not.toHaveBeenCalled(); // the open itself succeeded
+
+    fireFileSignature({ path: "a.ts", sha256: "sha-2", missing: false });
+
+    await vi.waitFor(() => expect(onFileUnopenable).toHaveBeenCalledWith("a.ts"));
+  });
+
   it("a later signature event still attempts a fresh read and reloads normally, proving the subscription survives", async () => {
     const workspaceFileRead = vi
       .fn()
@@ -4309,5 +4337,194 @@ describe("EditorView previews and the shared mode control", () => {
 
     // The source, the half Split just revealed, is aligned to the line the preview was already on.
     expect(fakeCodeViewControl.scrollToCalls).toEqual([{ type: "line", id: "docs/notes.md", lineNumber: 3, behavior: "instant" }]);
+  });
+});
+
+// A Files-tree Rename or Move to… moves bytes the pane may already hold open. The pane has to
+// follow the file to its destination: left pointing at the emptied source path, its next signature
+// reconcile reads the move as a deletion, and a dirty buffer would offer to write the file back
+// into existence at the path the user just moved it away from.
+describe("EditorView retargetOpenFile: a confirmed move carries the open file", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+  });
+
+  it("retargets a renamed open file, keeping its unsaved buffer and baseline, so the next save writes to the new path", async () => {
+    const workspaceFileWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-2" });
+    const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({
+      workspaceFileRead: vi.fn().mockResolvedValue({ content: "line1\n", sha256: "sha-1", size: 6 }),
+      workspaceFileWrite,
+    });
+    const view = newEditorView(container, bridge);
+    await view.open("a.ts");
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "line1 edited\n" } }, undefined);
+
+    expect(view.retargetOpenFile("a.ts", "b.ts")).toBe("b.ts");
+
+    expect(container.querySelector(".editor-path")!.textContent).toBe("b.ts");
+    expect(bridge.subscribeFileSignature).toHaveBeenLastCalledWith("b.ts", expect.any(Function));
+    // The page's own listener above only filters events; the host's daemon stream is still pointed
+    // at the emptied source path until this notification moves it. The source path goes with it so
+    // the host can apply the move only while its watcher still follows the path the move emptied.
+    expect(bridge.retargetFileSignature).toHaveBeenCalledWith("a.ts", "b.ts");
+    // The bytes did not move, only the path: the edit is still unsaved and still sits on the
+    // baseline the open read, so the write that follows is an ordinary compare-and-swap at `b.ts`.
+    await view.flushNow();
+    expect(workspaceFileWrite).toHaveBeenCalledWith("b.ts", "line1 edited\n", { baseSHA256: "sha-1", purpose: "editor" });
+
+    // The live signature stream follows too: an external change is reconciled against the
+    // destination rather than read as the source path having been deleted.
+    fireFileSignature({ path: "b.ts", sha256: "sha-2", missing: false });
+    await vi.waitFor(() => expect(bridge.workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
+  });
+
+  it("retargets an open file whose parent directory moved, keeping its own name under the destination", async () => {
+    const bridge = makeBridge({
+      workspaceFileRead: vi.fn().mockResolvedValue({ content: "export {}\n", sha256: "sha-1", size: 10 }),
+    });
+    const view = newEditorView(container, bridge);
+    await view.open("src/app/root.ts");
+
+    expect(view.retargetOpenFile("src/app", "lib/app")).toBe("lib/app/root.ts");
+
+    expect(container.querySelector(".editor-path")!.textContent).toBe("lib/app/root.ts");
+    expect(bridge.subscribeFileSignature).toHaveBeenLastCalledWith("lib/app/root.ts", expect.any(Function));
+    expect(bridge.retargetFileSignature).toHaveBeenCalledWith("src/app/root.ts", "lib/app/root.ts");
+  });
+
+  // `currentPath` still names the previously shown file (or nothing at all) while an open's read is
+  // in flight, so a move that lands in that window is invisible to it: the pane would reissue
+  // nothing and the late reply would adopt the path the daemon has just emptied.
+  it("reissues an open whose read is still in flight at the destination, and drops the source path's reply", async () => {
+    let resolveSourceRead: ((result: WorkspaceFileReadResult) => void) | undefined;
+    const workspaceFileRead = vi.fn((path: string) =>
+      path === "a.ts"
+        ? new Promise<WorkspaceFileReadResult>((resolve) => {
+            resolveSourceRead = resolve;
+          })
+        : Promise.resolve({ content: "moved bytes\n", sha256: "sha-b", size: 12 }),
+    );
+    const bridge = makeBridge({ workspaceFileRead });
+    const onFileOpened = vi.fn();
+    const view = newEditorView(container, bridge, { onFileOpened });
+
+    const pendingOpen = view.open("a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+    expect(container.querySelector(".editor-path")!.textContent).not.toBe("a.ts");
+
+    // A move that misses the pending open is still a no-op, even though nothing is on screen for
+    // `currentPath` to answer with.
+    expect(view.retargetOpenFile("other.ts", "z.ts")).toBeUndefined();
+    expect(workspaceFileRead).toHaveBeenCalledTimes(1);
+
+    // Nothing is displayed for the move to report: the reissued open below is the only thing that
+    // can put the destination on screen, and until it lands the caller has no path to persist.
+    expect(view.retargetOpenFile("a.ts", "b.ts")).toBeUndefined();
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
+
+    // The reply in flight describes bytes read from the emptied source path; adopting it would put
+    // the pane on a path that no longer exists.
+    resolveSourceRead!({ content: "stale bytes\n", sha256: "sha-a", size: 12 });
+    await pendingOpen;
+
+    expect(container.querySelector(".editor-path")!.textContent).toBe("b.ts");
+    // The reissued open lands, and the success-only seam is what tells the caller the pane is on the
+    // destination, in place of the synchronous answer a displayed file gives.
+    await vi.waitFor(() => expect(onFileOpened).toHaveBeenCalledWith("b.ts"));
+    expect(onFileOpened).not.toHaveBeenCalledWith("a.ts");
+    // The destination's own `editor` read is what points the host's daemon stream at it, so no
+    // separate retarget notification is owed here.
+    expect(bridge.retargetFileSignature).not.toHaveBeenCalled();
+    expect(bridge.subscribeFileSignature).toHaveBeenLastCalledWith("b.ts", expect.any(Function));
+  });
+
+  // The reissued open is an ordinary open, subject to every refusal and failure one can meet. Left
+  // reported as the pane's path, a destination that never loaded would be persisted and selected
+  // while the pane still shows the previous buffer, or nothing at all.
+  it("reports nothing for a pending open whose reissue at the destination fails to load", async () => {
+    let resolveSourceRead: ((result: WorkspaceFileReadResult) => void) | undefined;
+    const workspaceFileRead = vi.fn((path: string) =>
+      path === "a.ts"
+        ? new Promise<WorkspaceFileReadResult>((resolve) => {
+            resolveSourceRead = resolve;
+          })
+        : Promise.reject(new Error("read failed")),
+    );
+    const bridge = makeBridge({ workspaceFileRead });
+    const onFileOpened = vi.fn();
+    const view = newEditorView(container, bridge, { onFileOpened });
+
+    const pendingOpen = view.open("a.ts");
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+
+    expect(view.retargetOpenFile("a.ts", "b.ts")).toBeUndefined();
+    await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
+
+    resolveSourceRead!({ content: "stale bytes\n", sha256: "sha-a", size: 12 });
+    await pendingOpen;
+    // Let the rejected read's microtasks run before asserting nothing was reported.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onFileOpened).not.toHaveBeenCalled();
+    expect(container.querySelector(".editor-path")!.textContent).not.toBe("b.ts");
+  });
+
+  it("leaves the open file alone when something else moved, including a path it merely starts with", async () => {
+    const bridge = makeBridge({
+      workspaceFileRead: vi.fn().mockResolvedValue({ content: "export {}\n", sha256: "sha-1", size: 10 }),
+    });
+    const view = newEditorView(container, bridge);
+    await view.open("a.ts");
+    const subscriptions = (bridge.subscribeFileSignature as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    expect(view.retargetOpenFile("other.ts", "renamed.ts")).toBeUndefined();
+    // "a" is a prefix of "a.ts" but not a directory above it; only a whole path component boundary
+    // makes the open file part of what moved.
+    expect(view.retargetOpenFile("a", "z")).toBeUndefined();
+
+    expect(container.querySelector(".editor-path")!.textContent).toBe("a.ts");
+    expect((bridge.subscribeFileSignature as ReturnType<typeof vi.fn>).mock.calls.length).toBe(subscriptions);
+    expect(bridge.retargetFileSignature).not.toHaveBeenCalled();
+  });
+
+  // Pierre keys items by path (see `retargetOpenFile`'s doc comment), so the reinstall under `b.ts`
+  // mounts a fresh item rather than renaming the one already on screen: without sampling the live
+  // position first, its caret and scroll default to the top of the file.
+  it("preserves the caret and scroll position across a retarget instead of resetting to the top of the file", async () => {
+    document.body.appendChild(container);
+    const bridge = makeBridge({
+      workspaceFileRead: vi.fn().mockResolvedValue({ content: "one\ntwo\nthree\nfour\nfive\n", sha256: "sha-1", size: 24 }),
+    });
+    const focus = vi.fn();
+    fakeCodeViewControl.editor = { focus };
+    fakeCodeViewControl.scrollToCalls = [];
+    const view = newEditorView(container, bridge);
+    await view.open("a.ts");
+
+    const host = container.querySelector<HTMLElement>("#code-pane-editor-scroll")!;
+    const line = document.createElement("div");
+    line.dataset.line = "4";
+    Object.defineProperty(host, "getBoundingClientRect", { value: () => ({ top: 0 }) });
+    Object.defineProperty(line, "getBoundingClientRect", { value: () => ({ bottom: 1 }) });
+    host.appendChild(line);
+    fakeCodeViewControl.editorSelection = { start: { line: 2 }, end: { line: 2 }, direction: 0 }; // caret on line 3 (1-based)
+
+    expect(view.retargetOpenFile("a.ts", "b.ts")).toBe("b.ts");
+
+    // Reinstalled under the destination id, but at the line that was visible right before the move.
+    expect(fakeCodeViewControl.scrollToCalls).toEqual([{ type: "line", id: "b.ts", lineNumber: 4, behavior: "instant" }]);
+    await vi.waitFor(() => expect(focus).toHaveBeenCalledWith({ lineNumber: 3 }));
+
+    // `restorePosition` sets `focusedLine` synchronously, ahead of the focus poll above settling.
+    // Clearing the live selection here proves a follow-on read (the pane-level snapshot's own sample
+    // point) sees that persisted field rather than re-deriving it from an editor that may not have
+    // reattached yet.
+    fakeCodeViewControl.editorSelection = undefined;
+    expect(view.focusedLineNumber()).toBe(3);
+
+    container.remove();
   });
 });
