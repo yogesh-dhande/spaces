@@ -41,7 +41,7 @@ import Foundation
     /// rather than debouncing to the trailing edge keeps the latency-sensitive case free: a request
     /// after a quiet period runs at once, and only requests inside the interval wait.
     private let minimumStartInterval: Duration
-    private let clock = ContinuousClock()
+    private let clock: any SidebarReloadClock
     private var lastStartInstant: ContinuousClock.Instant?
     private var scheduledStartTask: Task<Void, Never>?
     /// Callers suspended in `requestAndAwaitNextRun`, each tagged with the run it is waiting for.
@@ -51,12 +51,14 @@ import Foundation
     init(
         loadSnapshot: @escaping @MainActor (ReloadScope) async -> Result<Snapshot, any Error>,
         applySnapshot: @escaping @MainActor (Snapshot, _ forceRemoteRefresh: Bool, _ bypassesBackoff: Bool) -> Void,
-        handleFailure: @escaping @MainActor (any Error, String?) -> Void, minimumStartInterval: Duration = .milliseconds(250)
+        handleFailure: @escaping @MainActor (any Error, String?) -> Void, minimumStartInterval: Duration = .milliseconds(250),
+        clock: any SidebarReloadClock = SidebarReloadSystemClock()
     ) {
         self.loadSnapshot = loadSnapshot
         self.applySnapshot = applySnapshot
         self.handleFailure = handleFailure
         self.minimumStartInterval = minimumStartInterval
+        self.clock = clock
     }
 
     /// `bypassesBackoff` defaults to `forceRemoteRefresh` (nil means "same as forceRemoteRefresh") so a
@@ -140,7 +142,7 @@ import Foundation
     private func scheduleStart(at deadline: ContinuousClock.Instant) {
         let clock = clock
         scheduledStartTask = Task { @MainActor [weak self] in
-            try? await clock.sleep(until: deadline, tolerance: nil)
+            await clock.sleep(until: deadline)
             guard !Task.isCancelled, let self else { return }
             self.scheduledStartTask = nil
             // The trailing request carries state the sidebar has not shown yet, so spacing may delay it

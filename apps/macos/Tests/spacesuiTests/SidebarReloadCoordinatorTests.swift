@@ -150,27 +150,34 @@ import Testing
     /// than a snapshot load can run. Without spacing between starts, each finished reload immediately
     /// starts the queued one and the sidebar reloads back to back for as long as output flows.
     ///
-    /// The interval is set far beyond any plausible scheduling lag, so "the next reload has not started
-    /// yet" is a fact about the coordinator rather than about how loaded the machine running the test is.
+    /// Time comes from a clock the test advances by hand, so "the next reload has not started yet" is a
+    /// fact about the coordinator rather than about how loaded the machine running the test is.
     @Test func reloadStartsAreSpacedByTheMinimumIntervalUnderARequestStorm() async {
         var applied: [Int] = []
         var loads = 0
 
+        let clock = ManualClock()
         let coordinator = SidebarReloadCoordinator<Int>(
             loadSnapshot: { _ in
                 loads += 1
                 return .success(loads)
-            }, applySnapshot: { snapshot, _, _ in applied.append(snapshot) }, handleFailure: { _, _ in }, minimumStartInterval: .seconds(60))
+            }, applySnapshot: { snapshot, _, _ in applied.append(snapshot) }, handleFailure: { _, _ in }, minimumStartInterval: .seconds(60),
+            clock: clock)
 
         coordinator.request()
         for _ in 0..<20 { coordinator.request() }
-        #expect(await eventuallySleeping { applied.count == 1 })
+        #expect(await eventually { applied.count == 1 })
 
-        try? await ContinuousClock().sleep(for: .milliseconds(100))
         // The storm collapsed into one run plus one start still waiting on the interval, not a run per
         // request and not a second run started the moment the first finished.
         #expect(loads == 1)
         #expect(coordinator.state == .queued)
+
+        // The held-back start is spaced, not dropped: it runs as soon as the interval elapses.
+        clock.advance(by: .seconds(60))
+        await coordinator.drainCurrentReloadForTesting()
+        #expect(loads == 2)
+        #expect(applied == [1, 2])
 
         coordinator.stop()
     }
@@ -238,14 +245,17 @@ import Testing
         #expect(loads == 2)
     }
 
-    /// The interval is long enough that the scheduled start provably still exists when `stop()` runs.
+    /// The manual clock has not reached the scheduled start's deadline, so that start provably still
+    /// exists when `stop()` runs, and advancing past the deadline afterwards proves `stop()` cancelled it
+    /// rather than merely delaying it.
     @Test func stopCancelsAScheduledStart() async {
         var loads = 0
+        let clock = ManualClock()
         let coordinator = SidebarReloadCoordinator<Int>(
             loadSnapshot: { _ in
                 loads += 1
                 return .success(loads)
-            }, applySnapshot: { _, _, _ in }, handleFailure: { _, _ in }, minimumStartInterval: .seconds(60))
+            }, applySnapshot: { _, _, _ in }, handleFailure: { _, _ in }, minimumStartInterval: .seconds(60), clock: clock)
 
         coordinator.request()
         await coordinator.drainCurrentReloadForTesting()
@@ -256,8 +266,9 @@ import Testing
         coordinator.stop()
         #expect(coordinator.state == .idle)
 
-        try? await ContinuousClock().sleep(for: .milliseconds(100))
-        #expect(loads == 1)
+        clock.advance(by: .seconds(120))
+        let startedAfterStop = await eventually { loads > 1 }
+        #expect(!startedAfterStop)
     }
 
     /// A caller whose lookup missed against the sidebar it can see asks for a snapshot at least as fresh
@@ -333,8 +344,11 @@ import Testing
     /// Teardown leaves nothing that could finish a run, so a waiter is released instead of hanging on a
     /// reload that will never happen.
     @Test func stopReleasesAWaiter() async {
+        // The manual clock never reaches the deadline, so the waiter's request is held back by the
+        // spacing interval for as long as the test needs, however loaded the machine is.
         let coordinator = SidebarReloadCoordinator<Int>(
-            loadSnapshot: { _ in .success(1) }, applySnapshot: { _, _, _ in }, handleFailure: { _, _ in }, minimumStartInterval: .seconds(60))
+            loadSnapshot: { _ in .success(1) }, applySnapshot: { _, _, _ in }, handleFailure: { _, _ in }, minimumStartInterval: .seconds(60),
+            clock: ManualClock())
 
         coordinator.request()
         await coordinator.drainCurrentReloadForTesting()
@@ -360,20 +374,59 @@ import Testing
         }
         return condition()
     }
-
-    /// Polls with real sleeps, for conditions whose progress depends on elapsed time rather than on
-    /// yielding to work that is already runnable.
-    private func eventuallySleeping(timeout: Duration = .seconds(5), _ condition: @MainActor () -> Bool) async -> Bool {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
-        while clock.now < deadline {
-            if condition() { return true }
-            try? await clock.sleep(for: .milliseconds(2))
-        }
-        return condition()
-    }
 }
 
 /// A `Task`'s closure is `@Sendable` and cannot capture a mutable local, so a test observes whether the
 /// task it spawned has come back through a main-actor box.
 @MainActor private final class ReturnFlag { var value = false }
+
+/// A clock the test advances by hand. The spacing assertions ("the next reload has not started yet", "the
+/// cancelled start never runs") are otherwise races against real time: the test process only has to be
+/// descheduled for longer than the spacing interval, which a loaded CI runner does, for a start the test
+/// expects to still be pending to have already fired.
+@MainActor private final class ManualClock: SidebarReloadClock {
+    private struct Sleeper {
+        let id: Int
+        let deadline: ContinuousClock.Instant
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
+    private(set) var now = ContinuousClock().now
+    private var sleepers: [Sleeper] = []
+    private var cancelledSleeperIDs: Set<Int> = []
+    private var nextSleeperID = 0
+
+    func advance(by duration: Duration) {
+        now = now.advanced(by: duration)
+        let due = sleepers.filter { $0.deadline <= now }
+        sleepers.removeAll { $0.deadline <= now }
+        for sleeper in due { sleeper.continuation.resume() }
+    }
+
+    func sleep(until deadline: ContinuousClock.Instant) async {
+        guard deadline > now else { return }
+        let id = nextSleeperID
+        nextSleeperID += 1
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                // Cancellation can land before the sleeper is registered, so a cancellation already
+                // recorded for this id is answered here instead of leaving the continuation to leak.
+                if cancelledSleeperIDs.remove(id) != nil {
+                    continuation.resume()
+                    return
+                }
+                sleepers.append(Sleeper(id: id, deadline: deadline, continuation: continuation))
+            }
+        } onCancel: {
+            Task { @MainActor in self.cancelSleeper(id) }
+        }
+    }
+
+    private func cancelSleeper(_ id: Int) {
+        guard let index = sleepers.firstIndex(where: { $0.id == id }) else {
+            cancelledSleeperIDs.insert(id)
+            return
+        }
+        sleepers.remove(at: index).continuation.resume()
+    }
+}
