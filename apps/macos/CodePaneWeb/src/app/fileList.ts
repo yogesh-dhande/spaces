@@ -1,5 +1,6 @@
 import { DiffFileEntry, FileChangeStatus } from "../bridge/types";
 import { createDisclosureChevron, createDisclosureSpacer, setDisclosureExpanded } from "./disclosureChevron";
+import { createFileTypeIcon } from "./fileTypeIcon";
 import { buildFileTree, FileTreeDirNode, FileTreeFileNode, FileTreeNode } from "./fileTree";
 import { submoduleLabel } from "./submoduleLabel";
 
@@ -359,6 +360,10 @@ function renderFileNode(
   status.className = `status ${file.status}`;
   status.textContent = STATUS_LABEL[file.status];
   row.appendChild(status);
+
+  // Directly before the name it labels, the same slot the Files tree gives it (see
+  // fileTypeIcon.ts); a submodule pointer is a directory row and never reaches here.
+  row.appendChild(createFileTypeIcon(node.name));
 
   const fn = document.createElement("span");
   fn.className = "fn";

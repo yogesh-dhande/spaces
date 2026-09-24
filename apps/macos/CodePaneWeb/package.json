@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
+    "icons": "node scripts/generate-file-type-icons.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },

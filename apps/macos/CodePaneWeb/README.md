@@ -17,6 +17,7 @@ npm run build       # tsc --noEmit, then vite build -> ../Sources/spacesui/Resou
 npm run typecheck   # tsc --noEmit only
 npm run test        # vitest run
 npm run dev         # dev harness: mock bridge + fixture diff, at the printed localhost URL
+npm run icons       # regenerate the file-type icon sprite from vscode-icons (needs network)
 ```
 
 `npm run build` emits directly into `apps/macos/Sources/spacesui/Resources/CodePane/`
@@ -637,7 +638,7 @@ the plaintext fallback actually plaintext.
 targets that Rollup must code-split into a chunk per language regardless of which ones
 `preloadHighlighter` is ever asked to load. There's no public `@pierre/diffs` option to swap in
 a scoped highlighter that only knows about these files. As a result the built output is ~11MB
-across ~320 files, but only the entry chunk (~1.08MB, ~310KB gzipped) and its CSS load eagerly: `index.html` has
+across ~320 files, but only the entry chunk (~1.24MB, ~385KB gzipped, ~137KB of which is the inlined file-type icon sprite) and its CSS load eagerly: `index.html` has
 a single `<script type="module">` tag and no `modulepreload` hints — and `resolveAllowedLanguage`
 guarantees only the 19 whitelisted languages' chunks can ever actually be requested at runtime,
 since anything else resolves to `"text"` first. The remaining ~300 files sit on disk unused.
@@ -646,6 +647,28 @@ Aliasing `shiki`'s `bundledLanguages` export to a hand-curated subset (Shiki's d
 re-exporting the rest of `shiki`'s value exports that `@pierre/diffs` also imports from the
 same specifier, reaching into a third-party package's unexported deep paths — left as an open
 decision rather than done unilaterally (see Open items).
+
+## File-type icons
+
+A file row in the Files tree and the Changes list carries a file-type icon before its name
+(`src/app/fileTypeIcon.ts`). The art and every name/extension mapping come from the
+[vscode-icons](https://github.com/vscode-icons/vscode-icons) pack, MIT-licensed; the license text
+lives in `public/vscode-icons-LICENSE.txt`, which Vite copies into the built bundle so the notice ships
+inside the app beside the art it covers.
+
+`npm run icons` (`scripts/generate-file-type-icons.mjs`) fetches the pinned pack commit, resolves
+its `ICON_SEEDS` (the file kinds the trees are expected to name) through the pack's own manifest,
+and writes three checked-in files:
+
+- `src/app/fileTypeIconSprite.ts`: one `<symbol>` per shipped icon, whitespace-stripped and with
+  each icon's internal ids namespaced so gradients and clip paths cannot collide. It is inlined in
+  the bundle, mounted once per pane, and referenced by a `<use>` per row, so a row costs no request.
+- `src/app/fileTypeIconTable.ts`: every file name and extension the pack's manifest points at one
+  of those icons. The seeds pick which icons ship; the pack picks which files reach them.
+- `public/vscode-icons-LICENSE.txt`: the pack's license, with the commit the art came from, copied into the bundle by the build.
+
+The generator is deliberately not part of `npm run build`, which stays offline and reproducible;
+rerun it by hand only to move the pinned commit or change the seed list, and commit its output.
 
 ## Tests
 
@@ -681,7 +704,7 @@ branch point) with the same behavior `test/fileTree.test.ts` already covers for 
 tree builder, plus the renderer's own collapsed-by-default/lazy-materialize contract: no descendant
 DOM before a directory's first expand, element identity preserved across toggles and across
 `FilesTreeHandle.setSelected` calls, and `setSelected` expanding just the target path's ancestor
-chain. `test/workspaceFileListCache.test.ts` covers the shared cache's lazy-fetch-once,
+chain. `test/fileTypeIcon.test.ts` covers the file-type icons: `fileTypeIconID`'s lookup order (an exact file name beating the extension it ends with, case-insensitive matching, a dotfile read as a name rather than an extension, an unknown extension and an extensionless name falling to the pack's default) and the icon's placement (a `<use>` on every file row of the Files tree and the Changes list, directly before the name; none on a directory row, an empty-folder row, or a quick-open row), plus that every icon the lookup can return has a symbol in the shipped sprite. `test/workspaceFileListCache.test.ts` covers the shared cache's lazy-fetch-once,
 concurrent-caller dedup, not-caching-a-failed-fetch, and `invalidate()` behavior, plus `getFresh()`'s
 stale-while-revalidate contract (serving the cached value while a deduped background refetch is in
 flight, the refetch's result replacing the cache on success, and a failed refetch leaving the
@@ -777,5 +800,5 @@ native menu.
   Confirming this deviation against the mockup's intent is worth a look before Swift-host
   integration locks in the pane's overall layout.
   - **Shiki bundle size**, discussed above: whether the ~11MB/~320-file built output (only
-  ~1.08MB of which loads eagerly) is acceptable as-is, or worth a `shiki` aliasing pass to
+  ~1.24MB of which loads eagerly) is acceptable as-is, or worth a `shiki` aliasing pass to
   physically shrink it to the 19 languages.
