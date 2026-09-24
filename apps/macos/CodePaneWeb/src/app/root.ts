@@ -26,6 +26,7 @@ import { EditorSidebar } from "./editorSidebar";
 import { EditorView } from "./editorView";
 import { diff3MergeLines, pathAfterMove } from "./editorView";
 import { renderFileList, updateFileListRow } from "./fileList";
+import { createFileTypeIconSprite } from "./fileTypeIcon";
 import { attachFileListDivider } from "./fileListDivider";
 import { FolderPicker } from "./folderPicker";
 import { createLiveRefreshNotice } from "./liveRefreshNotice";
@@ -252,6 +253,11 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
   const pane = document.createElement("div");
   pane.className = "pane";
   container.appendChild(pane);
+
+  // The file-type icon symbols both file lists' rows reference. Mounted once here rather than per
+  // list: the two lists share one set of symbols, and a `<use>` only resolves against a sprite that
+  // is in the same document.
+  pane.appendChild(createFileTypeIconSprite());
 
   const toolbarHost = document.createElement("div");
   pane.appendChild(toolbarHost);

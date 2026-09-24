@@ -487,6 +487,28 @@
   transform: rotate(90deg);
 }
 
+/* The file-type icon a FILE row carries directly before its name, in both lists
+   (fileTypeIcon.ts). A directory row takes none: its chevron already marks what it is. The
+   vscode-icons art keeps the colors the pack ships it in, so a row's kind reads by hue before its
+   name is read. The row does not grow around it: the disclosure slot beside it is already 16px. */
+.file-list .row .ficon {
+  flex: 0 0 16px;
+  height: 16px;
+  /* The row's 7px flex gap sits on both sides of this slot; -1px on the trailing side leaves the
+     6px the icon keeps from the name it labels. */
+  margin-right: -1px;
+}
+
+/* The inlined symbol sheet every `.ficon` resolves against, mounted once per pane. A `<symbol>`
+   never renders, but it has to stay in the document for a `<use>` to find it, so the sheet is
+   taken out of flow and sized to nothing rather than hidden. */
+.ficon-sprite {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
 .file-list .dirrow .dirlabel {
   overflow: hidden;
   text-overflow: ellipsis;

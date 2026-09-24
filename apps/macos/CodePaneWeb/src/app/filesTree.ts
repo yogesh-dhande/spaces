@@ -1,6 +1,7 @@
 import { WorkspaceSubmodule } from "../bridge/types";
 import { ContextMenu, ContextMenuItem } from "./contextMenu";
 import { createDisclosureChevron, createDisclosureSpacer, setDisclosureExpanded } from "./disclosureChevron";
+import { createFileTypeIcon } from "./fileTypeIcon";
 import { FolderPicker, workspaceFolderPaths } from "./folderPicker";
 import { beginInlineRowEdit, InlineRowEditRequest } from "./inlineRowEditor";
 import { buildPathTree, PathTreeDirNode, PathTreeFileNode, PathTreeNode } from "./pathTree";
@@ -100,7 +101,7 @@ export interface FilesTreeHandle {
 /**
  * Renders Editor mode's "Files" list (the full workspace listing, see `editorSidebar.ts`) into
  * `options.container`. Deliberately the same collapse/indent/row DOM idiom as `fileList.ts`'s Changes
- * list: `.dir-group`/`.dirrow`/`.tri`/`.dirlabel`/`.row`/`.fn`, driven by the same `--depth` CSS
+ * list: `.dir-group`/`.dirrow`/`.tri`/`.dirlabel`/`.row`/`.ficon`/`.fn`, driven by the same `--depth` CSS
  * custom property; so both lists share almost all of one set of CSS rules in `app.css`, with no
  * `.status` letter or `.st` +/- stat column (every file in the full listing is unchanged by
  * definition: a changed file also appears in the Changes list, which is what carries that
@@ -561,6 +562,10 @@ function renderFilesTreeNow(options: FilesTreeOptions, state: TreeRenderState): 
     // A file has nothing to disclose, but it takes the same leading slot a directory's chevron
     // occupies, so its name starts in the same column as a sibling folder's label.
     row.appendChild(createDisclosureSpacer());
+
+    // A file row's kind is carried by its icon; a directory row's is carried by its chevron, so
+    // only file rows take one (see fileTypeIcon.ts).
+    row.appendChild(createFileTypeIcon(node.name));
 
     const fn = document.createElement("span");
     fn.className = "fn";
