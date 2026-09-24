@@ -2742,6 +2742,141 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         }
         #expect(Date().timeIntervalSince(started) < 15)
     }
+
+    // MARK: - emptyDirectories
+
+    // The base case: an untracked directory that is genuinely, directly empty is reported by git's
+    // own untracked-directory listing without any collapse to expand, even when it sits under a
+    // directory the repository already tracks other files in.
+    @Test func listFilesReportsAnEmptyDirectoryUnderATrackedDirectoryAndNotInPaths() throws {
+        let repo = try makeFixtureRepository(
+            at: FileManager.default.temporaryDirectory.appendingPathComponent("spaces-empty-dir-tracked-\(UUID().uuidString)", isDirectory: true),
+            file: "ROOT.md", contents: "root")
+        defer { try? FileManager.default.removeItem(at: repo) }
+        try FileManager.default.createDirectory(at: repo.appendingPathComponent("docs"), withIntermediateDirectories: true)
+        try "guide".write(to: repo.appendingPathComponent("docs/guide.md"), atomically: true, encoding: .utf8)
+        try commitFixtureAll(repo, message: "add docs")
+        try FileManager.default.createDirectory(at: repo.appendingPathComponent("docs/empty"), withIntermediateDirectories: true)
+        let client = RemoteWorkspaceGitClient()
+
+        let result = try SpacesDeviceWorkspaceFileListEngine.listFiles(workspaceDir: repo.path, gitClient: client)
+
+        #expect(result.emptyDirectories.contains("docs/empty"))
+        #expect(!result.paths.contains("docs/empty"))
+        #expect(result.paths.contains("docs/guide.md"))
+    }
+
+    // Git collapses a non-empty untracked directory into its own root (`newdir/`), hiding an empty
+    // directory nested beneath it. This is the case the one-level pathspec expansion exists for.
+    @Test func listFilesReportsAnEmptyDirectoryNestedInsideAnUntrackedNonEmptyDirectory() throws {
+        let repo = try makeFixtureRepository(
+            at: FileManager.default.temporaryDirectory.appendingPathComponent("spaces-empty-dir-collapsed-\(UUID().uuidString)", isDirectory: true),
+            file: "ROOT.md", contents: "root")
+        defer { try? FileManager.default.removeItem(at: repo) }
+        try FileManager.default.createDirectory(at: repo.appendingPathComponent("newdir/emptysub"), withIntermediateDirectories: true)
+        try "content".write(to: repo.appendingPathComponent("newdir/file.txt"), atomically: true, encoding: .utf8)
+        let client = RemoteWorkspaceGitClient()
+
+        let result = try SpacesDeviceWorkspaceFileListEngine.listFiles(workspaceDir: repo.path, gitClient: client)
+
+        #expect(result.paths.contains("newdir/file.txt"))
+        #expect(result.emptyDirectories.contains("newdir/emptysub"))
+        #expect(!result.emptyDirectories.contains("newdir"), "newdir itself holds a listed file, so it is not empty")
+    }
+
+    // A directory chain holding no file anywhere is reported by git as its root alone (`foo/`), so the
+    // empty leaf deep inside it is only reachable by expanding a directory that holds no listed file
+    // either. Without that, a folder created through the Editor inside a just-created folder disappears
+    // from the tree on the next listing.
+    @Test func listFilesReportsTheEmptyLeafOfAWhollyUntrackedDirectoryChain() throws {
+        let repo = try makeFixtureRepository(
+            at: FileManager.default.temporaryDirectory.appendingPathComponent("spaces-empty-dir-chain-\(UUID().uuidString)", isDirectory: true),
+            file: "ROOT.md", contents: "root")
+        defer { try? FileManager.default.removeItem(at: repo) }
+        try FileManager.default.createDirectory(at: repo.appendingPathComponent("foo/bar/baz"), withIntermediateDirectories: true)
+        let client = RemoteWorkspaceGitClient()
+
+        let result = try SpacesDeviceWorkspaceFileListEngine.listFiles(workspaceDir: repo.path, gitClient: client)
+
+        // The leaf alone: the client rebuilds `foo` and `foo/bar` as directory rows from this path, and
+        // neither of them is an empty directory of its own.
+        #expect(result.emptyDirectories.contains("foo/bar/baz"))
+        #expect(!result.emptyDirectories.contains("foo"))
+        #expect(!result.emptyDirectories.contains("foo/bar"))
+    }
+
+    // The expansion must not swallow the directory it expanded: a folder whose only content is ignored
+    // has nothing beneath it to report, so it is itself the empty leaf and keeps its row.
+    @Test func listFilesReportsADirectoryWhoseOnlySubdirectoryIsGitignored() throws {
+        let repo = try makeFixtureRepository(
+            at: FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-empty-dir-only-ignored-\(UUID().uuidString)", isDirectory: true), file: "ROOT.md", contents: "root")
+        defer { try? FileManager.default.removeItem(at: repo) }
+        try "node_modules/\n".write(to: repo.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: repo.appendingPathComponent("foo/node_modules"), withIntermediateDirectories: true)
+        try "content".write(to: repo.appendingPathComponent("foo/node_modules/pkg.js"), atomically: true, encoding: .utf8)
+        let client = RemoteWorkspaceGitClient()
+
+        let result = try SpacesDeviceWorkspaceFileListEngine.listFiles(workspaceDir: repo.path, gitClient: client)
+
+        #expect(result.emptyDirectories.contains("foo"))
+        #expect(!result.emptyDirectories.contains("foo/node_modules"))
+    }
+
+    // `.gitignore` must be honored both for a directly-empty directory and for one only visible after
+    // the collapsed-directory expansion, since the expansion re-issues `ls-files --exclude-standard`
+    // rather than falling back to a plain filesystem walk.
+    @Test func listFilesOmitsGitignoredDirectoriesIncludingOneNestedInsideAnUntrackedNonEmptyDirectory() throws {
+        let repo = try makeFixtureRepository(
+            at: FileManager.default.temporaryDirectory.appendingPathComponent("spaces-empty-dir-ignored-\(UUID().uuidString)", isDirectory: true),
+            file: "ROOT.md", contents: "root")
+        defer { try? FileManager.default.removeItem(at: repo) }
+        try "ignored-top/\nnewdir/ignored-nested/\n".write(to: repo.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: repo.appendingPathComponent("ignored-top"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: repo.appendingPathComponent("newdir/ignored-nested"), withIntermediateDirectories: true)
+        try "content".write(to: repo.appendingPathComponent("newdir/file.txt"), atomically: true, encoding: .utf8)
+        let client = RemoteWorkspaceGitClient()
+
+        let result = try SpacesDeviceWorkspaceFileListEngine.listFiles(workspaceDir: repo.path, gitClient: client)
+
+        #expect(!result.emptyDirectories.contains("ignored-top"))
+        #expect(!result.emptyDirectories.contains("newdir/ignored-nested"))
+    }
+
+    // `ls-files --others --exclude-standard` excludes `.git` outright, the same rule that already keeps
+    // it out of `paths`.
+    @Test func listFilesDoesNotReportDotGitAsAnEmptyDirectory() throws {
+        let repo = try makeFixtureRepository(
+            at: FileManager.default.temporaryDirectory.appendingPathComponent("spaces-empty-dir-dotgit-\(UUID().uuidString)", isDirectory: true),
+            file: "ROOT.md", contents: "root")
+        defer { try? FileManager.default.removeItem(at: repo) }
+        let client = RemoteWorkspaceGitClient()
+
+        let result = try SpacesDeviceWorkspaceFileListEngine.listFiles(workspaceDir: repo.path, gitClient: client)
+
+        #expect(!result.emptyDirectories.contains(".git"))
+        #expect(!result.emptyDirectories.contains { $0.hasPrefix(".git/") })
+    }
+
+    // `listFilesystemFiles` (the non-git strategy) collects `emptyDirectories` too, using the same
+    // ancestor-of-a-listed-path rule as the git strategy.
+    @Test func listFilesystemFilesReportsEmptyDirectoriesInANonGitWorkspace() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-empty-dir-nongit-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("docs"), withIntermediateDirectories: true)
+        try "guide".write(to: root.appendingPathComponent("docs/guide.md"), atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("docs/empty"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("empty-top"), withIntermediateDirectories: true)
+        let client = RemoteWorkspaceGitClient()
+
+        let result = try SpacesDeviceWorkspaceFileListEngine.listFiles(workspaceDir: root.path, gitClient: client)
+
+        #expect(result.paths.contains("docs/guide.md"))
+        #expect(result.emptyDirectories.contains("docs/empty"))
+        #expect(result.emptyDirectories.contains("empty-top"))
+        #expect(!result.emptyDirectories.contains("docs"), "docs holds a listed file, so it is not empty")
+    }
 }
 
 @Suite struct SpacesDeviceWorkspaceFileListSignatureTests {
@@ -2770,6 +2905,16 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         let first = SpacesDeviceWorkspaceFileListSignature.value(for: .init(paths: ["ROOT.md"], truncated: false))
         let second = SpacesDeviceWorkspaceFileListSignature.value(
             for: .init(paths: ["ROOT.md"], truncated: false, submodules: [.init(path: "A", commit: String(repeating: "a", count: 40))]))
+
+        #expect(first != second)
+    }
+
+    // A folder created or removed since the last listing changes neither `paths` nor `submodules`, so
+    // `emptyDirectories` needs its own fold-in for the Files tree's new-folder row to ever reach a
+    // subscriber.
+    @Test func anEmptyDirectoryChangesTheSignatureWithTheSamePaths() {
+        let first = SpacesDeviceWorkspaceFileListSignature.value(for: .init(paths: ["ROOT.md"], truncated: false))
+        let second = SpacesDeviceWorkspaceFileListSignature.value(for: .init(paths: ["ROOT.md"], truncated: false, emptyDirectories: ["empty"]))
 
         #expect(first != second)
     }

@@ -63,6 +63,18 @@ extension SpacesDeviceAPICommand {
     /// table of its own: a local command whose daemon work is a Device API command's work takes this budget
     /// by name (see `spaces workspace stop` and `spaces terminal stop`), so one operation cannot end up with
     /// two deadlines that drift apart.
+    ///
+    /// Accepted contract, identical for every command that takes this deadline: the budget spans the wait
+    /// on the command's serial lane plus the command's own run, and the lane's other commands are allowed
+    /// the same 60 seconds. A mutation queued behind a predecessor that consumes most of its own allowance
+    /// can therefore exhaust this one while still on the queue, or mid-run: the client reports it failed
+    /// and the daemon runs it anyway, so the mutation may still land. That is the same outcome a file write
+    /// on the shared workspace lane already has, and a second, larger deadline for the queue wait would only
+    /// move the cliff, since the predecessor's own budget would grow with it. What the user sees is the
+    /// daemon's state rather than what the client believed: the next listing refetch shows the mutation.
+    /// A command whose reply drives client work nothing else can produce takes this deadline too, and
+    /// reconciles the outcome itself rather than reporting the deadline as a failure (see the Files
+    /// tree's entry move below).
     public static let longRunningMutationTimeoutSeconds: TimeInterval = 60
     /// `.agentHooksStatus` probes every configured coding agent's shell/config state, which can take
     /// longer than the default deadline but far less than a long-running mutation.
@@ -192,6 +204,32 @@ extension SpacesDeviceAPICommand {
             return Self.descriptor(wireKey: "workspaceRevisionFileRead", lane: .workspaceGit, timeoutSeconds: Self.largePayloadRequestTimeoutSeconds)
         case .workspaceFileWrite:
             return Self.descriptor(wireKey: "workspaceFileWrite", lane: .workspaceGit, timeoutSeconds: Self.largePayloadRequestTimeoutSeconds)
+        // This touches one directory entry and carries no large embedded payload (a path, never file
+        // bytes), but its deadline is not set by its own cost: `.workspaceGit` is one serial queue per
+        // workspace, shared with reads, writes, listings, and diff chunks that each take up to
+        // `largePayloadRequestTimeoutSeconds`. A mutation queued behind those would time out at the client
+        // on the default deadline and then run anyway, leaving the tree reporting a failure for a folder
+        // that actually got created. It takes the same long-running mutation deadline the delete below
+        // does, so the wait for the queue is never mistaken for a refusal.
+        case .workspaceFileCreateDirectory:
+            return Self.descriptor(
+                wireKey: "workspaceFileCreateDirectory", lane: .workspaceGit, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
+        // The rename/move behind the Files tree's Rename and Move to… items shares the two mutations'
+        // queue and takes their long-running mutation deadline for the same reason. It is also the one
+        // mutation whose reply the client turns into work of its own: the Editor moves the open buffer to
+        // the destination and retargets the path it persists and the signature it watches. That does not
+        // buy it a wait without a deadline, which a peer that stops answering without closing the socket
+        // would never end; the deadline is an unknown outcome rather than a failure, and the Editor
+        // resolves it by re-reading the listing (see `CodePaneContentController`).
+        case .workspaceFileRename:
+            return Self.descriptor(wireKey: "workspaceFileRename", lane: .workspaceGit, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
+        // Deleting a directory removes everything under it, one entry at a time, so its cost scales with
+        // the subtree rather than with the request: a folder holding a build output or a dependency tree
+        // takes far longer to unlink than the default deadline allows, on top of the same shared-queue
+        // wait the two mutations above face. It takes the same long-running mutation deadline as the
+        // other whole-tree mutations.
+        case .workspaceFileDelete:
+            return Self.descriptor(wireKey: "workspaceFileDelete", lane: .workspaceGit, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .workspaceDiffManifestChunk:
             return Self.descriptor(wireKey: "workspaceDiffManifestChunk", lane: .workspaceGit, timeoutSeconds: Self.largePayloadRequestTimeoutSeconds)
         case .workspaceDiffManifestRelease:

@@ -1,8 +1,62 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FilesTreeCallbacks, renderFilesTree } from "../src/app/filesTree";
+import { WorkspaceSubmodule } from "../src/bridge/types";
+import { ContextMenu } from "../src/app/contextMenu";
+import { FilesTreeActions, FilesTreeCallbacks, FilesTreeHandle, renderFilesTree } from "../src/app/filesTree";
+import { FolderPicker } from "../src/app/folderPicker";
 
-function makeCallbacks(): FilesTreeCallbacks {
-  return { onSelect: vi.fn() };
+function makeCallbacks(overrides: Partial<FilesTreeCallbacks> = {}): FilesTreeCallbacks {
+  return { onSelect: vi.fn(), onMutated: vi.fn(), ...overrides };
+}
+
+function makeContextMenu(): ContextMenu {
+  return { show: vi.fn(), hide: vi.fn(), isOpen: () => false };
+}
+
+function makeFolderPicker(): FolderPicker {
+  return new FolderPicker(document.createElement("div"));
+}
+
+/** Whether a row's disclosure chevron is pointing down (see disclosureChevron.ts: one glyph that
+ *  rotates, so the expanded state is a class rather than a different character). */
+function disclosureOpen(dirrow: HTMLElement): boolean {
+  return dirrow.querySelector(".tri")!.classList.contains("open");
+}
+
+function makeActions(overrides: Partial<FilesTreeActions> = {}): FilesTreeActions {
+  return {
+    createFile: vi.fn().mockResolvedValue(undefined),
+    createFolder: vi.fn().mockResolvedValue(undefined),
+    move: vi.fn().mockResolvedValue(undefined),
+    remove: vi.fn().mockResolvedValue(undefined),
+    openInSystemViewer: vi.fn().mockResolvedValue(undefined),
+    isUnopenable: () => false,
+    ...overrides,
+  };
+}
+
+/** Thin wrapper over the real `renderFilesTree`'s options object, matching this suite's original
+ *  positional shape; most tests here exist to exercise tree rendering/selection/expansion behavior,
+ *  not the pointer menu (see the "pointer menu" describe block below, and inlineRowEditor.test.ts,
+ *  for that), so they don't need a bespoke `contextMenu`/`actions` per call. */
+function render(
+  container: HTMLElement,
+  paths: string[],
+  submodules: WorkspaceSubmodule[],
+  selectedPath: string | undefined,
+  callbacks: FilesTreeCallbacks,
+  expandedPaths?: readonly string[],
+): FilesTreeHandle {
+  return renderFilesTree({
+    container,
+    listing: { paths, submodules, emptyDirectories: [] },
+    selectedPath,
+    callbacks,
+    expandedPaths,
+    contextMenu: makeContextMenu(),
+    folderPicker: makeFolderPicker(),
+    actions: makeActions(),
+    canOpenInSystemViewer: true,
+  });
 }
 
 // jsdom has no scrollIntoView implementation; setSelected calls it on the newly-highlighted row.
@@ -14,16 +68,26 @@ describe("filesTree — renderFilesTree", () => {
   it("renders an empty-state row when there are no paths", () => {
     const container = document.createElement("div");
 
-    renderFilesTree(container, [], [], undefined, makeCallbacks());
+    render(container, [], [], undefined, makeCallbacks());
 
     expect(container.querySelector(".empty")?.textContent).toBe("No files");
+  });
+
+  it("still reports the expansion it was given when there are no paths, so a listing-less first paint cannot erase it", () => {
+    const container = document.createElement("div");
+
+    // Every pane paints once before its listing has been fetched, and the caller reads its own copy
+    // of the expansion back from the handle each render returns.
+    const handle = render(container, [], [], undefined, makeCallbacks(), ["src", "src/util"]);
+
+    expect([...handle.expandedPaths()].sort()).toEqual(["src", "src/util"]);
   });
 
   it("marks the selected root-level row via the on class, and no other row", () => {
     const container = document.createElement("div");
     const callbacks = makeCallbacks();
 
-    renderFilesTree(container, ["a.ts", "b.ts"], [], "b.ts", callbacks);
+    render(container, ["a.ts", "b.ts"], [], "b.ts", callbacks);
 
     const rows = [...container.querySelectorAll(".row")];
     expect(rows[0]!.className).not.toContain(" on");
@@ -34,7 +98,7 @@ describe("filesTree — renderFilesTree", () => {
     const container = document.createElement("div");
     const callbacks = makeCallbacks();
 
-    renderFilesTree(container, ["apps/macos/Foo.swift"], [], undefined, callbacks);
+    render(container, ["apps/macos/Foo.swift"], [], undefined, callbacks);
 
     // The one directory on the path is an ancestor of no selectedPath here, so it starts collapsed;
     // expand it first to reach the file row.
@@ -47,7 +111,7 @@ describe("filesTree — renderFilesTree", () => {
   it("renders no .status or .st columns (unlike the Changes list)", () => {
     const container = document.createElement("div");
 
-    renderFilesTree(container, ["a.ts"], [], undefined, makeCallbacks());
+    render(container, ["a.ts"], [], undefined, makeCallbacks());
 
     const row = container.querySelector(".row")!;
     expect(row.querySelector(".status")).toBeNull();
@@ -58,7 +122,7 @@ describe("filesTree — renderFilesTree", () => {
     const container = document.createElement("div");
     const paths = ["apps/ios/Sources/ViewerResync.swift", "apps/ios/Sources/MobileRootView.swift"];
 
-    renderFilesTree(container, paths, [], undefined, makeCallbacks());
+    render(container, paths, [], undefined, makeCallbacks());
 
     const dirrows = [...container.querySelectorAll(".dirrow")];
     expect(dirrows).toHaveLength(1);
@@ -69,7 +133,7 @@ describe("filesTree — renderFilesTree", () => {
     const container = document.createElement("div");
     const paths = ["apps/ios/Sources/ViewerResync.swift", "apps/ios/Sources/MobileRootView.swift"];
 
-    renderFilesTree(container, paths, [], undefined, makeCallbacks());
+    render(container, paths, [], undefined, makeCallbacks());
     (container.querySelector(".dirrow") as HTMLElement).click();
 
     const fnTexts = [...container.querySelectorAll(".row .fn")].map((el) => el.textContent);
@@ -79,7 +143,7 @@ describe("filesTree — renderFilesTree", () => {
   it("sets data-path and a title tooltip to the full path on a nested file row", () => {
     const container = document.createElement("div");
 
-    renderFilesTree(container, ["apps/macos/Foo.swift"], [], undefined, makeCallbacks());
+    render(container, ["apps/macos/Foo.swift"], [], undefined, makeCallbacks());
     (container.querySelector(".dirrow") as HTMLElement).click();
 
     const row = container.querySelector(".row")!;
@@ -90,7 +154,7 @@ describe("filesTree — renderFilesTree", () => {
   it("row keydown Enter and Space both invoke onSelect, matching fileList.ts's row keydown handling", () => {
     const container = document.createElement("div");
     const callbacks = makeCallbacks();
-    renderFilesTree(container, ["apps/macos/Foo.swift", "apps/macos/Bar.swift"], [], undefined, callbacks);
+    render(container, ["apps/macos/Foo.swift", "apps/macos/Bar.swift"], [], undefined, callbacks);
     (container.querySelector(".dirrow") as HTMLElement).click();
 
     const rows = [...container.querySelectorAll(".row")] as HTMLElement[];
@@ -113,7 +177,7 @@ describe("filesTree — renderFilesTree", () => {
     const container = document.createElement("div");
     const paths = ["README.md", "apps/macos/Foo.swift"];
 
-    renderFilesTree(container, paths, [], undefined, makeCallbacks());
+    render(container, paths, [], undefined, makeCallbacks());
 
     expect(container.querySelectorAll(".dirrow")).toHaveLength(1);
     // The root-level file renders even though the nested directory is collapsed.
@@ -124,29 +188,47 @@ describe("filesTree — renderFilesTree", () => {
   it("re-rendering into the same container replaces prior content instead of appending", () => {
     const container = document.createElement("div");
 
-    renderFilesTree(container, ["a.ts"], [], undefined, makeCallbacks());
-    renderFilesTree(container, ["b.ts", "c.ts"], [], undefined, makeCallbacks());
+    render(container, ["a.ts"], [], undefined, makeCallbacks());
+    render(container, ["b.ts", "c.ts"], [], undefined, makeCallbacks());
 
     const fnTexts = [...container.querySelectorAll(".row .fn")].map((el) => el.textContent);
     expect(fnTexts).toEqual(["b.ts", "c.ts"]);
   });
 
   describe("collapsed-by-default and lazy materialization", () => {
-    it("starts every directory collapsed, with its triangle, aria-expanded, and display reflecting that", () => {
+    it("starts every directory collapsed, with its chevron, aria-expanded, and display reflecting that", () => {
       const container = document.createElement("div");
-      renderFilesTree(container, ["apps/macos/Foo.swift"], [], undefined, makeCallbacks());
+      render(container, ["apps/macos/Foo.swift"], [], undefined, makeCallbacks());
 
       const dirrow = container.querySelector(".dirrow") as HTMLElement;
       const dirChildren = container.querySelector(".dir-children") as HTMLElement;
-      expect(dirrow.querySelector(".tri")?.textContent).toBe("▸");
+      expect(disclosureOpen(dirrow)).toBe(false);
       expect(dirrow.getAttribute("aria-expanded")).toBe("false");
       expect(dirChildren.style.display).toBe("none");
+    });
+
+    it("leads a directory row with a chevron and a file row with the same slot left empty", () => {
+      const container = document.createElement("div");
+      render(container, ["apps/Foo.swift"], [], undefined, makeCallbacks());
+
+      const dirrow = container.querySelector(".dirrow") as HTMLElement;
+      const chevron = dirrow.querySelector(".tri svg") as SVGElement;
+      expect(chevron).not.toBeNull();
+      // Decorative: the row itself reports the disclosure state through role/aria-expanded.
+      expect(chevron.getAttribute("aria-hidden")).toBe("true");
+      // The slot is the row's first child, so it is what the name is indented past.
+      expect(dirrow.firstElementChild?.className).toBe("tri");
+
+      dirrow.click();
+      const row = container.querySelector(".row") as HTMLElement;
+      expect(row.firstElementChild?.className).toBe("tri");
+      expect(row.querySelector(".tri svg")).toBeNull();
     });
 
     it("installs no descendant row or listener DOM before a directory's first expand", () => {
       const container = document.createElement("div");
       const callbacks = makeCallbacks();
-      renderFilesTree(container, ["apps/macos/Foo.swift", "apps/macos/Bar.swift"], [], undefined, callbacks);
+      render(container, ["apps/macos/Foo.swift", "apps/macos/Bar.swift"], [], undefined, callbacks);
 
       const dirChildren = container.querySelector(".dir-children") as HTMLElement;
       expect(dirChildren.children).toHaveLength(0);
@@ -157,28 +239,28 @@ describe("filesTree — renderFilesTree", () => {
       expect(callbacks.onSelect).not.toHaveBeenCalled();
     });
 
-    it("materializes a directory's rows on first expand, flipping the triangle, aria-expanded, and display", () => {
+    it("materializes a directory's rows on first expand, turning the chevron and flipping aria-expanded and display", () => {
       const container = document.createElement("div");
-      renderFilesTree(container, ["apps/macos/Foo.swift"], [], undefined, makeCallbacks());
+      render(container, ["apps/macos/Foo.swift"], [], undefined, makeCallbacks());
 
       const dirrow = container.querySelector(".dirrow") as HTMLElement;
       const dirChildren = container.querySelector(".dir-children") as HTMLElement;
 
       dirrow.click();
-      expect(dirrow.querySelector(".tri")?.textContent).toBe("▾");
+      expect(disclosureOpen(dirrow)).toBe(true);
       expect(dirrow.getAttribute("aria-expanded")).toBe("true");
       expect(dirChildren.style.display).not.toBe("none");
       expect(container.querySelectorAll(".row")).toHaveLength(1);
 
       dirrow.click();
-      expect(dirrow.querySelector(".tri")?.textContent).toBe("▸");
+      expect(disclosureOpen(dirrow)).toBe(false);
       expect(dirrow.getAttribute("aria-expanded")).toBe("false");
       expect(dirChildren.style.display).toBe("none");
     });
 
     it("preserves row element identity across collapse/re-expand — no rebuild on subsequent toggles", () => {
       const container = document.createElement("div");
-      renderFilesTree(container, ["apps/macos/Foo.swift"], [], undefined, makeCallbacks());
+      render(container, ["apps/macos/Foo.swift"], [], undefined, makeCallbacks());
 
       const dirrow = container.querySelector(".dirrow") as HTMLElement;
       dirrow.click(); // first expand: materializes
@@ -192,7 +274,7 @@ describe("filesTree — renderFilesTree", () => {
 
     it("exposes the dirrow as a focusable button and toggles/materializes it from the keyboard", () => {
       const container = document.createElement("div");
-      renderFilesTree(container, ["apps/macos/Foo.swift"], [], undefined, makeCallbacks());
+      render(container, ["apps/macos/Foo.swift"], [], undefined, makeCallbacks());
 
       const dirrow = container.querySelector(".dirrow") as HTMLElement;
       expect(dirrow.getAttribute("role")).toBe("button");
@@ -221,11 +303,11 @@ describe("filesTree — renderFilesTree", () => {
     it("expands and materializes every ancestor of selectedPath, and highlights its row", () => {
       const container = document.createElement("div");
 
-      renderFilesTree(container, ["apps/macos/Foo.swift", "apps/macos/Bar.swift"], [], "apps/macos/Foo.swift", makeCallbacks());
+      render(container, ["apps/macos/Foo.swift", "apps/macos/Bar.swift"], [], "apps/macos/Foo.swift", makeCallbacks());
 
       const dirrow = container.querySelector(".dirrow") as HTMLElement;
       expect(dirrow.getAttribute("aria-expanded")).toBe("true");
-      expect(dirrow.querySelector(".tri")?.textContent).toBe("▾");
+      expect(disclosureOpen(dirrow)).toBe(true);
 
       const rows = [...container.querySelectorAll(".row")];
       expect(rows).toHaveLength(2); // both siblings materialized — expand happens per directory, not per file
@@ -239,7 +321,7 @@ describe("filesTree — renderFilesTree", () => {
       // dirrows ("macos", "ios") rather than compacting into one shared "apps/..." chain.
       const paths = ["macos/Foo.swift", "ios/Bar.swift"];
 
-      renderFilesTree(container, paths, [], "macos/Foo.swift", makeCallbacks());
+      render(container, paths, [], "macos/Foo.swift", makeCallbacks());
 
       const dirrows = [...container.querySelectorAll(".dirrow")] as HTMLElement[];
       const macosRow = dirrows.find((d) => d.querySelector(".dirlabel")?.textContent === "macos")!;
@@ -253,7 +335,7 @@ describe("filesTree — renderFilesTree", () => {
   describe("FilesTreeHandle.setSelected", () => {
     it("moves the highlight from the old row to the new one without touching other materialized rows' identity", () => {
       const container = document.createElement("div");
-      const handle = renderFilesTree(container, ["a.ts", "b.ts", "c.ts"], [], "a.ts", makeCallbacks());
+      const handle = render(container, ["a.ts", "b.ts", "c.ts"], [], "a.ts", makeCallbacks());
       const unrelatedRow = container.querySelector('.row[data-path="c.ts"]');
 
       handle.setSelected("b.ts");
@@ -266,7 +348,7 @@ describe("filesTree — renderFilesTree", () => {
     it("expands and materializes the new path's ancestor chain, without rebuilding an already-materialized sibling", () => {
       const container = document.createElement("div");
       const paths = ["macos/Foo.swift", "ios/Bar.swift"];
-      const handle = renderFilesTree(container, paths, [], "macos/Foo.swift", makeCallbacks());
+      const handle = render(container, paths, [], "macos/Foo.swift", makeCallbacks());
       const macosRowBefore = container.querySelector('.row[data-path="macos/Foo.swift"]');
 
       handle.setSelected("ios/Bar.swift");
@@ -283,7 +365,7 @@ describe("filesTree — renderFilesTree", () => {
 
     it("scrolls the newly-selected row into view", () => {
       const container = document.createElement("div");
-      const handle = renderFilesTree(container, ["a.ts", "b.ts"], [], "a.ts", makeCallbacks());
+      const handle = render(container, ["a.ts", "b.ts"], [], "a.ts", makeCallbacks());
 
       handle.setSelected("b.ts");
 
@@ -293,7 +375,7 @@ describe("filesTree — renderFilesTree", () => {
 
     it("clears the previous highlight and does nothing else for a path not present in the tree", () => {
       const container = document.createElement("div");
-      const handle = renderFilesTree(container, ["a.ts", "b.ts"], [], "a.ts", makeCallbacks());
+      const handle = render(container, ["a.ts", "b.ts"], [], "a.ts", makeCallbacks());
 
       handle.setSelected("missing.ts");
 
@@ -302,7 +384,7 @@ describe("filesTree — renderFilesTree", () => {
 
     it("clears the previous highlight for undefined and does not throw", () => {
       const container = document.createElement("div");
-      const handle = renderFilesTree(container, ["a.ts", "b.ts"], [], "a.ts", makeCallbacks());
+      const handle = render(container, ["a.ts", "b.ts"], [], "a.ts", makeCallbacks());
 
       expect(() => handle.setSelected(undefined)).not.toThrow();
       expect(container.querySelector(".row.on")).toBeNull();
@@ -310,7 +392,7 @@ describe("filesTree — renderFilesTree", () => {
 
     it("is a safe no-op on the empty-state handle", () => {
       const container = document.createElement("div");
-      const handle = renderFilesTree(container, [], [], undefined, makeCallbacks());
+      const handle = render(container, [], [], undefined, makeCallbacks());
 
       expect(() => handle.setSelected("a.ts")).not.toThrow();
     });
@@ -323,7 +405,7 @@ describe("filesTree: submodule checkout directories (PR D, nested submodules)", 
     const paths = ["sbc_hal/.bumpversion.cfg", "src/main.ts"];
     const submodules = [{ path: "sbc_hal", commit: "128a927b0eb3ce10dc6ffe974b5a368456f974ca" }];
 
-    renderFilesTree(container, paths, submodules, undefined, makeCallbacks());
+    render(container, paths, submodules, undefined, makeCallbacks());
 
     const chip = container.querySelector(`.dirrow .submodule-badge`)!;
     expect(chip.textContent).toBe("128a927");
@@ -335,7 +417,7 @@ describe("filesTree: submodule checkout directories (PR D, nested submodules)", 
   it("leaves an ordinary directory unchipped", () => {
     const container = document.createElement("div");
 
-    renderFilesTree(container, ["src/main.ts"], [], undefined, makeCallbacks());
+    render(container, ["src/main.ts"], [], undefined, makeCallbacks());
 
     expect(container.querySelector(".submodule-badge")).toBeNull();
   });
@@ -343,7 +425,7 @@ describe("filesTree: submodule checkout directories (PR D, nested submodules)", 
   it("shows an empty submodule checkout's folder instead of the no-files empty state", () => {
     const container = document.createElement("div");
 
-    renderFilesTree(container, [], [{ path: "vendor/lib", commit: "3".repeat(40) }], undefined, makeCallbacks());
+    render(container, [], [{ path: "vendor/lib", commit: "3".repeat(40) }], undefined, makeCallbacks());
 
     expect(container.querySelector(".empty")).toBeNull();
     // Directories start collapsed here, so the enclosing folder is opened to reach the checkout.
@@ -356,7 +438,7 @@ describe("filesTree: submodule checkout directories (PR D, nested submodules)", 
   it("gives a submodule checkout with no files of its own no disclosure affordance", () => {
     const container = document.createElement("div");
     const callbacks = makeCallbacks();
-    const handle = renderFilesTree(container, [], [{ path: "vendor/lib", commit: "3".repeat(40) }], undefined, callbacks);
+    const handle = render(container, [], [{ path: "vendor/lib", commit: "3".repeat(40) }], undefined, callbacks);
 
     (container.querySelector(".dirrow") as HTMLElement).click(); // open `vendor` to reach the checkout
     const lib = [...container.querySelectorAll<HTMLElement>(".dirrow")].find(
@@ -365,7 +447,9 @@ describe("filesTree: submodule checkout directories (PR D, nested submodules)", 
 
     // There is nothing under it to disclose, so it must not offer a control that opens nothing.
     expect(lib.querySelector(".submodule-badge")?.textContent).toBe("3333333");
-    expect(lib.querySelector(".tri")).toBeNull();
+    // The slot is still there (every row leads with one, so labels line up); what it must not hold
+    // is a chevron.
+    expect(lib.querySelector(".tri svg")).toBeNull();
     expect(lib.getAttribute("role")).toBeNull();
     expect(lib.tabIndex).toBe(-1);
     expect(lib.hasAttribute("aria-expanded")).toBe(false);
@@ -381,7 +465,7 @@ describe("filesTree: submodule checkout directories (PR D, nested submodules)", 
   it("keeps the disclosure on a submodule checkout that does have a file of its own", () => {
     const container = document.createElement("div");
 
-    renderFilesTree(container, ["vendor/lib/parser.c"], [{ path: "vendor/lib", commit: "4".repeat(40) }], undefined, makeCallbacks());
+    render(container, ["vendor/lib/parser.c"], [{ path: "vendor/lib", commit: "4".repeat(40) }], undefined, makeCallbacks());
 
     (container.querySelector(".dirrow") as HTMLElement).click();
     const lib = [...container.querySelectorAll<HTMLElement>(".dirrow")].find(
@@ -404,7 +488,7 @@ describe("filesTree: submodule checkout directories (PR D, nested submodules)", 
       { path: "sbc_hal/api_commands", commit: "2".repeat(40) },
     ];
 
-    renderFilesTree(container, paths, submodules, "sbc_hal/api_commands/uart.c", makeCallbacks());
+    render(container, paths, submodules, "sbc_hal/api_commands/uart.c", makeCallbacks());
 
     const chips = [...container.querySelectorAll(".dirrow")].map((row) => ({
       label: row.querySelector(".dirlabel")?.textContent,

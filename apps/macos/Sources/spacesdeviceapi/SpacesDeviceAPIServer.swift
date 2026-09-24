@@ -1274,20 +1274,26 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         NSError(domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(workspaceID)' was not found."])
     }
 
-    /// The workspace id a workspace file-read/write/diff/file-list/ref-list request targets, used to route
-    /// it to its per-workspace serial queue (`workspaceGitQueue(for:)`). `preconditionFailure`s mirror
-    /// `handleWorkspaceGitRequest`'s: only these five commands ever reach this accessor.
+    /// The workspace id a workspace file-read/write/create-directory/rename/delete/diff/file-list/ref-list
+    /// request targets, used to route it to its per-workspace serial queue (`workspaceGitQueue(for:)`).
+    /// `preconditionFailure`s mirror `handleWorkspaceGitRequest`'s: only these commands ever reach this
+    /// accessor.
     private func workspaceGitQueueWorkspaceID(for request: SpacesDeviceAPIRequest) -> String {
         switch request.command {
         case .workspaceFileRead(let payload): return payload.workspaceID
         case .workspaceRevisionFileRead(let payload): return payload.workspaceID
         case .workspaceFileWrite(let payload): return payload.workspaceID
+        case .workspaceFileCreateDirectory(let payload): return payload.workspaceID
+        case .workspaceFileRename(let payload): return payload.workspaceID
+        case .workspaceFileDelete(let payload): return payload.workspaceID
         case .workspaceDiffManifestChunk(let payload): return payload.workspaceID
         case .workspaceDiffManifestRelease(let payload): return payload.workspaceID
         case .workspaceDiffFileChunk(let payload): return payload.workspaceID
         case .workspaceFileList(let payload): return payload.workspaceID
         case .workspaceRefList(let payload): return payload.workspaceID
-        default: preconditionFailure("Only workspace file-read/write/diff/file-list/ref-list commands run on a workspace-git queue.")
+        default:
+            preconditionFailure(
+                "Only workspace file-read/write/create-directory/rename/delete/diff/file-list/ref-list commands run on a workspace-git queue.")
         }
     }
     /// Subprocess-per-call, `Sendable` git wrapper used by the workspace-git handlers and by diff-signature
@@ -3180,11 +3186,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // Both transports divert `.runWorkspaceSetup` (descriptor lane `.workspaceSetup`) to
         // `workspaceSetupQueue` before they reach here, so this case only keeps the switch exhaustive.
         case .runWorkspaceSetup: return try handleWorkspaceSetupRequest(request)
-        // Both transports divert workspace file-read/write/diff/file-list/ref-list commands (descriptor
-        // lane `.workspaceGit`; see `SpacesDeviceAPICommandDescriptor`) to `workspaceGitQueue` before they
-        // reach here, so this case only keeps the switch exhaustive.
-        case .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease,
-            .workspaceDiffFileChunk, .workspaceFileList, .workspaceRefList:
+        // Both transports divert workspace file-read/write/create-directory/rename/delete/diff/file-list/
+        // ref-list commands (descriptor lane `.workspaceGit`; see `SpacesDeviceAPICommandDescriptor`) to
+        // `workspaceGitQueue` before they reach here, so this case only keeps the switch exhaustive.
+        case .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileWrite, .workspaceFileCreateDirectory, .workspaceFileRename,
+            .workspaceFileDelete, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease, .workspaceDiffFileChunk, .workspaceFileList,
+            .workspaceRefList:
             return try handleWorkspaceGitRequest(request)
         // Both transports divert the project `spaces.yaml` import/export commands (descriptor lane
         // `.projectConfigFile`) to `projectConfigFileQueue` before they reach here, so this case only keeps
@@ -3397,8 +3404,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    /// Runs one workspace file-read/write/diff/file-list/ref-list command (descriptor lane
-    /// `.workspaceGit`; see `SpacesDeviceAPICommandDescriptor`) on
+    /// Runs one workspace file-read/write/create-directory/rename/delete/diff/file-list/ref-list command
+    /// (descriptor lane `.workspaceGit`; see `SpacesDeviceAPICommandDescriptor`) on
     /// `workspaceGitQueue`, confined the same way the other per-family handlers above confine their store:
     /// a request handled on one queue must not touch a `SQLiteStore` opened on another.
     private func handleWorkspaceGitRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
@@ -3407,12 +3414,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .workspaceFileRead(let payload): return try handleWorkspaceFileReadRequest(payload, context: context)
         case .workspaceRevisionFileRead(let payload): return try handleWorkspaceRevisionFileReadRequest(payload, context: context)
         case .workspaceFileWrite(let payload): return try handleWorkspaceFileWriteRequest(payload, context: context)
+        case .workspaceFileCreateDirectory(let payload): return try handleWorkspaceFileCreateDirectoryRequest(payload, context: context)
+        case .workspaceFileRename(let payload): return try handleWorkspaceFileRenameRequest(payload, context: context)
+        case .workspaceFileDelete(let payload): return try handleWorkspaceFileDeleteRequest(payload, context: context)
         case .workspaceDiffManifestChunk(let payload): return try handleWorkspaceDiffManifestChunkRequest(payload, context: context)
         case .workspaceDiffManifestRelease(let payload): return handleWorkspaceDiffManifestReleaseRequest(payload)
         case .workspaceDiffFileChunk(let payload): return try handleWorkspaceDiffFileChunkRequest(payload, context: context)
         case .workspaceFileList(let payload): return try handleWorkspaceFileListRequest(payload, context: context)
         case .workspaceRefList(let payload): return try handleWorkspaceRefListRequest(payload, context: context)
-        default: preconditionFailure("Only workspace file-read/write/diff/file-list/ref-list commands run on the workspace-git queue.")
+        default:
+            preconditionFailure(
+                "Only workspace file-read/write/create-directory/rename/delete/diff/file-list/ref-list commands run on the workspace-git queue.")
         }
     }
 
@@ -5416,6 +5428,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// as a failure. round-13 Fix 4: a mismatch whose current bytes already equal the requested `newData` is
     /// not a conflict — it is a retry of a write that already landed — and is reported as an idempotent
     /// success (`didWrite: true`) instead; see the guard below.
+    ///
+    /// `purpose == .createFile` is the one write that never takes part in any of that: it is an exclusive
+    /// create, refused outright when anything already sits at the resolved path. See the guard below for
+    /// why the compare-and-swap rules alone cannot express it.
     private func handleWorkspaceFileWriteRequest(_ request: SpacesDeviceWorkspaceFileWriteRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
@@ -5424,17 +5440,39 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         do {
             resolvedPath =
                 try
-                (request.requiresDirectPath
-                ? SpacesDeviceWorkspacePathResolver.resolveDirectPath(relativePath: request.relativePath, workspaceDir: workspaceDir)
-                : SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: request.relativePath, workspaceDir: workspaceDir))
+                (request.purpose == .editor
+                ? SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: request.relativePath, workspaceDir: workspaceDir)
+                : SpacesDeviceWorkspacePathResolver.resolveDirectPath(relativePath: request.relativePath, workspaceDir: workspaceDir))
         } catch SpacesDeviceWorkspacePathResolver.PathError.containsSymbolicLink {
-            return SpacesDeviceAPIResponse(ok: false, message: "Inline diff editing cannot follow symbolic links.", errorCode: .invalidArgument)
+            // Direct resolution covers both inline diff saves and the Files tree's New file, so this
+            // states the rule rather than naming one of the two callers.
+            return SpacesDeviceAPIResponse(ok: false, message: "Path passes through a symbolic link.", errorCode: .invalidArgument)
         } catch { return SpacesDeviceAPIResponse(ok: false, message: "Path escapes the workspace directory.", errorCode: .invalidArgument) }
         guard let newData = Data(base64Encoded: request.base64Data) else {
             return SpacesDeviceAPIResponse(ok: false, message: "File content is not valid base64.", errorCode: .invalidArgument)
         }
         guard newData.count <= Self.workspaceFileMaxBytes else {
             return SpacesDeviceAPIResponse(ok: false, message: "File exceeds the 10 MiB write limit.", errorCode: .payloadTooLarge)
+        }
+        // A strict create, and the filesystem is what decides it. The compare-and-swap rules below cannot
+        // express "must not exist": an empty file already at this path hashes differently from `nil` but
+        // holds bytes identical to the empty content New file sends, so the idempotent-retry branch would
+        // report `didWrite: true` for a file this request did not create, and the atomic rename would
+        // replace whatever a check had just found absent. `O_CREAT | O_EXCL` collapses both into one step
+        // that cannot be raced, and it refuses a directory or a dangling symlink at the path just as it
+        // refuses a regular file, the same rule `handleWorkspaceFileCreateDirectoryRequest` applies.
+        if request.purpose == .createFile {
+            do { try Self.exclusivelyCreateWorkspaceFile(newData, at: resolvedPath) } catch let error as POSIXError where error.code == .EEXIST {
+                return SpacesDeviceAPIResponse(ok: false, message: "'\(request.relativePath)' already exists.", errorCode: .conflict)
+            } catch {
+                return SpacesDeviceAPIResponse(
+                    ok: false,
+                    message: "Failed to write workspace file: \((error as? LocalizedError)?.errorDescription ?? String(describing: error))",
+                    errorCode: .internalError)
+            }
+            return SpacesDeviceAPIResponse(
+                ok: true, message: "Wrote workspace file.",
+                result: .workspaceFileWrite(.init(didWrite: true, sha256: SpacesDeviceWorkspaceGitHashing.sha256Hex(newData))))
         }
         // Mirror the read handler's size guard before touching the current on-disk content: an oversized
         // file makes the whole save flow unusable regardless of what the client sent (the read path refuses
@@ -5511,6 +5549,151 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             result: .workspaceFileWrite(.init(didWrite: true, sha256: SpacesDeviceWorkspaceGitHashing.sha256Hex(newData))))
     }
 
+    /// Either a resolved absolute path inside the workspace, or the refusal to answer the request with.
+    private enum WorkspaceFileMutationPath {
+        case resolved(String)
+        case refused(SpacesDeviceAPIResponse)
+    }
+
+    /// Resolves `relativePath` for the three Files-tree mutation handlers below (create directory, rename,
+    /// delete). All three use `resolveDirectPath`, never `resolveContainedPath`: a mutation must act on
+    /// exactly the path the Files tree shows, so a symlink component (or a symlink leaf) is refused rather
+    /// than followed. That is what keeps a delete or a rename from acting on a link's target somewhere
+    /// else instead of the entry the user selected. `resolveDirectPath` already rejects an empty path, an
+    /// absolute path, and any `.`/`..` component, and resolves the workspace root itself, so containment is
+    /// the same guard the read and write handlers use.
+    private func resolveWorkspaceFileMutationPath(relativePath: String, workspaceDir: String) -> WorkspaceFileMutationPath {
+        do {
+            return .resolved(try SpacesDeviceWorkspacePathResolver.resolveDirectPath(relativePath: relativePath, workspaceDir: workspaceDir))
+        } catch SpacesDeviceWorkspacePathResolver.PathError.containsSymbolicLink {
+            return .refused(SpacesDeviceAPIResponse(ok: false, message: "Path passes through a symbolic link.", errorCode: .invalidArgument))
+        } catch { return .refused(SpacesDeviceAPIResponse(ok: false, message: "Path escapes the workspace directory.", errorCode: .invalidArgument)) }
+    }
+
+    /// Creates an empty directory in the Files tree. Refuses any path that already exists, and `mkdir(2)`
+    /// is that refusal: it creates the directory only if the name is free and reports `EEXIST` otherwise,
+    /// in one step nothing can slip between. It refuses a file, and a dangling symlink, at the path the
+    /// same way it refuses a directory, which is what keeps New folder from adopting something already
+    /// there. Missing parents are created first, so naming a folder inside one the user just typed works;
+    /// only the leaf is the exclusive create.
+    private func handleWorkspaceFileCreateDirectoryRequest(_ request: SpacesDeviceWorkspaceFileCreateDirectoryRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
+        let resolvedPath: String
+        switch resolveWorkspaceFileMutationPath(relativePath: request.relativePath, workspaceDir: workspaceDir) {
+        case .resolved(let path): resolvedPath = path
+        case .refused(let response): return response
+        }
+        do {
+            try FileManager.default.createDirectory(atPath: (resolvedPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        } catch {
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "Failed to create directory: \((error as? LocalizedError)?.errorDescription ?? String(describing: error))",
+                errorCode: .internalError)
+        }
+        guard mkdir(resolvedPath, 0o755) == 0 else {
+            // Captured before anything else can touch `errno`, since both arms below read it.
+            let failure = errno
+            if failure == EEXIST {
+                return SpacesDeviceAPIResponse(ok: false, message: "'\(request.relativePath)' already exists.", errorCode: .conflict)
+            }
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "Failed to create directory: \(String(cString: strerror(failure)))", errorCode: .internalError)
+        }
+        return SpacesDeviceAPIResponse(ok: true, message: "Created directory.")
+    }
+
+    /// Refuses a Files-tree mutation whose SOURCE `relativePath` is a submodule checkout, or a directory
+    /// containing one. A raw filesystem move or delete of a checkout breaks the superproject's gitlink and
+    /// the submodule's own relative `.git` file: neither the destination side of a rename nor an ordinary
+    /// file or folder needs this check, only the entry actually being moved or deleted. `submodulePaths`
+    /// is the same per-repository submodule discovery `workspaceFileList` uses to populate
+    /// `SpacesDeviceWorkspaceFileListResult.submodules`, so this reports exactly the checkouts the Files
+    /// tree itself labels as submodules.
+    ///
+    /// The client does no pre-check for this: the refusal surfaces in the in-page Files-tree menu the same
+    /// way every other daemon refusal does, rather than the client trying to special-case submodule rows
+    /// up front.
+    private func workspaceSubmoduleRefusal(relativePath: String, workspaceDir: String) throws -> SpacesDeviceAPIResponse? {
+        let submodulePaths = try SpacesDeviceWorkspaceFileListEngine.submodulePaths(workspaceDir: workspaceDir, gitClient: workspaceGitClient)
+        guard submodulePaths.contains(where: { $0 == relativePath || $0.hasPrefix(relativePath + "/") }) else { return nil }
+        return SpacesDeviceAPIResponse(
+            ok: false, message: "Path is or contains a git submodule; move or delete it with git.", errorCode: .invalidArgument)
+    }
+
+    /// Renames or moves one Files-tree entry. Serves both Rename and Move: the destination is just a path,
+    /// and whether only its last component or an ancestor differs from the source is not distinguished
+    /// here. Refuses to overwrite an existing destination, and refuses moving a directory into itself.
+    ///
+    /// A rename whose source and destination differ only by case on a case-insensitive filesystem (e.g.
+    /// default APFS) still reads as an existing destination via `attributesOfItem` and is refused here.
+    /// Accepted, not special-cased: true case-only renaming needs a two-step (rename to a temporary name,
+    /// then to the final one) that this single-shot command does not attempt.
+    private func handleWorkspaceFileRenameRequest(_ request: SpacesDeviceWorkspaceFileRenameRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
+        let sourcePath: String
+        switch resolveWorkspaceFileMutationPath(relativePath: request.relativePath, workspaceDir: workspaceDir) {
+        case .resolved(let path): sourcePath = path
+        case .refused(let response): return response
+        }
+        let destinationPath: String
+        switch resolveWorkspaceFileMutationPath(relativePath: request.destinationRelativePath, workspaceDir: workspaceDir) {
+        case .resolved(let path): destinationPath = path
+        case .refused(let response): return response
+        }
+        guard (try? FileManager.default.attributesOfItem(atPath: sourcePath)) != nil else {
+            return SpacesDeviceAPIResponse(ok: false, message: "'\(request.relativePath)' was not found.", errorCode: .notFound)
+        }
+        guard (try? FileManager.default.attributesOfItem(atPath: destinationPath)) == nil else {
+            return SpacesDeviceAPIResponse(ok: false, message: "'\(request.destinationRelativePath)' already exists.", errorCode: .conflict)
+        }
+        if let refusal = try workspaceSubmoduleRefusal(relativePath: request.relativePath, workspaceDir: workspaceDir) { return refusal }
+        // A move must not place the source inside itself. Compared as resolved lexical paths with a
+        // trailing separator on the source so a sibling that merely shares the source's name as a prefix
+        // (e.g. moving "foo" into "foo-bar") is not rejected. A destination equal to the source needs no
+        // arm here: the existing-destination check above has already refused it as a conflict.
+        guard !destinationPath.hasPrefix(sourcePath + "/") else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Cannot move a folder into itself.", errorCode: .invalidArgument)
+        }
+        do {
+            try FileManager.default.createDirectory(
+                atPath: (destinationPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            try FileManager.default.moveItem(atPath: sourcePath, toPath: destinationPath)
+        } catch {
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "Failed to move workspace entry: \((error as? LocalizedError)?.errorDescription ?? String(describing: error))",
+                errorCode: .internalError)
+        }
+        return SpacesDeviceAPIResponse(ok: true, message: "Renamed workspace entry.")
+    }
+
+    /// Deletes one Files-tree entry, and everything under it when it is a directory. Confirming a
+    /// non-empty folder's deletion with the user is the client's concern, not the daemon's: this command
+    /// simply performs the deletion it is asked for.
+    private func handleWorkspaceFileDeleteRequest(_ request: SpacesDeviceWorkspaceFileDeleteRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let workspaceDir = try resolveWorkspaceDirectory(workspaceID: request.workspaceID, context: context)
+        let resolvedPath: String
+        switch resolveWorkspaceFileMutationPath(relativePath: request.relativePath, workspaceDir: workspaceDir) {
+        case .resolved(let path): resolvedPath = path
+        case .refused(let response): return response
+        }
+        guard (try? FileManager.default.attributesOfItem(atPath: resolvedPath)) != nil else {
+            return SpacesDeviceAPIResponse(ok: false, message: "'\(request.relativePath)' was not found.", errorCode: .notFound)
+        }
+        if let refusal = try workspaceSubmoduleRefusal(relativePath: request.relativePath, workspaceDir: workspaceDir) { return refusal }
+        do { try FileManager.default.removeItem(atPath: resolvedPath) } catch {
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "Failed to delete workspace entry: \((error as? LocalizedError)?.errorDescription ?? String(describing: error))",
+                errorCode: .internalError)
+        }
+        return SpacesDeviceAPIResponse(ok: true, message: "Deleted workspace entry.")
+    }
+
     /// Writes `data` to `path` via `Data.write(options: .atomic)`, which writes an auxiliary file in the
     /// same directory and renames it into place — the temp-file-plus-rename atomicity the spec asks for,
     /// without hand-rolling it. Creates any missing intermediate directories first, since `expectedSHA256
@@ -5548,6 +5731,36 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let existingPermissions = (try? FileManager.default.attributesOfItem(atPath: path))?[.posixPermissions] as? NSNumber
         try data.write(to: URL(fileURLWithPath: path), options: .atomic)
         if let existingPermissions { try FileManager.default.setAttributes([.posixPermissions: existingPermissions], ofItemAtPath: path) }
+    }
+
+    /// Creates the file the Files tree's New file names, and refuses any path that already exists.
+    /// `O_CREAT | O_EXCL` is the refusal: the kernel decides "the path was free and is now mine" in one
+    /// step, so nothing can appear between deciding and creating, and the open never follows a symlink at
+    /// the final component. `EEXIST` reaches the caller as the conflict the user sees.
+    ///
+    /// Missing parent directories are created first, exactly as `atomicallyWriteWorkspaceFile` does for the
+    /// ordinary write path, since a new file's folder can be one the client just created. A create that
+    /// then fails leaves those directories behind, which is what an interrupted New folder would leave too.
+    private static func exclusivelyCreateWorkspaceFile(_ data: Data, at path: String) throws {
+        try FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        let fileDescriptor = open(path, O_WRONLY | O_CREAT | O_EXCL, 0o644)
+        guard fileDescriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        do {
+            try data.withUnsafeBytes { rawBuffer in
+                guard let baseAddress = rawBuffer.baseAddress else { return }
+                var offset = 0
+                while offset < rawBuffer.count {
+                    let written = write(fileDescriptor, baseAddress.advanced(by: offset), rawBuffer.count - offset)
+                    guard written > 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                    offset += written
+                }
+            }
+            close(fileDescriptor)
+        } catch {
+            close(fileDescriptor)
+            try? FileManager.default.removeItem(atPath: path)
+            throw error
+        }
     }
 
     private func handleWorkspaceDiffManifestChunkRequest(_ request: SpacesDeviceWorkspaceDiffManifestChunkRequest, context: RequestContext) throws

@@ -1040,26 +1040,32 @@ public struct SpacesDeviceWorkspaceFileListRequest: Codable, Sendable, Equatable
 /// Result of `workspaceFileList`. `paths` are workspace-relative and sorted ascending, and include the
 /// files inside every initialized submodule under their full workspace-relative path. `truncated` is
 /// `true` when the workspace has more paths than `SpacesDeviceWorkspaceFileListEngine.maxPaths`, in
-/// which case `paths` holds only the first (sorted) slice up to that cap. `submodules` names every
-/// checked-out submodule whose files `paths` covers, sorted by path, nested submodules included under
-/// their full path, each with the commit its checkout sits at; a submodule the user never initialized
-/// contributes neither paths nor an entry here.
+/// which case `paths` holds only the first (sorted) slice up to that cap (also `true` when
+/// `emptyDirectories` itself hit that cap). `submodules` names every checked-out submodule whose files
+/// `paths` covers, sorted by path, nested submodules included under their full path, each with the
+/// commit its checkout sits at; a submodule the user never initialized contributes neither paths nor an
+/// entry here. `emptyDirectories` are workspace-relative, sorted ascending, with no trailing slash: every
+/// directory in the workspace checkout that holds no file in `paths`, so a folder with nothing in it (a
+/// folder just created from the Editor) still has a row in the Files tree.
 public struct SpacesDeviceWorkspaceFileListResult: Codable, Sendable, Equatable {
     public let paths: [String]
     public let truncated: Bool
     public let submodules: [SpacesDeviceWorkspaceFileListSubmodule]
+    public let emptyDirectories: [String]
 
-    public init(paths: [String], truncated: Bool, submodules: [SpacesDeviceWorkspaceFileListSubmodule] = []) {
+    public init(paths: [String], truncated: Bool, submodules: [SpacesDeviceWorkspaceFileListSubmodule] = [], emptyDirectories: [String] = []) {
         self.paths = paths
         self.truncated = truncated
         self.submodules = submodules
+        self.emptyDirectories = emptyDirectories
     }
 }
 
-/// Stable change token for the exact `workspaceFileList` wire contract: same `paths` + `truncated`
-/// means same token, and any membership/truncation change yields a different one. Shared by the
-/// daemon's `subscribeWorkspaceFileListSignature` producer and the host-side baseline recorded after
-/// a successful `workspaceFileList` pull, so reconnect dedupe compares identical logic on both sides.
+/// Stable change token for the exact `workspaceFileList` wire contract: same `paths` + `truncated` +
+/// `submodules` + `emptyDirectories` means same token, and any membership/truncation change yields a
+/// different one. Shared by the daemon's `subscribeWorkspaceFileListSignature` producer and the
+/// host-side baseline recorded after a successful `workspaceFileList` pull, so reconnect dedupe compares
+/// identical logic on both sides.
 public enum SpacesDeviceWorkspaceFileListSignature {
     public static func value(for result: SpacesDeviceWorkspaceFileListResult) -> String {
         var data = Data()
@@ -1085,6 +1091,15 @@ public enum SpacesDeviceWorkspaceFileListSignature {
                 withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
                 data.append(utf8)
             }
+        }
+        // A created or removed empty directory changes neither `paths` nor `submodules`, so it needs its
+        // own separator and fold-in to still change the token.
+        data.append(0x00)
+        for directory in result.emptyDirectories {
+            let utf8 = Data(directory.utf8)
+            var length = UInt64(utf8.count).bigEndian
+            withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
+            data.append(utf8)
         }
         return TerminalServiceSHA256.hexDigest(data)
     }
@@ -1134,6 +1149,25 @@ public struct SpacesDeviceWorkspaceRefListResult: Codable, Sendable, Equatable {
     }
 }
 
+/// What a `workspaceFileWrite` is for. One value decides both facts the daemon needs about a write that
+/// its `expectedSHA256` alone cannot express: how the path resolves, and whether the write may land on a
+/// file that already exists.
+public enum SpacesDeviceWorkspaceFileWritePurpose: String, Codable, Sendable, Equatable {
+    /// Saving the buffer the Editor already opened, through the same contained-symlink resolution that
+    /// opened it (`SpacesDeviceWorkspacePathResolver.resolveContainedPath`). Compare-and-swap against
+    /// `expectedSHA256` decides whether it lands.
+    case editor
+    /// Saving an inline diff edit. Resolves the path directly, refusing any symbolic-link component: the
+    /// save must update exactly the file the displayed patch names, never a link's target elsewhere.
+    case inlineDiff
+    /// Creating the file the Files tree's New file names. Resolves the path directly like `inlineDiff`,
+    /// and is a strict create: an existing path is refused as a conflict rather than compared, written,
+    /// or reported as an already-landed write. "New file" that quietly adopts a file already there (an
+    /// empty one is byte-identical to what this write sends) would report a creation that never
+    /// happened and open someone else's file.
+    case createFile
+}
+
 /// Compare-and-swap write to one file inside a workspace's checkout. `expectedSHA256` is the hash of the
 /// disk content the client last read (from `workspaceFileRead`); `nil` asserts the file must not exist yet
 /// (create). When the disk content does not match `expectedSHA256`, the daemon does not write — it reports
@@ -1145,15 +1179,59 @@ public struct SpacesDeviceWorkspaceFileWriteRequest: Codable, Sendable, Equatabl
     public let relativePath: String
     public let base64Data: String
     public let expectedSHA256: String?
-    /// See `SpacesDeviceWorkspaceFileReadRequest.requiresDirectPath`.
-    public let requiresDirectPath: Bool
+    /// See `SpacesDeviceWorkspaceFileWritePurpose`.
+    public let purpose: SpacesDeviceWorkspaceFileWritePurpose
 
-    public init(workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String? = nil, requiresDirectPath: Bool = false) {
+    public init(
+        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String? = nil,
+        purpose: SpacesDeviceWorkspaceFileWritePurpose = .editor
+    ) {
         self.workspaceID = workspaceID
         self.relativePath = relativePath
         self.base64Data = base64Data
         self.expectedSHA256 = expectedSHA256
-        self.requiresDirectPath = requiresDirectPath
+        self.purpose = purpose
+    }
+}
+
+/// Creates an empty directory inside a workspace's checkout. Bounded to the workspace: `relativePath`
+/// must resolve inside the checkout, following no symlink component. Refused when anything already
+/// exists at the resolved path; this command never overwrites an existing path.
+public struct SpacesDeviceWorkspaceFileCreateDirectoryRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let relativePath: String
+
+    public init(workspaceID: String, relativePath: String) {
+        self.workspaceID = workspaceID
+        self.relativePath = relativePath
+    }
+}
+
+/// Renames or moves one file or directory inside a workspace's checkout to `destinationRelativePath`
+/// (the same command serves both: a rename changes only the last path component, a move changes an
+/// ancestor). Both paths are bounded to the workspace, following no symlink component. Refused when
+/// `destinationRelativePath` already names something; this command never overwrites an existing path.
+public struct SpacesDeviceWorkspaceFileRenameRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let relativePath: String
+    public let destinationRelativePath: String
+
+    public init(workspaceID: String, relativePath: String, destinationRelativePath: String) {
+        self.workspaceID = workspaceID
+        self.relativePath = relativePath
+        self.destinationRelativePath = destinationRelativePath
+    }
+}
+
+/// Deletes one file or directory (with everything under it) inside a workspace's checkout. Bounded to
+/// the workspace: `relativePath` must resolve inside the checkout, following no symlink component.
+public struct SpacesDeviceWorkspaceFileDeleteRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let relativePath: String
+
+    public init(workspaceID: String, relativePath: String) {
+        self.workspaceID = workspaceID
+        self.relativePath = relativePath
     }
 }
 
@@ -2549,6 +2627,14 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     /// Compare-and-swap write to one file inside a workspace's checkout; see
     /// `SpacesDeviceWorkspaceFileWriteRequest`.
     case workspaceFileWrite(SpacesDeviceWorkspaceFileWriteRequest)
+    /// Creates an empty directory inside a workspace's checkout; see
+    /// `SpacesDeviceWorkspaceFileCreateDirectoryRequest`.
+    case workspaceFileCreateDirectory(SpacesDeviceWorkspaceFileCreateDirectoryRequest)
+    /// Renames or moves one file or directory inside a workspace's checkout; see
+    /// `SpacesDeviceWorkspaceFileRenameRequest`.
+    case workspaceFileRename(SpacesDeviceWorkspaceFileRenameRequest)
+    /// Deletes one file or directory inside a workspace's checkout; see `SpacesDeviceWorkspaceFileDeleteRequest`.
+    case workspaceFileDelete(SpacesDeviceWorkspaceFileDeleteRequest)
     /// Lists every path inside a workspace's checkout the user would consider part of the workspace; see
     /// `SpacesDeviceWorkspaceFileListRequest`. Read-only.
     case workspaceFileList(SpacesDeviceWorkspaceFileListRequest)
@@ -2645,6 +2731,9 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .workspaceFileRead: "workspaceFileRead"
         case .workspaceRevisionFileRead: "workspaceRevisionFileRead"
         case .workspaceFileWrite: "workspaceFileWrite"
+        case .workspaceFileCreateDirectory: "workspaceFileCreateDirectory"
+        case .workspaceFileRename: "workspaceFileRename"
+        case .workspaceFileDelete: "workspaceFileDelete"
         case .workspaceFileList: "workspaceFileList"
         case .workspaceRefList: "workspaceRefList"
         case .workspaceDiffManifestChunk: "workspaceDiffManifestChunk"
@@ -2843,6 +2932,9 @@ extension SpacesDeviceAPICommand: Codable {
         case workspaceFileRead
         case workspaceRevisionFileRead
         case workspaceFileWrite
+        case workspaceFileCreateDirectory
+        case workspaceFileRename
+        case workspaceFileDelete
         case workspaceFileList
         case workspaceRefList
         case workspaceDiffManifestChunk
@@ -2949,6 +3041,10 @@ extension SpacesDeviceAPICommand: Codable {
         case .workspaceRevisionFileRead:
             self = .workspaceRevisionFileRead(try container.decode(SpacesDeviceWorkspaceRevisionFileReadRequest.self, forKey: key))
         case .workspaceFileWrite: self = .workspaceFileWrite(try container.decode(SpacesDeviceWorkspaceFileWriteRequest.self, forKey: key))
+        case .workspaceFileCreateDirectory:
+            self = .workspaceFileCreateDirectory(try container.decode(SpacesDeviceWorkspaceFileCreateDirectoryRequest.self, forKey: key))
+        case .workspaceFileRename: self = .workspaceFileRename(try container.decode(SpacesDeviceWorkspaceFileRenameRequest.self, forKey: key))
+        case .workspaceFileDelete: self = .workspaceFileDelete(try container.decode(SpacesDeviceWorkspaceFileDeleteRequest.self, forKey: key))
         case .workspaceFileList: self = .workspaceFileList(try container.decode(SpacesDeviceWorkspaceFileListRequest.self, forKey: key))
         case .workspaceRefList: self = .workspaceRefList(try container.decode(SpacesDeviceWorkspaceRefListRequest.self, forKey: key))
         case .workspaceDiffManifestChunk:
@@ -3041,6 +3137,9 @@ extension SpacesDeviceAPICommand: Codable {
         case .workspaceFileRead(let payload): try container.encode(payload, forKey: .workspaceFileRead)
         case .workspaceRevisionFileRead(let payload): try container.encode(payload, forKey: .workspaceRevisionFileRead)
         case .workspaceFileWrite(let payload): try container.encode(payload, forKey: .workspaceFileWrite)
+        case .workspaceFileCreateDirectory(let payload): try container.encode(payload, forKey: .workspaceFileCreateDirectory)
+        case .workspaceFileRename(let payload): try container.encode(payload, forKey: .workspaceFileRename)
+        case .workspaceFileDelete(let payload): try container.encode(payload, forKey: .workspaceFileDelete)
         case .workspaceFileList(let payload): try container.encode(payload, forKey: .workspaceFileList)
         case .workspaceRefList(let payload): try container.encode(payload, forKey: .workspaceRefList)
         case .workspaceDiffManifestChunk(let payload): try container.encode(payload, forKey: .workspaceDiffManifestChunk)

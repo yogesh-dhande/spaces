@@ -176,6 +176,8 @@ let INIT_PAYLOAD: CodePaneInitPayload = {
   // about stale-response ordering, not about which scope is picked).
   baseBranch: "main",
   isGitRepository: true,
+  // A workspace on this Mac: the Files tree's Open in system viewer item is gated on this.
+  isLocalWorkspace: true,
   // No running agents: these tests exercise refreshDiff's own logic, not the comment surface (see
   // test/commentsController.test.ts and test/reviewComments.test.ts for that).
   agents: [],
@@ -235,6 +237,9 @@ const hoisted = vi.hoisted(() => {
     deadlineEpochMilliseconds: 90_000,
   });
   const retryLiveRefresh = vi.fn().mockResolvedValue(undefined);
+  // The Files tree's Rename/Move to… mutation; the tests that drive it set its listing answer too,
+  // since the tree refetches `workspaceFileList` once the device confirms.
+  const workspaceFileRename = vi.fn().mockRejectedValue(new Error("not used"));
   const manifests = new Map<string, { scopeSignature: string; files: DiffFileEntry[] }>();
   let nextManifestID = 0;
   let manifestPageSize = Number.POSITIVE_INFINITY;
@@ -327,6 +332,7 @@ const hoisted = vi.hoisted(() => {
     startWorkspaceCommand,
     resumeWorkspaceCommandTracking,
     retryLiveRefresh,
+    workspaceFileRename,
     notifyModeChanged,
     notifyEditorUIStateChanged,
     notifyWorkspaceStateChanged,
@@ -360,6 +366,8 @@ vi.mock("../src/bridge", () => ({
     subscribeFileListSignature: hoisted.subscribeFileListSignature,
     subscribeFileSignature: vi.fn(() => () => {}),
     unsubscribeFileSignature: vi.fn(),
+    retargetFileSignature: vi.fn(),
+    workspaceFileRename: hoisted.workspaceFileRename,
     notifyWorkspaceStateChanged: hoisted.notifyWorkspaceStateChanged,
     notifyRenderMetric: hoisted.notifyRenderMetric,
     notifyEditsFlushed: hoisted.notifyEditsFlushed,
@@ -1045,7 +1053,7 @@ describe("mountRoot's progressive patch scheduler — interrupted chunk recovery
 
   it("uses the sidebar selection, promotion, and reveal path when Quick Open picks a queued diff file", async () => {
     const files = [makeFile("1.ts"), makeFile("2.ts"), makeFile("50.ts")];
-    hoisted.workspaceFileList.mockResolvedValue({ paths: files.map((file) => file.path), truncated: false, submodules: [] });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: files.map((file) => file.path), truncated: false, submodules: [], emptyDirectories: [] });
     let releaseFirst: ((value: WorkspaceDiffFileChunkResult) => void) | undefined;
     hoisted.workspaceDiffFileChunk.mockImplementationOnce(
       () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { releaseFirst = resolve; }),
@@ -1058,7 +1066,7 @@ describe("mountRoot's progressive patch scheduler — interrupted chunk recovery
     await vi.waitFor(() => expect(releaseFirst).toBeDefined());
 
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true }));
-    const input = container.querySelector<HTMLInputElement>(".quick-open input")!;
+    const input = container.querySelector<HTMLInputElement>("#code-pane-quick-open-input")!;
     input.value = "50.ts";
     input.dispatchEvent(new Event("input"));
     const row = await vi.waitFor(() => {
@@ -1400,7 +1408,7 @@ describe("mountRoot's diff-tree expansion recovery", () => {
     resolveDiff(0, [makeFile("src/fresh.ts")], "fresh-tree-sig");
     await mounted;
 
-    expect(container.querySelector(".dirrow .tri")?.textContent).toBe("▾");
+    expect(container.querySelector(".dirrow .tri")!.classList.contains("open")).toBe(true);
     const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
     expect(snapshot).not.toHaveProperty("diffTreeExpandedPaths");
   });
@@ -1415,7 +1423,7 @@ describe("mountRoot's diff-tree expansion recovery", () => {
     resolveDiff(0, [makeFile("src/collapsed.ts")], "collapsed-tree-sig");
     await mounted;
 
-    expect(container.querySelector(".dirrow .tri")?.textContent).toBe("▸");
+    expect(container.querySelector(".dirrow .tri")!.classList.contains("open")).toBe(false);
     const snapshot = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
     expect(snapshot.diffTreeExpandedPaths).toEqual([]);
   });
@@ -5674,7 +5682,7 @@ describe("mountRoot's file-list-signature push — sidebar refresh gated to Edit
     hoisted.workspaceDiff.mockClear();
     hoisted.notifyModeChanged.mockClear();
     hoisted.workspaceFileList.mockClear();
-    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [] });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [], emptyDirectories: [] });
     container = document.createElement("div");
   });
 
@@ -5715,7 +5723,7 @@ describe("mountRoot's file-list-signature push — ⌘P overlay refresh is not m
     hoisted.fileListSignatureCallbacks.length = 0;
     hoisted.workspaceDiff.mockClear();
     hoisted.workspaceFileList.mockClear();
-    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [] });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [], emptyDirectories: [] });
     container = document.createElement("div");
   });
 
@@ -5733,7 +5741,7 @@ describe("mountRoot's file-list-signature push — ⌘P overlay refresh is not m
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true }));
     // Typing narrows to a fuzzy-match result (an empty query shows "recents", which is empty here —
     // nothing has been opened yet) — the same technique Finding E's test above uses to get a row.
-    const input = container.querySelector(".quick-open input") as HTMLInputElement;
+    const input = container.querySelector("#code-pane-quick-open-input") as HTMLInputElement;
     input.value = "a.ts";
     input.dispatchEvent(new Event("input"));
     await vi.waitFor(() => expect(container.querySelector('.quick-open .row[data-path="a.ts"]')).not.toBeNull());
@@ -5783,7 +5791,7 @@ describe("mountRoot's live-refresh notice", () => {
   });
 
   it("shows the same notice in Editor mode, over the editor's content area rather than the Files sidebar", async () => {
-    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [] });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [], emptyDirectories: [] });
     const mounted = mountRoot(container);
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
     resolveDiff(0, [], "sig-a");
@@ -5922,7 +5930,7 @@ describe("mountRoot's editor-mode-only startup triggers the sidebar's first fetc
     hoisted.pendingDiffCalls.length = 0;
     hoisted.workspaceDiff.mockClear();
     hoisted.workspaceFileList.mockClear();
-    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [] });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [], emptyDirectories: [] });
     container = document.createElement("div");
   });
 
@@ -5955,7 +5963,7 @@ describe("mountRoot's init ordering — rehydrating into editor mode reads the r
     hoisted.notifyModeChanged.mockClear();
     hoisted.workspaceFileList.mockClear();
     hoisted.workspaceFileRead.mockClear();
-    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [] });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [], emptyDirectories: [] });
     hoisted.workspaceFileRead.mockResolvedValue({ content: "let x = 0;\n", sha256: "deadbeef", size: 11 });
     container = document.createElement("div");
   });
@@ -6171,7 +6179,7 @@ describe("mountRoot's Diff-mode ⌘P jump records into recents (Finding E)", () 
     hoisted.notifyModeChanged.mockClear();
     hoisted.notifyEditorUIStateChanged.mockClear();
     hoisted.workspaceFileList.mockClear();
-    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [] });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [], emptyDirectories: [] });
     container = document.createElement("div");
   });
 
@@ -6185,7 +6193,7 @@ describe("mountRoot's Diff-mode ⌘P jump records into recents (Finding E)", () 
     // The pane is in its default initial mode (Diff); "a.ts" is already part of the current diff, so
     // this jump stays in Diff mode instead of switching to Editor (see QuickOpen's own doc comment).
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true }));
-    const input = container.querySelector(".quick-open input") as HTMLInputElement;
+    const input = container.querySelector("#code-pane-quick-open-input") as HTMLInputElement;
     input.value = "a.ts";
     input.dispatchEvent(new Event("input"));
 
@@ -6214,7 +6222,7 @@ describe("mountRoot's Diff-mode ⌘P jump to an out-of-diff file opens it before
     hoisted.workspaceDiff.mockClear();
     hoisted.workspaceFileList.mockClear();
     hoisted.workspaceFileRead.mockClear();
-    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts", "b.ts"], truncated: false, submodules: [] });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts", "b.ts"], truncated: false, submodules: [], emptyDirectories: [] });
     hoisted.workspaceFileRead.mockResolvedValueOnce({ content: "b content", sha256: "sha-b", size: 9 });
     container = document.createElement("div");
   });
@@ -6232,7 +6240,7 @@ describe("mountRoot's Diff-mode ⌘P jump to an out-of-diff file opens it before
     // settle (the row only renders once it has) and clear both mocks so only the calls the click
     // below triggers are being measured.
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true }));
-    const input = container.querySelector(".quick-open input") as HTMLInputElement;
+    const input = container.querySelector("#code-pane-quick-open-input") as HTMLInputElement;
     input.value = "b.ts";
     input.dispatchEvent(new Event("input"));
     const row = await vi.waitFor(() => {
@@ -6268,7 +6276,7 @@ describe("mountRoot's cross-mode Quick Open scope preservation", () => {
     hoisted.workspaceFileList.mockClear();
     hoisted.workspaceFileRead.mockClear();
     hoisted.notifyWorkspaceStateChanged.mockClear();
-    hoisted.workspaceFileList.mockResolvedValue({ paths: ["committed.ts", "untracked.ts"], truncated: false, submodules: [] });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["committed.ts", "untracked.ts"], truncated: false, submodules: [], emptyDirectories: [] });
     hoisted.workspaceFileRead.mockResolvedValue({ content: "untracked content", sha256: "untracked-sha", size: 17 });
     container = document.createElement("div");
   });
@@ -6290,7 +6298,7 @@ describe("mountRoot's cross-mode Quick Open scope preservation", () => {
     );
 
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true }));
-    const input = container.querySelector(".quick-open input") as HTMLInputElement;
+    const input = container.querySelector("#code-pane-quick-open-input") as HTMLInputElement;
     input.value = "untracked.ts";
     input.dispatchEvent(new Event("input"));
     const row = await vi.waitFor(() => {
@@ -6345,7 +6353,7 @@ describe("mountRoot's Editor mode — Files/Changes sidebar and recent-files rec
    *  the same test (e.g. a Diff→Editor round trip) would otherwise starve on an exhausted `-Once`
    *  queue — these tests want the same listing back every time, not to count individual calls. */
   async function mountWithFiles(paths: readonly string[]): Promise<void> {
-    hoisted.workspaceFileList.mockResolvedValue({ paths, truncated: false, submodules: [] });
+    hoisted.workspaceFileList.mockResolvedValue({ paths, truncated: false, submodules: [], emptyDirectories: [] });
     const mounted = mountRoot(container);
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
     resolveDiff(0, [], "sig-a");
@@ -6520,6 +6528,530 @@ describe("mountRoot's Editor mode — Files/Changes sidebar and recent-files rec
   });
 });
 
+// A confirmed Rename or Move to… moves bytes this pane remembers by path in more places than the
+// open buffer: Quick Open's recent list and the set of paths the Editor has reported it cannot open
+// as text. Both are keyed by path, so a move nobody rewrote leaves them naming a path the daemon has
+// emptied: the recent silently disappears from Quick Open (it is filtered against the live
+// listing), and the file the user most needs Open in system viewer for stops offering it.
+describe("mountRoot's Files tree: a confirmed move rewrites every remembered path", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.notifyModeChanged.mockClear();
+    hoisted.notifyEditorUIStateChanged.mockClear();
+    hoisted.workspaceFileList.mockReset();
+    hoisted.workspaceFileRead.mockReset();
+    hoisted.workspaceFileRead.mockImplementation((path: string) =>
+      Promise.resolve({ content: `${path} content`, sha256: `sha-${path}`, size: 1 }),
+    );
+    hoisted.workspaceFileRename.mockReset();
+    hoisted.workspaceFileRename.mockResolvedValue(undefined);
+    capturedCodeViewOptions.current = undefined;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    hoisted.workspaceFileRead.mockReset().mockRejectedValue(new Error("not used"));
+    hoisted.workspaceFileList.mockReset().mockRejectedValue(new Error("not used"));
+    hoisted.workspaceFileRename.mockReset().mockRejectedValue(new Error("not used"));
+    container.remove();
+  });
+
+  function listing(paths: readonly string[]): void {
+    hoisted.workspaceFileList.mockResolvedValue({ paths, truncated: false, submodules: [], emptyDirectories: [] });
+  }
+
+  /** Mounts in the default Diff mode, settles the (empty) initial diff pull, then switches to Editor
+   *  mode, which is what triggers the sidebar's first Files listing fetch. */
+  async function mountWithFiles(paths: readonly string[]): Promise<void> {
+    listing(paths);
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "sig-move");
+    await mounted;
+    clickButton(container, "Editor");
+    // A nested listing paints directory rows first (files below them are materialized only once
+    // their directory is opened), so the tree is ready as soon as either kind of row is there.
+    await vi.waitFor(() => expect(container.querySelector(".row, .dirrow")).not.toBeNull());
+  }
+
+  function fileRow(path: string): HTMLElement {
+    const row = container.querySelector(`.row[data-path="${path}"]`);
+    if (!row) throw new Error(`no Files-tree row for "${path}"`);
+    return row as HTMLElement;
+  }
+
+  /** The directory row carrying `label`. Directory rows are materialized lazily too, so a nested
+   *  directory only has one once the directory above it has been clicked open. */
+  function dirRow(label: string): HTMLElement {
+    const row = [...container.querySelectorAll<HTMLElement>(".dirrow")].find((candidate) => candidate.querySelector(".dirlabel")?.textContent === label);
+    if (!row) throw new Error(`no Files-tree directory row labeled "${label}"`);
+    return row;
+  }
+
+  /** The `fileTreeExpandedPaths` the pane last persisted into its workspace-state snapshot. */
+  function persistedExpandedPaths(): readonly string[] {
+    const [state] = hoisted.notifyWorkspaceStateChanged.mock.calls.at(-1)!;
+    return (state as { fileTreeExpandedPaths: readonly string[] }).fileTreeExpandedPaths;
+  }
+
+  /** The open path the pane last persisted, which is also the Files tree's selected row. */
+  function persistedSelectedPath(): string | null {
+    const [state] = hoisted.notifyWorkspaceStateChanged.mock.calls.at(-1)!;
+    return (state as { fileTreeSelectedPath: string | null }).fileTreeSelectedPath;
+  }
+
+  /** Whether any state the pane persisted since the last `mockClear` named `path` as the open file. */
+  function everPersistedSelectedPath(path: string): boolean {
+    return hoisted.notifyWorkspaceStateChanged.mock.calls.some(([state]) => (state as { fileTreeSelectedPath: string | null }).fileTreeSelectedPath === path);
+  }
+
+  /** Whether the tree paints `path`'s row as the selected one (`renderFilesTree`'s `on` class). */
+  function rowIsSelected(path: string): boolean {
+    return fileRow(path).classList.contains("on");
+  }
+
+  function openMenu(path: string): string[] {
+    fileRow(path).dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 20 }));
+    return [...container.querySelectorAll<HTMLButtonElement>(".ctx-menu .item")].map((item) => item.textContent ?? "");
+  }
+
+  /** Drives the tree's Rename exactly as a user does: right-click the row, pick Rename, type the new
+   *  name into the field the row became, and commit it with Return. `source`/`destination` are the
+   *  move the device is then expected to be asked for, which is the typed name joined onto the row's
+   *  own folder rather than the typed name itself. */
+  async function renameElement(row: HTMLElement, newName: string, source: string, destination: string): Promise<void> {
+    row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 20 }));
+    const rename = [...container.querySelectorAll<HTMLButtonElement>(".ctx-menu .item")].find((item) => item.textContent === "Rename");
+    if (!rename) throw new Error(`the pointer menu for "${source}" offers no Rename`);
+    rename.click();
+    const field = row.querySelector("input.inline-name") as HTMLInputElement;
+    field.value = newName;
+    field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(hoisted.workspaceFileRename).toHaveBeenCalledWith(source, destination));
+  }
+
+  /** Renames a root-level file row, where the typed name is the destination path. */
+  async function renameRow(path: string, newName: string): Promise<void> {
+    await renameElement(fileRow(path), newName, path, newName);
+  }
+
+  it("keeps a renamed file in Quick Open's recents under its new path", async () => {
+    await mountWithFiles(["a.ts", "b.ts"]);
+    // a.ts is a recent the open buffer is not: b.ts is what the Editor holds, so nothing but the
+    // recents rewrite can carry a.ts to its destination.
+    fileRow("a.ts").click();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+    fileRow("b.ts").click();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("b.ts", "editor"));
+
+    listing(["b.ts", "renamed.ts"]);
+    await renameRow("a.ts", "renamed.ts");
+    await vi.waitFor(() => expect(container.querySelector('.row[data-path="renamed.ts"]')).not.toBeNull());
+
+    // The overlay lists recents before anything is typed, filtered against the live workspace
+    // listing, so a recent left at the emptied source path would be dropped entirely.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true }));
+    await vi.waitFor(() => expect(container.querySelector('.quick-open .row[data-path="renamed.ts"]')).not.toBeNull());
+    expect(container.querySelector('.quick-open .row[data-path="a.ts"]')).toBeNull();
+  });
+
+  it("keeps offering Open in system viewer for a renamed file the Editor cannot open as text", async () => {
+    hoisted.workspaceFileRead.mockImplementation((path: string) =>
+      path === "bin.dat"
+        ? Promise.reject(new SpacesBridgeError("invalidArgument", "File is not valid UTF-8 text."))
+        : Promise.resolve({ content: `${path} content`, sha256: `sha-${path}`, size: 1 }),
+    );
+    await mountWithFiles(["a.ts", "bin.dat"]);
+    fileRow("bin.dat").click();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("bin.dat", "editor"));
+    await vi.waitFor(() => expect(openMenu("bin.dat")).toContain("Open in system viewer"));
+
+    listing(["a.ts", "data.bin"]);
+    await renameRow("bin.dat", "data.bin");
+    await vi.waitFor(() => expect(container.querySelector('.row[data-path="data.bin"]')).not.toBeNull());
+
+    // The pane learned this file is unopenable from a read of its old path, and nothing reads it
+    // again after a move: only the rewrite keeps the offer attached to the same bytes.
+    expect(openMenu("data.bin")).toContain("Open in system viewer");
+  });
+
+  it("keeps a moved directory and everything under it expanded, at the destination", async () => {
+    await mountWithFiles(["src/b.ts", "src/util/a.ts"]);
+    dirRow("src").click();
+    dirRow("util").click();
+    await vi.waitFor(() => expect(container.querySelector('.row[data-path="src/util/a.ts"]')).not.toBeNull());
+    expect(persistedExpandedPaths()).toEqual(["src", "src/util"]);
+
+    listing(["lib/b.ts", "lib/util/a.ts"]);
+    await renameElement(dirRow("src"), "lib", "src", "lib");
+
+    // The refetched listing carries the destination's paths only, so an expansion set still keyed
+    // to the source would render the whole subtree collapsed and keep naming folders that are gone.
+    await vi.waitFor(() => expect(container.querySelector('.row[data-path="lib/util/a.ts"]')).not.toBeNull());
+    expect(persistedExpandedPaths()).toEqual(["lib", "lib/util"]);
+  });
+
+  // A move can land while the file it carries is still being read: the pane is showing the previous
+  // file (or nothing), so the Editor reissues the open at the destination instead of reporting it.
+  // Nothing may be persisted or selected until that reissued open actually shows the file.
+  it("persists and selects a file the move caught mid-open only once that open lands", async () => {
+    let resolveSourceRead: ((result: { content: string; sha256: string; size: number }) => void) | undefined;
+    hoisted.workspaceFileRead.mockImplementation((path: string) =>
+      path === "a.ts"
+        ? new Promise((resolve) => {
+            resolveSourceRead = resolve;
+          })
+        : Promise.resolve({ content: `${path} content`, sha256: `sha-${path}`, size: 1 }),
+    );
+    await mountWithFiles(["a.ts", "b.ts"]);
+
+    fileRow("a.ts").click();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+
+    listing(["b.ts", "renamed.ts"]);
+    await renameRow("a.ts", "renamed.ts");
+    await vi.waitFor(() => expect(container.querySelector('.row[data-path="renamed.ts"]')).not.toBeNull());
+    // The reissued open is what puts the destination on screen; the move itself reported nothing.
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("renamed.ts", "editor"));
+
+    resolveSourceRead!({ content: "stale bytes", sha256: "sha-a", size: 11 });
+
+    await vi.waitFor(() => expect(persistedSelectedPath()).toBe("renamed.ts"));
+    expect(rowIsSelected("renamed.ts")).toBe(true);
+  });
+
+  // The same window, but the reissued open never loads. The pane keeps showing what it had, so a
+  // persisted path or a selected row at the destination would name a file nobody can see.
+  it("persists and selects nothing when the reissued open of a file the move caught fails", async () => {
+    let resolveSourceRead: ((result: { content: string; sha256: string; size: number }) => void) | undefined;
+    hoisted.workspaceFileRead.mockImplementation((path: string) =>
+      path === "a.ts"
+        ? new Promise((resolve) => {
+            resolveSourceRead = resolve;
+          })
+        : Promise.reject(new Error("read failed")),
+    );
+    await mountWithFiles(["a.ts", "b.ts"]);
+
+    fileRow("a.ts").click();
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("a.ts", "editor"));
+    hoisted.notifyWorkspaceStateChanged.mockClear();
+
+    listing(["b.ts", "renamed.ts"]);
+    await renameRow("a.ts", "renamed.ts");
+    await vi.waitFor(() => expect(container.querySelector('.row[data-path="renamed.ts"]')).not.toBeNull());
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("renamed.ts", "editor"));
+
+    resolveSourceRead!({ content: "stale bytes", sha256: "sha-a", size: 11 });
+    // Give the rejected read's microtasks a turn to (not) report an open before asserting.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(everPersistedSelectedPath("renamed.ts")).toBe(false);
+    expect(rowIsSelected("renamed.ts")).toBe(false);
+  });
+
+  it("leaves the tree's expansion alone when the thing that moved is a file", async () => {
+    await mountWithFiles(["src/b.ts", "src/util/a.ts"]);
+    dirRow("src").click();
+    dirRow("util").click();
+    await vi.waitFor(() => expect(container.querySelector('.row[data-path="src/util/a.ts"]')).not.toBeNull());
+
+    listing(["src/c.ts", "src/util/a.ts"]);
+    await renameElement(fileRow("src/b.ts"), "c.ts", "src/b.ts", "src/c.ts");
+
+    await vi.waitFor(() => expect(container.querySelector('.row[data-path="src/c.ts"]')).not.toBeNull());
+    expect(persistedExpandedPaths()).toEqual(["src", "src/util"]);
+  });
+});
+
+// `⌘P` quick-open's window-level keydown listener fires no matter what else on the page has focus,
+// the Files tree's Move to… folder picker's own field included, since both are just DOM elements
+// with their own independent listeners. Without `pickerOverlay.ts`'s shared "one overlay at a time"
+// slot, that stacks a second `.quick-open-backdrop` on top of the still-open picker: the picker
+// stays alive underneath and could still fire its pending move once quick-open closed.
+describe("mountRoot's Files tree: Move to… and ⌘P quick-open never stack (finding 2)", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.workspaceFileList.mockReset();
+    hoisted.workspaceFileRename.mockReset();
+    capturedCodeViewOptions.current = undefined;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    hoisted.workspaceFileList.mockReset().mockRejectedValue(new Error("not used"));
+    hoisted.workspaceFileRename.mockReset().mockRejectedValue(new Error("not used"));
+    container.remove();
+  });
+
+  /** Mounts in the default Diff mode, settles the (empty) initial diff pull, then switches to Editor
+   *  mode, which is what triggers the sidebar's first Files listing fetch. */
+  async function mountWithFiles(paths: readonly string[]): Promise<void> {
+    hoisted.workspaceFileList.mockResolvedValue({ paths, truncated: false, submodules: [], emptyDirectories: [] });
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "sig-overlay-exclusivity");
+    await mounted;
+    clickButton(container, "Editor");
+    await vi.waitFor(() => expect(container.querySelector(".row, .dirrow")).not.toBeNull());
+  }
+
+  function fileRow(path: string): HTMLElement {
+    const row = container.querySelector(`.row[data-path="${path}"]`);
+    if (!row) throw new Error(`no Files-tree row for "${path}"`);
+    return row as HTMLElement;
+  }
+
+  /** Opens the pointer menu on `row` and picks its "Move to…" item, exactly as the user does. */
+  function beginMove(row: HTMLElement): void {
+    row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 20 }));
+    const moveItem = [...container.querySelectorAll<HTMLButtonElement>(".ctx-menu .item")].find((item) => item.textContent === "Move to…");
+    if (!moveItem) throw new Error("the pointer menu offers no Move to…");
+    moveItem.click();
+  }
+
+  /** Every overlay backdrop currently showing (`display` other than `none`). `.quick-open-backdrop`
+   *  is the shared class both quick-open and the folder picker mount their panel on, so more than
+   *  one here at once means two overlays are stacked rather than the newer one having closed the
+   *  older, as `pickerOverlay.ts`'s shared slot is meant to guarantee. */
+  function openBackdrops(): HTMLElement[] {
+    return [...container.querySelectorAll<HTMLElement>(".quick-open-backdrop")].filter((backdrop) => backdrop.style.display !== "none");
+  }
+
+  it("closes an open Move to… picker, cancelling its pending move, when ⌘P opens quick-open on top of it", async () => {
+    await mountWithFiles(["a.ts", "b.ts"]);
+    beginMove(fileRow("a.ts"));
+    expect(openBackdrops()).toHaveLength(1);
+    expect(openBackdrops()[0]!.querySelector(".folder-picker")).not.toBeNull();
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true }));
+
+    // Exactly one overlay is open: the folder picker's own close() ran first (the same cancellation
+    // Escape would have done), so quick-open never stacks a second backdrop over it.
+    expect(openBackdrops()).toHaveLength(1);
+    const quickOpenInput = container.querySelector<HTMLInputElement>(".quick-open:not(.folder-picker) input");
+    expect(quickOpenInput).not.toBeNull();
+    expect(openBackdrops()[0]!.contains(quickOpenInput)).toBe(true);
+    // The keyboard now belongs to quick-open, not the closed folder picker.
+    expect(document.activeElement).toBe(quickOpenInput);
+
+    // Return acts on whatever quick-open highlighted, never on the move the picker had pending: the
+    // picker's own Enter handler cannot fire on a panel that is no longer open or focused.
+    quickOpenInput!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    expect(hoisted.workspaceFileRename).not.toHaveBeenCalled();
+  });
+});
+
+// The inline diff editor is not part of Editor mode, but it outlives the switch into it: a draft
+// typed in the Changes view keeps its buffer and keeps autosaving while the Files tree is the thing
+// on screen. A rename of the file it holds therefore has to carry it too, or its next write
+// recreates the file at the path the user just moved it away from.
+describe("mountRoot's Files tree: a confirmed move carries the hidden inline diff edit", () => {
+  let container: HTMLElement;
+  const editableFile: DiffFileEntry = {
+    path: "editable.ts",
+    status: "modified",
+    isBinary: false,
+    // Coherent with the "disk before\n" read below, so the inline editor's reverse-apply hydration
+    // actually succeeds.
+    patch: "diff --git a/editable.ts b/editable.ts\n--- a/editable.ts\n+++ b/editable.ts\n@@ -1 +1 @@\n-before\n+disk before\n",
+  };
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.workspaceFileList.mockReset();
+    hoisted.workspaceFileRead.mockReset();
+    hoisted.workspaceFileRead.mockResolvedValue({ content: "disk before\n", sha256: "sha-before", size: 12 });
+    hoisted.workspaceFileWrite.mockReset();
+    hoisted.workspaceFileRename.mockReset();
+    hoisted.workspaceFileRename.mockResolvedValue(undefined);
+    hoisted.notifyWorkspaceStateChanged.mockClear();
+    capturedCodeViewOptions.current = undefined;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    hoisted.workspaceFileRead.mockReset().mockRejectedValue(new Error("not used"));
+    hoisted.workspaceFileWrite.mockReset().mockRejectedValue(new Error("not used"));
+    hoisted.workspaceFileList.mockReset().mockRejectedValue(new Error("not used"));
+    hoisted.workspaceFileRename.mockReset().mockRejectedValue(new Error("not used"));
+    container.remove();
+  });
+
+  function listing(paths: readonly string[]): void {
+    hoisted.workspaceFileList.mockResolvedValue({ paths, truncated: false, submodules: [], emptyDirectories: [] });
+  }
+
+  /** Right-click the row, pick Rename, type the new name into the field the row became, commit with
+   *  Return, the same drive as the recents/unopenable move tests above. */
+  async function renameRow(path: string, newName: string): Promise<void> {
+    const row = container.querySelector(`.row[data-path="${path}"]`);
+    if (!row) throw new Error(`no Files-tree row for "${path}"`);
+    row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 20 }));
+    const rename = [...container.querySelectorAll<HTMLButtonElement>(".ctx-menu .item")].find((item) => item.textContent === "Rename");
+    if (!rename) throw new Error(`the pointer menu for "${path}" offers no Rename`);
+    rename.click();
+    const field = container.querySelector("input.inline-name") as HTMLInputElement;
+    field.value = newName;
+    field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(hoisted.workspaceFileRename).toHaveBeenCalledWith(path, newName));
+  }
+
+  /** Leaves the pane exactly where a rename arrives: a dirty inline draft on `editable.ts` whose
+   *  first autosave write is parked in flight, with the pane switched into Editor mode so the Files
+   *  tree is on screen. Resolving the returned deferred is what lets that write report its result. */
+  async function dirtyHiddenEdit(paths: readonly string[]): Promise<(result: { ok: true; sha256: string }) => void> {
+    listing(paths);
+    let resolveWrite!: (result: { ok: true; sha256: string }) => void;
+    hoisted.workspaceFileWrite.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveWrite = resolve;
+        }),
+    );
+    // Every later write stays in flight too, so the assertions below read the call that was made
+    // rather than whatever a settled second write would have done next.
+    hoisted.workspaceFileWrite.mockImplementation(() => new Promise(() => {}));
+
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [editableFile], "hidden-edit-sig");
+    await mounted;
+
+    capturedCodeViewOptions.current!.onLineClick!(
+      { type: "diff-line", lineNumber: 1, annotationSide: "additions" },
+      { type: "diff", item: { id: "editable.ts" } },
+    );
+    await vi.waitFor(() =>
+      expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({ path: "editable.ts", dirty: false }),
+    );
+    capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "edited\n" } }, { id: "editable.ts", type: "diff" });
+    // ⌘S reaches the inline editor only while the pane is still in Diff mode, which is where the
+    // user typed. The write it starts is what is in flight when the rename lands.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "s", metaKey: true, bubbles: true, cancelable: true }));
+    await vi.waitFor(() =>
+      expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith("editable.ts", "edited\n", { baseSHA256: "sha-before", purpose: "inlineDiff" }),
+    );
+
+    clickButton(container, "Editor");
+    await vi.waitFor(() => expect(container.querySelector(`.row[data-path="${paths[0]}"]`)).not.toBeNull());
+    return resolveWrite;
+  }
+
+  it("rewrites a dirty hidden draft's path so its next autosave writes the destination", async () => {
+    const resolveWrite = await dirtyHiddenEdit(["editable.ts"]);
+
+    listing(["renamed.ts"]);
+    await renameRow("editable.ts", "renamed.ts");
+
+    // The write in flight was submitted against the emptied source path, so its hash describes a
+    // file the user moved away from: adopting it would mark this buffer clean and leave the
+    // destination holding the pre-edit bytes for good.
+    resolveWrite({ ok: true, sha256: "sha-source-written" });
+
+    await vi.waitFor(() =>
+      expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith("renamed.ts", "edited\n", { baseSHA256: "sha-before", purpose: "inlineDiff" }),
+    );
+    // The draft itself moved whole: same bytes, same dirty flag, same CAS baseline, new path.
+    expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
+      path: "renamed.ts",
+      content: "edited\n",
+      baseSHA256: "sha-before",
+      dirty: true,
+    });
+  });
+
+  it("leaves the hidden draft alone when some other file moved", async () => {
+    const resolveWrite = await dirtyHiddenEdit(["editable.ts", "other.ts"]);
+
+    listing(["editable.ts", "moved.ts"]);
+    await renameRow("other.ts", "moved.ts");
+
+    // Nothing this draft owns moved, so its write is still its own: it adopts the written hash and
+    // the buffer goes clean, with no second write to anything.
+    resolveWrite({ ok: true, sha256: "sha-written" });
+
+    await vi.waitFor(() =>
+      expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toMatchObject({
+        path: "editable.ts",
+        baseSHA256: "sha-written",
+        dirty: false,
+      }),
+    );
+    expect(hoisted.workspaceFileWrite).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Both calls a New file makes reach the daemon on one per-workspace serial queue, so their order is
+// the difference between the file appearing at once and the user watching a whole workspace listing
+// go by first.
+describe("mountRoot's Files tree: New file opens before it refetches the listing", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    hoisted.pendingDiffCalls.length = 0;
+    hoisted.workspaceDiff.mockClear();
+    hoisted.workspaceFileList.mockReset();
+    hoisted.workspaceFileRead.mockReset();
+    hoisted.workspaceFileRead.mockImplementation((path: string) =>
+      Promise.resolve({ content: "", sha256: `sha-${path}`, size: 0 }),
+    );
+    hoisted.workspaceFileWrite.mockReset();
+    hoisted.workspaceFileWrite.mockResolvedValue({ ok: true, sha256: "sha-created" });
+    container = document.createElement("div");
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    hoisted.workspaceFileRead.mockReset().mockRejectedValue(new Error("not used"));
+    hoisted.workspaceFileWrite.mockReset().mockRejectedValue(new Error("not used"));
+    hoisted.workspaceFileList.mockReset().mockRejectedValue(new Error("not used"));
+    container.remove();
+  });
+
+  it("posts the new file's read ahead of the workspace listing refetch", async () => {
+    hoisted.workspaceFileList.mockResolvedValue({ paths: ["a.ts"], truncated: false, submodules: [], emptyDirectories: [] });
+    const mounted = mountRoot(container);
+    await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
+    resolveDiff(0, [], "create-order-sig");
+    await mounted;
+    clickButton(container, "Editor");
+    await vi.waitFor(() => expect(container.querySelector('.row[data-path="a.ts"]')).not.toBeNull());
+    const listCallsBeforeCreate = hoisted.workspaceFileList.mock.calls.length;
+
+    // The workspace root's own menu, reached by right-clicking the tree's empty space.
+    const tree = container.querySelector(".editor-sidebar-list")!.firstElementChild as HTMLElement;
+    tree.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 20 }));
+    const newFile = [...container.querySelectorAll<HTMLButtonElement>(".ctx-menu .item")].find((item) => item.textContent === "New file");
+    if (!newFile) throw new Error("the workspace-root menu offers no New file");
+    newFile.click();
+    const field = container.querySelector("input.inline-name") as HTMLInputElement;
+    field.value = "fresh.ts";
+    field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() =>
+      expect(hoisted.workspaceFileWrite).toHaveBeenCalledWith("fresh.ts", "", { baseSHA256: undefined, purpose: "createFile" }),
+    );
+    await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith("fresh.ts", "editor"));
+    await vi.waitFor(() => expect(hoisted.workspaceFileList.mock.calls.length).toBeGreaterThan(listCallsBeforeCreate));
+
+    const readOrder = hoisted.workspaceFileRead.mock.invocationCallOrder.at(-1)!;
+    const listOrder = hoisted.workspaceFileList.mock.invocationCallOrder.at(-1)!;
+    expect(readOrder).toBeLessThan(listOrder);
+  });
+});
+
 describe("mountRoot for a workspace whose project is not a git repository", () => {
   const defaultInitPayload = INIT_PAYLOAD;
   let container: HTMLElement;
@@ -6618,7 +7150,7 @@ describe("mountRoot's diff line context menu", () => {
     hoisted.workspaceFileRead.mockReset();
     hoisted.workspaceFileRead.mockResolvedValue({ content: "alpha\ndelta\nepsilon\n", sha256: "sha-app", size: 22 });
     hoisted.workspaceFileList.mockReset();
-    hoisted.workspaceFileList.mockResolvedValue({ paths: [contextFile.path], truncated: false, submodules: [] });
+    hoisted.workspaceFileList.mockResolvedValue({ paths: [contextFile.path], truncated: false, submodules: [], emptyDirectories: [] });
     capturedCodeViewOptions.scrollCalls = [];
     INIT_PAYLOAD = defaultInitPayload;
     container = document.createElement("div");

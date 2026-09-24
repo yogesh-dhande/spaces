@@ -102,9 +102,9 @@ public final class SpacesDeviceAPIRequestClient: @unchecked Sendable {
         // back over a healthy connection, so it is evidence about a payload rather than about an address.
         do {
             try connection.sendLine(requestLine, timeout: remainingOrTimeout(until: deadline))
-            do { responseLine = try connection.readLine(timeout: remainingOrTimeout(until: deadline)) } catch SpacesPinnedTLSConnectionError.connectionClosed {
-                throw SpacesDeviceAPIRequestClientError.emptyResponse
-            }
+            do { responseLine = try connection.readLine(timeout: remainingOrTimeout(until: deadline)) } catch SpacesPinnedTLSConnectionError
+                .connectionClosed
+            { throw SpacesDeviceAPIRequestClientError.emptyResponse }
         } catch {
             resolver.noteStreamFailed(host: host)
             throw error
@@ -184,6 +184,53 @@ public final class SpacesDeviceAPIRequestClient: @unchecked Sendable {
 enum SpacesDeviceAPIConnectionFailure {
     static func isClosed(_ error: any Error) -> Bool {
         if case SpacesDeviceAPIRequestClientError.emptyResponse = error { return true }
+        return SpacesPinnedTLSConnector.isClosedConnectionError(error)
+    }
+}
+
+/// Whether a failed request leaves it unknown what the daemon did with it: the failure may have landed
+/// after the request reached the daemon, so a mutation it carried may have been performed with only the
+/// answer lost. A caller that must not report a mutation as refused when it may have run (the Editor's
+/// entry move) asks this before deciding, and reconciles an unknown outcome against product state.
+///
+/// The stage is not in the error itself: the pinned-TLS transport throws the same shapes for a dial and
+/// for a read. It is in the request path's structure instead. A request that is not safe to replay dials
+/// its own connection, so every failure it can see falls on one side of that dial:
+///
+/// - Before it, `SpacesDeviceEndpointResolver.connect` is what fails, and it reports only its own errors
+///   (no candidate answered, no candidate stored, a pinned-identity mismatch). Nothing was sent, and an
+///   `invalidPort` never even reached the resolver. These are definite failures.
+/// - A coded rejection is the daemon's own answer: definite too, and the caller branches on its code.
+/// - After it, the exchange is the only thing left running, so a deadline, a closed or reset connection,
+///   or an empty response all mean the request may already have been carried out. `connectionFailed` is
+///   included: on Apple platforms `NWConnection`'s send and receive failures are reported in exactly that
+///   shape, so it is a read failure on this path as often as it is a dial failure elsewhere.
+///
+/// Anything else (a client layer's own rejection, missing credentials) reads as definite, since only
+/// positive evidence that a connection carried the request makes an outcome unknown.
+public enum SpacesDeviceAPIRequestOutcome {
+    public static func mayHaveBeenPerformed(_ error: any Error) -> Bool {
+        if let requestError = error as? SpacesDeviceAPIRequestClientError {
+            switch requestError {
+            // `streamStalled` is a subscription's error, never a request's, but it says the same thing
+            // the others do: an established link stopped answering.
+            case .emptyResponse, .timeout, .connectionFailed, .streamStalled: return true
+            case .invalidPort, .requestRejected: return false
+            }
+        }
+        if let pinnedTLSError = error as? SpacesPinnedTLSConnectionError {
+            switch pinnedTLSError {
+            case .timeout, .connectionClosed, .connectionFailed: return true
+            // Neither reaches a connection: an invalid port is never dialed, and a second receive loop on
+            // one connection is a programming error caught before any send.
+            case .invalidPort, .receiveLoopActive: return false
+            }
+        }
+        // Every candidate was raced and none answered, or none is stored, or one presented the wrong
+        // identity: the dial itself failed, so nothing went out.
+        if error is SpacesDeviceEndpointResolverError { return false }
+        // The raw drop shapes the transport surfaces without wrapping (reset, aborted, broken pipe),
+        // which only an established connection can produce.
         return SpacesPinnedTLSConnector.isClosedConnectionError(error)
     }
 }

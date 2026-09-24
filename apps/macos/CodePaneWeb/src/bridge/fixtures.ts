@@ -436,6 +436,11 @@ export const FIXTURE_ALL_PATHS: string[] = [
   "sbc_hal/example_pinout.md",
 ];
 
+/** Directories the mock's workspace listing reports as holding no file of their own
+ *  (`WorkspaceFileListResult.emptyDirectories`), so the Files tree's empty-folder row is
+ *  exercisable in the dev harness without creating one through the pointer menu first. */
+export const FIXTURE_EMPTY_DIRECTORIES: string[] = ["empty-folder"];
+
 /** The mock's checked-out submodules, nested ones included, backing
  *  `WorkspaceFileListResult.submodules`. Each `commit` matches the pointer the corresponding
  *  fixture diff entry moved to, so the Files tree's chip and the Changes list's chip name the same
@@ -476,6 +481,9 @@ export const FIXTURE_INIT_PAYLOAD: CodePaneInitPayload = {
   },
   theme: "dark",
   isGitRepository: true,
+  // The dev harness stands in for a workspace on this Mac, so the Files tree's Open in system viewer
+  // item is exercisable there.
+  isLocalWorkspace: true,
   // Matches FIXTURE_REF_LIST.branches so the harness's "Branch…" search dialog demonstrates the
   // "base" badge and first-sort behavior.
   baseBranch: "main",

@@ -70,6 +70,11 @@ struct CodePaneAgentStartSnapshot: Equatable, Sendable {
     /// selected responder; this is deliberately host-owned because only the panel coordinator knows
     /// where a workspace's unselected terminal tabs belong.
     func codePaneInstallBackgroundCommandSession(workspaceID: String, deviceID: String, response: SpacesDeviceAPIResponse)
+
+    /// The workspace's checkout directory on THIS Mac, or `nil` when the workspace lives on another
+    /// device: handing a path to the Finder needs a path that exists on this machine, the same rule the
+    /// sidebar's Reveal in Finder item follows.
+    func codePaneLocalWorkspaceDirectory(workspaceID: String) -> String?
 }
 
 extension AppKitController: CodePaneHosting {
@@ -102,5 +107,13 @@ extension AppKitController: CodePaneHosting {
         applyDeviceMutationResponse(response, deviceID: deviceID, epoch: epoch)
         guard let request = Self.startedWorkspaceCommandPaneOpenRequest(deviceID: deviceID, response: response) else { return }
         _ = panelCoordinator.openOrFocusTerminalPane(request, openIntent: .init(focus: .withoutFocus))
+    }
+
+    /// Mirrors the sidebar's Reveal in Finder gating exactly (`SidebarController`'s context-menu
+    /// builder around its `isLocalWorkspace` check): a workspace on another device has no directory on
+    /// this Mac to hand to `NSWorkspace`.
+    func codePaneLocalWorkspaceDirectory(workspaceID: String) -> String? {
+        guard let (_, workspace) = findWorkspace(id: workspaceID), isLocalWorkspace(workspace) else { return nil }
+        return workspace.dir
     }
 }

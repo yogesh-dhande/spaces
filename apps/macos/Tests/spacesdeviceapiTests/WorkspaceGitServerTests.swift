@@ -1236,11 +1236,125 @@
                             .init(
                                 workspaceID: workspaceID, relativePath: "inline-link.md",
                                 base64Data: Data("edited target".utf8).base64EncodedString(),
-                                expectedSHA256: SpacesDeviceWorkspaceGitHashing.sha256Hex(original), requiresDirectPath: true)), authToken: authToken,
+                                expectedSHA256: SpacesDeviceWorkspaceGitHashing.sha256Hex(original), purpose: .inlineDiff)), authToken: authToken,
                         clientApp: clientApp))
                 XCTAssertFalse(writeResponse.ok)
                 XCTAssertEqual(writeResponse.errorCode, .invalidArgument)
                 XCTAssertEqual(try Data(contentsOf: target), original, "an inline diff save must not follow the symlink into its target")
+            }
+        }
+
+        /// The Files tree's New file is this same write with the `createFile` purpose. A dangling symlink
+        /// inside the workspace is where the two resolutions visibly diverge: the ordinary Editor write
+        /// recreates the link's target (the test above), while a create from the tree must refuse, because
+        /// the user named the link's own path and creating the target instead puts the new file somewhere
+        /// the tree never showed.
+        func testDirectPathFileWriteRefusesCreatingThroughADanglingSymlink() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                try FileManager.default.createSymbolicLink(
+                    atPath: repo.appendingPathComponent("dangling-link.md").path, withDestinationPath: "elsewhere.md")
+                try FileManager.default.createSymbolicLink(atPath: repo.appendingPathComponent("linked-dir").path, withDestinationPath: ".")
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "dangling-link.md", base64Data: "", expectedSHA256: nil, purpose: .createFile)
+                        ), authToken: authToken, clientApp: clientApp))
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertFalse(
+                    FileManager.default.fileExists(atPath: repo.appendingPathComponent("elsewhere.md").path),
+                    "the create must not have followed the link to its target")
+
+                let prefixResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "linked-dir/created.md", base64Data: "", expectedSHA256: nil,
+                                purpose: .createFile)), authToken: authToken, clientApp: clientApp))
+                XCTAssertFalse(prefixResponse.ok)
+                XCTAssertEqual(prefixResponse.errorCode, .invalidArgument)
+                XCTAssertFalse(
+                    FileManager.default.fileExists(atPath: repo.appendingPathComponent("created.md").path),
+                    "the create must not have followed a symlinked prefix")
+            }
+        }
+
+        /// New file is a strict create, not a compare-and-swap: a path that already holds something is
+        /// refused outright. An EMPTY file is the case the compare-and-swap rules get wrong on their own:
+        /// its bytes are identical to the empty content New file sends, so the idempotent-retry branch
+        /// would answer `didWrite: true` for a file this request did not create, and the tree would report
+        /// a creation and then open a file that was already there.
+        func testCreateFileWriteRefusesAPathThatAlreadyHoldsAnEmptyFile() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let existing = repo.appendingPathComponent("occupied.md")
+                try Data().write(to: existing)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "occupied.md", base64Data: "", expectedSHA256: nil, purpose: .createFile)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok, response.message)
+                XCTAssertEqual(response.errorCode, .conflict)
+                XCTAssertNil(response.workspaceFileWrite, "a refused create reports no write result to mistake for a landed write")
+            }
+        }
+
+        /// The same strict create against a path holding content, and against a directory: both are
+        /// refused as conflicts, and the file on disk is left exactly as it was.
+        func testCreateFileWriteRefusesANonEmptyFileAndADirectoryWithoutTouchingThem() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let existing = repo.appendingPathComponent("notes.md")
+                let original = Data("keep me".utf8)
+                try original.write(to: existing)
+                try FileManager.default.createDirectory(at: repo.appendingPathComponent("folder"), withIntermediateDirectories: true)
+
+                let fileResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "notes.md", base64Data: "", expectedSHA256: nil, purpose: .createFile)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertFalse(fileResponse.ok)
+                XCTAssertEqual(fileResponse.errorCode, .conflict)
+                XCTAssertEqual(try Data(contentsOf: existing), original, "a refused create must not have touched the file already there")
+
+                let directoryResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "folder", base64Data: "", expectedSHA256: nil, purpose: .createFile)),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertFalse(directoryResponse.ok)
+                XCTAssertEqual(directoryResponse.errorCode, .conflict)
+            }
+        }
+
+        /// A create is decided by taking the name, never by comparing content: a path already holding
+        /// exactly the bytes this request carries is refused like any other occupied path. The
+        /// compare-and-swap rules an ordinary write runs read those bytes as a retry of a write that
+        /// already landed and report `didWrite: true`, which for New file would claim a creation that never
+        /// happened and hand the user a file someone else wrote.
+        func testCreateFileWriteRefusesAPathAlreadyHoldingTheBytesItWouldWrite() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let existing = Data("written by someone else".utf8)
+                try existing.write(to: repo.appendingPathComponent("raced.md"))
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "raced.md", base64Data: existing.base64EncodedString(), expectedSHA256: nil,
+                                purpose: .createFile)), authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok, response.message)
+                XCTAssertEqual(response.errorCode, .conflict)
+                XCTAssertNil(response.workspaceFileWrite, "a refused create reports no write result to mistake for a landed write")
+                XCTAssertEqual(try Data(contentsOf: repo.appendingPathComponent("raced.md")), existing, "the file already there is left as it was")
             }
         }
 
@@ -1255,6 +1369,543 @@
 
                 XCTAssertFalse(response.ok)
                 XCTAssertEqual(response.errorCode, .notFound)
+            }
+        }
+
+        // MARK: - workspaceFileCreateDirectory / workspaceFileRename / workspaceFileDelete
+
+        func testWorkspaceFileCreateDirectoryMakesItExistAndAppearsAsEmptyInTheFileList() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileCreateDirectory(
+                            SpacesDeviceWorkspaceFileCreateDirectoryRequest(workspaceID: workspaceID, relativePath: "new-folder")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(response.ok, response.message)
+
+                var isDirectory: ObjCBool = false
+                XCTAssertTrue(FileManager.default.fileExists(atPath: repo.appendingPathComponent("new-folder").path, isDirectory: &isDirectory))
+                XCTAssertTrue(isDirectory.boolValue)
+
+                let listResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertTrue(listResponse.ok, listResponse.message)
+                let listResult = try XCTUnwrap(listResponse.workspaceFileList)
+                XCTAssertTrue(listResult.emptyDirectories.contains("new-folder"))
+                XCTAssertFalse(listResult.paths.contains("new-folder"))
+            }
+        }
+
+        // A folder created inside a folder that is itself empty: git names only the outermost untracked
+        // directory, so the inner one survives a listing refresh only because the listing expands into it.
+        func testWorkspaceFileCreateDirectoryInsideAnEmptyFolderStaysInTheFileList() throws {
+            try withWorkspaceFixture { workspaceID, _, server, requestClient, clientApp, authToken in
+                for path in ["foo", "foo/bar"] {
+                    let response = try requestClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .workspaceFileCreateDirectory(
+                                SpacesDeviceWorkspaceFileCreateDirectoryRequest(workspaceID: workspaceID, relativePath: path)), authToken: authToken,
+                            clientApp: clientApp))
+                    XCTAssertTrue(response.ok, response.message)
+                }
+
+                let listResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertTrue(listResponse.ok, listResponse.message)
+                let listResult = try XCTUnwrap(listResponse.workspaceFileList)
+                XCTAssertTrue(listResult.emptyDirectories.contains("foo/bar"))
+                XCTAssertFalse(listResult.emptyDirectories.contains("foo"), "foo holds bar, so bar is the empty one")
+            }
+        }
+
+        // A folder name that is also a git pathspec glob (`[id]` is a character class, `*` a wildcard)
+        // must still be matched as a literal path when the empty-directory scan re-queries it, or git
+        // reports the parent instead of the created leaf and the expansion loops until its call budget is
+        // spent without ever finding it. See `gitUntrackedDirectories`'s doc comment.
+        func testWorkspaceFileCreateDirectoryWithPathspecGlobCharactersStaysInTheFileList() throws {
+            try withWorkspaceFixture { workspaceID, _, server, requestClient, clientApp, authToken in
+                for path in ["app", "app/[id]"] {
+                    let response = try requestClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .workspaceFileCreateDirectory(
+                                SpacesDeviceWorkspaceFileCreateDirectoryRequest(workspaceID: workspaceID, relativePath: path)), authToken: authToken,
+                            clientApp: clientApp))
+                    XCTAssertTrue(response.ok, response.message)
+                }
+
+                let listResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertTrue(listResponse.ok, listResponse.message)
+                let listResult = try XCTUnwrap(listResponse.workspaceFileList)
+                XCTAssertTrue(listResult.emptyDirectories.contains("app/[id]"))
+                XCTAssertFalse(listResult.truncated)
+            }
+        }
+
+        // A sibling case with a literal `*`, git's own wildcard character, exercising the same fix.
+        func testWorkspaceFileCreateDirectoryWithAsteriskInNameStaysInTheFileList() throws {
+            try withWorkspaceFixture { workspaceID, _, server, requestClient, clientApp, authToken in
+                for path in ["parent", "parent/*"] {
+                    let response = try requestClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .workspaceFileCreateDirectory(
+                                SpacesDeviceWorkspaceFileCreateDirectoryRequest(workspaceID: workspaceID, relativePath: path)), authToken: authToken,
+                            clientApp: clientApp))
+                    XCTAssertTrue(response.ok, response.message)
+                }
+
+                let listResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertTrue(listResponse.ok, listResponse.message)
+                let listResult = try XCTUnwrap(listResponse.workspaceFileList)
+                XCTAssertTrue(listResult.emptyDirectories.contains("parent/*"))
+                XCTAssertFalse(listResult.truncated)
+            }
+        }
+
+        // A file created inside a glob-named folder must resolve through the same literal pathspec, not
+        // just an otherwise-empty one: the folder holding a listed file is what `gitUntrackedDirectories`
+        // has to enumerate correctly for `listedPrefixes` to see it as non-empty rather than as an empty
+        // leaf reported twice over.
+        func testWorkspaceFileCreatedInsideAPathspecGlobFolderIsListed() throws {
+            try withWorkspaceFixture { workspaceID, _, server, requestClient, clientApp, authToken in
+                let createDirectoryResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileCreateDirectory(
+                            SpacesDeviceWorkspaceFileCreateDirectoryRequest(workspaceID: workspaceID, relativePath: "app/[id]")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(createDirectoryResponse.ok, createDirectoryResponse.message)
+
+                let writeResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "app/[id]/page.tsx", base64Data: "", expectedSHA256: nil, purpose: .createFile
+                            )), authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(writeResponse.ok, writeResponse.message)
+
+                let listResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertTrue(listResponse.ok, listResponse.message)
+                let listResult = try XCTUnwrap(listResponse.workspaceFileList)
+                XCTAssertTrue(listResult.paths.contains("app/[id]/page.tsx"))
+                XCTAssertFalse(listResult.emptyDirectories.contains("app/[id]"), "app/[id] holds page.tsx, so it is not empty")
+                XCTAssertFalse(listResult.truncated)
+            }
+        }
+
+        /// Commits `foo/a` into the fixture repository, the setup both tracked-but-deleted cases below
+        /// start from: a folder whose only content is one tracked file.
+        private func commitTrackedFileInFolder(repo: URL) throws {
+            try FileManager.default.createDirectory(at: repo.appendingPathComponent("foo"), withIntermediateDirectories: true)
+            try "tracked".write(to: repo.appendingPathComponent("foo/a"), atomically: true, encoding: .utf8)
+            try runGit(["add", "foo/a"], cwd: repo.path)
+            try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add foo/a"], cwd: repo.path)
+        }
+
+        // Deleting a folder's last tracked file leaves the folder itself on disk, holding nothing. Git's
+        // untracked-directory listing passes over it while the index still names the deleted file, so the
+        // folder has a row only because the listing also scans what the deleted paths leave behind.
+        func testDeletingTheLastTrackedFileInAFolderKeepsThatFolderInTheFileList() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                try commitTrackedFileInFolder(repo: repo)
+
+                let deleteResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileDelete(SpacesDeviceWorkspaceFileDeleteRequest(workspaceID: workspaceID, relativePath: "foo/a")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(deleteResponse.ok, deleteResponse.message)
+
+                let listResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertTrue(listResponse.ok, listResponse.message)
+                let listResult = try XCTUnwrap(listResponse.workspaceFileList)
+                XCTAssertFalse(listResult.paths.contains("foo/a"), "the deleted file is gone from the listing")
+                XCTAssertTrue(listResult.emptyDirectories.contains("foo"), "foo is still on disk and now holds nothing")
+            }
+        }
+
+        // The same folder emptied the other way the Files tree can empty it: its last tracked file moved
+        // out of it rather than deleted.
+        func testMovingTheLastTrackedFileOutOfAFolderKeepsThatFolderInTheFileList() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                try commitTrackedFileInFolder(repo: repo)
+
+                let renameResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRename(
+                            SpacesDeviceWorkspaceFileRenameRequest(workspaceID: workspaceID, relativePath: "foo/a", destinationRelativePath: "a")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertTrue(renameResponse.ok, renameResponse.message)
+
+                let listResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertTrue(listResponse.ok, listResponse.message)
+                let listResult = try XCTUnwrap(listResponse.workspaceFileList)
+                XCTAssertTrue(listResult.paths.contains("a"), "the file is listed at its destination")
+                XCTAssertFalse(listResult.paths.contains("foo/a"))
+                XCTAssertTrue(listResult.emptyDirectories.contains("foo"), "the source folder is still on disk and now holds nothing")
+            }
+        }
+
+        // The same chain, carried deeper than any fixed cutoff: git names only the outermost untracked
+        // directory however deep the chain runs, so the listing has to follow it all the way down or the
+        // folder the user just created disappears from the Files tree on the reload that follows it.
+        func testWorkspaceFileCreateDirectoryTenLevelsDeepStaysInTheFileList() throws {
+            try withWorkspaceFixture { workspaceID, _, server, requestClient, clientApp, authToken in
+                let levels = ["l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10"]
+                var built: [String] = []
+                for level in levels {
+                    built.append(level)
+                    let path = built.joined(separator: "/")
+                    let response = try requestClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .workspaceFileCreateDirectory(
+                                SpacesDeviceWorkspaceFileCreateDirectoryRequest(workspaceID: workspaceID, relativePath: path)), authToken: authToken,
+                            clientApp: clientApp))
+                    XCTAssertTrue(response.ok, response.message)
+                }
+
+                let listResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertTrue(listResponse.ok, listResponse.message)
+                let listResult = try XCTUnwrap(listResponse.workspaceFileList)
+                let deepest = levels.joined(separator: "/")
+                XCTAssertTrue(listResult.emptyDirectories.contains(deepest), "the deepest folder is the empty leaf and must be listed")
+                XCTAssertFalse(listResult.truncated, "a chain this deep is well inside the expansion budget")
+                // Only the leaf: the client rebuilds every directory above it from that one path.
+                XCTAssertFalse(listResult.emptyDirectories.contains("l1/l2/l3/l4/l5/l6/l7/l8"))
+            }
+        }
+
+        // The expansion's one bound is the number of git calls it may spawn, shared across the whole
+        // listing. A workspace holding more untracked directories to expand than that budget allows stops
+        // early and says so, rather than reporting a short list as if it were complete.
+        func testFileListReportsTruncatedWhenEmptyDirectoryExpansionExhaustsItsCallBudget() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                // Each top-level folder holds one subfolder, so each costs the expansion one git call;
+                // 300 of them is past the 256-call budget.
+                for index in 0..<300 {
+                    try FileManager.default.createDirectory(
+                        at: repo.appendingPathComponent(String(format: "d%03d/sub", index)), withIntermediateDirectories: true)
+                }
+
+                let listResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertTrue(listResponse.ok, listResponse.message)
+                let listResult = try XCTUnwrap(listResponse.workspaceFileList)
+                XCTAssertTrue(listResult.truncated, "the expansion ran out of calls, which the client is told about")
+            }
+        }
+
+        func testWorkspaceFileCreateDirectoryOnAnExistingPathIsRefusedAndLeavesItUntouched() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let existing = Data("do not touch".utf8)
+                try existing.write(to: repo.appendingPathComponent("README.md"))
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileCreateDirectory(
+                            SpacesDeviceWorkspaceFileCreateDirectoryRequest(workspaceID: workspaceID, relativePath: "README.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .conflict)
+                XCTAssertEqual(try Data(contentsOf: repo.appendingPathComponent("README.md")), existing)
+            }
+        }
+
+        /// The same refusal when a folder is already there, which is the case the create decides by taking
+        /// the name: `mkdir` reports that the name is taken, and what the existing folder holds is left
+        /// alone rather than merged into.
+        func testWorkspaceFileCreateDirectoryOnAnExistingFolderIsRefusedAndKeepsWhatItHolds() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let folder = repo.appendingPathComponent("existing-folder")
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                let kept = Data("keep me".utf8)
+                try kept.write(to: folder.appendingPathComponent("inside.md"))
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileCreateDirectory(
+                            SpacesDeviceWorkspaceFileCreateDirectoryRequest(workspaceID: workspaceID, relativePath: "existing-folder")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok, response.message)
+                XCTAssertEqual(response.errorCode, .conflict)
+                XCTAssertEqual(try Data(contentsOf: folder.appendingPathComponent("inside.md")), kept)
+            }
+        }
+
+        func testWorkspaceFileCreateDirectoryEscapingTheWorkspaceIsRefusedAndCreatesNothingOutside() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileCreateDirectory(
+                            SpacesDeviceWorkspaceFileCreateDirectoryRequest(workspaceID: workspaceID, relativePath: "../outside")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: repo.deletingLastPathComponent().appendingPathComponent("outside").path))
+            }
+        }
+
+        func testWorkspaceFileRenameMovesBytesToTheNewPathAndRemovesTheOldOne() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let content = Data("initial".utf8)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRename(
+                            SpacesDeviceWorkspaceFileRenameRequest(
+                                workspaceID: workspaceID, relativePath: "README.md", destinationRelativePath: "RENAMED.md")), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: repo.appendingPathComponent("README.md").path))
+                XCTAssertEqual(try Data(contentsOf: repo.appendingPathComponent("RENAMED.md")), content)
+            }
+        }
+
+        func testWorkspaceFileRenameOntoAnExistingPathIsRefusedAndNeitherFileChanges() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let source = Data("source content".utf8)
+                try source.write(to: repo.appendingPathComponent("SOURCE.md"))
+                let destination = Data("destination content".utf8)
+                try destination.write(to: repo.appendingPathComponent("DESTINATION.md"))
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRename(
+                            SpacesDeviceWorkspaceFileRenameRequest(
+                                workspaceID: workspaceID, relativePath: "SOURCE.md", destinationRelativePath: "DESTINATION.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .conflict)
+                XCTAssertEqual(try Data(contentsOf: repo.appendingPathComponent("SOURCE.md")), source)
+                XCTAssertEqual(try Data(contentsOf: repo.appendingPathComponent("DESTINATION.md")), destination)
+            }
+        }
+
+        func testWorkspaceFileRenameOfAMissingPathReturnsNotFound() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRename(
+                            SpacesDeviceWorkspaceFileRenameRequest(
+                                workspaceID: workspaceID, relativePath: "MISSING.md", destinationRelativePath: "RENAMED.md")), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .notFound)
+            }
+        }
+
+        func testWorkspaceFileRenameAFolderIntoItselfIsRefused() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let folder = repo.appendingPathComponent("folder")
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRename(
+                            SpacesDeviceWorkspaceFileRenameRequest(
+                                workspaceID: workspaceID, relativePath: "folder", destinationRelativePath: "folder/nested")), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertTrue(FileManager.default.fileExists(atPath: folder.path))
+            }
+        }
+
+        func testWorkspaceFileRenameWithAnEscapingDestinationIsRefused() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRename(
+                            SpacesDeviceWorkspaceFileRenameRequest(
+                                workspaceID: workspaceID, relativePath: "README.md", destinationRelativePath: "../outside.md")), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertTrue(FileManager.default.fileExists(atPath: repo.appendingPathComponent("README.md").path))
+                XCTAssertFalse(FileManager.default.fileExists(atPath: repo.deletingLastPathComponent().appendingPathComponent("outside.md").path))
+            }
+        }
+
+        func testWorkspaceFileDeleteRemovesAFile() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileDelete(SpacesDeviceWorkspaceFileDeleteRequest(workspaceID: workspaceID, relativePath: "README.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: repo.appendingPathComponent("README.md").path))
+            }
+        }
+
+        func testWorkspaceFileDeleteOfAFolderRemovesTheWholeSubtree() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let nested = repo.appendingPathComponent("folder/nested")
+                try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+                try Data("inner".utf8).write(to: nested.appendingPathComponent("inner.md"))
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileDelete(SpacesDeviceWorkspaceFileDeleteRequest(workspaceID: workspaceID, relativePath: "folder")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: repo.appendingPathComponent("folder").path))
+            }
+        }
+
+        func testWorkspaceFileDeleteOfAMissingPathReturnsNotFound() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileDelete(SpacesDeviceWorkspaceFileDeleteRequest(workspaceID: workspaceID, relativePath: "MISSING.md")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .notFound)
+            }
+        }
+
+        func testWorkspaceFileDeleteOfAnEscapingPathIsRefusedAndRemovesNothingOutside() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let outside = repo.deletingLastPathComponent().appendingPathComponent("delete-outside-\(UUID().uuidString).md")
+                try Data("must survive".utf8).write(to: outside)
+                defer { try? FileManager.default.removeItem(at: outside) }
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileDelete(
+                            SpacesDeviceWorkspaceFileDeleteRequest(workspaceID: workspaceID, relativePath: "../\(outside.lastPathComponent)")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertTrue(FileManager.default.fileExists(atPath: outside.path))
+            }
+        }
+
+        /// A delete or a rename whose path passes through a symlink must be refused rather than follow the
+        /// link to act on its target: `resolveDirectPath` is what these two handlers use instead of the
+        /// ordinary `resolveContainedPath`, exactly so a mutation acts on the entry the Files tree shows,
+        /// never on wherever a link happens to point.
+        func testWorkspaceFileDeleteAndRenameThroughASymlinkAreRefusedAndTheTargetSurvives() throws {
+            try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
+                let target = repo.appendingPathComponent("target.md")
+                let targetContent = Data("must survive".utf8)
+                try targetContent.write(to: target)
+                try FileManager.default.createSymbolicLink(atPath: repo.appendingPathComponent("link.md").path, withDestinationPath: "target.md")
+
+                let deleteResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileDelete(SpacesDeviceWorkspaceFileDeleteRequest(workspaceID: workspaceID, relativePath: "link.md")),
+                        authToken: authToken, clientApp: clientApp))
+                XCTAssertFalse(deleteResponse.ok)
+                XCTAssertEqual(deleteResponse.errorCode, .invalidArgument)
+
+                let renameResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRename(
+                            SpacesDeviceWorkspaceFileRenameRequest(
+                                workspaceID: workspaceID, relativePath: "link.md", destinationRelativePath: "renamed-link.md")), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertFalse(renameResponse.ok)
+                XCTAssertEqual(renameResponse.errorCode, .invalidArgument)
+
+                XCTAssertTrue(FileManager.default.fileExists(atPath: repo.appendingPathComponent("link.md").path))
+                XCTAssertEqual(try Data(contentsOf: target), targetContent)
+            }
+        }
+
+        /// A raw filesystem move of a submodule checkout breaks the superproject's gitlink and the
+        /// checkout's own relative `.git` file, so `workspaceFileRename` must refuse it up front rather
+        /// than let `FileManager.moveItem` corrupt both.
+        func testWorkspaceFileRenameOfASubmoduleCheckoutIsRefused() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let source = try addSubmoduleFixture(to: repo, at: "sub")
+                defer { try? FileManager.default.removeItem(at: source) }
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRename(
+                            SpacesDeviceWorkspaceFileRenameRequest(
+                                workspaceID: workspaceID, relativePath: "sub", destinationRelativePath: "sub-renamed")), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertEqual(response.message, "Path is or contains a git submodule; move or delete it with git.")
+                XCTAssertFalse(FileManager.default.fileExists(atPath: repo.appendingPathComponent("sub-renamed").path))
+                XCTAssertEqual(try Data(contentsOf: repo.appendingPathComponent("sub/FILE.txt")), Data("sub content".utf8))
+            }
+        }
+
+        /// The same refusal applies when the deleted path is a directory that CONTAINS a submodule
+        /// checkout, not the checkout itself: removing "container" would take the checkout's gitdir with
+        /// it just the same.
+        func testWorkspaceFileDeleteOfADirectoryContainingASubmoduleIsRefused() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let source = try addSubmoduleFixture(to: repo, at: "container/sub")
+                defer { try? FileManager.default.removeItem(at: source) }
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileDelete(SpacesDeviceWorkspaceFileDeleteRequest(workspaceID: workspaceID, relativePath: "container")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertEqual(response.message, "Path is or contains a git submodule; move or delete it with git.")
+                XCTAssertEqual(try Data(contentsOf: repo.appendingPathComponent("container/sub/FILE.txt")), Data("sub content".utf8))
+            }
+        }
+
+        /// The refusal is scoped to paths that are or contain a checkout: an ordinary sibling file in a
+        /// repository that happens to have a submodule still renames normally.
+        func testWorkspaceFileRenameOfASiblingNextToASubmoduleStillSucceeds() throws {
+            try withWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                let source = try addSubmoduleFixture(to: repo, at: "sub")
+                defer { try? FileManager.default.removeItem(at: source) }
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRename(
+                            SpacesDeviceWorkspaceFileRenameRequest(
+                                workspaceID: workspaceID, relativePath: "README.md", destinationRelativePath: "RENAMED.md")), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: repo.appendingPathComponent("README.md").path))
+                XCTAssertTrue(FileManager.default.fileExists(atPath: repo.appendingPathComponent("RENAMED.md").path))
+                XCTAssertTrue(FileManager.default.fileExists(atPath: repo.appendingPathComponent("sub").path))
             }
         }
 
@@ -4030,6 +4681,42 @@
             }
         }
 
+        // The Editor treats a submodule's files as ordinary workspace files, so a folder created inside a
+        // checkout has to survive the refetch that follows the mutation. Git's untracked-directory listing
+        // stops at a gitlink, so the workspace's own scan alone would never report these and the new folder
+        // would disappear from the tree the moment the listing came back.
+        func testWorkspaceFileListReportsEmptyDirectoriesInsideInitializedSubmodules() throws {
+            try withNestedSubmoduleWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
+                for created in ["A/new-in-submodule", "A/B/new-in-nested-submodule", "top-level-new"] {
+                    let response = try requestClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .workspaceFileCreateDirectory(
+                                SpacesDeviceWorkspaceFileCreateDirectoryRequest(workspaceID: workspaceID, relativePath: created)),
+                            authToken: authToken, clientApp: clientApp))
+                    XCTAssertTrue(response.ok, response.message)
+                }
+
+                let listResponse = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+                XCTAssertTrue(listResponse.ok, listResponse.message)
+                let listResult = try XCTUnwrap(listResponse.workspaceFileList)
+                XCTAssertTrue(listResult.emptyDirectories.contains("top-level-new"))
+                XCTAssertTrue(listResult.emptyDirectories.contains("A/new-in-submodule"))
+                XCTAssertTrue(listResult.emptyDirectories.contains("A/B/new-in-nested-submodule"))
+                // The checkouts themselves hold files, so they are never reported as empty.
+                XCTAssertFalse(listResult.emptyDirectories.contains("A"))
+                XCTAssertFalse(listResult.emptyDirectories.contains("A/B"))
+                XCTAssertEqual(listResult.emptyDirectories, listResult.emptyDirectories.sorted())
+                XCTAssertFalse(listResult.truncated)
+
+                XCTAssertTrue(
+                    FileManager.default.fileExists(atPath: repo.appendingPathComponent("A/B/new-in-nested-submodule").path),
+                    "the create landed inside the nested checkout, not under a same-named path in the superproject")
+            }
+        }
+
         // Review comments key off the workspace-relative path the diff row carries, so a submodule file's
         // path round-trips like any other without the store or the handler knowing about submodules.
         func testWorkspaceReviewCommentUpsertKeepsASubmoduleFilePath() throws {
@@ -4143,6 +4830,19 @@
 
                 try body(workspaceID, repo, server, requestClient, clientApp, authToken)
             }
+        }
+
+        /// Adds a real checked-out submodule at `path` inside `repo` and commits the gitlink, returning
+        /// the throwaway source repository it was cloned from so the caller can remove it. The mutation
+        /// refusals need a genuine checkout, since the daemon looks for a tracked gitlink whose own HEAD
+        /// resolves, exactly what the Files listing reports as a submodule.
+        private func addSubmoduleFixture(to repo: URL, at path: String) throws -> URL {
+            let source = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "spaces-workspace-git-server-submodule-source-\(UUID().uuidString)", isDirectory: true)
+            try makeSourceRepository(at: source, file: "FILE.txt", contents: "sub content")
+            try runGit(["-c", "protocol.file.allow=always", "submodule", "add", "-q", source.path, path], cwd: repo.path)
+            try commitAllForFixture(repo, message: "add submodule at \(path)")
+            return source
         }
 
         private func makeSourceRepository(at url: URL, file: String, contents: String) throws {

@@ -21,7 +21,7 @@ import Testing
 /// `SpacesDeviceAPICommandDescriptor`'s own switch, so a descriptor case that silently drifted fails here
 /// even though the descriptor's own exhaustiveness check would not catch it. Samples come from
 /// `SpacesDeviceAPICommandWireKeyTests.samples` (one instance per case) so this suite exercises the
-/// identical 76 commands that file's wire-key assertions do, rather than a second hand-built payload table
+/// identical 79 commands that file's wire-key assertions do, rather than a second hand-built payload table
 /// that could drift out of sync with that one.
 @Suite struct SpacesDeviceAPICommandDescriptorTests {
     @Test func descriptorLaneMatchesTheIntendedPerCommandGrouping() {
@@ -37,6 +37,24 @@ import Testing
             #expect(
                 command.descriptor.timeoutSeconds == Self.expectedTimeoutSeconds(for: command),
                 "\(command.descriptor.wireKey): descriptor.timeoutSeconds did not match the pre-migration client switch")
+        }
+    }
+
+    /// The Files tree's rename/move takes the long-running mutation deadline its two sibling mutations
+    /// take, and not a wait without one: its reply drives work only that reply can produce (moving the open
+    /// buffer to the destination), but a peer that stops answering without closing the socket would leave a
+    /// deadline-free wait blocked forever. The deadline is an unknown outcome rather than a failure, which
+    /// the Editor resolves by re-reading the listing (see `CodePaneContentController`).
+    @Test func theEntryMoveTakesTheLongRunningMutationDeadlineItsSiblingMutationsTake() {
+        let moves = SpacesDeviceAPICommandWireKeyTests.samples.filter { command in
+            if case .workspaceFileRename = command { return true }
+            return false
+        }
+        #expect(moves.count == 1, "the wire-key samples must carry exactly one entry move for this to pin")
+        for move in moves {
+            #expect(
+                move.descriptor.timeoutSeconds == SpacesDeviceAPICommand.longRunningMutationTimeoutSeconds,
+                "the entry move must share the long-running mutation deadline create-folder and delete take on their common queue")
         }
     }
 
@@ -86,8 +104,9 @@ import Testing
         case .terminalControl, .terminalPasteImage, .sendTerminalInput, .state, .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete,
             .workspaceReviewCommentsSend:
             .terminalControl
-        case .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease,
-            .workspaceDiffFileChunk, .workspaceFileList, .workspaceRefList:
+        case .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileWrite, .workspaceFileCreateDirectory, .workspaceFileRename,
+            .workspaceFileDelete, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease, .workspaceDiffFileChunk, .workspaceFileList,
+            .workspaceRefList:
             .workspaceGit
         default: .mainQueue
         }
@@ -101,14 +120,19 @@ import Testing
     /// does not depend on `spacesclientcore` (which `spacesdevicecoreTests` does not, and should not, link
     /// against). `.terminalTranscript` is the one case that is not in any of those groups: its response is
     /// as large as the caller asked for, so its deadline is written out here as the same 10-second
-    /// allowance plus one second per 64 KiB of page the policy budgets.
+    /// allowance plus one second per 64 KiB of page the policy budgets. The Files-tree create-folder and
+    /// delete that postdate that switch take the long-running mutation deadline: they share one serial
+    /// per-workspace queue with the 60-second reads, writes, listings, and diff chunks, so their wait is
+    /// the queue's, not their own one-entry cost. The rename/move on that same queue takes it for the same
+    /// reason (see `theEntryMoveTakesTheLongRunningMutationDeadlineItsSiblingMutationsTake`).
     private static func expectedTimeoutSeconds(for command: SpacesDeviceAPICommand) -> TimeInterval {
         switch command {
         case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
             .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .startWorkspaceCommandSession, .stopWorkspaceTerminal,
             .stopWorkspaceTerminalIfBareShell, .runWorkspaceProcess, .stopWorkspaceProcess, .restartWorkspaceProcess, .stopCodingAgent,
             .installAgentHooks, .spawnAgentSession, .killAgentSession, .createAutomation, .updateAutomation, .setAutomationNextRun, .deleteAutomation,
-            .triggerAutomation, .cancelAutomationRun, .endAutomationAgents, .restoreSessions, .discardRestorableSessions:
+            .triggerAutomation, .cancelAutomationRun, .endAutomationAgents, .restoreSessions, .discardRestorableSessions, .workspaceFileDelete,
+            .workspaceFileCreateDirectory, .workspaceFileRename:
             60
         case .agentHooksStatus: 20
         // Clamped to `TerminalScrollbackBudget.defaultMaxBytes`, written out here as its literal value for

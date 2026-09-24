@@ -16,6 +16,7 @@ import spacesterminalcore
     func codePaneCurrentAppearance() -> ThemeAppearance { .dark }
     func codePaneRunningAgents(workspaceID: String) -> [CodePaneRunningAgent] { [] }
     func codePaneInstallBackgroundCommandSession(workspaceID: String, deviceID: String, response: SpacesDeviceAPIResponse) {}
+    func codePaneLocalWorkspaceDirectory(workspaceID: String) -> String? { nil }
 }
 
 /// A `CodePaneHosting` double that resolves to a real (fake-populated) device, for the RPC-dispatch
@@ -31,6 +32,11 @@ import spacesterminalcore
     /// Settable so a test can present the workspace as living in a plain (non-git) project — the
     /// one fact the pane's seeded mode and its `spaces:init` payload branch on.
     var isGitRepository = true
+
+    /// Settable so a test can present the workspace as local (a directory on this Mac) or remote
+    /// (`nil`) for `openInSystemViewer`, `nil` by default, matching a workspace this double otherwise
+    /// says nothing about being local.
+    var localWorkspaceDirectory: String?
 
     init(device: SpacesPairedDeviceRecord, agents: [CodePaneRunningAgent] = []) {
         self.device = device
@@ -49,6 +55,7 @@ import spacesterminalcore
         }
         onInstallBackgroundCommandSession?()
     }
+    func codePaneLocalWorkspaceDirectory(workspaceID: String) -> String? { localWorkspaceDirectory }
 }
 
 /// A `CodePaneHosting` double whose `codePaneDevice` lookup fails (returns `nil`) for a configurable
@@ -80,6 +87,7 @@ import spacesterminalcore
     func codePaneCurrentAppearance() -> ThemeAppearance { .dark }
     func codePaneRunningAgents(workspaceID: String) -> [CodePaneRunningAgent] { [] }
     func codePaneInstallBackgroundCommandSession(workspaceID: String, deviceID: String, response: SpacesDeviceAPIResponse) {}
+    func codePaneLocalWorkspaceDirectory(workspaceID: String) -> String? { nil }
 }
 
 /// Records every script it's asked to evaluate, standing in for the live `WKWebView` so a test can
@@ -823,7 +831,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     func setFileWriteResult(_ result: Result<SpacesDeviceWorkspaceFileWriteResult, any Error>) { fileWriteResult = result }
 
     func workspaceFileWrite(
-        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, requiresDirectPath _: Bool,
+        workspaceID: String, relativePath: String, base64Data: String, expectedSHA256: String?, purpose _: SpacesDeviceWorkspaceFileWritePurpose,
         device: SpacesPairedDeviceRecord
     ) async throws -> SpacesDeviceWorkspaceFileWriteResult {
         fileWriteCalls.append((workspaceID, relativePath, base64Data, expectedSHA256))
@@ -868,6 +876,84 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             preconditionFailure("no held workspaceFileWrite call at arrival index \(index)")
         }
         pendingFileWriteCalls.remove(at: position).continuation.resume(throwing: error)
+    }
+
+    // MARK: - File-tree mutations
+    //
+    // Mirrors `workspaceRefList`'s stub shape exactly: nothing in `CodePaneContentController` races
+    // these calls against hibernation or a resubscribe, so a canned `Result` answered synchronously is
+    // enough to dispatch-test RPC -> gateway-args wiring.
+
+    private(set) var fileCreateDirectoryCalls: [(workspaceID: String, relativePath: String)] = []
+    private var fileCreateDirectoryResult: Result<Void, any Error> = .success(())
+
+    func setFileCreateDirectoryResult(_ result: Result<Void, any Error>) { fileCreateDirectoryResult = result }
+
+    func workspaceFileCreateDirectory(workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord) async throws {
+        fileCreateDirectoryCalls.append((workspaceID, relativePath))
+        try fileCreateDirectoryResult.get()
+    }
+
+    private(set) var fileRenameCalls: [(workspaceID: String, relativePath: String, destinationRelativePath: String)] = []
+    private var fileRenameResult: Result<Void, any Error> = .success(())
+    /// `workspaceFileRename` calls to hold open rather than answering right away, counted down on each
+    /// arrival, mirroring `holdNextFileWriteAttempts`'s shape. Rename is the one mutation whose reply the
+    /// page turns into a retarget, so a test needs one parked in flight across a `deactivate()` or a
+    /// `close()`.
+    private var holdNextFileRenameAttempts = 0
+    private var pendingFileRenameCalls: [CheckedContinuation<Void, any Error>] = []
+    private var fileRenameArrivalWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func setFileRenameResult(_ result: Result<Void, any Error>) { fileRenameResult = result }
+
+    func workspaceFileRename(workspaceID: String, relativePath: String, destinationRelativePath: String, device: SpacesPairedDeviceRecord)
+        async throws
+    {
+        fileRenameCalls.append((workspaceID, relativePath, destinationRelativePath))
+        let waiters = fileRenameArrivalWaiters
+        fileRenameArrivalWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+        if holdNextFileRenameAttempts > 0 {
+            holdNextFileRenameAttempts -= 1
+            return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                pendingFileRenameCalls.append(continuation)
+            }
+        }
+        try fileRenameResult.get()
+    }
+
+    /// Makes the next `count` `workspaceFileRename` calls suspend instead of resolving immediately, so a
+    /// test can observe the RPC still in flight before answering it with `completeHeldFileRenameCall`.
+    func holdNextFileRenameAttempts(_ count: Int) { holdNextFileRenameAttempts = count }
+
+    func waitForFileRenameCallCount(_ count: Int) async {
+        while fileRenameCalls.count < count {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in fileRenameArrivalWaiters.append(continuation) }
+        }
+    }
+
+    /// Answers the oldest held `workspaceFileRename` call successfully.
+    func completeHeldFileRenameCall() {
+        precondition(!pendingFileRenameCalls.isEmpty, "no held workspaceFileRename call to complete")
+        pendingFileRenameCalls.removeFirst().resume()
+    }
+
+    /// Fails the oldest held `workspaceFileRename` call, the shape a rename takes when the connection
+    /// carrying it breaks: the request has no deadline of its own, so this is the only way one ends
+    /// without the daemon reporting an outcome.
+    func failHeldFileRenameCall(_ error: any Error) {
+        precondition(!pendingFileRenameCalls.isEmpty, "no held workspaceFileRename call to fail")
+        pendingFileRenameCalls.removeFirst().resume(throwing: error)
+    }
+
+    private(set) var fileDeleteCalls: [(workspaceID: String, relativePath: String)] = []
+    private var fileDeleteResult: Result<Void, any Error> = .success(())
+
+    func setFileDeleteResult(_ result: Result<Void, any Error>) { fileDeleteResult = result }
+
+    func workspaceFileDelete(workspaceID: String, relativePath: String, device: SpacesPairedDeviceRecord) async throws {
+        fileDeleteCalls.append((workspaceID, relativePath))
+        try fileDeleteResult.get()
     }
 
     // MARK: - Review comments
@@ -1161,6 +1247,15 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     }
 
     private enum TestParseError: Error { case unexpectedInitScript }
+
+    private func initIsLocalWorkspace(in script: String) throws -> Bool {
+        let prefix = "window.dispatchEvent(new CustomEvent(\"spaces:init\", {detail: "
+        let suffix = "}));"
+        guard script.hasPrefix(prefix), script.hasSuffix(suffix) else { throw TestParseError.unexpectedInitScript }
+        struct InitDetail: Decodable { let isLocalWorkspace: Bool }
+        let detail = String(script.dropFirst(prefix.count).dropLast(suffix.count))
+        return try JSONDecoder().decode(InitDetail.self, from: Data(detail.utf8)).isLocalWorkspace
+    }
 
     private func initIsGitRepository(in script: String) throws -> Bool {
         let prefix = "window.dispatchEvent(new CustomEvent(\"spaces:init\", {detail: "
@@ -2500,6 +2595,186 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(await gateway.subscribedFilePath(at: 0) == "foo.ts")
     }
 
+    // A confirmed Files-tree rename or move is the one transition that changes which file the Editor
+    // shows without reading anything: the bytes never left the page. The page reports the move as the
+    // source and destination pair with the `retargetFileSignature` notification, and without the host
+    // acting on it the daemon keeps watching the emptied source path, so an external edit at the
+    // destination never reaches the pane.
+
+    /// `"spacesBridge"` is the message handler's own (private) name; a test drives `handleScriptMessage`
+    /// directly because `WKScriptMessage` has no public initializer.
+    private func sendRetargetFileSignature(from source: String, to destination: String, content: CodePaneContentController, webView: WKWebView) {
+        content.handleScriptMessage(
+            name: "spacesBridge", body: ["method": "retargetFileSignature", "params": ["from": source, "to": destination]], senderWebView: webView)
+    }
+
+    /// Bounded wait for `count` file-signature subscriptions, reporting whether they arrived.
+    /// `RecordingCodePaneDeviceGateway.waitForFileSubscribeCallCount` suspends without a deadline, which
+    /// is fine for a subscription some other awaited step is already driving, but a retarget is driven
+    /// by a notification nothing else waits on: a regression that stops retargeting would hang the whole
+    /// test run instead of failing this one test.
+    private func waitForFileSubscribeCount(_ gateway: RecordingCodePaneDeviceGateway, _ count: Int, sourceLocation: SourceLocation = #_sourceLocation)
+        async -> Bool
+    {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while await gateway.fileSubscribeCallCount() < count, clock.now < deadline {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        guard await gateway.fileSubscribeCallCount() >= count else {
+            Issue.record("timed out waiting for \(count) file-signature subscriptions", sourceLocation: sourceLocation)
+            return false
+        }
+        return true
+    }
+
+    @Test func aRetargetNotificationMovesTheFileSignatureStreamToTheMovedFilesNewPath() async throws {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let webView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(
+            at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        sendRetargetFileSignature(from: "foo.ts", to: "renamed/foo.ts", content: content, webView: webView)
+
+        guard await waitForFileSubscribeCount(gateway, 2) else { return }
+        #expect(await gateway.subscribedFilePath(at: 1) == "renamed/foo.ts", "the stream must follow the file to its destination")
+    }
+
+    @Test func aRetargetNotificationForAPathOutsideTheWorkspaceLeavesTheStreamWhereItIs() async throws {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let webView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(
+            at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        // The same workspace-relative rule every path-bearing command is held to. A notification has no
+        // reply to reject, so the refusal is the stream staying exactly where it was.
+        sendRetargetFileSignature(from: "foo.ts", to: "../outside.ts", content: content, webView: webView)
+        await settle()
+
+        #expect(await gateway.fileSubscribeCallCount() == 1, "a path outside the workspace must not open a subscription")
+        #expect(await gateway.subscribedFilePath(at: 0) == "foo.ts", "the existing subscription must be untouched")
+    }
+
+    /// The notification is fire-and-forget: there is no reply the host can defer, and the device is
+    /// unavailable by contract for the window its daemon spends restarting. Dropping the destination in
+    /// that window would leave the stream (or the reconnect loop already running) watching the path the
+    /// move emptied, while the page filters every frame that path can still produce, so external edits
+    /// would stop reaching the pane until the file was reread or reopened.
+    @Test func aRetargetWhileTheDeviceIsAwaySubscribesToTheDestinationOnceItIsBack() async throws {
+        let gateway = RecordingCodePaneDeviceGateway()
+        // Available for the initial read's own lookup, away for the retarget's, back for the reconnect.
+        let hosting = ToggleableCodePaneHostingDouble(device: fakeDevice(), unavailableForCalls: 1)
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.fileSignatureReconnectFloor = .milliseconds(20)
+        content.fileSignatureReconnectCap = .milliseconds(20)
+        content.activate(focus: false)
+        let webView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "foo.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(
+            at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        sendRetargetFileSignature(from: "foo.ts", to: "renamed/foo.ts", content: content, webView: webView)
+
+        guard await waitForFileSubscribeCount(gateway, 2) else { return }
+        #expect(
+            await gateway.subscribedFilePath(at: 1) == "renamed/foo.ts",
+            "the reconnect that follows an away device must subscribe to the destination, not the path the move emptied")
+    }
+
+    /// A move renames the watcher's target in place; it is not a navigation. An open of a different
+    /// file that is still in flight when the move lands keeps running, and the page adopts its reply,
+    /// so the host must leave that open free to claim the watcher when its read comes back. A retarget
+    /// that claimed the navigation token instead would fail the open's success arm, and since the
+    /// page's own `subscribeFileSignature` never messages Swift, nothing else would ever point the
+    /// daemon at the file the editor ends up showing.
+    @Test func aRetargetLeavesASlowerOpenFreeToClaimTheStreamWhenItsReadLands() async throws {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let webView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "a.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(
+            at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-a", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        // The open of b.ts is dispatched but its read is held, so the move below lands while the page
+        // still shows a.ts and b.ts is on its way.
+        content.dispatch(fileReadRequest(id: "req-2", path: "b.ts"))
+        await gateway.waitForFileReadCallCount(2)
+
+        sendRetargetFileSignature(from: "a.ts", to: "renamed/a.ts", content: content, webView: webView)
+        guard await waitForFileSubscribeCount(gateway, 2) else { return }
+        #expect(await gateway.subscribedFilePath(at: 1) == "renamed/a.ts", "the move must follow the shown file to its destination")
+
+        await gateway.completeFileReadCall(
+            at: 1, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-b", size: 0, isBinaryGuess: false))
+        guard await waitForFileSubscribeCount(gateway, 3) else { return }
+        #expect(
+            await gateway.subscribedFilePath(at: 2) == "b.ts",
+            "the open the page adopts must end up watched, not the destination of a move it never involved")
+    }
+
+    /// The mirror image of the test above. There the move's destination took the stream because the
+    /// watcher was still following the file the move carried; here another file's read has already
+    /// landed natively, so the watcher follows that file before the move's notification arrives. The
+    /// page can still send that notification: the other file's reply is queued behind the rename's, so
+    /// the page is deciding against the file it still shows. Acting on it would point the daemon at the
+    /// rename's destination while the page goes on to display the other file, whose own subscribe step
+    /// has already run, so external changes to that file would stop reaching the pane until it was
+    /// reread or reopened.
+    @Test func aRetargetArrivingAfterAnotherFilesReadTookTheStreamLeavesItThere() async throws {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let webView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+        content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
+
+        content.dispatch(fileReadRequest(id: "req-1", path: "a.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(
+            at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-a", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        // B's read completes natively here, so the watcher follows B while the page still shows A.
+        content.dispatch(fileReadRequest(id: "req-2", path: "b.ts"))
+        await gateway.waitForFileReadCallCount(2)
+        await gateway.completeFileReadCall(
+            at: 1, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-b", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(2)
+
+        sendRetargetFileSignature(from: "a.ts", to: "renamed/a.ts", content: content, webView: webView)
+        await settle()
+
+        #expect(await gateway.fileSubscribeCallCount() == 2, "a move of a file the watcher no longer follows must not resubscribe")
+        #expect(await gateway.subscribedFilePath(at: 1) == "b.ts", "the watcher must stay on the file whose read took the stream")
+    }
+
     @Test func lateFileReadResponseDoesNotRetargetTheStreamToASupersededPath() async {
         let gateway = RecordingCodePaneDeviceGateway()
         let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
@@ -3781,6 +4056,353 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
         #expect(await gateway.refListCalls == ["workspace-1"], "the request must reach the gateway with this pane's workspace id")
         #expect(evaluator.evaluatedScripts.contains { $0.contains("req-1") && $0.contains("abc123") }, "the gateway's result must be replied back")
+    }
+
+    // MARK: - workspaceFileDelete dispatch (Files tree's Delete item)
+    //
+    // Mirrors `workspaceRefListRequestReachesTheGatewayAndDeliversItsReply` exactly: a plain
+    // record-and-answer round trip, with no staleness race for this test to pin.
+
+    @Test func workspaceFileDeleteRequestReachesTheGatewayWithThePathAndAcknowledges() async throws {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.dispatch(CodePaneBridge.Request(id: "req-1", method: "workspaceFileDelete", params: ["path": "Sources/Obsolete.swift"]))
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains("req-1") } }
+
+        let call = try #require(await gateway.fileDeleteCalls.first, "the request must reach the gateway")
+        #expect(call.workspaceID == "workspace-1")
+        #expect(call.relativePath == "Sources/Obsolete.swift")
+        #expect(
+            evaluator.evaluatedScripts.contains(#"window.__spacesBridge.resolve("req-1", {"ok":true});"#),
+            "a successful mutation acknowledges with no result payload beyond ok")
+    }
+
+    // MARK: - workspaceFileRename dispatch (Files tree's Rename and Move to… items)
+
+    /// A rename still awaiting the daemon when the pane hibernates keeps its page alive until the reply
+    /// lands. The reply is what runs the page's own retarget of the open buffer and the state push
+    /// behind it; hibernating first would replace the page, the generation guard would drop the reply,
+    /// and the snapshot this pane restores from would still name the path the daemon has emptied.
+    @Test func hibernationWaitsForAnInFlightRenameSoItsReplyStillReachesThePage() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        await gateway.holdNextFileRenameAttempts(1)
+
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "workspaceFileRename", params: ["path": "Sources/App.swift", "destinationPath": "Sources/Renamed.swift"]))
+        await gateway.waitForFileRenameCallCount(1)
+
+        content.deactivate()
+        // Long enough to expose a deferral that releases itself: the page is held for the daemon's answer
+        // and for nothing else, so no amount of waiting may tear it down or answer the page.
+        await settle(.milliseconds(600))
+
+        #expect(!content.contentView.subviews.isEmpty, "the web view must survive hibernation while the rename is still in flight")
+        #expect(
+            !evaluator.evaluatedScripts.contains { $0.contains(#"window.__spacesBridge"#) && $0.contains("req-1") },
+            "the page may not be answered until the daemon has answered the rename")
+        #expect(
+            !evaluator.evaluatedScripts.contains(CodePaneBridge.collectWorkspaceStateScript),
+            "no teardown state collection may run before the rename settles")
+
+        await gateway.completeHeldFileRenameCall()
+        await waitUntil { content.contentView.subviews.isEmpty }
+
+        let replyIndex = evaluator.evaluatedScripts.firstIndex { $0.contains(#"window.__spacesBridge.resolve("req-1""#) }
+        let collectIndex = evaluator.evaluatedScripts.firstIndex(of: CodePaneBridge.collectWorkspaceStateScript)
+        #expect(replyIndex != nil, "the page must receive the rename's reply, which is what drives its retarget")
+        #expect(collectIndex != nil, "the deferred hibernation must still tear the page down once the rename settles")
+        if let replyIndex, let collectIndex {
+            #expect(replyIndex < collectIndex, "the reply must reach the page before the teardown collects the state it retargets")
+        }
+    }
+
+    /// The same rename in flight when the pane is closed (a pane close, a retarget, or app quit) fences
+    /// the close instead of tearing the page down under it. The reply is what runs the page's retarget
+    /// and the state push behind it, and the snapshot this close persists is collected after them, so a
+    /// pane restored from it names the destination rather than the path the daemon has emptied.
+    @Test func closeWaitsForAnInFlightRenameBeforeCollectingAndReleasingItsState() async throws {
+        let storage = MemoryCodePaneWorkspaceStateStorage()
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway, workspaceStateStore: storage)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        await gateway.holdNextFileRenameAttempts(1)
+
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "workspaceFileRename", params: ["path": "Sources/App.swift", "destinationPath": "Sources/Renamed.swift"]))
+        await gateway.waitForFileRenameCallCount(1)
+
+        content.close()
+        await settle()
+
+        #expect(!content.contentView.subviews.isEmpty, "the web view must survive the close while the rename is still in flight")
+        #expect(
+            !evaluator.evaluatedScripts.contains(CodePaneBridge.collectWorkspaceStateScript),
+            "no final state collection may run before the rename settles")
+        #expect(try storage.stateJSON(workspaceID: "workspace-1") == nil, "the close must not release its state before the retarget has landed")
+
+        await gateway.completeHeldFileRenameCall()
+        await waitUntil { evaluator.evaluatedScripts.contains(CodePaneBridge.collectWorkspaceStateScript) }
+
+        let replyIndex = evaluator.evaluatedScripts.firstIndex { $0.contains(#"window.__spacesBridge.resolve("req-1""#) }
+        let collectIndex = evaluator.evaluatedScripts.firstIndex(of: CodePaneBridge.collectWorkspaceStateScript)
+        #expect(replyIndex != nil, "the page must receive the rename's reply, which is what drives its retarget")
+        if let replyIndex, let collectIndex {
+            #expect(replyIndex < collectIndex, "the reply must reach the page before the close collects the state it retargets")
+        }
+
+        // The fenced close finishes on its own once the rename has answered and the page has handed back
+        // the state that answer produced.
+        evaluator.completeOldestPending(with: try workspaceStateJSON(completeWorkspaceState()))
+        await waitUntil { (try? storage.stateJSON(workspaceID: "workspace-1")) != nil }
+        #expect(try storage.stateJSON(workspaceID: "workspace-1") != nil, "the close must persist the snapshot it waited for")
+    }
+
+    /// A rename the daemon answers well after it was asked (queued behind the reads, writes, and diff
+    /// chunks that share its per-workspace queue) still reaches the page, and the page's retarget of the
+    /// open file still moves the watched path to the destination. Nothing at the client may answer the
+    /// page for the daemon while the request is still within its deadline.
+    @Test func aMoveAnsweredWithinItsDeadlineStillDrivesThePagesRetarget() async throws {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let webView = try #require(content.contentView.subviews.first { $0 is WKWebView } as? WKWebView)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.dispatch(fileReadRequest(id: "req-open", path: "a.ts"))
+        await gateway.waitForFileReadCallCount(1)
+        await gateway.completeFileReadCall(
+            at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-a", size: 0, isBinaryGuess: false))
+        await gateway.waitForFileSubscribeCallCount(1)
+
+        await gateway.holdNextFileRenameAttempts(1)
+        content.dispatch(
+            CodePaneBridge.Request(id: "req-1", method: "workspaceFileRename", params: ["path": "a.ts", "destinationPath": "renamed/a.ts"]))
+        await gateway.waitForFileRenameCallCount(1)
+        await settle(.milliseconds(600))
+
+        #expect(
+            !evaluator.evaluatedScripts.contains { $0.contains("req-1") },
+            "a move still queued on the daemon must stay pending at the page rather than being answered for it")
+
+        await gateway.completeHeldFileRenameCall()
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains(#"window.__spacesBridge.resolve("req-1""#) } }
+
+        sendRetargetFileSignature(from: "a.ts", to: "renamed/a.ts", content: content, webView: webView)
+        guard await waitForFileSubscribeCount(gateway, 2) else { return }
+        #expect(await gateway.subscribedFilePath(at: 1) == "renamed/a.ts", "the answered move must move the watched path to its destination")
+    }
+
+    /// A move whose dial never reached the device has a definite outcome of its own: no request went out,
+    /// so nothing moved. The page is told, the teardown deferred for it is released rather than held for an
+    /// answer that can no longer arrive, and no listing is read, since there is nothing to reconcile.
+    @Test func aMoveThatNeverReachedTheDeviceIsRejectedAndReleasesTheDeferredTeardown() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        await gateway.holdNextFileRenameAttempts(1)
+
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "workspaceFileRename", params: ["path": "Sources/App.swift", "destinationPath": "Sources/Renamed.swift"]))
+        await gateway.waitForFileRenameCallCount(1)
+
+        content.deactivate()
+        await settle()
+        #expect(!content.contentView.subviews.isEmpty, "the web view must survive hibernation while the rename is still in flight")
+
+        await gateway.failHeldFileRenameCall(SpacesDeviceEndpointResolverError.allCandidatesUnreachable(hosts: ["10.0.0.2"]))
+        await waitUntil { content.contentView.subviews.isEmpty }
+
+        #expect(
+            evaluator.evaluatedScripts.contains { $0.contains(#"window.__spacesBridge.reject("req-1""#) },
+            "the page must learn the move failed rather than waiting on it forever")
+        #expect(await gateway.fileListCalls.isEmpty, "a request that never went out needs no listing to account for it")
+    }
+
+    /// The daemon performed the move and the connection carrying its reply died before the answer arrived,
+    /// which the transport reports as an empty response. That is not a failed move: the request was sent,
+    /// so the outcome is unknown until the listing settles it, and here the listing shows the move done.
+    /// Reporting the transport failure instead would leave the Editor on the path the daemon emptied.
+    @Test func aMoveWhoseReplyIsLostAfterTheDaemonPerformedItIsAnsweredAsTheSuccessTheListingShows() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        await gateway.setFileListResult(.success(SpacesDeviceWorkspaceFileListResult(paths: ["Sources/Renamed.swift"], truncated: false)))
+        await gateway.holdNextFileRenameAttempts(1)
+
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "workspaceFileRename", params: ["path": "Sources/App.swift", "destinationPath": "Sources/Renamed.swift"]))
+        await gateway.waitForFileRenameCallCount(1)
+        await gateway.failHeldFileRenameCall(SpacesDeviceAPIRequestClientError.emptyResponse)
+
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains(#"window.__spacesBridge.resolve("req-1""#) } }
+        #expect(
+            !evaluator.evaluatedScripts.contains { $0.contains(#"window.__spacesBridge.reject("req-1""#) },
+            "a move whose only loss was its reply must never be reported to the page as a failure")
+        #expect(await gateway.fileListCalls.count == 1, "the reconciliation must re-read the listing once to decide the outcome")
+    }
+
+    /// A move whose request runs out its deadline has no outcome of its own: the daemon runs the mutation
+    /// when its per-workspace queue reaches it, so the client's silence says nothing about whether the
+    /// entry moved. The listing settles it. Here it shows the destination and no source, so the move
+    /// happened and the page is answered exactly as the daemon's own reply would have answered it, which
+    /// is what runs its retarget of the open buffer.
+    @Test func aMoveThatTimesOutAfterTheDaemonPerformedItIsAnsweredAsTheSuccessTheListingShows() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        await gateway.setFileListResult(.success(SpacesDeviceWorkspaceFileListResult(paths: ["Sources/Renamed.swift"], truncated: false)))
+        await gateway.holdNextFileRenameAttempts(1)
+
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "workspaceFileRename", params: ["path": "Sources/App.swift", "destinationPath": "Sources/Renamed.swift"]))
+        await gateway.waitForFileRenameCallCount(1)
+        await gateway.failHeldFileRenameCall(SpacesPinnedTLSConnectionError.timeout)
+
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains(#"window.__spacesBridge.resolve("req-1""#) } }
+        #expect(
+            !evaluator.evaluatedScripts.contains { $0.contains(#"window.__spacesBridge.reject("req-1""#) },
+            "a move the listing shows as done must never be reported to the page as a failure")
+        #expect(await gateway.fileListCalls.count == 1, "the reconciliation must re-read the listing once to decide the outcome")
+    }
+
+    /// The same deadline with the source still listed where it was: the device did not answer and moved
+    /// nothing, so the row says exactly that and the user can ask again. The teardown deferred on the move
+    /// is released by the reconciliation, not held for an answer that is never coming.
+    @Test func aMoveThatTimesOutWithTheSourceStillListedIsRejectedAndReleasesTheDeferredTeardown() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        await gateway.setFileListResult(.success(SpacesDeviceWorkspaceFileListResult(paths: ["Sources/App.swift"], truncated: false)))
+        await gateway.holdNextFileRenameAttempts(1)
+
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "workspaceFileRename", params: ["path": "Sources/App.swift", "destinationPath": "Sources/Renamed.swift"]))
+        await gateway.waitForFileRenameCallCount(1)
+
+        content.deactivate()
+        await settle()
+        #expect(!content.contentView.subviews.isEmpty, "the web view must survive hibernation while the move is still in flight")
+
+        await gateway.failHeldFileRenameCall(SpacesPinnedTLSConnectionError.timeout)
+        await waitUntil { content.contentView.subviews.isEmpty }
+
+        let rejection = evaluator.evaluatedScripts.first { $0.contains(#"window.__spacesBridge.reject("req-1""#) }
+        #expect(rejection != nil, "the page must learn the move did not happen")
+        // The script carries the message as JSON, which escapes the paths' slashes, so the assertions read
+        // the message in slash-free pieces rather than reproducing that escaping.
+        #expect(rejection?.contains("The device did not answer the move.") == true, "the refusal must say the device did not answer")
+        #expect(rejection?.contains("App.swift' is still where it was") == true, "the refusal must name the source file as still being where it was")
+    }
+
+    /// The listing accounting for neither path is the one outcome that cannot be read as either answer, so
+    /// it is reported as it is rather than guessed at in the user's favour.
+    @Test func aMoveThatTimesOutWithNeitherPathListedIsRejectedSayingSo() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        await gateway.setFileListResult(.success(SpacesDeviceWorkspaceFileListResult(paths: ["Sources/Other.swift"], truncated: false)))
+        await gateway.holdNextFileRenameAttempts(1)
+
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "workspaceFileRename", params: ["path": "Sources/App.swift", "destinationPath": "Sources/Renamed.swift"]))
+        await gateway.waitForFileRenameCallCount(1)
+        await gateway.failHeldFileRenameCall(SpacesPinnedTLSConnectionError.timeout)
+
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains(#"window.__spacesBridge.reject("req-1""#) } }
+        let rejection = evaluator.evaluatedScripts.first { $0.contains(#"window.__spacesBridge.reject("req-1""#) }
+        // See the slash-escaping note in the test above.
+        #expect(rejection?.contains("the listing shows neither") == true, "the refusal must say the listing accounts for neither path")
+        #expect(rejection?.contains("App.swift") == true && rejection?.contains("Renamed.swift") == true, "the refusal must name both paths")
+    }
+
+    /// A workspace past the listing's path cap still answers with evidence when the destination is in the
+    /// slice it returns: presence is presence, whatever the cap left out, so the move is the success the
+    /// daemon would have reported and the page runs its retarget.
+    @Test func aMoveWhoseDestinationIsInATruncatedListingIsAnsweredAsDone() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        await gateway.setFileListResult(.success(SpacesDeviceWorkspaceFileListResult(paths: ["Sources/Renamed.swift"], truncated: true)))
+        await gateway.holdNextFileRenameAttempts(1)
+
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "workspaceFileRename", params: ["path": "Sources/App.swift", "destinationPath": "Sources/Renamed.swift"]))
+        await gateway.waitForFileRenameCallCount(1)
+        await gateway.failHeldFileRenameCall(SpacesPinnedTLSConnectionError.timeout)
+
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains(#"window.__spacesBridge.resolve("req-1""#) } }
+        #expect(
+            !evaluator.evaluatedScripts.contains { $0.contains(#"window.__spacesBridge.reject("req-1""#) },
+            "a listed destination is evidence the move happened even when the listing was capped")
+    }
+
+    /// The same capped listing carrying neither path proves nothing: either could sit beyond the cap. The
+    /// row must say the outcome is unknown rather than that the file is still where it was, since a move
+    /// the daemon performed reads exactly the same way and would send the user to the wrong path.
+    @Test func aMoveWithNeitherPathInATruncatedListingIsRejectedAsAnUnknownOutcome() async {
+        let gateway = RecordingCodePaneDeviceGateway()
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        let content = makeController(hosting: hosting, deviceGateway: gateway)
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+        await gateway.setFileListResult(.success(SpacesDeviceWorkspaceFileListResult(paths: ["Sources/Other.swift"], truncated: true)))
+        await gateway.holdNextFileRenameAttempts(1)
+
+        content.dispatch(
+            CodePaneBridge.Request(
+                id: "req-1", method: "workspaceFileRename", params: ["path": "Sources/App.swift", "destinationPath": "Sources/Renamed.swift"]))
+        await gateway.waitForFileRenameCallCount(1)
+        await gateway.failHeldFileRenameCall(SpacesPinnedTLSConnectionError.timeout)
+
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains(#"window.__spacesBridge.reject("req-1""#) } }
+        let rejection = evaluator.evaluatedScripts.first { $0.contains(#"window.__spacesBridge.reject("req-1""#) }
+        // See the slash-escaping note in the tests above.
+        #expect(rejection?.contains("too many files") == true, "the refusal must say the listing cannot account for the entry")
+        #expect(rejection?.contains("is still where it was") == false, "an unknown outcome must never claim the file did not move")
+        #expect(rejection?.contains("the listing shows neither") == false, "a capped listing showing neither path is not evidence of absence")
+        #expect(rejection?.contains("App.swift") == true && rejection?.contains("Renamed.swift") == true, "the refusal must name both paths")
     }
 
     @Test func workspaceRevisionFileReadUsesTheImmutableRevisionWithoutRetargetingLiveFileMonitoring() async {
@@ -5084,5 +5706,80 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let script = try #require(evaluator.evaluatedScripts.first { $0.contains("spaces:init") })
         #expect(try initIsGitRepository(in: script) == false)
         #expect(try initWorkspaceState(in: script).mode == "editor")
+    }
+
+    /// Open in system viewer is the one Files-tree action that never reaches the daemon: the host resolves
+    /// the path itself and hands it to macOS. A lexical containment check passes a listed path that IS a
+    /// symlink out of the workspace, and `NSWorkspace` follows links, so the file outside the workspace is
+    /// what would open. The host applies the daemon's own direct-path rule instead, down to its wording.
+    @Test func openInSystemViewerRefusesAPathThatIsASymbolicLinkOutOfTheWorkspace() async throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("open-in-viewer-\(UUID().uuidString)")
+        let workspace = root.appendingPathComponent("workspace")
+        let outside = root.appendingPathComponent("outside")
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let secret = outside.appendingPathComponent("secret.pdf")
+        try Data("outside the workspace".utf8).write(to: secret)
+        try FileManager.default.createSymbolicLink(atPath: workspace.appendingPathComponent("link.pdf").path, withDestinationPath: secret.path)
+
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        hosting.localWorkspaceDirectory = workspace.path
+        let content = makeController(hosting: hosting, workspaceStateStore: MemoryCodePaneWorkspaceStateStorage())
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.dispatch(CodePaneBridge.Request(id: "req-1", method: "openInSystemViewer", params: ["path": "link.pdf"]))
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains("req-1") } }
+
+        let script = try #require(evaluator.evaluatedScripts.first { $0.contains("req-1") })
+        #expect(script.contains("window.__spacesBridge.reject"), "the link must be refused, not handed to macOS")
+        #expect(script.contains("Path passes through a symbolic link."))
+    }
+
+    /// The same refusal for a link in the middle of the path: the leaf sits inside the workspace
+    /// lexically, but the directory above it is a link pointing out of the workspace.
+    @Test func openInSystemViewerRefusesAPathUnderASymlinkedDirectory() async throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("open-in-viewer-\(UUID().uuidString)")
+        let workspace = root.appendingPathComponent("workspace")
+        let outside = root.appendingPathComponent("outside")
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("outside the workspace".utf8).write(to: outside.appendingPathComponent("secret.pdf"))
+        try FileManager.default.createSymbolicLink(atPath: workspace.appendingPathComponent("docs").path, withDestinationPath: outside.path)
+
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        hosting.localWorkspaceDirectory = workspace.path
+        let content = makeController(hosting: hosting, workspaceStateStore: MemoryCodePaneWorkspaceStateStorage())
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.dispatch(CodePaneBridge.Request(id: "req-1", method: "openInSystemViewer", params: ["path": "docs/secret.pdf"]))
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains("req-1") } }
+
+        let script = try #require(evaluator.evaluatedScripts.first { $0.contains("req-1") })
+        #expect(script.contains("window.__spacesBridge.reject"))
+        #expect(script.contains("Path passes through a symbolic link."))
+    }
+
+    /// The Files tree's Open in system viewer hands a path to macOS, which only exists for a workspace
+    /// checked out on this Mac. The page decides whether to offer the item from this one fact, so the
+    /// payload has to carry it honestly in both directions.
+    @Test(arguments: [String?.none, "/tmp/workspace"]) func initPayloadReportsWhetherTheWorkspaceIsOnThisMac(directory: String?) async throws {
+        let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
+        hosting.localWorkspaceDirectory = directory
+        let content = makeController(hosting: hosting, workspaceStateStore: MemoryCodePaneWorkspaceStateStorage())
+        content.activate(focus: false)
+        let evaluator = RecordingCodePaneScriptEvaluator()
+        content.scriptEvaluator = evaluator
+
+        content.handleReady()
+        await waitUntil { evaluator.evaluatedScripts.contains { $0.contains("spaces:init") } }
+
+        let script = try #require(evaluator.evaluatedScripts.first { $0.contains("spaces:init") })
+        #expect(try initIsLocalWorkspace(in: script) == (directory != nil))
     }
 }

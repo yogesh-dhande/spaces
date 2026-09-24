@@ -184,22 +184,22 @@ describe("fileList — directory tree (docs mockup 'G — Tree with compacted ch
     expect(callbacks.onSelect).toHaveBeenCalledWith("apps/macos/Foo.swift");
   });
 
-  it("collapses and re-expands a directory's rows on clicking its dirrow, flipping the disclosure triangle", () => {
+  it("collapses and re-expands a directory's rows on clicking its dirrow, turning the disclosure chevron", () => {
     const container = document.createElement("div");
     renderFileList(container, [makeFile({ path: "apps/macos/Foo.swift" })], undefined, makeCallbacks());
 
     const dirrow = container.querySelector(".dirrow") as HTMLElement;
     const dirChildren = container.querySelector(".dir-children") as HTMLElement;
-    expect(dirrow.querySelector(".tri")?.textContent).toBe("▾"); // default expanded
+    expect(dirrow.querySelector(".tri")!.classList.contains("open")).toBe(true); // default expanded
     expect(dirChildren.style.display).not.toBe("none");
 
     dirrow.click();
-    expect(dirrow.querySelector(".tri")?.textContent).toBe("▸");
+    expect(dirrow.querySelector(".tri")!.classList.contains("open")).toBe(false);
     expect(dirChildren.style.display).toBe("none");
     expect(dirrow.getAttribute("aria-expanded")).toBe("false");
 
     dirrow.click();
-    expect(dirrow.querySelector(".tri")?.textContent).toBe("▾");
+    expect(dirrow.querySelector(".tri")!.classList.contains("open")).toBe(true);
     expect(dirChildren.style.display).not.toBe("none");
     expect(dirrow.getAttribute("aria-expanded")).toBe("true");
   });
@@ -407,8 +407,9 @@ describe("fileList: submodule pointer rows (PR D, nested submodules)", () => {
     const chip = dirrow.querySelector(".submodule-badge")!;
     expect(chip.classList.contains("not-checked-out")).toBe(true);
     expect(chip.getAttribute("title")).toBe("Submodule ddddddd → eeeeeee (dirty), not checked out");
-    // Nothing is nested under it, so the row is not a toggle: no triangle, no button semantics.
-    expect(dirrow.querySelector(".tri")).toBeNull();
+    // Nothing is nested under it, so the row is not a toggle: its disclosure slot holds no chevron,
+    // and the row has no button semantics.
+    expect(dirrow.querySelector(".tri svg")).toBeNull();
     expect(dirrow.getAttribute("role")).toBeNull();
     expect(dirrow.hasAttribute("aria-expanded")).toBe(false);
   });
@@ -546,7 +547,7 @@ describe("fileList: submodule pointer rows (PR D, nested submodules)", () => {
     expect(rows).toHaveLength(2);
     const pointerRow = container.querySelector<HTMLElement>(`.dirrow[data-path="A"]`)!;
     expect(pointerRow.querySelector(".submodule-badge")?.textContent).toBe("aaaaaaa");
-    expect(pointerRow.querySelector(".tri")).toBeNull();
+    expect(pointerRow.querySelector(".tri svg")).toBeNull();
     expect(pointerRow.getAttribute("role")).toBeNull();
 
     const plainRow = rows.find((row) => row !== pointerRow)!;

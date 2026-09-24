@@ -63,8 +63,9 @@ import {
  *     `spaces:flushEdits` (the host is about to quit or tear this pane down and
  *     wants every unsaved edit written first, detail: { token }). The host
  *     decides which path `spaces:fileSignature` tracks based on
- *     `workspaceFileRead` completions marked with the `editor` purpose; inline
- *     diff reads use `inlineDiff` and never retarget that watcher.
+ *     `workspaceFileRead` completions marked with the `editor` purpose and on
+ *     the `retargetFileSignature` notification below; inline diff reads use
+ *     `inlineDiff` and never retarget that watcher.
  *
  *   JS -> Swift (state pushes, fire-and-forget): the same message handler,
  *     no `id`. `workspaceStateChanged` atomically carries all workspace-local
@@ -72,7 +73,10 @@ import {
  *     diff edit state, comments, and agent launch tracking. `editsFlushed`
  *     answers one `spaces:flushEdits` request, echoing its token. `unsubscribeFileSignature` takes
  *     no params and asks the host to end the file-signature stream outright, for the case where the
- *     page has nothing open that a disk change could be reconciled into. `retryLiveRefresh` takes an
+ *     page has nothing open that a disk change could be reconciled into. `retargetFileSignature`
+ *     carries a confirmed rename or move as a workspace-relative `{ from, to }` pair, moving the
+ *     host's one file-signature stream onto the destination while its watcher still follows the
+ *     source. `retryLiveRefresh` takes an
  *     empty params object and resolves with no payload once the host has stopped and reopened
  *     both signature streams, which is what makes the daemon re-attempt the workspace's watcher.
  */
@@ -182,6 +186,13 @@ class RealSpacesBridge implements SpacesBridge {
     handler?.postMessage({ method: "editsFlushed", params: { token } });
   }
 
+  /** Fire-and-forget retarget of the host's one file-signature stream; see `SpacesBridge`'s own
+   * doc comment for why a confirmed move is the transition that needs it. */
+  retargetFileSignature(from: string, to: string): void {
+    const handler = window.webkit?.messageHandlers?.spacesBridge;
+    handler?.postMessage({ method: "retargetFileSignature", params: { from, to } });
+  }
+
   async workspaceDiffManifestChunk(
     scope: DiffScope,
     request: { manifestID?: string; fileIndex: number },
@@ -226,8 +237,8 @@ class RealSpacesBridge implements SpacesBridge {
     content: string,
     options: WorkspaceFileWriteOptions,
   ): Promise<WorkspaceFileWriteResult> {
-    if (options.purpose !== "editor" && options.purpose !== "inlineDiff") {
-      throw new SpacesBridgeError("invalidArgument", "workspaceFileWrite requires an editor or inlineDiff purpose.");
+    if (options.purpose !== "editor" && options.purpose !== "inlineDiff" && options.purpose !== "createFile") {
+      throw new SpacesBridgeError("invalidArgument", "workspaceFileWrite requires an editor, inlineDiff, or createFile purpose.");
     }
     // `baseSHA256: undefined` (the "create" convention) is normalized to `null` here for the same
     // reason workspace-state JSON normalizes nullable values: postMessage's structured-clone
@@ -238,6 +249,22 @@ class RealSpacesBridge implements SpacesBridge {
       content,
       options: { baseSHA256: options.baseSHA256 ?? null, purpose: options.purpose },
     })) as WorkspaceFileWriteResult;
+  }
+
+  async workspaceFileCreateDirectory(path: string): Promise<void> {
+    await this.post("workspaceFileCreateDirectory", { path });
+  }
+
+  async workspaceFileRename(path: string, destinationPath: string): Promise<void> {
+    await this.post("workspaceFileRename", { path, destinationPath });
+  }
+
+  async workspaceFileDelete(path: string): Promise<void> {
+    await this.post("workspaceFileDelete", { path });
+  }
+
+  async openInSystemViewer(path: string): Promise<void> {
+    await this.post("openInSystemViewer", { path });
   }
 
   async workspaceFileList(): Promise<WorkspaceFileListResult> {
@@ -294,8 +321,8 @@ class RealSpacesBridge implements SpacesBridge {
   subscribeFileSignature(_path: string, listener: FileSignatureListener): Unsubscribe {
     // Mirrors subscribeDiffSignature exactly: the host, not this call, decides which path the
     // one live `spaces:fileSignature` stream tracks (driven by editor-purpose workspaceFileRead
-    // completions — see types.ts doc comment), so this never messages Swift, it only listens for
-    // the one global event.
+    // completions and by `retargetFileSignature`; see types.ts doc comment), so this never
+    // messages Swift, it only listens for the one global event.
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<FileSignatureEvent>).detail;
       if (detail && typeof detail.path === "string" && typeof detail.missing === "boolean") {

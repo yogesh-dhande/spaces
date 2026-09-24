@@ -1,6 +1,7 @@
 import {
   FIXTURE_AGENTS,
   FIXTURE_ALL_PATHS,
+  FIXTURE_EMPTY_DIRECTORIES,
   FIXTURE_FILE_CONTENTS,
   FIXTURE_IMAGE_CONTENTS,
   FIXTURE_INIT_PAYLOAD,
@@ -74,6 +75,10 @@ export class MockSpacesBridge implements SpacesBridge {
     Object.entries(FIXTURE_FILE_CONTENTS).map(([path, content]) => [path, { content, sha256: fixtureHash(content) }]),
   );
   private readonly workspaceMembership = new Set<string>(FIXTURE_ALL_PATHS);
+  /** Directories holding no file counted in `workspaceMembership`; backs `WorkspaceFileListResult
+   *  .emptyDirectories`, which is what gives a just-created (or otherwise empty) folder a row in the
+   *  Files tree. */
+  private readonly emptyDirectories = new Set<string>(FIXTURE_EMPTY_DIRECTORIES);
   private readonly comments = new Map<string, SpacesReviewComment>();
   private readonly patchTransfers = new Map<string, { scopeSignature: string; file: ReturnType<typeof fixtureDiffFiles>[number]; bytes: Uint8Array }>();
   private readonly manifests = new Map<string, { scope: DiffScope; scopeSignature: string }>();
@@ -82,6 +87,9 @@ export class MockSpacesBridge implements SpacesBridge {
   private readonly agentStartDeadlines = new Map<string, number>();
   /** Every `spaces:flushEdits` token this page has answered, in order. */
   readonly editsFlushedTokens: string[] = [];
+  /** Every path handed to `openInSystemViewer`, in order; recorded rather than posted anywhere,
+   *  the same convention as `editsFlushedTokens` above, since the mock has no real OS to hand off to. */
+  readonly systemViewerOpens: string[] = [];
   private nextManifestID = 0;
   private nextPatchTransferID = 0;
 
@@ -257,6 +265,12 @@ export class MockSpacesBridge implements SpacesBridge {
   ): Promise<WorkspaceFileWriteResult> {
     const entry = this.files.get(path);
     const created = entry === undefined;
+    // The Files tree's New file is a strict create on the device: anything already at the path is
+    // refused outright rather than compared, so the mock refuses it the same way instead of letting a
+    // zero-byte file already there read as this write having landed.
+    if (options.purpose === "createFile" && this.existsAtPath(path)) {
+      throw new SpacesBridgeError("conflict", `'${path}' already exists.`);
+    }
     if (options.baseSHA256 === undefined) {
       // "Create" convention: succeeds only if nothing currently exists at this path. Used by the
       // conflict compare view's "Keep mine" action to recreate a file deleted on disk.
@@ -278,11 +292,91 @@ export class MockSpacesBridge implements SpacesBridge {
     return delay({ ok: true, sha256 });
   }
 
+  /** True if a file, an empty directory, or a non-empty directory already sits at `path`: the
+   *  "would this overwrite something" check every mutation below runs before touching state. */
+  private existsAtPath(path: string): boolean {
+    if (this.workspaceMembership.has(path) || this.emptyDirectories.has(path)) return true;
+    const prefix = `${path}/`;
+    for (const p of this.workspaceMembership) if (p.startsWith(prefix)) return true;
+    for (const p of this.emptyDirectories) if (p.startsWith(prefix)) return true;
+    return false;
+  }
+
+  async workspaceFileCreateDirectory(path: string): Promise<void> {
+    if (this.existsAtPath(path)) throw new SpacesBridgeError("conflict", `'${path}' already exists.`);
+    this.emptyDirectories.add(path);
+    this.emitFileListSignatureChange();
+    await delay(undefined);
+  }
+
+  async workspaceFileRename(path: string, destinationPath: string): Promise<void> {
+    const isFile = this.workspaceMembership.has(path);
+    const isEmptyDir = this.emptyDirectories.has(path);
+    const nestedPrefix = `${path}/`;
+    const filesUnder = [...this.workspaceMembership].filter((p) => p.startsWith(nestedPrefix));
+    const emptyDirsUnder = [...this.emptyDirectories].filter((p) => p.startsWith(nestedPrefix));
+    if (!isFile && !isEmptyDir && filesUnder.length === 0 && emptyDirsUnder.length === 0) {
+      throw new SpacesBridgeError("notFound", `No such file or directory: ${path}`);
+    }
+    if (destinationPath !== path && this.existsAtPath(destinationPath)) {
+      throw new SpacesBridgeError("conflict", `'${destinationPath}' already exists.`);
+    }
+    if (isFile) {
+      const entry = this.files.get(path)!;
+      this.files.delete(path);
+      this.workspaceMembership.delete(path);
+      this.files.set(destinationPath, entry);
+      this.workspaceMembership.add(destinationPath);
+    }
+    if (isEmptyDir) {
+      this.emptyDirectories.delete(path);
+      this.emptyDirectories.add(destinationPath);
+    }
+    for (const p of filesUnder) {
+      const newPath = destinationPath + p.slice(path.length);
+      const entry = this.files.get(p)!;
+      this.files.delete(p);
+      this.workspaceMembership.delete(p);
+      this.files.set(newPath, entry);
+      this.workspaceMembership.add(newPath);
+    }
+    for (const p of emptyDirsUnder) {
+      const newPath = destinationPath + p.slice(path.length);
+      this.emptyDirectories.delete(p);
+      this.emptyDirectories.add(newPath);
+    }
+    this.emitFileListSignatureChange();
+    await delay(undefined);
+  }
+
+  async workspaceFileDelete(path: string): Promise<void> {
+    const prefix = `${path}/`;
+    const filesUnder = [...this.workspaceMembership].filter((p) => p === path || p.startsWith(prefix));
+    const dirsUnder = [...this.emptyDirectories].filter((p) => p === path || p.startsWith(prefix));
+    if (filesUnder.length === 0 && dirsUnder.length === 0) {
+      throw new SpacesBridgeError("notFound", `No such file or directory: ${path}`);
+    }
+    for (const p of filesUnder) {
+      this.files.delete(p);
+      this.workspaceMembership.delete(p);
+    }
+    for (const p of dirsUnder) this.emptyDirectories.delete(p);
+    this.emitFileListSignatureChange();
+    await delay(undefined);
+  }
+
+  async openInSystemViewer(path: string): Promise<void> {
+    if (!this.workspaceMembership.has(path)) throw new SpacesBridgeError("notFound", `No such file: ${path}`);
+    this.systemViewerOpens.push(path);
+    await delay(undefined);
+  }
+
   async workspaceFileList(): Promise<WorkspaceFileListResult> {
     return delay({
       paths: [...this.workspaceMembership].sort((a, b) => a.localeCompare(b)),
       truncated: false,
       submodules: FIXTURE_SUBMODULES,
+      emptyDirectories: [...this.emptyDirectories].sort((a, b) => a.localeCompare(b)),
     });
   }
 
@@ -424,6 +518,16 @@ export class MockSpacesBridge implements SpacesBridge {
    * assert on the tokens the page answered with. */
   notifyEditsFlushed(token: string): void {
     this.editsFlushedTokens.push(token);
+  }
+
+  /** `currentReadPath` is this mock's whole file-signature stream (see its doc comment), so moving
+   * it to `to` is exactly what the native host's retarget does: `simulateFileChange` and
+   * `simulateFileDeleted` act on the file the editor shows after a rename or move, not on the path
+   * it was read from. The `from` check mirrors the host's rule as well, so a move that arrives after
+   * another file's read has taken the stream leaves that file's stream alone. */
+  retargetFileSignature(from: string, to: string): void {
+    if (this.currentReadPath !== from) return;
+    this.currentReadPath = to;
   }
 
   async startWorkspaceCommand(_command: string): Promise<StartWorkspaceCommandResult> {

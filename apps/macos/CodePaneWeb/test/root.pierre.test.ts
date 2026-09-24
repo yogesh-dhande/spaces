@@ -53,6 +53,7 @@ const INIT_PAYLOAD: CodePaneInitPayload = {
   theme: "dark",
   baseBranch: "main",
   isGitRepository: true,
+  isLocalWorkspace: true,
   agents: [],
 };
 
@@ -95,6 +96,7 @@ vi.mock("../src/bridge", () => ({
     notifyWorkspaceStateChanged: hoisted.notifyWorkspaceStateChanged,
     notifyRenderMetric: vi.fn(),
     notifyEditsFlushed: vi.fn(),
+    retargetFileSignature: vi.fn(),
     reviewCommentList: vi.fn().mockResolvedValue([]),
     reviewCommentUpsert: vi.fn().mockRejectedValue(new Error("not used")),
     reviewCommentDelete: vi.fn().mockRejectedValue(new Error("not used")),
