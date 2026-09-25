@@ -22,12 +22,13 @@ extension SQLiteStore {
         COALESCE(agent_sessions.terminal_session_id, ''),
         COALESCE(agent_sessions.session_key, ''),
         agent_sessions.status,
-        agent_sessions.note,
+        COALESCE(agent_sessions.brief, ''),
         agent_sessions.created_at,
         agent_sessions.updated_at,
         COALESCE(agent_sessions.detected_agent_kind, ''),
         COALESCE(agent_sessions.user_label, ''),
-        COALESCE(agent_sessions.launch_command, '')
+        COALESCE(agent_sessions.launch_command, ''),
+        COALESCE(agent_sessions.brief_updated_at, '')
         """
 
     /// Lifecycle-owning upsert. Hook/lifecycle writers (`registerAgentWindow`, `updateAgentWindowStatus`)
@@ -75,7 +76,7 @@ extension SQLiteStore {
     /// lifecycle columns keep the STORED row's values — `status`, `session_key`, `created_at`, and
     /// `updated_at` — regardless of what the caller's record carried,
     /// closing the read-modify-upsert race entirely. `updated_at` tracks when the row's lifecycle state
-    /// was entered (see `setAgentSessionNote`), so it must move in lockstep with `status`, not with a
+    /// was entered (see `setAgentSessionBrief`), so it must move in lockstep with `status`, not with a
     /// detection refresh that leaves status untouched. On first insert (no conflict) the record's own
     /// values are used, so a detection record must still carry sensible initial lifecycle values.
     public func upsertDetectedAgentWindow(_ record: AgentWindowRecord) throws {
@@ -91,7 +92,6 @@ extension SQLiteStore {
           runtime_target_id = excluded.runtime_target_id,
           terminal_session_id = COALESCE(excluded.terminal_session_id, agent_sessions.terminal_session_id),
           session_key = excluded.session_key,
-          note = COALESCE(excluded.note, agent_sessions.note),
           detected_agent_kind = COALESCE(excluded.detected_agent_kind, agent_sessions.detected_agent_kind),
           launch_command = COALESCE(excluded.launch_command, agent_sessions.launch_command),
           updated_at = excluded.updated_at
@@ -106,7 +106,6 @@ extension SQLiteStore {
           runtime_target_id = excluded.runtime_target_id,
           terminal_session_id = COALESCE(excluded.terminal_session_id, agent_sessions.terminal_session_id),
           session_key = agent_sessions.session_key,
-          note = COALESCE(excluded.note, agent_sessions.note),
           detected_agent_kind = COALESCE(excluded.detected_agent_kind, agent_sessions.detected_agent_kind),
           launch_command = COALESCE(excluded.launch_command, agent_sessions.launch_command),
           created_at = agent_sessions.created_at,
@@ -119,6 +118,11 @@ extension SQLiteStore {
     /// through `setAgentSessionUserLabel`, whose only caller is the rename command.
     /// `AgentWindowRecord.userLabel` is therefore read-only here: a record carrying one is not rejected,
     /// it simply does not carry that field into the table.
+    ///
+    /// `brief` and `brief_updated_at` are left out the same way, with `setAgentSessionBrief` as their one
+    /// writer. The agent writes its brief while it works, often moments before a hook signal lands on
+    /// another connection, and a signal upserts a record built from a snapshot read before that write; an
+    /// upsert that carried the brief would put the older document back.
     private func upsertAgentWindow(_ record: AgentWindowRecord, conflictClause: String) throws {
         let runtimeTargetID = try ensureRuntimeTargetForAgentWindow(record)
         let terminalSessionID = spacesAgentTerminalSessionID(record)
@@ -126,15 +130,15 @@ extension SQLiteStore {
             try execute(
                 sql: """
                         INSERT INTO agent_sessions(
-                          id, workspace_id, provider, label, status, runtime_target_id, terminal_session_id, session_key, note, detected_agent_kind, launch_command, created_at, updated_at
+                          id, workspace_id, provider, label, status, runtime_target_id, terminal_session_id, session_key, detected_agent_kind, launch_command, created_at, updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
+                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
                         \(conflictClause)
                     """,
                 bindings: [
                     record.id, record.workspaceID, record.provider.rawValue, record.label ?? "", record.status.rawValue, runtimeTargetID ?? "",
-                    terminalSessionID ?? "", record.sessionKey ?? "", record.note ?? "", record.detectedAgentKind ?? "", record.launchCommand ?? "",
-                    record.createdAt, record.updatedAt,
+                    terminalSessionID ?? "", record.sessionKey ?? "", record.detectedAgentKind ?? "", record.launchCommand ?? "", record.createdAt,
+                    record.updatedAt,
                 ])
         }
     }
@@ -257,20 +261,22 @@ extension SQLiteStore {
 
     public func deleteAgentWindow(id: String) throws { try execute(sql: "DELETE FROM agent_sessions WHERE id = ?", bindings: [id]) }
 
-    /// Sets (or, with an empty `note`, clears) an agent session's explicit annotation. The note is
-    /// written directly here rather than through `upsertAgentWindow` so a status signal — which upserts
-    /// with a nil note and therefore preserves the stored one — never clobbers an annotation.
-    /// Updates only the note column. `updated_at` tracks when an agent entered its current lifecycle
-    /// state (read as the alert event timestamp by clients such as iOS Alerts), so annotating must not
-    /// touch it or a stale blocked/finished event would appear to have just occurred.
-    public func setAgentSessionNote(id: String, note: String?) throws {
-        try execute(sql: "UPDATE agent_sessions SET note = NULLIF(?, '') WHERE id = ?", bindings: [note ?? "", id])
+    /// Replaces (or, with a nil or empty `brief`, clears) an agent session's brief and stamps
+    /// `brief_updated_at` with `updatedAt`, writing those two columns and nothing else. It is the only writer
+    /// of either column (no upsert carries them; see `upsertAgentWindow`), which is what keeps a status
+    /// signal from ever clobbering a brief. `updated_at` is deliberately left alone: it tracks when the
+    /// agent entered its current lifecycle state (read as the alert event timestamp by clients such as iOS
+    /// Alerts), and a brief write is not a transition, so bumping it would make a stale blocked or finished
+    /// event appear to have just occurred.
+    public func setAgentSessionBrief(id: String, brief: String?, updatedAt: String) throws {
+        try execute(
+            sql: "UPDATE agent_sessions SET brief = NULLIF(?, ''), brief_updated_at = ? WHERE id = ?", bindings: [brief ?? "", updatedAt, id])
     }
 
     /// Sets (or, with a nil `userLabel`, clears) the user-authored name of an agent session, writing that
     /// column and nothing else. It is the only writer of `user_label`, which is what makes a rename
     /// survive the hook and detection writes that keep `label` current. `updated_at` is deliberately left
-    /// alone for the same reason `setAgentSessionNote` leaves it: it marks when the row entered its current
+    /// alone for the same reason `setAgentSessionBrief` leaves it: it marks when the row entered its current
     /// lifecycle state (clients read it as an alert's event time), and renaming is not a transition.
     /// Returns whether a row matched, so the rename can fail loudly on an unknown id.
     @discardableResult public func setAgentSessionUserLabel(id: String, userLabel: String?) throws -> Bool {
@@ -286,7 +292,7 @@ extension SQLiteStore {
     /// erases a value the row already learned, the same rule both upserts enforce, because detection goes
     /// quiet exactly when the agent exits and that is when both values are read.
     ///
-    /// Writes those columns and nothing else, for the same reason `setAgentSessionNote` writes directly
+    /// Writes those columns and nothing else, for the same reason `setAgentSessionBrief` writes directly
     /// rather than through `upsertAgentWindow`: `updated_at` tracks when the row entered its current
     /// lifecycle state (clients read it as an alert's event time), and learning what is running is not a
     /// lifecycle transition, so bumping it would re-date a stale blocked/finished alert to the present.
@@ -767,7 +773,7 @@ extension SQLiteStore {
     }
 
     func decodeAgentWindow(row: [String]) -> AgentWindowRecord? {
-        guard row.count >= 18 else { return nil }
+        guard row.count >= 19 else { return nil }
         guard let provider = AgentProvider(rawValue: row[2]) else { return nil }
         let terminalSessionID = row[9].isEmpty ? nil : row[9]
         let status = AgentWindowStatus(rawValue: row[11]) ?? .idle
@@ -778,8 +784,9 @@ extension SQLiteStore {
         return AgentWindowRecord(
             id: row[0], workspaceID: row[1], provider: provider, label: row[3].isEmpty ? nil : row[3], userLabel: row[16].isEmpty ? nil : row[16],
             runtimeTargetID: row[4].isEmpty ? nil : row[4], terminalTarget: terminalTarget, sessionKey: row[10].isEmpty ? nil : row[10],
-            status: status, note: row[12].isEmpty ? nil : row[12], detectedAgentKind: row[15].isEmpty ? nil : row[15],
-            launchCommand: row[17].isEmpty ? nil : row[17], createdAt: row[13], updatedAt: row[14])
+            status: status, brief: row[12].isEmpty ? nil : row[12], briefUpdatedAt: row[18].isEmpty ? nil : row[18],
+            detectedAgentKind: row[15].isEmpty ? nil : row[15], launchCommand: row[17].isEmpty ? nil : row[17], createdAt: row[13], updatedAt: row[14]
+        )
     }
 
     func spacesAgentTerminalSessionID(_ record: AgentWindowRecord) -> String? {

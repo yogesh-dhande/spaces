@@ -7,13 +7,12 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 24
+    public static let currentVersion = 25
 
-    /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
-    /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
-    /// plain terminal with no agent row), and the target is the agent session id. The foreign key is
-    /// `ON DELETE RESTRICT`: an agent row's inbound subscriptions are NOT cascaded away on delete but
-    /// dropped explicitly by the single termination chokepoint (`WorkspaceOrchestrator.finalizeAgentRow`)
+    /// The coding-agent orchestration watch graph, `agent_subscriptions`. The subscriber key is a terminal
+    /// session id (a subscriber may be a plain terminal with no agent row), and the target is the agent
+    /// session id. The foreign key is `ON DELETE RESTRICT`: an agent row's inbound subscriptions are NOT
+    /// cascaded away on delete but dropped explicitly by the single termination chokepoint (`WorkspaceOrchestrator.finalizeAgentRow`)
     /// after it has notified those subscribers the child exited. RESTRICT then makes any delete that
     /// bypasses the chokepoint fail loudly instead of silently stranding a watcher's notice. Named
     /// separately so both the fresh-schema SQL and the v6→v7 rebuild step share one definition and can
@@ -856,6 +855,53 @@ public enum DatabaseSchema {
                     ALTER TABLE projects ADD COLUMN kind TEXT NOT NULL DEFAULT 'standard';
                     """)
         },
+        // Replaces the single-line agent note with the agent's brief, a markdown document. An existing note
+        // becomes that agent's brief, dated by the row's `updated_at` (the note kept no timestamp of its own,
+        // and the lifecycle time is the closest the row has), so an agent keeps the context it was given.
+        //
+        // The frozen pre-v25 shape is created first for the reason every altering step in this file writes
+        // one out: the ALTERs need a table to alter. The column guards make the step idempotent, so a retry
+        // after a half-applied step lands on the same schema without copying a note twice. `note` is neither
+        // indexed nor referenced by a constraint, so SQLite's in-place DROP COLUMN preserves every row, as
+        // it did for the v12 to v13 step.
+        DatabaseMigrationStep(fromVersion: 24, toVersion: 25, description: "Replace the agent note with a brief", requiresBackup: true) { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS agent_sessions (
+                      id TEXT PRIMARY KEY,
+                      workspace_id TEXT NOT NULL,
+                      provider TEXT NOT NULL,
+                      label TEXT,
+                      user_label TEXT,
+                      status TEXT NOT NULL DEFAULT 'idle',
+                      runtime_target_id TEXT,
+                      terminal_session_id TEXT,
+                      session_key TEXT,
+                      note TEXT,
+                      detected_agent_kind TEXT,
+                      launch_command TEXT,
+                      created_at TEXT NOT NULL,
+                      updated_at TEXT NOT NULL,
+                      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+                      FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE SET NULL
+                    );
+                    """)
+            if !(try migrationColumnExists(handle, table: "agent_sessions", column: "brief")) {
+                try migrationExecuteBatch(handle, sql: "ALTER TABLE agent_sessions ADD COLUMN brief TEXT;")
+            }
+            if !(try migrationColumnExists(handle, table: "agent_sessions", column: "brief_updated_at")) {
+                try migrationExecuteBatch(handle, sql: "ALTER TABLE agent_sessions ADD COLUMN brief_updated_at TEXT;")
+            }
+            if try migrationColumnExists(handle, table: "agent_sessions", column: "note") {
+                try migrationExecuteBatch(
+                    handle,
+                    sql: """
+                        UPDATE agent_sessions SET brief = note, brief_updated_at = updated_at WHERE note IS NOT NULL AND note != '';
+                        ALTER TABLE agent_sessions DROP COLUMN note;
+                        """)
+            }
+        },
     ]
 
     /// The persisted final-render state of a session, one row per session. `has_final_render` stores
@@ -1202,7 +1248,11 @@ public enum DatabaseSchema {
               -- The agent's own conversation id in its provider's store, reported by its lifecycle
               -- hooks and used to resume that conversation rather than start a new one.
               session_key TEXT,
-              note TEXT,
+              -- The agent's brief: one markdown document the agent writes about its own work, shown beside
+              -- its terminal. `brief_updated_at` is when it was last written or cleared; `updated_at` stays
+              -- the lifecycle timestamp, so a brief write never re-dates a blocked or finished alert.
+              brief TEXT,
+              brief_updated_at TEXT,
               detected_agent_kind TEXT,
               -- The command that relaunches this agent, sampled from the terminal's foreground process
               -- while the agent runs. It lives here rather than only on the runtime row because the

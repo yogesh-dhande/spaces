@@ -46,14 +46,11 @@ struct AgentsTabView: View {
         } label: {
             BandRow(dotKind: row.statusDotKind(exitAcknowledged: false), tile: .tile(for: .codingAgents), title: entry.row.name, detail: entry.detail)
             {
+                if row.brief != nil { RowBriefGlyph() }
                 if row.sessionID != nil { RowChevron() }
             }
         }.buttonStyle(.plain).disabled(model.isMutating || row.sessionID == nil).accessibilityIdentifier("agents.row.\(entry.id)")
-        if model.hasUndismissedAlerts(for: row) {
-            button.contextMenu { DismissAlertMenuButton(model: model, row: row) }
-        } else {
-            button
-        }
+        if model.hasUndismissedAlerts(for: row) { button.contextMenu { DismissAlertMenuButton(model: model, row: row) } } else { button }
     }
 
     private func activateAgentRow(_ row: SpacesMobileWorkspaceRuntimeRow) {

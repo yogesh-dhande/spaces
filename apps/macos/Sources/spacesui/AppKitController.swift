@@ -95,6 +95,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// The right panel's footer strip: workspace details for the selected workspace.
     private weak var workspaceDetailFooterRow: NSStackView?
     private weak var workspaceFooterPaneLabel: NSTextField?
+    /// The footer's brief glyph, which follows the focused pane the same way the label above does.
+    private weak var workspaceFooterBriefButton: NSButton?
     private var workspaceFooterWorkspaceID: String?
     /// What the footer strip currently shows. Non-nil exactly while the strip holds that workspace's
     /// controls: `clearWorkspaceDetailFooter` is the only path that empties the strip, and it clears this.
@@ -315,6 +317,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let takeoverButtonVisible: Bool?
         let takeoverButtonEnabled: Bool?
         let takeoverMessage: String?
+        let briefVisible: Bool?
+        let briefSummary: String?
     }
 
     enum WindowFocusRequest: Sendable {
@@ -965,11 +969,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             searchVisible: debugState?.searchVisible, searchQuery: debugState?.searchQuery, searchTotal: debugState?.searchTotal,
             searchSelected: debugState?.searchSelected, attachmentMode: debugState?.attachmentMode, takeoverPending: debugState?.takeoverPending,
             takeoverButtonVisible: debugState?.takeoverButtonVisible, takeoverButtonEnabled: debugState?.takeoverButtonEnabled,
-            takeoverMessage: debugState?.takeoverMessage)
+            takeoverMessage: debugState?.takeoverMessage, briefVisible: debugState?.briefVisible, briefSummary: debugState?.briefSummary)
         writeTerminalSessionWindowStateDump(payload, to: outputPath)
     }
 
+    /// `toggle-brief` is the one action handled here rather than by the pane: the brief's visibility is
+    /// the panel coordinator's, keyed by the session's agent, and the terminal pane knows nothing of it.
     private func performTerminalSessionPaneShortcut(sessionID: String, action: String, text: String?) {
+        if action == "toggle-brief" {
+            panelCoordinator.toggleAgentBrief(forSessionID: sessionID)
+            return
+        }
         panelCoordinator.content(forSessionID: sessionID)?.performShortcutForTesting(action: action, text: text)
     }
 
@@ -2010,7 +2020,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return AgentWindowRecord(
                 id: row.agentID ?? row.id, workspaceID: row.workspaceID, provider: .spaces, label: row.name,
                 terminalTarget: row.sessionID.map { TerminalTargetRecord(trackingID: $0) }, status: agentStatus(from: row.activityState),
-                createdAt: updatedAt, updatedAt: updatedAt)
+                brief: row.brief, briefUpdatedAt: row.briefUpdatedAt, createdAt: updatedAt, updatedAt: updatedAt)
         }
     }
 
@@ -4650,6 +4660,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
         footer.addArrangedSubview(spacer)
+        // Built with the rest of the strip but kept in step with the focused pane in place, like the
+        // label above: whether the pane's agent has a brief moves without anything else in the strip.
+        // It sits just before ⋯, where it is added below.
+        let briefButton = footerActionButton(
+            symbol: "doc.text", tooltip: AgentBriefToggleState.hidden.toggleTitle, action: #selector(toggleWorkspaceFocusedPaneBrief(_:)))
+        briefButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+        briefButton.setAccessibilityIdentifier("workspace-detail-brief-toggle")
+        workspaceFooterBriefButton = briefButton
         refreshWorkspaceFooterFocusedPane(workspaceID: workspace.id)
 
         // Everything below writes through the owning daemon, so an unreachable device's footer reads
@@ -4695,6 +4713,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
         }
 
+        footer.addArrangedSubview(briefButton)
         let overflowButton = footerActionButton(symbol: "ellipsis.circle", tooltip: "More actions", action: #selector(showWorkspaceOverflowMenu(_:)))
         overflowButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         overflowButton.setAccessibilityIdentifier("workspace-detail-overflow")
@@ -4758,6 +4777,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let info = deviceID(forWorkspaceID: workspaceID).flatMap { panelCoordinator.focusedPaneInfo(deviceID: $0, workspaceID: workspaceID) }
         paneLabel.stringValue = info?.title ?? ""
         paneLabel.isHidden = info == nil
+        refreshWorkspaceFooterBriefToggle()
+    }
+
+    /// Syncs the footer's brief glyph with the focused pane's agent brief. Called with the focused-pane
+    /// label above, and by the panel coordinator on every overview install, which is how a brief
+    /// appearing, changing, or going away reaches the glyph.
+    func refreshWorkspaceFooterBriefToggle() {
+        guard let briefButton = workspaceFooterBriefButton, let workspaceID = workspaceFooterWorkspaceID else { return }
+        briefButton.applyAgentBriefToggleState(focusedPaneBriefToggleState(workspaceID: workspaceID))
     }
 
     /// Opens the notes editor in a popover anchored to the footer's notes button.
@@ -5900,8 +5928,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// menu keeps its shape — the items stay listed so the menu does not reshuffle mid-outage —
     /// and only the ones that need the daemon are disabled. Auto-enabling is off so those
     /// decisions are the menu's own rather than AppKit's responder-chain guess.
+    ///
+    /// The Hide/Show Brief item leads the menu for the workspace's focused pane: always listed, so the
+    /// menu keeps one shape, and enabled only while that pane's agent has a brief (`briefToggle`). It
+    /// needs nothing from the daemon, so an unreachable device leaves it as it is.
     static func makeWorkspaceOverflowMenu(
-        workspaceID: String, path: String, target: AnyObject?, isLocalDevice: Bool, daemonActionsEnabled: Bool, isHomeWorkspace: Bool
+        workspaceID: String, path: String, target: AnyObject?, isLocalDevice: Bool, daemonActionsEnabled: Bool, isHomeWorkspace: Bool,
+        briefToggle: AgentBriefToggleState
     ) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -5920,6 +5953,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             menu.addItem(item)
         }
 
+        addItem(
+            title: briefToggle.toggleTitle, symbol: "doc.text", action: #selector(AppKitController.toggleWorkspaceFocusedPaneBrief(_:)),
+            keyEquivalent: "b", modifiers: [.command, .option], identifier: workspaceID, isEnabled: briefToggle != .unavailable)
+        menu.addItem(.separator())
         addItem(
             title: "Copy path", symbol: "doc.on.doc", action: #selector(AppKitController.copyDirectoryPath(_:)), keyEquivalent: "", modifiers: [],
             identifier: path)
@@ -5945,7 +5982,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let workspaceID = sender.identifier?.rawValue, let workspace = deviceModel.workspaceIndex[workspaceID]?.workspace else { return }
         let menu = Self.makeWorkspaceOverflowMenu(
             workspaceID: workspaceID, path: workspace.dir, target: self, isLocalDevice: isLocalWorkspace(workspace),
-            daemonActionsEnabled: deviceAcceptsDaemonActions(forWorkspaceID: workspaceID), isHomeWorkspace: workspace.projectKind == .home)
+            daemonActionsEnabled: deviceAcceptsDaemonActions(forWorkspaceID: workspaceID), isHomeWorkspace: workspace.projectKind == .home,
+            briefToggle: focusedPaneBriefToggleState(workspaceID: workspaceID))
         let origin = NSPoint(x: 0, y: sender.bounds.maxY + 4)
         menu.popUp(positioning: nil, at: origin, in: sender)
     }

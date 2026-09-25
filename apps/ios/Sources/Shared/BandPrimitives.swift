@@ -112,6 +112,13 @@ struct RowChevron: View {
     var body: some View { Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mutedSecondary) }
 }
 
+/// Muted marker a coding-agent row carries, just before its chevron, while its agent keeps a brief.
+struct RowBriefGlyph: View {
+    var body: some View {
+        Image(systemName: "doc.text").font(.system(size: 11)).foregroundStyle(Theme.mutedSecondary).accessibilityLabel("Has brief")
+    }
+}
+
 /// Accent play glyph for rows whose primary action launches the row.
 struct RowPlayIndicator: View {
     var body: some View { Image(systemName: "play.fill").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.accent) }

@@ -671,6 +671,7 @@ extension ProcessProfileEnvironmentSuites {
     func applyAppearance(_ appearance: ThemeAppearance) {}
     func applyTerminalTextSize(_ size: TerminalTextSize) {}
     func setAccessibilityRuntimeTargetName(_ name: String) {}
+    func applyAgentBrief(_ brief: AgentBriefPresentation?) {}
 
     /// Runs where a real pane would reclaim ownership, which a test uses to act at that exact point in
     /// an open (it is the last thing the open does before the suspension it reports its landing after).

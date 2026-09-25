@@ -396,8 +396,8 @@ struct SpacesDeviceOverviewBuilder {
         let session = rawSessionID.flatMap { sessionsByID[$0] }
         return SpacesDeviceWorkspaceCodingAgentRow(
             id: id, workspaceID: workspaceID, name: name, command: command, agentID: agent.id, sessionID: session?.sessionID,
-            runState: agentRunState(session: session), activityState: activityState(for: agent), updatedAt: agent.updatedAt, canStop: true,
-            liveTitle: session?.liveTitle)
+            runState: agentRunState(session: session), activityState: activityState(for: agent), updatedAt: agent.updatedAt, brief: agent.brief,
+            briefUpdatedAt: agent.briefUpdatedAt, canStop: true, liveTitle: session?.liveTitle)
     }
 
     private static func workspaceTerminalRows(

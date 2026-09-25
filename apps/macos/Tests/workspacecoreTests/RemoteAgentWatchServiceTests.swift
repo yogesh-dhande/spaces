@@ -193,9 +193,9 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
 
     private func makeRow(status: String, terminalSessionID: String = "child-1") -> SpacesDeviceAgentSessionRow {
         SpacesDeviceAgentSessionRow(
-            id: "row-\(terminalSessionID)", terminalSessionID: terminalSessionID, agent: "claude", label: "Child", status: status, note: nil,
-            projectID: "project-1", projectName: "Project", workspaceID: "workspace-1", workspaceName: "Workspace", workspaceDir: "/tmp/workspace-1",
-            branch: "main", updatedAt: "t", lastSignalAt: nil)
+            id: "row-\(terminalSessionID)", terminalSessionID: terminalSessionID, agent: "claude", label: "Child", status: status, briefSummary: nil,
+            briefUpdatedAt: nil, projectID: "project-1", projectName: "Project", workspaceID: "workspace-1", workspaceName: "Workspace",
+            workspaceDir: "/tmp/workspace-1", branch: "main", updatedAt: "t", lastSignalAt: nil)
     }
 
     @MainActor private func waitUntil(

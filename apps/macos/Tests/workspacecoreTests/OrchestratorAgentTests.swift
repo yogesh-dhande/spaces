@@ -1459,7 +1459,8 @@ extension OrchestratorTests {
             AgentWindowRecord(
                 id: inserted.id, workspaceID: inserted.workspaceID, provider: inserted.provider, label: inserted.label,
                 runtimeTargetID: inserted.runtimeTargetID, terminalTarget: inserted.terminalTarget, sessionKey: "session-key-from-hook",
-                status: .spinning, note: inserted.note, createdAt: inserted.createdAt, updatedAt: "2026-01-01T00:00:01Z"))
+                status: .spinning, brief: inserted.brief, briefUpdatedAt: inserted.briefUpdatedAt, createdAt: inserted.createdAt,
+                updatedAt: "2026-01-01T00:00:01Z"))
 
         // Pass B: the delayed second reconcile pass re-runs the same detection.
         try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)

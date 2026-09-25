@@ -3311,8 +3311,8 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let gateway = RecordingCodePaneDeviceGateway()
         let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
         let content = makeController(hosting: hosting, deviceGateway: gateway)
-        content.fileSignatureReconnectFloor = .milliseconds(150)
-        content.fileSignatureReconnectCap = .milliseconds(150)
+        content.fileSignatureReconnectFloor = .seconds(1)
+        content.fileSignatureReconnectCap = .seconds(1)
         content.activate(focus: false)
         content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
 
@@ -3323,7 +3323,9 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         await gateway.waitForFileSubscribeCallCount(1)
 
         // Drop the first path's stream and let it enter its pending-retry backoff window, without waiting
-        // for that retry to fire.
+        // for that retry to fire. The second open below must be dispatched well before the 1s floor
+        // elapses, so the floor is set far above what this settle plus the dispatch can take even on a
+        // loaded machine: a tight window here is what let the stale retry win the race and fire first.
         await gateway.triggerFileDisconnect(at: 0)
         await settle(.milliseconds(50))  // let the disconnect handler run and schedule the retry's sleep
 
@@ -3338,9 +3340,9 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let restoredPath = await gateway.subscribedFilePath(at: 1)
         #expect(restoredPath == "foo.ts")
 
-        // Wait well past the original 150ms backoff floor: the stale retry (still captured against the
+        // Wait well past the 1s backoff floor: the stale retry (still captured against the
         // now-superseded generation) must not also fire and produce a second, redundant subscribe.
-        await settle(.milliseconds(300))
+        await settle(.milliseconds(1300))
         let subscribeCount = await gateway.fileSubscribeCallCount()
         #expect(subscribeCount == 2, "the superseded backoff retry must not also resubscribe on top of the deliberate restore")
     }

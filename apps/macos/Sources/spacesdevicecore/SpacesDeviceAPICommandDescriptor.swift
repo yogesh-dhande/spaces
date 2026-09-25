@@ -169,8 +169,9 @@ extension SpacesDeviceAPICommand {
             return Self.descriptor(wireKey: "killAgentSession", lane: .mainQueue, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .listAgentSessions:
             return Self.descriptor(wireKey: "listAgentSessions", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
-        case .annotateAgentSession:
-            return Self.descriptor(wireKey: "annotateAgentSession", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .writeAgentBrief: return Self.descriptor(wireKey: "writeAgentBrief", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .readAgentBrief: return Self.descriptor(wireKey: "readAgentBrief", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .clearAgentBrief: return Self.descriptor(wireKey: "clearAgentBrief", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .state: return Self.descriptor(wireKey: "state", lane: .terminalControl, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .terminalControl:
             return Self.descriptor(wireKey: "terminalControl", lane: .terminalControl, timeoutSeconds: Self.defaultRequestTimeoutSeconds)

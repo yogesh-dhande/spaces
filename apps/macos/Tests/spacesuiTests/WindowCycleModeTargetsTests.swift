@@ -198,7 +198,8 @@ import workspacecore
                         agents: [
                             SpacesDeviceWorkspaceCodingAgentRow(
                                 id: "row-a-waiting", workspaceID: "w1", name: "a-waiting", command: "claude", agentID: "a-waiting", sessionID: nil,
-                                runState: .running, activityState: .waiting, updatedAt: "2026-01-01T10:00:00Z", canStop: true)
+                                runState: .running, activityState: .waiting, updatedAt: "2026-01-01T10:00:00Z", brief: nil, briefUpdatedAt: nil,
+                                canStop: true)
                         ])
                 ], sessions: []))
 
@@ -709,7 +710,7 @@ import workspacecore
     {
         SpacesDeviceWorkspaceCodingAgentRow(
             id: "row-\(id)", workspaceID: workspaceID, name: id, command: "claude", agentID: id, sessionID: sessionID ?? "session-\(id)",
-            runState: .running, activityState: state, updatedAt: updatedAt, canStop: true)
+            runState: .running, activityState: state, updatedAt: updatedAt, brief: nil, briefUpdatedAt: nil, canStop: true)
     }
 
     private func terminalRow(id: String, workspaceID: String, sessionID: String, title: String) -> SpacesDeviceWorkspaceTerminalRow {

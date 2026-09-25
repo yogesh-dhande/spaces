@@ -44,6 +44,7 @@ import spacesterminalui
     func applyAppearance(_ appearance: ThemeAppearance) {}
     func applyTerminalTextSize(_ size: TerminalTextSize) {}
     func setAccessibilityRuntimeTargetName(_ name: String) {}
+    func applyAgentBrief(_ brief: AgentBriefPresentation?) {}
 
     func requestOwnershipIfNeeded() { requestOwnershipCallCount += 1 }
 

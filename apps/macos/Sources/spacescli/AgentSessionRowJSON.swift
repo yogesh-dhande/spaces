@@ -3,7 +3,8 @@ import spacesdevicecore
 import spacesterminalcore
 
 /// JSON presentation of one coding-agent session row, shared by `spaces agent list`/`spaces agent status
-/// --json` and the `spaces_agent_list`/`spaces_agent_status`/`spaces_agent_annotate` MCP tools.
+/// --json` and the `spaces_agent_list`, `spaces_agent_status`, `spaces_agent_brief_write`, and
+/// `spaces_agent_brief_clear` MCP tools.
 ///
 /// The wire rows (`TerminalServiceAgentSessionRow`, the local daemon protocol type, and
 /// `SpacesDeviceAgentSessionRow`, the cross-device Device API type) carry no rendered link and no device
@@ -24,7 +25,8 @@ struct AgentSessionRowJSON: Codable, Equatable {
     let agent: String?
     let label: String?
     let status: String
-    let note: String?
+    let briefSummary: String?
+    let briefUpdatedAt: String?
     let projectID: String
     let projectName: String
     let workspaceID: String
@@ -41,8 +43,9 @@ struct AgentSessionRowJSON: Codable, Equatable {
     let open: String
 
     private init(
-        id: String, terminalSessionID: String?, agent: String?, label: String?, status: String, note: String?, projectID: String, projectName: String,
-        workspaceID: String, workspaceName: String, workspaceDir: String, branch: String?, updatedAt: String, lastSignalAt: String?, deviceID: String?
+        id: String, terminalSessionID: String?, agent: String?, label: String?, status: String, briefSummary: String?, briefUpdatedAt: String?,
+        projectID: String, projectName: String, workspaceID: String, workspaceName: String, workspaceDir: String, branch: String?, updatedAt: String,
+        lastSignalAt: String?, deviceID: String?
     ) {
         let resolvedSessionID = terminalSessionID ?? id
         self.id = id
@@ -50,7 +53,8 @@ struct AgentSessionRowJSON: Codable, Equatable {
         self.agent = agent
         self.label = label
         self.status = status
-        self.note = note
+        self.briefSummary = briefSummary
+        self.briefUpdatedAt = briefUpdatedAt
         self.projectID = projectID
         self.projectName = projectName
         self.workspaceID = workspaceID
@@ -66,17 +70,19 @@ struct AgentSessionRowJSON: Codable, Equatable {
     /// Wraps a local daemon agent row. `deviceID` is nil for this machine's own sessions.
     init(_ row: TerminalServiceAgentSessionRow, deviceID: String? = nil) {
         self.init(
-            id: row.id, terminalSessionID: row.terminalSessionID, agent: row.agent, label: row.label, status: row.status, note: row.note,
-            projectID: row.projectID, projectName: row.projectName, workspaceID: row.workspaceID, workspaceName: row.workspaceName,
-            workspaceDir: row.workspaceDir, branch: row.branch, updatedAt: row.updatedAt, lastSignalAt: row.lastSignalAt, deviceID: deviceID)
+            id: row.id, terminalSessionID: row.terminalSessionID, agent: row.agent, label: row.label, status: row.status,
+            briefSummary: row.briefSummary, briefUpdatedAt: row.briefUpdatedAt, projectID: row.projectID, projectName: row.projectName,
+            workspaceID: row.workspaceID, workspaceName: row.workspaceName, workspaceDir: row.workspaceDir, branch: row.branch,
+            updatedAt: row.updatedAt, lastSignalAt: row.lastSignalAt, deviceID: deviceID)
     }
 
     /// Wraps a paired-device agent row read over the Device API. `deviceID` is required (unlike the local
     /// overload) because a remote row always resolves to the paired device it was read from.
     init(_ row: SpacesDeviceAgentSessionRow, deviceID: String) {
         self.init(
-            id: row.id, terminalSessionID: row.terminalSessionID, agent: row.agent, label: row.label, status: row.status, note: row.note,
-            projectID: row.projectID, projectName: row.projectName, workspaceID: row.workspaceID, workspaceName: row.workspaceName,
-            workspaceDir: row.workspaceDir, branch: row.branch, updatedAt: row.updatedAt, lastSignalAt: row.lastSignalAt, deviceID: deviceID)
+            id: row.id, terminalSessionID: row.terminalSessionID, agent: row.agent, label: row.label, status: row.status,
+            briefSummary: row.briefSummary, briefUpdatedAt: row.briefUpdatedAt, projectID: row.projectID, projectName: row.projectName,
+            workspaceID: row.workspaceID, workspaceName: row.workspaceName, workspaceDir: row.workspaceDir, branch: row.branch,
+            updatedAt: row.updatedAt, lastSignalAt: row.lastSignalAt, deviceID: deviceID)
     }
 }

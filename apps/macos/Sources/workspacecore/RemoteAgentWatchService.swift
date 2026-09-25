@@ -4,7 +4,7 @@ import spacesdevicecore
 /// Watches coding-agent sessions on paired devices on behalf of local subscriber terminals. For every
 /// paired device that has at least one `agent_remote_subscriptions` edge it holds one long-lived
 /// device-overview stream — the same push transport the Mac sidebar uses. Each push is treated purely as
-/// a change signal: the overview's coding-agent rows lack the note/status detail needed to tell blocked
+/// a change signal: the overview's coding-agent rows lack the status detail needed to tell blocked
 /// from waiting or to see an exit, so the source of truth is a `listAgentSessions` pull whose successive
 /// snapshots are diffed (`RemoteAgentSnapshotDiff`) to recover blocked/done/exited transitions.
 /// Transitions are delivered through the shared `AgentNotificationEngine`, so a remote child's line

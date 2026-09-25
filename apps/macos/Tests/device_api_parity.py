@@ -784,26 +784,32 @@ def run(args: argparse.Namespace) -> dict:
     agent_id = agent_row.get("agentID")
 
     # Orchestration surface (`spaces agent … --device`): the running coding agent registered a Spaces
-    # agent row, so it shows in listAgentSessions; annotateAgentSession sets and persists its note, and
-    # a later stopCodingAgent is the remote kill. spawnAgentSession's supported-agent hook gate rejects
+    # agent row, so it shows in listAgentSessions; writeAgentBrief stores its brief (the rows carry the
+    # headline, readAgentBrief the whole document), and a later stopCodingAgent is the remote kill. spawnAgentSession's supported-agent hook gate rejects
     # an unsupported command remotely — a negative check needing no installed hooks.
     listed_rows = result(
         send("listAgentSessions", {"sessionID": agent_session_id}, args, app), "agentSessions", "listAgentSessions"
     ).get("rows") or []
     if not any(row.get("terminalSessionID") == agent_session_id for row in listed_rows):
         raise AssertionError(f"listAgentSessions did not include {agent_session_id}: {json.dumps(listed_rows, indent=2, sort_keys=True)}")
-    annotated_rows = result(
-        send("annotateAgentSession", {"sessionID": agent_session_id, "note": "parity review"}, args, app),
+    brief_markdown = "# parity review\n\n- checking the brief round trip"
+    briefed_rows = result(
+        send("writeAgentBrief", {"sessionID": agent_session_id, "markdown": brief_markdown}, args, app),
         "agentSessions",
-        "annotateAgentSession",
+        "writeAgentBrief",
     ).get("rows") or []
-    if not annotated_rows or annotated_rows[0].get("note") != "parity review":
-        raise AssertionError(f"annotateAgentSession did not persist note: {json.dumps(annotated_rows, indent=2, sort_keys=True)}")
+    if not briefed_rows or briefed_rows[0].get("briefSummary") != "parity review":
+        raise AssertionError(f"writeAgentBrief did not persist the brief: {json.dumps(briefed_rows, indent=2, sort_keys=True)}")
     reread_rows = result(
         send("listAgentSessions", {"sessionID": agent_session_id}, args, app), "agentSessions", "listAgentSessions"
     ).get("rows") or []
-    if not any(row.get("note") == "parity review" for row in reread_rows):
-        raise AssertionError(f"listAgentSessions did not carry the persisted note: {json.dumps(reread_rows, indent=2, sort_keys=True)}")
+    if not any(row.get("briefSummary") == "parity review" for row in reread_rows):
+        raise AssertionError(f"listAgentSessions did not carry the persisted brief: {json.dumps(reread_rows, indent=2, sort_keys=True)}")
+    read_brief = result(
+        send("readAgentBrief", {"sessionID": agent_session_id}, args, app), "agentBrief", "readAgentBrief"
+    )
+    if read_brief.get("brief") != brief_markdown:
+        raise AssertionError(f"readAgentBrief did not return the written document: {json.dumps(read_brief, indent=2, sort_keys=True)}")
     spawn_rejected = send("spawnAgentSession", {"workspaceID": workspace_id, "command": "ls -la"}, args, app)
     if spawn_rejected.get("ok") is not False:
         raise AssertionError(f"spawnAgentSession accepted an unsupported command: {json.dumps(spawn_rejected, indent=2, sort_keys=True)}")

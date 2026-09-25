@@ -19,10 +19,17 @@ public struct AgentWindowRecord: Codable, Sendable {
     public let terminalTarget: TerminalTargetRecord?
     public let sessionKey: String?
     public let status: AgentWindowStatus
-    /// Explicit, user-authored annotation for orchestration (`spaces agent annotate`). It is never
-    /// derived from prompts or terminal output, and survives status signals — only the annotate path
-    /// clears or replaces it.
-    public let note: String?
+    /// The agent's brief: one markdown document it writes about its own work (`spaces agent brief write`),
+    /// shown read-only beside its terminal. Nil when the agent has none. Like `userLabel`, it has exactly one
+    /// writer (`SQLiteStore.setAgentSessionBrief`) and is read-only on every other path: no upsert writes the
+    /// column, so a hook or detection write holding an older snapshot can never put back a brief the agent
+    /// has since replaced. A lifecycle path that rebuilds a record from an existing one still copies it
+    /// across, for the reason `userLabel` gives.
+    public let brief: String?
+    /// When the brief was last written or cleared, nil when it never was. Kept apart from `updatedAt`, which
+    /// marks when the row entered its current lifecycle state and which clients read as an alert's event
+    /// time, so a brief write never re-dates a blocked or finished alert.
+    public let briefUpdatedAt: String?
     /// The coding agent kind (claude/codex/opencode) foreground detection classified this session as,
     /// persisted the first time it is observed and refreshed by every later observation. It is stored
     /// rather than read live because the live foreground state it comes from is cleared exactly when the
@@ -43,8 +50,8 @@ public struct AgentWindowRecord: Codable, Sendable {
 
     public init(
         id: String, workspaceID: String, provider: AgentProvider, label: String?, userLabel: String? = nil, runtimeTargetID: String? = nil,
-        terminalTarget: TerminalTargetRecord? = nil, sessionKey: String? = nil, status: AgentWindowStatus, note: String? = nil,
-        detectedAgentKind: String? = nil, launchCommand: String? = nil, createdAt: String, updatedAt: String
+        terminalTarget: TerminalTargetRecord? = nil, sessionKey: String? = nil, status: AgentWindowStatus, brief: String? = nil,
+        briefUpdatedAt: String? = nil, detectedAgentKind: String? = nil, launchCommand: String? = nil, createdAt: String, updatedAt: String
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -55,7 +62,8 @@ public struct AgentWindowRecord: Codable, Sendable {
         self.terminalTarget = terminalTarget
         self.sessionKey = sessionKey
         self.status = status
-        self.note = note
+        self.brief = brief
+        self.briefUpdatedAt = briefUpdatedAt
         self.detectedAgentKind = detectedAgentKind
         self.launchCommand = launchCommand
         self.createdAt = createdAt
@@ -99,7 +107,7 @@ public struct AgentWindowRecord: Codable, Sendable {
     public func withUserLabel(_ userLabel: String?) -> AgentWindowRecord {
         AgentWindowRecord(
             id: id, workspaceID: workspaceID, provider: provider, label: label, userLabel: userLabel, runtimeTargetID: runtimeTargetID,
-            terminalTarget: terminalTarget, sessionKey: sessionKey, status: status, note: note, detectedAgentKind: detectedAgentKind,
-            launchCommand: launchCommand, createdAt: createdAt, updatedAt: updatedAt)
+            terminalTarget: terminalTarget, sessionKey: sessionKey, status: status, brief: brief, briefUpdatedAt: briefUpdatedAt,
+            detectedAgentKind: detectedAgentKind, launchCommand: launchCommand, createdAt: createdAt, updatedAt: updatedAt)
     }
 }

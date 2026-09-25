@@ -5,16 +5,18 @@ import spacesterminalcore
 import workspacecore
 
 final class SpacesMCPStdioServer {
-    /// A tool handler's result: either the shared local-daemon wire envelope (every non-agent-session
-    /// tool, and the agent tools that don't carry rows), or the agent-session presentation envelope
-    /// (`spaces_agent_list`/`spaces_agent_status`/`spaces_agent_annotate`). Two cases instead of widening
+    /// A tool handler's result: the shared local-daemon wire envelope (every non-agent-session tool, and
+    /// the agent tools that don't carry rows), the agent-session presentation envelope
+    /// (`spaces_agent_list`, `spaces_agent_status`, `spaces_agent_brief_write`, `spaces_agent_brief_clear`),
+    /// or the brief read envelope (`spaces_agent_brief_read`). Separate cases instead of widening
     /// `TerminalServiceProfileCommandResponse` itself: that type is the shared wire response for every
     /// tool in this server, not just agent ones, so adding a presentation-only field to it would ripple
-    /// into every other tool's JSON shape. Both cases flow through the same encode/piggyback chokepoints
+    /// into every other tool's JSON shape. Every case flows through the same encode/piggyback chokepoints
     /// below so every tool, agent or not, is handled identically apart from its payload type.
     private enum MCPToolResponse {
         case profile(TerminalServiceProfileCommandResponse)
         case agentSessions(MCPAgentSessionsToolResponse)
+        case agentBrief(MCPAgentBriefToolResponse)
     }
 
     /// JSON envelope for the agent-session-carrying tools, mirroring `TerminalServiceProfileCommandResponse`'s
@@ -27,6 +29,30 @@ final class SpacesMCPStdioServer {
         var pendingAgentEvents: [String]?
 
         func addingPendingAgentEvents(_ events: [String]?) -> MCPAgentSessionsToolResponse {
+            guard let events, !events.isEmpty else { return self }
+            var copy = self
+            copy.pendingAgentEvents = events
+            return copy
+        }
+    }
+
+    /// JSON envelope for `spaces_agent_brief_read`: the agent's terminal session id, its full brief (absent
+    /// when it has none, with `message` saying so), and when the brief was last written or cleared.
+    private struct MCPAgentBriefToolResponse: Encodable {
+        let message: String
+        let session: String
+        let brief: String?
+        let updatedAt: String?
+        var pendingAgentEvents: [String]?
+
+        init(session: String, brief: String?, updatedAt: String?) {
+            self.message = brief == nil ? "No brief for terminal \(session)." : "Read agent brief."
+            self.session = session
+            self.brief = brief
+            self.updatedAt = updatedAt
+        }
+
+        func addingPendingAgentEvents(_ events: [String]?) -> MCPAgentBriefToolResponse {
             guard let events, !events.isEmpty else { return self }
             var copy = self
             copy.pendingAgentEvents = events
@@ -261,7 +287,7 @@ final class SpacesMCPStdioServer {
             MCPToolDescriptor(
                 name: "spaces_agent_list",
                 description:
-                    "List coding-agent sessions on this or a paired device with status, note, project/workspace, and a spaces://terminal deep link.",
+                    "List coding-agent sessions on this or a paired device with status, the first line of each agent's brief (briefSummary), project/workspace, and a spaces://terminal deep link.",
                 properties: [
                     "workspace": stringSchema("Workspace ID filter. When omitted, lists agents across every workspace."),
                     "device": stringSchema("Paired device name or ID. Defaults to this machine."),
@@ -282,7 +308,7 @@ final class SpacesMCPStdioServer {
             MCPToolDescriptor(
                 name: "spaces_agent_status",
                 description:
-                    "Show one coding-agent session's status, note, project/workspace, and deep link. Fails until the agent has emitted its first hook signal (no agent row exists before then) — retry after the child starts working.",
+                    "Show one coding-agent session's status, the first line of its brief (briefSummary), project/workspace, and deep link. Fails until the agent has emitted its first hook signal (no agent row exists before then); retry after the child starts working.",
                 properties: [
                     "session": stringSchema("Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID."),
                     "device": stringSchema("Paired device name or ID. Defaults to this machine."),
@@ -305,26 +331,69 @@ final class SpacesMCPStdioServer {
                 return .agentSessions(MCPAgentSessionsToolResponse(message: "Listed agent sessions.", agentSessions: [AgentSessionRowJSON(row)]))
             },
             MCPToolDescriptor(
-                name: "spaces_agent_annotate",
+                name: "spaces_agent_brief_write",
                 description:
-                    "Set (or clear, with an empty note) a coding-agent session's explicit note. Fails until the agent has emitted its first hook signal (no agent row exists before then) — retry after the child starts working.",
+                    "Replace this coding agent's brief: a short markdown status page that Spaces shows read-only beside the agent's terminal on Mac and iPhone, so the user sees where things stand without reading the transcript. Write it for the user and keep it current: update it when you start or finish a step, when a question for the user comes up, and when an estimate changes. Each call replaces the whole document (read it first with spaces_agent_brief_read to keep sections you are not changing). Recommended sections: Status (what you are doing now; for a step that takes more than a few minutes, when you expect it to finish), Questions for you (decisions only the user can make, as a checklist so they are not buried in the transcript), Tasks (what you plan to do and what is done, as a checklist). Keep it under one screen; the cap is 8000 characters. The first non-empty line doubles as the one-line summary shown in spaces_agent_list and in blocked/done notifications, so lead with the headline. An empty string clears the brief. Defaults to the calling terminal's agent (SPACES_TERMINAL_TRACKING_ID); works for any detected coding agent, hooks are not required.",
                 properties: [
-                    "note": stringSchema("Note text. Pass an empty string to clear the note."),
+                    "markdown": stringSchema("The whole brief as markdown. An empty string clears the brief."),
                     "session": stringSchema("Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID."),
                     "device": stringSchema("Paired device name or ID. Defaults to this machine."),
-                ], required: ["note"]
+                ], required: ["markdown"]
             ) { server, arguments in
-                let args = try decodeMCPArguments(AgentAnnotateArguments.self, from: arguments)
+                let args = try decodeMCPArguments(AgentBriefWriteArguments.self, from: arguments)
                 let sessionID = try server.resolvedAgentSessionID(args.session)
                 if let device = try server.resolvedDevice(args.device) {
-                    let rows = try SpacesDeviceClient.annotateAgentSession(
-                        sessionID: sessionID, note: args.note, context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
+                    let response = try SpacesDeviceClient.writeAgentBrief(
+                        sessionID: sessionID, markdown: args.markdown, context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
                     return .agentSessions(
                         MCPAgentSessionsToolResponse(
-                            message: rows.first?.note == nil ? "Cleared agent note." : "Annotated agent session.",
+                            message: response.message,
+                            agentSessions: (response.agentSessions ?? []).map { AgentSessionRowJSON($0, deviceID: device.id) }))
+                }
+                let response = try TerminalService.sendProfileCommand(.agentBriefWrite(.init(sessionID: sessionID, markdown: args.markdown)))
+                return .agentSessions(
+                    MCPAgentSessionsToolResponse(
+                        message: response.message, agentSessions: (response.agentSessions ?? []).map { AgentSessionRowJSON($0) }))
+            },
+            MCPToolDescriptor(
+                name: "spaces_agent_brief_read",
+                description:
+                    "Read this coding agent's brief, the markdown status page Spaces shows beside its terminal, in full, with when it was last updated. Read it before spaces_agent_brief_write to keep the sections you are not changing; the result says so when there is no brief yet. Defaults to the calling terminal's agent (SPACES_TERMINAL_TRACKING_ID); works for any detected coding agent.",
+                properties: [
+                    "session": stringSchema("Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID."),
+                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
+                ], required: []
+            ) { server, arguments in
+                let args = try decodeMCPArguments(AgentStatusArguments.self, from: arguments)
+                let sessionID = try server.resolvedAgentSessionID(args.session)
+                if let device = try server.resolvedDevice(args.device) {
+                    let result = try SpacesDeviceClient.readAgentBrief(
+                        sessionID: sessionID, context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
+                    return .agentBrief(MCPAgentBriefToolResponse(session: sessionID, brief: result.brief, updatedAt: result.updatedAt))
+                }
+                let result = try TerminalService.sendProfileCommand(.agentBriefRead(sessionID: sessionID)).agentBrief
+                return .agentBrief(MCPAgentBriefToolResponse(session: sessionID, brief: result?.brief, updatedAt: result?.updatedAt))
+            },
+            MCPToolDescriptor(
+                name: "spaces_agent_brief_clear",
+                description:
+                    "Clear this coding agent's brief, removing the status page Spaces shows beside its terminal, for example once the work it described is finished. Defaults to the calling terminal's agent (SPACES_TERMINAL_TRACKING_ID); works for any detected coding agent.",
+                properties: [
+                    "session": stringSchema("Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID."),
+                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
+                ], required: []
+            ) { server, arguments in
+                let args = try decodeMCPArguments(AgentStatusArguments.self, from: arguments)
+                let sessionID = try server.resolvedAgentSessionID(args.session)
+                if let device = try server.resolvedDevice(args.device) {
+                    let rows = try SpacesDeviceClient.clearAgentBrief(
+                        sessionID: sessionID, context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
+                    return .agentSessions(
+                        MCPAgentSessionsToolResponse(
+                            message: WorkspaceOrchestrator.agentBriefClearedMessage,
                             agentSessions: rows.map { AgentSessionRowJSON($0, deviceID: device.id) }))
                 }
-                let response = try TerminalService.sendProfileCommand(.agentAnnotate(.init(sessionID: sessionID, note: args.note)))
+                let response = try TerminalService.sendProfileCommand(.agentBriefClear(sessionID: sessionID))
                 return .agentSessions(
                     MCPAgentSessionsToolResponse(
                         message: response.message, agentSessions: (response.agentSessions ?? []).map { AgentSessionRowJSON($0) }))
@@ -393,7 +462,7 @@ final class SpacesMCPStdioServer {
             MCPToolDescriptor(
                 name: "spaces_agent_subscribe",
                 description:
-                    "Watch a child coding-agent session from the current (or an explicit) terminal. While watching, each time the child goes blocked/done/exited you get one event block — a `[spaces] <label> (<kind>) is <blocked|done|exited>` line followed by indented project/workspace/branch/session/note/link fields. When you are idle it is injected into your terminal; when you are busy it is attached as `pendingAgentEvents` on the result of your next spaces_* tool call, so you learn a child is blocked without waiting for your own turn boundary. Fails until the child has emitted its first hook signal (there is no agent row to watch before then) — retry after the child starts working.",
+                    "Watch a child coding-agent session from the current (or an explicit) terminal. While watching, each time the child goes blocked/done/exited you get one event block (a `[spaces] <label> (<kind>) is <blocked|done|exited>` line followed by indented project/workspace/branch/session/brief/link fields). When you are idle it is injected into your terminal; when you are busy it is attached as `pendingAgentEvents` on the result of your next spaces_* tool call, so you learn a child is blocked without waiting for your own turn boundary. Fails until the child has emitted its first hook signal (there is no agent row to watch before then), so retry after the child starts working.",
                 properties: [
                     "session": stringSchema("Child terminal session ID to watch."),
                     "subscriber": stringSchema("Subscriber terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID."),
@@ -559,13 +628,14 @@ final class SpacesMCPStdioServer {
 
     /// After a tool handler returns successfully, attaches any pending agent events drained by
     /// `drainedPendingAgentEvents()`. Reached only on the success path, so an errored tool call never
-    /// consumes. Both `MCPToolResponse` cases carry an `addingPendingAgentEvents` that no-ops when there
-    /// is nothing to attach, so this stays a plain dispatch over the two payload types.
+    /// consumes. Every `MCPToolResponse` case carries an `addingPendingAgentEvents` that no-ops when there
+    /// is nothing to attach, so this stays a plain dispatch over the payload types.
     private func attachingPendingAgentEvents(to response: MCPToolResponse) throws -> MCPToolResponse {
         let events = try drainedPendingAgentEvents()
         switch response {
         case .profile(let profile): return .profile(profile.addingPendingAgentEvents(events))
         case .agentSessions(let agentSessions): return .agentSessions(agentSessions.addingPendingAgentEvents(events))
+        case .agentBrief(let agentBrief): return .agentBrief(agentBrief.addingPendingAgentEvents(events))
         }
     }
 
@@ -580,6 +650,7 @@ final class SpacesMCPStdioServer {
         switch response {
         case .profile(let profile): return try encodedJSON(profile)
         case .agentSessions(let agentSessions): return try encodedJSON(agentSessions)
+        case .agentBrief(let agentBrief): return try encodedJSON(agentBrief)
         }
     }
 
@@ -612,7 +683,7 @@ final class SpacesMCPStdioServer {
             displayName: summary.displayName)
     }
 
-    /// Resolves the agent's terminal session id for `status`/`annotate`, defaulting to the current
+    /// Resolves the agent's terminal session id for `status` and the brief tools, defaulting to the current
     /// Spaces terminal's `SPACES_TERMINAL_TRACKING_ID`. Internal so it is unit-testable.
     func resolvedAgentSessionID(_ session: String?) throws -> String {
         if let session { return session }

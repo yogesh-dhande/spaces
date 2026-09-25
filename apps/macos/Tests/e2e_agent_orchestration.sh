@@ -9,7 +9,7 @@
 #
 # Part A (always runnable, no real coding agents): the orchestration lifecycle is driven with explicit
 # `spaces agent signal` events against two ordinary shell sessions (orchestrator O and child C). Those
-# flows (list/annotate/status, subscribe + notification injection, busy-subscriber queue/flush, cycle
+# flows (list/brief/status, subscribe + notification injection, busy-subscriber queue/flush, cycle
 # rejection, kill) need deterministic signal control that real agents cannot give. It then covers the two
 # `agent spawn` behaviors that are deterministic without a real coding agent — failing as soon as the
 # child exits, and running the command through the interactive login shell — with a fixture binary named
@@ -228,24 +228,28 @@ part_a() {
   printf '[agent-e2e] child C=%s orchestrator O=%s\n' "$C" "$O"
   sleep 2
 
-  # Step 1: init creates the agent row (ready), annotate sets a note, working preserves it.
+  # Step 1: init creates the agent row (ready), brief write sets a brief, working preserves it.
   signal "$C" init
-  local list_json ready status note
+  local list_json ready status brief
   list_json="$("$SPACES_CLI" agent list --json)"
   ready="$(json_field "$list_json" '"yes" if any(r.get("terminalSessionID")=="'"$C"'" and r.get("lastSignalAt") for r in d) else "no"')"
   [[ "$ready" == "yes" ]] || fail "agent list did not show C=$C ready after init: $list_json"
   "$SPACES_CLI" agent status --session "$C" >/dev/null || fail "agent status --session C failed"
   pass "step 1a: init created a ready agent row for C"
 
-  "$SPACES_CLI" agent annotate "investigating flaky test" --session "$C" >/dev/null
+  # The brief goes in on stdin, the way an agent pipes a multi-line document; the rows carry only its
+  # headline (the first line, marker stripped) and `agent brief read` returns the document verbatim.
+  local brief_doc=$'# investigating flaky test\n\n- reproduce under load\n- bisect the fixture'
+  printf '%s' "$brief_doc" | "$SPACES_CLI" agent brief write --session "$C" >/dev/null || fail "agent brief write for C failed"
   signal "$C" working
   local status_json
   status_json="$("$SPACES_CLI" agent status --session "$C" --json)"
-  note="$(json_field "$status_json" 'd.get("note") or ""')"
+  brief="$(json_field "$status_json" 'd.get("briefSummary") or ""')"
   status="$(json_field "$status_json" 'd.get("status") or ""')"
-  [[ "$note" == "investigating flaky test" ]] || fail "note was clobbered by working signal: note=$note"
+  [[ "$brief" == "investigating flaky test" ]] || fail "brief was clobbered by working signal: briefSummary=$brief"
   [[ "$status" == "spinning" ]] || fail "expected status spinning after working, got: $status"
-  pass "step 1b: annotate note survived a later working signal (status=$status)"
+  [[ "$("$SPACES_CLI" agent brief read --session "$C")" == "$brief_doc" ]] || fail "agent brief read did not return the written document"
+  pass "step 1b: the brief survived a later working signal and reads back verbatim (status=$status)"
 
   # Step 2: O subscribes to C; C blocked (O idle) injects the notification into O's tail.
   "$SPACES_CLI" agent subscribe "$C" --subscriber "$O" >/dev/null || fail "subscribe O->C failed"
@@ -258,10 +262,10 @@ part_a() {
   signal "$O" working
   status="$(json_field "$("$SPACES_CLI" agent status --session "$O" --json)" 'd.get("status") or ""')"
   [[ "$status" == "spinning" ]] || fail "expected O busy (spinning) before queue test, got: $status"
-  # The needle pins the block's `note:` continuation line carrying the annotation set in step 1b, so a
-  # status transition must not drop the note from the injected notification. The note text is unique to C
-  # in this fixture, so counting its line tracks C's done block specifically.
-  local done_needle="note: investigating flaky test"
+  # The needle pins the block's `brief:` continuation line carrying the headline of the brief written in
+  # step 1b, so a status transition must not drop the brief from the injected notification. The headline is
+  # unique to C in this fixture, so counting its line tracks C's done block specifically.
+  local done_needle="brief: investigating flaky test"
   local before_done
   before_done="$(tail_count "$O" "$done_needle")"
   signal "$C" "done"

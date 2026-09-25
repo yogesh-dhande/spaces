@@ -42,7 +42,7 @@ struct AlertsControllerBuilderTests {
     {
         SpacesDeviceWorkspaceCodingAgentRow(
             id: id, workspaceID: "ws", name: "Codex", command: "codex", agentID: agentID, sessionID: nil, runState: .running,
-            activityState: activityState, updatedAt: updatedAt, canStop: true)
+            activityState: activityState, updatedAt: updatedAt, brief: nil, briefUpdatedAt: nil, canStop: true)
     }
 
     private func overview(

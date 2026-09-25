@@ -3239,7 +3239,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .agentHooksStatus, .installAgentHooks: return try handleAgentHookRequest(request)
         case .spawnAgentSession(let payload): return try handleSpawnAgentSessionRequest(payload, context: context)
         case .listAgentSessions(let payload): return try handleListAgentSessionsRequest(payload, context: context)
-        case .annotateAgentSession(let payload): return try handleAnnotateAgentSessionRequest(payload, context: context)
+        case .writeAgentBrief(let payload): return try handleWriteAgentBriefRequest(payload, context: context)
+        case .readAgentBrief(let payload): return try handleReadAgentBriefRequest(payload, context: context)
+        case .clearAgentBrief(let payload): return try handleClearAgentBriefRequest(payload, context: context)
         case .killAgentSession(let payload): return try handleKillAgentSessionRequest(payload, context: context)
         case .openServiceTunnel:
             // Hijacks the connection into a raw byte pipe after this response, like a subscription;
@@ -6628,16 +6630,35 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             ok: true, message: "Listed agent sessions.", result: .agentSessions(.init(rows: rows.map(Self.deviceAgentSessionRow))))
     }
 
-    private func handleAnnotateAgentSessionRequest(_ request: SpacesDeviceAnnotateAgentSessionRequest, context: RequestContext) throws
+    private func handleWriteAgentBriefRequest(_ request: SpacesDeviceWriteAgentBriefRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
         guard let sessionID = normalizedString(request.sessionID) else {
             return SpacesDeviceAPIResponse(ok: false, message: "sessionID is required.", errorCode: .invalidArgument)
         }
-        let row = try context.orchestrator().annotateAgentSession(terminalSessionID: sessionID, note: request.note)
+        let row = try context.orchestrator().writeAgentBrief(terminalSessionID: sessionID, markdown: request.markdown)
         return SpacesDeviceAPIResponse(
-            ok: true, message: row.note == nil ? "Cleared agent note." : "Annotated agent session.",
+            ok: true, message: WorkspaceOrchestrator.agentBriefWriteMessage(markdown: request.markdown),
             result: .agentSessions(.init(rows: [Self.deviceAgentSessionRow(row)])))
+    }
+
+    private func handleReadAgentBriefRequest(_ request: SpacesDeviceAgentBriefRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse {
+        guard let sessionID = normalizedString(request.sessionID) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "sessionID is required.", errorCode: .invalidArgument)
+        }
+        let brief = try context.orchestrator().readAgentBrief(terminalSessionID: sessionID)
+        return SpacesDeviceAPIResponse(
+            ok: true, message: "Read agent brief.",
+            result: .agentBrief(SpacesDeviceAgentBriefResult(sessionID: brief.sessionID, brief: brief.brief, updatedAt: brief.updatedAt)))
+    }
+
+    private func handleClearAgentBriefRequest(_ request: SpacesDeviceAgentBriefRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse {
+        guard let sessionID = normalizedString(request.sessionID) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "sessionID is required.", errorCode: .invalidArgument)
+        }
+        let row = try context.orchestrator().clearAgentBrief(terminalSessionID: sessionID)
+        return SpacesDeviceAPIResponse(
+            ok: true, message: WorkspaceOrchestrator.agentBriefClearedMessage, result: .agentSessions(.init(rows: [Self.deviceAgentSessionRow(row)])))
     }
 
     /// Terminates a coding-agent terminal session on the daemon host by session id. This is the remote
@@ -6916,9 +6937,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// Maps the neutral orchestration row the daemon builds to its Device API wire shape.
     static func deviceAgentSessionRow(_ row: TerminalServiceAgentSessionRow) -> SpacesDeviceAgentSessionRow {
         SpacesDeviceAgentSessionRow(
-            id: row.id, terminalSessionID: row.terminalSessionID, agent: row.agent, label: row.label, status: row.status, note: row.note,
-            projectID: row.projectID, projectName: row.projectName, workspaceID: row.workspaceID, workspaceName: row.workspaceName,
-            workspaceDir: row.workspaceDir, branch: row.branch, updatedAt: row.updatedAt, lastSignalAt: row.lastSignalAt)
+            id: row.id, terminalSessionID: row.terminalSessionID, agent: row.agent, label: row.label, status: row.status,
+            briefSummary: row.briefSummary, briefUpdatedAt: row.briefUpdatedAt, projectID: row.projectID, projectName: row.projectName,
+            workspaceID: row.workspaceID, workspaceName: row.workspaceName, workspaceDir: row.workspaceDir, branch: row.branch,
+            updatedAt: row.updatedAt, lastSignalAt: row.lastSignalAt)
     }
 
     private func refreshedMutationResponse(

@@ -47,12 +47,13 @@ those children to a verified finish. You work through the Spaces MCP tools.
   unsubmitted paste.
 - spaces_agent_subscribe(session) — subscribe YOUR terminal to a child. When the
   child goes blocked, done, or exits, a [spaces] ... event line is delivered to
-  you. Subscribe, annotate, and status work only after the child has signaled
-  once (started working); if they fail right after spawn, retry after the child
+  you. Subscribe and status work only after the child has signaled once
+  (started working); if they fail right after spawn, retry after the child
   accepts its prompt.
 - spaces_agent_status(session) / spaces_terminal_tail(session, lines) — a child's
   current state / its recent terminal output.
-- spaces_agent_annotate(session, note) — label a child with its chunk.
+- spaces_agent_brief_read(session) reads a child's brief, a short living status
+  page it keeps updated with what it is doing, questions, and remaining tasks.
 - spaces_agent_list — every child and its status at a glance.
 - spaces_agent_kill(session) — end a child and its terminal.
 - All tools accept an optional device to act on a paired machine.
@@ -61,12 +62,15 @@ those children to a verified finish. You work through the Spaces MCP tools.
 
 1. Decompose the task into chunks. Pick the right project for each chunk; create a
    worktree per chunk (spaces_workspace_create, then spaces_workspace_start).
-2. spaces_agent_spawn a child in the chunk's workspace. spaces_agent_annotate it
-   with its chunk. spaces_agent_subscribe to it if spawn did not already.
+2. spaces_agent_spawn a child in the chunk's workspace. spaces_agent_subscribe
+   to it if spawn did not already.
 3. Send the child a clear, self-contained prompt with spaces_terminal_send.
    Children are full agents: give them the goal, constraints, and definition of
-   done — not keystroke-level instructions. They may plan and use their own
-   subagents as they see fit.
+   done, not keystroke-level instructions. Tell each child to keep its own
+   brief (spaces_agent_brief_write) updated with its status, questions, and
+   remaining tasks, so you can check on it with spaces_agent_brief_read without
+   tailing its whole terminal. They may plan and use their own subagents as they
+   see fit.
 4. Confirm the child actually started working (spaces_terminal_tail): a first-run
    child may be sitting at a trust/onboarding/auth dialog that you must answer
    before your prompt is seen.
@@ -76,6 +80,7 @@ those children to a verified finish. You work through the Spaces MCP tools.
        workspace: <worktree directory path>
        branch: <branch>
        session: <session id>
+       brief: <first line of the child's brief, when it has one>
        link: spaces://terminal/<session id>
    While you are idle they are delivered into your terminal; while you are busy
    they arrive attached to the result of your next spaces tool call — watch for
@@ -141,7 +146,9 @@ export default function OrchestrationDocsPage() {
           <Tool name="spaces_agent_subscribe" description="Get told when a child goes blocked, done, or exits." />
           <Tool name="spaces_agent_status" description="Read a child's current state — working, blocked, or done." />
           <Tool name="spaces_terminal_tail" description="Read a child's recent terminal output by session id." />
-          <Tool name="spaces_agent_annotate" description="Label a child with the chunk it is working on." />
+          <Tool name="spaces_agent_brief_write" description="What each child uses to keep its own brief: a short status page for you, shown beside its terminal on Mac and iPhone." />
+          <Tool name="spaces_agent_brief_read" description="Read a child's brief to see its status, open questions, and tasks without tailing its terminal." />
+          <Tool name="spaces_agent_brief_clear" description="Remove a brief once the work it describes is finished." />
           <Tool name="spaces_agent_list" description="See every child and its status at a glance." />
           <Tool name="spaces_agent_kill" description="End a child and its terminal when it is finished." />
         </ul>

@@ -91,13 +91,31 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
     }
 
-    func testAnnotateAgentSessionRequestRoundTripsAndIsNotReplaySafe() throws {
-        let request = SpacesDeviceAPIRequest(
-            command: .annotateAgentSession(.init(sessionID: "agent-session", note: "review auth")), authToken: "SECRET")
+    /// Reading a brief is safe to replay. Writing and clearing are not: a replay after an ambiguous failure
+    /// could land after another writer's newer document and overwrite it.
+    func testAgentBriefRequestsRoundTripAndOnlyReadIsReplaySafe() throws {
+        let write = SpacesDeviceAPIRequest(
+            command: .writeAgentBrief(.init(sessionID: "agent-session", markdown: "# review auth\n\n- tokens")), authToken: "SECRET")
+        let read = SpacesDeviceAPIRequest(command: .readAgentBrief(.init(sessionID: "agent-session")), authToken: "SECRET")
+        let clear = SpacesDeviceAPIRequest(command: .clearAgentBrief(.init(sessionID: "agent-session")), authToken: "SECRET")
 
-        XCTAssertEqual(request.commandName, "annotateAgentSession")
-        XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
-        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+        XCTAssertEqual([write, read, clear].map(\.commandName), ["writeAgentBrief", "readAgentBrief", "clearAgentBrief"])
+        XCTAssertFalse(write.isSafeToReplayAfterConnectionFailure)
+        XCTAssertTrue(read.isSafeToReplayAfterConnectionFailure)
+        XCTAssertFalse(clear.isSafeToReplayAfterConnectionFailure)
+        for request in [write, read, clear] {
+            XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+        }
+    }
+
+    func testAgentBriefResultRoundTripsThroughResponse() throws {
+        let brief = SpacesDeviceAgentBriefResult(sessionID: "agent-session", brief: "# review auth\n\n- tokens", updatedAt: "2026-07-14T00:00:02Z")
+        let response = SpacesDeviceAPIResponse(ok: true, message: "Read agent brief.", result: .agentBrief(brief))
+
+        let decoded = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))
+
+        XCTAssertEqual(decoded, response)
+        XCTAssertEqual(decoded.agentBrief, brief)
     }
 
     func testKillAgentSessionRequestRoundTripsAndIsNotReplaySafe() throws {
@@ -112,16 +130,18 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
 
     func testAgentSessionsResultRoundTripsThroughResponse() throws {
         let row = SpacesDeviceAgentSessionRow(
-            id: "agent-1", terminalSessionID: "session-1", agent: "Claude Code CLI", label: "Claude Code CLI", status: "waiting", note: "review auth",
-            projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature",
-            workspaceDir: "/repo/workspaces/feature", branch: "feature", updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: "2026-07-14T00:00:01Z")
+            id: "agent-1", terminalSessionID: "session-1", agent: "Claude Code CLI", label: "Claude Code CLI", status: "waiting",
+            briefSummary: "review auth", briefUpdatedAt: "2026-07-14T00:00:02Z", projectID: "project-1", projectName: "Spaces",
+            workspaceID: "workspace-1", workspaceName: "feature", workspaceDir: "/repo/workspaces/feature", branch: "feature",
+            updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: "2026-07-14T00:00:01Z")
         let response = SpacesDeviceAPIResponse(ok: true, message: "Listed agent sessions.", result: .agentSessions(.init(rows: [row])))
 
         let decoded = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))
 
         XCTAssertEqual(decoded, response)
         XCTAssertEqual(decoded.agentSessions?.first, row)
-        XCTAssertEqual(decoded.agentSessions?.first?.note, "review auth")
+        XCTAssertEqual(decoded.agentSessions?.first?.briefSummary, "review auth")
+        XCTAssertEqual(decoded.agentSessions?.first?.briefUpdatedAt, "2026-07-14T00:00:02Z")
         XCTAssertEqual(decoded.agentSessions?.first?.lastSignalAt, "2026-07-14T00:00:01Z")
     }
 
@@ -458,7 +478,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             runState: .running, canRun: false, canStop: true, canRestart: true)
         let agentRow = SpacesDeviceWorkspaceCodingAgentRow(
             id: "agent-1", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "agent-runtime-1", sessionID: "session-2",
-            runState: .running, activityState: .spinning, canStop: true)
+            runState: .running, activityState: .spinning, brief: nil, briefUpdatedAt: nil, canStop: true)
         let terminalRow = SpacesDeviceWorkspaceTerminalRow(
             id: "terminal-1", workspaceID: "workspace-1", title: "Shell", workingDirectory: "/repo", sessionID: "session-3", runState: .running,
             canOpenTerminal: true, canStop: true)

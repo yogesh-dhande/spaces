@@ -67,7 +67,7 @@ args = ["mcp"]`}</CodeBlock>
 
       <Section title="Tools">
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          The server exposes project, workspace, and terminal tools.
+          The server exposes project, workspace, terminal, paired-device, and coding-agent orchestration tools.
         </p>
         <ul className="mt-3 space-y-1">
           <Tool name="spaces_project_list" description="List Spaces projects." />
@@ -78,7 +78,20 @@ args = ["mcp"]`}</CodeBlock>
           <Tool name="spaces_terminal_list" description="List available Spaces terminal sessions." />
           <Tool name="spaces_terminal_tail" description="Read recent rendered output, omitting inline suggestions only in identified coding-agent sessions. Defaults to the last 20 lines." />
           <Tool name="spaces_terminal_send" description="Send UTF-8 text or explicit raw byte values to a terminal session, optionally submitting text as a paste followed by a separate Enter keystroke that every supported agent TUI (Claude Code, Codex, OpenCode) reads as a distinct submit rather than an unsubmitted paste." />
+          <Tool name="spaces_agent_list" description="List coding-agent sessions, optionally filtered by workspace." />
+          <Tool name="spaces_agent_status" description="Read one coding-agent session's status, brief summary, and context." />
+          <Tool name="spaces_agent_spawn" description="Start a supported coding agent (claude, codex, or opencode) in a workspace and wait until it is ready for input." />
+          <Tool name="spaces_agent_subscribe" description="Watch a coding agent from this terminal; get told when it goes blocked, done, or exits." />
+          <Tool name="spaces_agent_unsubscribe" description="Stop watching a coding agent." />
+          <Tool name="spaces_agent_kill" description="End a coding agent and its terminal." />
+          <Tool name="spaces_agent_brief_write" description="Replace an agent's brief, the short markdown status page Spaces shows beside its terminal on Mac and iPhone. An empty brief clears it." />
+          <Tool name="spaces_agent_brief_read" description="Read an agent's brief in full, with when it was last updated." />
+          <Tool name="spaces_agent_brief_clear" description="Remove an agent's brief, for example once its work is finished." />
+          <Tool name="spaces_device_list" description="List the paired devices this machine can reach." />
         </ul>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          The brief tools act on the calling terminal's agent unless given a session, so an agent connected to this server keeps its own brief with no extra setup. The write tool tells the agent what a useful brief holds: a one-line headline first (it is what <Cmd>spaces agent list</Cmd> and notifications show), what it is doing now and when it expects a long step to finish, the questions only you can answer, and a checklist of its tasks, all kept under one screen and updated as the work moves.
+        </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Agent lifecycle signals are intentionally not MCP tools. Coding agents report state through the CLI hook <Cmd>spaces agent signal</Cmd> so those hooks stay out of the agent-callable tool surface.
         </p>

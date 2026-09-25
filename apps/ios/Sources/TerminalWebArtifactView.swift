@@ -7,7 +7,9 @@ import WebKit
 enum TerminalWebArtifactLoad: Equatable {
     /// A local HTML artifact file. Read access is scoped to the single file (see `load(on:)`).
     case fileURL(URL)
-    /// A self-contained rendered HTML document string with no external references.
+    /// A self-contained rendered HTML document string with no external references. The app writes these
+    /// documents itself with transparent backgrounds and light/dark colors, so the view draws no canvas
+    /// of its own and whatever surface hosts it shows through.
     case htmlString(String)
 }
 
@@ -87,7 +89,7 @@ struct TerminalWebArtifactView: View {
                 TerminalWebArtifactRepresentable(load: load, model: model)
                 if let message = model.loadErrorMessage { TerminalArtifactFailureView(message: message) { model.retry?() } }
             }
-        }.background(Color(uiColor: .systemBackground)).ignoresSafeArea(edges: .bottom).accessibilityIdentifier("terminal.webArtifact")
+        }.ignoresSafeArea(edges: .bottom).accessibilityIdentifier("terminal.webArtifact")
     }
 }
 
@@ -129,6 +131,12 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
         // browser-sessions feature or leak state between one preview and the next.
         configuration.websiteDataStore = .nonPersistent()
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        if case .htmlString = load {
+            webView.isOpaque = false
+            webView.backgroundColor = .clear
+            webView.scrollView.backgroundColor = .clear
+            webView.underPageBackgroundColor = .clear
+        }
         webView.navigationDelegate = context.coordinator
         context.coordinator.attach(to: webView, load: load)
         return webView

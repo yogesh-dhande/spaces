@@ -1572,7 +1572,7 @@
                 source: .codingAgent(
                     SpacesDeviceWorkspaceCodingAgentRow(
                         id: "agent-automation", workspaceID: "workspace-docs", name: "Nightly review", command: "codex", agentID: "agent-automation",
-                        sessionID: "session-agent", runState: .running, activityState: .spinning, canStop: true)))
+                        sessionID: "session-agent", runState: .running, activityState: .spinning, brief: nil, briefUpdatedAt: nil, canStop: true)))
 
             await model.stop(row: row)
 
@@ -1599,7 +1599,7 @@
                 source: .codingAgent(
                     SpacesDeviceWorkspaceCodingAgentRow(
                         id: "agent-automation", workspaceID: "workspace-docs", name: "Nightly review", command: "codex", agentID: "agent-automation",
-                        sessionID: nil, runState: .running, activityState: .spinning, canStop: true)))
+                        sessionID: nil, runState: .running, activityState: .spinning, brief: nil, briefUpdatedAt: nil, canStop: true)))
 
             await model.stop(row: row)
 
@@ -3628,7 +3628,7 @@
                 featureCodingAgentRows ?? [
                     SpacesDeviceWorkspaceCodingAgentRow(
                         id: "agent:runtime-codex", workspaceID: "workspace-feature", name: "Codex", command: "codex", agentID: "runtime-codex",
-                        sessionID: "session-codex", runState: .running, activityState: .spinning, canStop: true)
+                        sessionID: "session-codex", runState: .running, activityState: .spinning, brief: nil, briefUpdatedAt: nil, canStop: true)
                 ]
             // Mirrors the daemon's own verdict: any row still running trips the tracked-runtime flag,
             // independent of `isRunning` (which an ad hoc terminal alone can also set).

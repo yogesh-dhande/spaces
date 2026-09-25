@@ -215,8 +215,8 @@ enum SpacesDaemonProfileCommandRouting {
             .automationRunCancel, .automationEndAgents:
             true
         // Engine-free: pure store/disk reads and metadata writes with no launcher/terminator reach.
-        case .terminalTail, .projectList, .workspaceList, .workspaceCreate, .agentList, .agentAnnotate, .agentSubscribe, .agentUnsubscribe,
-            .agentConsumePendingEvents:
+        case .terminalTail, .projectList, .workspaceList, .workspaceCreate, .agentList, .agentBriefWrite, .agentBriefRead, .agentBriefClear,
+            .agentSubscribe, .agentUnsubscribe, .agentConsumePendingEvents:
             false
         }
     }
@@ -2029,9 +2029,15 @@ enum SpacesDaemonErrorClassification {
             let rows = try orchestrator.agentSessionRows(
                 workspaceID: normalizedProfileArgument(payload.workspaceID), sessionID: normalizedProfileArgument(payload.sessionID))
             return TerminalServiceProfileCommandResponse(message: "Listed agent sessions.", agentSessions: rows)
-        case .agentAnnotate(let payload):
+        case .agentBriefWrite(let payload):
             let orchestrator = try makeProfileOrchestrator()
-            return try annotateProfileAgentSession(payload, orchestrator: orchestrator)
+            return try writeProfileAgentBrief(payload, orchestrator: orchestrator)
+        case .agentBriefRead(let sessionID):
+            let orchestrator = try makeProfileOrchestrator()
+            return try readProfileAgentBrief(sessionID: sessionID, orchestrator: orchestrator)
+        case .agentBriefClear(let sessionID):
+            let orchestrator = try makeProfileOrchestrator()
+            return try clearProfileAgentBrief(sessionID: sessionID, orchestrator: orchestrator)
         case .agentSpawn: preconditionFailure("`.agentSpawn` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .agentKill: preconditionFailure("`.agentKill` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .agentSubscribe(let payload):
@@ -2798,12 +2804,21 @@ enum SpacesDaemonErrorClassification {
         return normalizedProfileArgument(runtimeState.foregroundDisplayLabel) ?? kind.displayLabel
     }
 
-    private func annotateProfileAgentSession(_ payload: TerminalServiceAgentAnnotatePayload, orchestrator: WorkspaceOrchestrator) throws
+    private func writeProfileAgentBrief(_ payload: TerminalServiceAgentBriefWritePayload, orchestrator: WorkspaceOrchestrator) throws
         -> TerminalServiceProfileCommandResponse
     {
-        let updated = try orchestrator.annotateAgentSession(terminalSessionID: payload.sessionID, note: payload.note)
+        let updated = try orchestrator.writeAgentBrief(terminalSessionID: payload.sessionID, markdown: payload.markdown)
         return TerminalServiceProfileCommandResponse(
-            message: updated.note == nil ? "Cleared agent note." : "Annotated agent session.", agentSessions: [updated])
+            message: WorkspaceOrchestrator.agentBriefWriteMessage(markdown: payload.markdown), agentSessions: [updated])
+    }
+
+    private func readProfileAgentBrief(sessionID: String, orchestrator: WorkspaceOrchestrator) throws -> TerminalServiceProfileCommandResponse {
+        TerminalServiceProfileCommandResponse(message: "Read agent brief.", agentBrief: try orchestrator.readAgentBrief(terminalSessionID: sessionID))
+    }
+
+    private func clearProfileAgentBrief(sessionID: String, orchestrator: WorkspaceOrchestrator) throws -> TerminalServiceProfileCommandResponse {
+        let updated = try orchestrator.clearAgentBrief(terminalSessionID: sessionID)
+        return TerminalServiceProfileCommandResponse(message: WorkspaceOrchestrator.agentBriefClearedMessage, agentSessions: [updated])
     }
 
     /// Spawns a coding-agent terminal session after gating the command against the supported-agent set:

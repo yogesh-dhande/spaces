@@ -70,6 +70,10 @@ import spacesterminalui
 
     func setAccessibilityRuntimeTargetName(_ name: String) { rootView.setAccessibilityLabel(name) }
 
+    /// A pane still preparing has no terminal to sit beside, so it shows no brief; the ready pane that
+    /// replaces it is handed the brief when it is installed.
+    func applyAgentBrief(_ brief: AgentBriefPresentation?) {}
+
     func fail(error: Error) { fail(message: String(describing: error)) }
 
     func fail(message: String) {
@@ -84,8 +88,7 @@ import spacesterminalui
         TerminalSessionWindowDebugState(
             renderedOutput: "\(titleLabel.stringValue)\n\(detailLabel.stringValue)", visibleSurfaceOutput: nil, surfaceSelectionText: nil,
             showsTerminalSurface: false, showsTextRenderer: true, rendererSummary: "Renderer: preparing", summary: detailLabel.stringValue,
-            state: titleLabel.stringValue,
-            windowTitle: rootView.window?.title ?? "", didCloseWindow: false, surfaceColumns: nil, surfaceRows: nil,
+            state: titleLabel.stringValue, windowTitle: rootView.window?.title ?? "", didCloseWindow: false, surfaceColumns: nil, surfaceRows: nil,
             windowIsKey: rootView.window?.isKeyWindow == true, firstResponderTypeName: debugFirstResponderTypeName, searchVisible: false,
             searchQuery: "", searchTotal: nil, searchSelected: nil, attachmentMode: TerminalAttachmentMode.owner.rawValue,
             takeoverPending: requestsOwnershipWhenReady, takeoverButtonVisible: false, takeoverButtonEnabled: false, takeoverMessage: "")

@@ -408,6 +408,19 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
     }
 
     var hasTerminalDetailActions: Bool { canRun || canStopFromTerminalDetail || canRestartFromTerminalDetail }
+
+    /// The markdown brief the row's coding agent keeps for the user, or nil when it keeps none. Only a
+    /// coding agent writes one, so every other row family has none.
+    var brief: String? {
+        guard case .codingAgent(let row) = source else { return nil }
+        return row.brief
+    }
+
+    /// When the agent last wrote or cleared its brief (ISO-8601), nil when it never did.
+    var briefUpdatedAt: String? {
+        guard case .codingAgent(let row) = source else { return nil }
+        return row.briefUpdatedAt
+    }
 }
 
 extension SpacesDeviceWorkspaceSummary {
@@ -701,6 +714,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// `TerminalViewerModel` as `@State` and the pop that closes a terminal destroys both (#674). A
     /// reopen paints from this before it asks the device anything; see `TerminalRetainedScreenStore`.
     @ObservationIgnored let retainedTerminalScreens = TerminalRetainedScreenStore()
+    /// Which coding agents' brief sheets the user hid this run; see `AgentBriefVisibility`.
+    let agentBriefVisibility = AgentBriefVisibility()
     /// Monotonic identity of the connection the published overview belongs to. Bumped whenever the
     /// active connection changes (device switch or removal, new settings, auth reset) so an overview
     /// fetch begun against the previous connection can neither publish its stale payload nor satisfy

@@ -192,14 +192,14 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(context?.sessionID, "session-env")
     }
 
-    /// Signal, plus the read/annotate orchestration surface. Hook installation and status stay owned by
+    /// Signal, plus the orchestration surface (list, status, brief, spawn, kill, subscribe). Hook installation and status stay owned by
     /// the app and the daemon, never the CLI or MCP.
     func testAgentCommandExposesSignalAndOrchestrationCommands() {
         let subcommands = AgentCommand.configuration.subcommands.map { String(describing: $0) }
         XCTAssertEqual(
             subcommands,
             [
-                "AgentSignalCommand", "AgentListCommand", "AgentStatusCommand", "AgentAnnotateCommand", "AgentSpawnCommand", "AgentKillCommand",
+                "AgentSignalCommand", "AgentListCommand", "AgentStatusCommand", "AgentBriefCommand", "AgentSpawnCommand", "AgentKillCommand",
                 "AgentSubscribeCommand", "AgentUnsubscribeCommand",
             ])
         XCTAssertThrowsError(try AgentCommand.parseAsRoot(["hooks", "status"]))
@@ -538,14 +538,16 @@ final class SpacesCommandTests: XCTestCase {
             [
                 "spaces_project_list", "spaces_workspace_list", "spaces_workspace_create", "spaces_workspace_start", "spaces_workspace_restart",
                 "spaces_terminal_list", "spaces_terminal_tail", "spaces_terminal_send", "spaces_agent_list", "spaces_agent_status",
-                "spaces_agent_annotate", "spaces_agent_spawn", "spaces_agent_kill", "spaces_agent_subscribe", "spaces_agent_unsubscribe",
-                "spaces_device_list",
+                "spaces_agent_brief_write", "spaces_agent_brief_read", "spaces_agent_brief_clear", "spaces_agent_spawn", "spaces_agent_kill",
+                "spaces_agent_subscribe", "spaces_agent_unsubscribe", "spaces_device_list",
             ])
         // `agent signal` is CLI-only forever: an orchestrating agent may read peers' status but must not forge it.
         XCTAssertFalse(names.contains("spaces_agent_signal"))
         // Sending a key is a keystroke, not a lifecycle event. There is no agent-scoped tool that claims to
         // interrupt a turn: an orchestrator sends ESC (or any other key) with `spaces_terminal_send`.
         XCTAssertFalse(names.contains("spaces_agent_interrupt"))
+        // The brief is the one agent status surface; there is no separate one-line annotate tool.
+        XCTAssertFalse(names.contains("spaces_agent_annotate"))
 
         let createTool = try XCTUnwrap(tools.first { ($0["name"] as? String) == "spaces_workspace_create" })
         let schema = try XCTUnwrap(createTool["inputSchema"] as? [String: Any])
@@ -570,8 +572,9 @@ final class SpacesCommandTests: XCTestCase {
         let expectedRequired: [String: [String]] = [
             "spaces_project_list": [], "spaces_workspace_list": [], "spaces_workspace_start": ["workspace"],
             "spaces_workspace_restart": ["workspace"], "spaces_terminal_list": [], "spaces_agent_list": [], "spaces_agent_status": [],
-            "spaces_agent_annotate": ["note"], "spaces_agent_spawn": ["command"], "spaces_agent_kill": ["session"],
-            "spaces_agent_subscribe": ["session"], "spaces_agent_unsubscribe": ["session"], "spaces_device_list": [],
+            "spaces_agent_brief_write": ["markdown"], "spaces_agent_brief_read": [], "spaces_agent_brief_clear": [],
+            "spaces_agent_spawn": ["command"], "spaces_agent_kill": ["session"], "spaces_agent_subscribe": ["session"],
+            "spaces_agent_unsubscribe": ["session"], "spaces_device_list": [],
         ]
         for (name, required) in expectedRequired {
             let tool = try XCTUnwrap(tools.first { ($0["name"] as? String) == name }, "missing tool \(name)")
@@ -613,8 +616,8 @@ final class SpacesCommandTests: XCTestCase {
         let tools = try XCTUnwrap((toolsList["result"] as? [String: Any])?["tools"] as? [[String: Any]])
         let names = Set(tools.compactMap { $0["name"] as? String })
         let agentTools = [
-            "spaces_agent_list", "spaces_agent_status", "spaces_agent_annotate", "spaces_agent_spawn", "spaces_agent_kill", "spaces_agent_subscribe",
-            "spaces_agent_unsubscribe",
+            "spaces_agent_list", "spaces_agent_status", "spaces_agent_brief_write", "spaces_agent_brief_read", "spaces_agent_brief_clear",
+            "spaces_agent_spawn", "spaces_agent_kill", "spaces_agent_subscribe", "spaces_agent_unsubscribe",
         ]
         XCTAssertTrue(agentTools.allSatisfy(names.contains), "expected all agent tools, got \(names.sorted())")
     }
@@ -634,6 +637,20 @@ final class SpacesCommandTests: XCTestCase {
         }
         XCTAssertThrowsError(try terminalInputPayload(from: ["text": "hi", "bytes": [1]])) { error in
             XCTAssertEqual(error.localizedDescription, "Provide text or bytes, not both.")
+        }
+    }
+
+    /// The brief tool passes markdown through untouched (the daemon sanitizes it), and an empty document is
+    /// a valid write that clears the brief; only a missing `markdown` is a caller mistake.
+    func testMCPAgentBriefWriteKeepsMarkdownVerbatimAndRequiresIt() throws {
+        let arguments = try decodeMCPArguments(
+            AgentBriefWriteArguments.self, from: ["markdown": "  # Fixing auth\n\n- step one\n", "session": "session-1", "device": "phone"])
+        XCTAssertEqual(arguments.markdown, "  # Fixing auth\n\n- step one\n")
+        XCTAssertEqual(arguments.session, "session-1")
+        XCTAssertEqual(arguments.device, "phone")
+        XCTAssertEqual(try decodeMCPArguments(AgentBriefWriteArguments.self, from: ["markdown": ""]).markdown, "")
+        XCTAssertThrowsError(try decodeMCPArguments(AgentBriefWriteArguments.self, from: ["session": "session-1"])) { error in
+            XCTAssertEqual(error.localizedDescription, "markdown is required.")
         }
     }
 

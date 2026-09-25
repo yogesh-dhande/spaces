@@ -49,7 +49,7 @@ public enum RemoteAgentSnapshotDiff {
         public let terminalSessionID: String
         public let kind: TransitionKind
         /// The row the notification renders from. For `exited` this is the last-seen row (the agent is
-        /// absent from the new listing), so its label/note survive the disappearance.
+        /// absent from the new listing), so its label and brief headline survive the disappearance.
         public let row: SpacesDeviceAgentSessionRow
 
         public init(terminalSessionID: String, kind: TransitionKind, row: SpacesDeviceAgentSessionRow) {

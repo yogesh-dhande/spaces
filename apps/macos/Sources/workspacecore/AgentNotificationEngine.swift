@@ -241,27 +241,28 @@ public struct AgentNotificationEngine {
         return renderBlock(
             label: agent.effectiveLabel ?? kind, kind: kind, transition: transition,
             project: project?.name ?? workspace?.projectID ?? agent.workspaceID, workspace: workspace?.dir ?? agent.workspaceID, branch: branch,
-            sessionID: agent.terminalTrackingID ?? agent.id, note: agent.note, deviceID: nil)
+            sessionID: agent.terminalTrackingID ?? agent.id, briefSummary: AgentBriefSummary.summary(of: agent.brief), deviceID: nil)
     }
 
     /// The single injected block for a watched agent on a paired device. Reuses the shared format; the
     /// deep link is device-qualified (`?device=<id>`) and targets the remote child's terminal session
-    /// (the watched key). Project/workspace/branch/label/note all come straight off the `listAgentSessions`
-    /// row — the remote device already resolved them, so this path does no store lookups. The kind is the
-    /// row's `agent` field (the remote daemon's detected agent kind — a `TerminalDetectedAgentKind` raw value, never the
-    /// launch title), falling back to `coding agent` when no kind is detected yet.
+    /// (the watched key). Project/workspace/branch/label and the brief's headline all come straight off the
+    /// `listAgentSessions` row: the remote device already resolved them, so this path does no store lookups. The
+    /// kind is the row's `agent` field (the remote daemon's detected agent kind, a `TerminalDetectedAgentKind` raw
+    /// value, never the launch title), falling back to `coding agent` when no kind is detected yet.
     func renderRemoteLine(terminalSessionID: String, row: SpacesDeviceAgentSessionRow, deviceID: String, transition: ChildTransition) -> String {
         let kind = row.agent ?? "coding agent"
         return renderBlock(
             label: row.label ?? kind, kind: kind, transition: transition, project: row.projectName, workspace: row.workspaceDir, branch: row.branch,
-            sessionID: terminalSessionID, note: row.note, deviceID: deviceID)
+            sessionID: terminalSessionID, briefSummary: row.briefSummary, deviceID: deviceID)
     }
 
     /// The single injected block shared by the local and cross-device paths — a pure formatter over
     /// explicit fields, so both paths produce an identical shape. It is one multi-line string: a sentence
     /// first line (`[spaces] <label> (<kind>) is <word>`) followed by two-space-indented `key: value`
-    /// continuation lines in the order project, workspace, branch, session, note, link. The `branch` line
-    /// is omitted when the branch is empty/nil and the `note` line when the note is; the rest are always
+    /// continuation lines in the order project, workspace, branch, session, brief, link. The `branch` line
+    /// is omitted when the branch is empty/nil and the `brief` line when the agent has no brief; it carries
+    /// the brief's one-line headline (`AgentBriefSummary`), never the document. The rest are always
     /// present so an orchestrating agent can parse fields rather than the deep link's URL. Multi-line YAML
     /// is markedly more readable in agent transcripts than a packed single line; the deep link stays
     /// clickable because Ghostty's URL matcher charset stops at end-of-line and excludes quotes, and the
@@ -269,14 +270,14 @@ public struct AgentNotificationEngine {
     /// `!` — are safe from the slash/command syntax some agent TUIs apply to a leading character. The cost
     /// is that a plain-shell subscriber echoes one junk line per continuation, which is acceptable since
     /// subscribers are agent TUIs first. Every free-text field (label, kind, project, workspace, branch,
-    /// note) passes through `shellSafeNotificationField` before interpolation: this block is submitted
+    /// brief) passes through `shellSafeNotificationField` before interpolation: this block is submitted
     /// with a trailing newline into the subscriber terminal, and a plain-shell subscriber executes each
     /// submitted line, so a value originating from the watched agent must not be able to smuggle shell
     /// syntax into that execution. `session` and the deep link are generated/constrained values, not
     /// free text, so they render verbatim and both target the child's terminal session id.
     func renderBlock(
         label: String, kind: String, transition: ChildTransition, project: String, workspace: String, branch: String?, sessionID: String,
-        note: String?, deviceID: String?
+        briefSummary: String?, deviceID: String?
     ) -> String {
         let deepLink = SpacesTerminalDeepLink(sessionID: sessionID, deviceID: deviceID).absoluteString
         let safeLabel = Self.shellSafeNotificationField(label)
@@ -286,14 +287,14 @@ public struct AgentNotificationEngine {
         lines.append("  workspace: \(Self.shellSafeNotificationField(workspace))")
         if let branch, !branch.isEmpty { lines.append("  branch: \(Self.shellSafeNotificationField(branch))") }
         lines.append("  session: \(sessionID)")
-        if let note, !note.isEmpty { lines.append("  note: \(Self.shellSafeNotificationField(note))") }
+        if let briefSummary, !briefSummary.isEmpty { lines.append("  brief: \(Self.shellSafeNotificationField(briefSummary))") }
         lines.append("  link: \(deepLink)")
         return lines.joined(separator: "\n")
     }
 
     /// Neutralizes a metadata value before it is interpolated into a notification line that may be
     /// submitted (with Enter) into a plain-shell subscriber. A shell executes such a line, so any
-    /// value originating from a watched agent (note/branch/label/project/workspace/kind) must not be
+    /// value originating from a watched agent (brief/branch/label/project/workspace/kind) must not be
     /// able to smuggle command substitution (`$(...)`, backticks), command separators (`;`, `|`, `&`),
     /// or redirects (`<`, `>`) — each of these runs even inside an otherwise-failing command. Quotes
     /// (`"`, `'`) and backslashes are stripped too: this is not about execution risk (the fields are
@@ -303,7 +304,7 @@ public struct AgentNotificationEngine {
     /// input to the stuck command. Control characters (including newlines) are dropped too so a value
     /// cannot forge a new continuation line or inject terminal control sequences. The value is otherwise
     /// preserved for readability in the agent-TUI subscribers that are the primary consumer; stripping
-    /// an apostrophe means a note like "don't" renders as "dont", an accepted readability cost.
+    /// an apostrophe means a brief headline like "don't" renders as "dont", an accepted readability cost.
     private static func shellSafeNotificationField(_ value: String) -> String {
         let forbidden = Set("$`;|&<>()\"'\\".unicodeScalars)
         let filtered = value.unicodeScalars.filter { scalar in !forbidden.contains(scalar) && !CharacterSet.controlCharacters.contains(scalar) }

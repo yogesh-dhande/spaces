@@ -171,8 +171,8 @@ final class RemoteAgentSnapshotDiffTests: XCTestCase {
 
     private func row(terminal: String?, status: String) -> SpacesDeviceAgentSessionRow {
         SpacesDeviceAgentSessionRow(
-            id: "row-\(terminal ?? "none")", terminalSessionID: terminal, agent: "CLI", label: "CLI", status: status, note: nil, projectID: "p",
-            projectName: "P", workspaceID: "w", workspaceName: "W", workspaceDir: "/remote/workspaces/W", branch: nil, updatedAt: "now",
-            lastSignalAt: "now")
+            id: "row-\(terminal ?? "none")", terminalSessionID: terminal, agent: "CLI", label: "CLI", status: status, briefSummary: nil,
+            briefUpdatedAt: nil, projectID: "p", projectName: "P", workspaceID: "w", workspaceName: "W", workspaceDir: "/remote/workspaces/W",
+            branch: nil, updatedAt: "now", lastSignalAt: "now")
     }
 }

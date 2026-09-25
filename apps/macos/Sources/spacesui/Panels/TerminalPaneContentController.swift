@@ -8,6 +8,8 @@ import spacesterminalui
     func applyAppearance(_ appearance: ThemeAppearance)
     func applyTerminalTextSize(_ size: TerminalTextSize)
     func setAccessibilityRuntimeTargetName(_ name: String)
+    /// Shows the coding agent's brief in the pane's brief column, or removes the column when nil.
+    func applyAgentBrief(_ brief: AgentBriefPresentation?)
     func requestOwnershipIfNeeded()
     /// Whether this content already holds the session's owner attachment on a live surface (see
     /// `TerminalSessionPaneViewController.holdsOwnerAttachedSurface`). Lets a re-show of the pane the user
@@ -34,6 +36,8 @@ import spacesterminalui
     let workspaceID: String
     let sessionID: String
     private let pane: TerminalSessionPaneViewController
+    /// The view the pane shows: the terminal pane's view beside its agent's brief column.
+    private let containerView: AgentBriefPaneContainerView
     /// Re-themes this session's live daemon rendering to `appearance` (see
     /// `TerminalPaneService.applyAppearanceToLiveSession`). Dedupe and pending-attach state live in the
     /// session's shared appearance store, captured by the closure, so this controller holds no copy.
@@ -54,6 +58,7 @@ import spacesterminalui
         self.workspaceID = workspaceID
         self.sessionID = sessionID
         self.pane = pane
+        containerView = AgentBriefPaneContainerView(terminalView: pane.view)
         self.setAppearanceAction = setAppearanceAction
         self.linkOpenCoordinator = linkOpenCoordinator
         pane.onDisplayTitleChanged = { [weak self] title, _ in self?.onTitleChanged?(title) }
@@ -69,7 +74,7 @@ import spacesterminalui
     /// when the pane is built so it opens at the size the profile already holds.
     func applyTerminalTextSize(_ size: TerminalTextSize) { pane.applyTerminalTextSize(size) }
 
-    var contentView: NSView { pane.view }
+    var contentView: NSView { containerView }
     var displayTitle: String { pane.displayTitle }
 
     func activate(focus: Bool) { pane.showEmbedded(focus: focus) }
@@ -78,6 +83,10 @@ import spacesterminalui
     /// view's accessibility label so UI automation can match the front window's selected-tab
     /// session by name. Pushed by `PanelCoordinator` on every render.
     func setAccessibilityRuntimeTargetName(_ name: String) { pane.setAccessibilityRuntimeTargetName(name) }
+
+    /// A column that held keyboard focus when it was removed hands focus to the terminal, so hiding the
+    /// brief while reading it leaves the caret in the pane rather than on the window.
+    func applyAgentBrief(_ brief: AgentBriefPresentation?) { if containerView.apply(brief) { pane.focusEmbeddedTerminalInput() } }
 
     /// Reclaims owner attachment for the session, preempting a different active owner
     /// (e.g. a mobile client that took the session over) when the runtime is interactive.
@@ -106,11 +115,23 @@ import spacesterminalui
         return true
     }
 
-    func owns(responder: NSResponder) -> Bool { pane.ownsResponder(responder) }
+    /// The brief column counts as the pane, so a click into it focuses this pane like a click into the
+    /// terminal does.
+    func owns(responder: NSResponder) -> Bool { pane.ownsResponder(responder) || containerView.briefColumnOwns(responder) }
 
-    func handleKeyEvent(_ event: NSEvent) -> Bool { pane.handleKeyEvent(event) }
+    /// Keys pressed while the brief column holds focus belong to its text view (moving the selection,
+    /// ⌘C copying it), so neither routing hook hands them to the terminal.
+    func handleKeyEvent(_ event: NSEvent) -> Bool {
+        guard !briefColumnHoldsKeyboardFocus else { return false }
+        return pane.handleKeyEvent(event)
+    }
 
-    func handleCommandKeyEquivalent(_ event: NSEvent) -> Bool { pane.handleCommandKeyEquivalent(event) }
+    func handleCommandKeyEquivalent(_ event: NSEvent) -> Bool {
+        guard !briefColumnHoldsKeyboardFocus else { return false }
+        return pane.handleCommandKeyEquivalent(event)
+    }
+
+    private var briefColumnHoldsKeyboardFocus: Bool { containerView.briefColumnOwns(containerView.window?.firstResponder) }
 
     // MARK: - Edit-menu actions (dispatched by the main menu to the focused pane)
 
@@ -136,5 +157,11 @@ import spacesterminalui
 
     func debugRefreshStateForTesting(skipOwnerAttach: Bool) { pane.debugRefreshStateForTesting(skipOwnerAttach: skipOwnerAttach) }
 
-    func debugStateDump() -> TerminalSessionWindowDebugState { pane.debugStateDump() }
+    func debugStateDump() -> TerminalSessionWindowDebugState {
+        var state = pane.debugStateDump()
+        let brief = containerView.briefDebugState
+        state.briefVisible = brief.visible
+        state.briefSummary = brief.summary
+        return state
+    }
 }

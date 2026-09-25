@@ -44,13 +44,15 @@ final class AgentOrchestrationCLITests: XCTestCase {
         let row = agentSessionRow(
             TerminalServiceAgentSessionRow(
                 id: "agent-1", terminalSessionID: "session-1", agent: "Claude Code CLI", label: "Claude Code CLI", status: "waiting",
-                note: "review auth", projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature",
-                workspaceDir: "/repo/workspaces/feature", branch: "feature", updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: "2026-07-14T00:00:00Z"))
+                briefSummary: "review auth", briefUpdatedAt: "2026-07-14T00:00:02Z", projectID: "project-1", projectName: "Spaces",
+                workspaceID: "workspace-1", workspaceName: "feature", workspaceDir: "/repo/workspaces/feature", branch: "feature",
+                updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: "2026-07-14T00:00:00Z"))
         XCTAssertTrue(row.hasPrefix("session-1\t"))
         XCTAssertTrue(row.contains("agent=Claude Code CLI"))
         XCTAssertTrue(row.contains("status=waiting"))
         XCTAssertTrue(row.contains("signaled=true"))
-        XCTAssertTrue(row.contains("note=review auth"))
+        XCTAssertTrue(row.contains("brief=review auth"))
+        XCTAssertTrue(row.contains("briefUpdatedAt=2026-07-14T00:00:02Z"))
         XCTAssertTrue(row.contains("project=Spaces"))
         XCTAssertTrue(row.contains("workspace=feature"))
         XCTAssertTrue(row.contains("branch=feature"))
@@ -60,11 +62,12 @@ final class AgentOrchestrationCLITests: XCTestCase {
     func testAgentSessionRowRendersDashesForMissingValuesAndUnready() {
         let row = agentSessionRow(
             TerminalServiceAgentSessionRow(
-                id: "agent-2", terminalSessionID: "session-2", agent: nil, label: nil, status: "idle", note: nil, projectID: "project-1",
-                projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature", workspaceDir: "/repo/workspaces/feature", branch: nil,
-                updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: nil))
+                id: "agent-2", terminalSessionID: "session-2", agent: nil, label: nil, status: "idle", briefSummary: nil, briefUpdatedAt: nil,
+                projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature",
+                workspaceDir: "/repo/workspaces/feature", branch: nil, updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: nil))
         XCTAssertTrue(row.contains("agent=-"))
-        XCTAssertTrue(row.contains("note=-"))
+        XCTAssertTrue(row.contains("brief=-"))
+        XCTAssertTrue(row.contains("briefUpdatedAt=-"))
         XCTAssertTrue(row.contains("branch=-"))
         XCTAssertTrue(row.contains("signaled=false"))
     }
@@ -75,8 +78,9 @@ final class AgentOrchestrationCLITests: XCTestCase {
         let json = AgentSessionRowJSON(
             TerminalServiceAgentSessionRow(
                 id: "agent-1", terminalSessionID: "session-1", agent: "Claude Code CLI", label: "Claude Code CLI", status: "waiting",
-                note: "review auth", projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature",
-                workspaceDir: "/repo/workspaces/feature", branch: "feature", updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: "2026-07-14T00:00:00Z"))
+                briefSummary: "review auth", briefUpdatedAt: "2026-07-14T00:00:02Z", projectID: "project-1", projectName: "Spaces",
+                workspaceID: "workspace-1", workspaceName: "feature", workspaceDir: "/repo/workspaces/feature", branch: "feature",
+                updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: "2026-07-14T00:00:00Z"))
         XCTAssertEqual(json.terminalSessionID, "session-1")
         XCTAssertNil(json.deviceID)
         XCTAssertEqual(json.open, "spaces://terminal/session-1")
@@ -86,9 +90,9 @@ final class AgentOrchestrationCLITests: XCTestCase {
         let json = AgentSessionRowJSON(
             SpacesDeviceAgentSessionRow(
                 id: "agent-1", terminalSessionID: "session-1", agent: "Claude Code CLI", label: "Claude Code CLI", status: "waiting",
-                note: "review auth", projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature",
-                workspaceDir: "/repo/workspaces/feature", branch: "feature", updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: "2026-07-14T00:00:00Z"),
-            deviceID: "device-9")
+                briefSummary: "review auth", briefUpdatedAt: "2026-07-14T00:00:02Z", projectID: "project-1", projectName: "Spaces",
+                workspaceID: "workspace-1", workspaceName: "feature", workspaceDir: "/repo/workspaces/feature", branch: "feature",
+                updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: "2026-07-14T00:00:00Z"), deviceID: "device-9")
         XCTAssertEqual(json.terminalSessionID, "session-1")
         XCTAssertEqual(json.deviceID, "device-9")
         XCTAssertEqual(json.open, "spaces://terminal/session-1?device=device-9")
@@ -98,9 +102,9 @@ final class AgentOrchestrationCLITests: XCTestCase {
         // The text path resolves `row.terminalSessionID ?? row.id`; the JSON row must match exactly so
         // structured and text output never disagree on which session a row addresses.
         let row = TerminalServiceAgentSessionRow(
-            id: "agent-1", terminalSessionID: nil, agent: nil, label: nil, status: "idle", note: nil, projectID: "project-1", projectName: "Spaces",
-            workspaceID: "workspace-1", workspaceName: "feature", workspaceDir: "/repo/workspaces/feature", branch: nil,
-            updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: nil)
+            id: "agent-1", terminalSessionID: nil, agent: nil, label: nil, status: "idle", briefSummary: nil, briefUpdatedAt: nil,
+            projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature",
+            workspaceDir: "/repo/workspaces/feature", branch: nil, updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: nil)
         let json = AgentSessionRowJSON(row)
         XCTAssertEqual(json.terminalSessionID, "agent-1")
         XCTAssertEqual(json.open, "spaces://terminal/agent-1")
@@ -109,13 +113,14 @@ final class AgentOrchestrationCLITests: XCTestCase {
     func testAgentSessionRowJSONEncodesOpenAndDeviceIDKeys() throws {
         let json = AgentSessionRowJSON(
             SpacesDeviceAgentSessionRow(
-                id: "agent-1", terminalSessionID: "session-1", agent: "codex", label: "codex", status: "blocked", note: nil, projectID: "project-1",
-                projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature", workspaceDir: "/repo/workspaces/feature", branch: nil,
-                updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: nil), deviceID: "device-9")
+                id: "agent-1", terminalSessionID: "session-1", agent: "codex", label: "codex", status: "blocked", briefSummary: "review auth",
+                briefUpdatedAt: nil, projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature",
+                workspaceDir: "/repo/workspaces/feature", branch: nil, updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: nil), deviceID: "device-9")
         let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(json)) as? [String: Any]
         XCTAssertEqual(encoded?["open"] as? String, "spaces://terminal/session-1?device=device-9")
         XCTAssertEqual(encoded?["deviceID"] as? String, "device-9")
         XCTAssertEqual(encoded?["terminalSessionID"] as? String, "session-1")
+        XCTAssertEqual(encoded?["briefSummary"] as? String, "review auth")
     }
 
     // MARK: - Session resolution
@@ -143,14 +148,44 @@ final class AgentOrchestrationCLITests: XCTestCase {
         XCTAssertTrue(command.json)
     }
 
-    func testAgentStatusAndAnnotateParseSessionDefaults() throws {
+    func testAgentStatusParsesSessionAndJSON() throws {
         let status = try AgentStatusCommand.parse(["--session", "session-1", "--json"])
         XCTAssertEqual(status.session, "session-1")
         XCTAssertTrue(status.json)
+    }
 
-        let annotate = try AgentAnnotateCommand.parse(["review the auth flow", "--session", "session-1"])
-        XCTAssertEqual(annotate.note, "review the auth flow")
-        XCTAssertEqual(annotate.session, "session-1")
+    func testAgentBriefCommandsParseSession() throws {
+        let write = try AgentBriefWriteCommand.parse(["# Fixing auth\n\n- step one", "--session", "session-1"])
+        XCTAssertEqual(write.markdown, "# Fixing auth\n\n- step one")
+        XCTAssertEqual(write.session, "session-1")
+        // A list-first brief passes through after `--`, as the argument's help says.
+        XCTAssertEqual(try AgentBriefWriteCommand.parse(["--session", "session-1", "--", "- [ ] reproduce"]).markdown, "- [ ] reproduce")
+        XCTAssertEqual(try AgentBriefReadCommand.parse(["--session", "session-1"]).session, "session-1")
+        XCTAssertEqual(try AgentBriefClearCommand.parse(["--session", "session-1"]).session, "session-1")
+    }
+
+    /// The brief commands sit under `spaces agent brief`, so `write`, `read`, and `clear` are what an agent types.
+    func testAgentBriefSubcommandsAreNamedWriteReadClear() throws {
+        XCTAssertEqual(AgentBriefCommand.configuration.commandName, "brief")
+        XCTAssertEqual(AgentBriefCommand.configuration.subcommands.map { $0.configuration.commandName }, ["write", "read", "clear"])
+        XCTAssertTrue(try AgentCommand.parseAsRoot(["brief", "clear", "--session", "session-1"]) is AgentBriefClearCommand)
+    }
+
+    /// With the markdown argument omitted, the whole document comes from standard input, so an agent can
+    /// pipe a multi-line brief in without quoting it; a given argument wins over standard input.
+    func testAgentBriefWriteReadsStandardInputWhenMarkdownIsOmitted() throws {
+        let document = "## Fixing the flaky test\n\n- [x] reproduce\n- [ ] fix\n"
+        let pipe = Pipe()
+        pipe.fileHandleForWriting.write(Data(document.utf8))
+        try pipe.fileHandleForWriting.close()
+
+        let fromStdin = try AgentBriefWriteCommand.parse(["--session", "session-1"])
+        XCTAssertNil(fromStdin.markdown)
+        XCTAssertEqual(fromStdin.resolvedMarkdown(standardInput: pipe.fileHandleForReading), document)
+
+        let unread = Pipe()
+        let fromArgument = try AgentBriefWriteCommand.parse(["inline brief", "--session", "session-1"])
+        XCTAssertEqual(fromArgument.resolvedMarkdown(standardInput: unread.fileHandleForReading), "inline brief")
     }
 
     func testAgentSpawnParsesAllOptions() throws {
@@ -189,7 +224,9 @@ final class AgentOrchestrationCLITests: XCTestCase {
     func testOrchestrationCommandsAcceptDeviceOption() throws {
         XCTAssertEqual(try AgentListCommand.parse(["--device", "phone"]).device, "phone")
         XCTAssertEqual(try AgentStatusCommand.parse(["--device", "phone"]).device, "phone")
-        XCTAssertEqual(try AgentAnnotateCommand.parse(["note", "--device", "phone"]).device, "phone")
+        XCTAssertEqual(try AgentBriefWriteCommand.parse(["brief", "--device", "phone"]).device, "phone")
+        XCTAssertEqual(try AgentBriefReadCommand.parse(["--device", "phone"]).device, "phone")
+        XCTAssertEqual(try AgentBriefClearCommand.parse(["--device", "phone"]).device, "phone")
         XCTAssertEqual(try AgentSpawnCommand.parse(["--command", "claude", "--workspace", "workspace-1", "--device", "phone"]).device, "phone")
         XCTAssertEqual(try AgentKillCommand.parse(["session-1", "--device", "phone"]).device, "phone")
     }

@@ -56,10 +56,10 @@
 
     func makeAgentRow(
         id: String, workspaceID: String = "workspace-feature", name: String = "claude", runState: SpacesDeviceRunState = .running,
-        activityState: SpacesDeviceCodingAgentActivityState, updatedAt: String? = nil
+        activityState: SpacesDeviceCodingAgentActivityState, updatedAt: String? = nil, brief: String? = nil, briefUpdatedAt: String? = nil
     ) -> SpacesDeviceWorkspaceCodingAgentRow {
         SpacesDeviceWorkspaceCodingAgentRow(
             id: id, workspaceID: workspaceID, name: name, command: name, agentID: "runtime-\(id)", sessionID: "session-\(id)", runState: runState,
-            activityState: activityState, updatedAt: updatedAt, canStop: true)
+            activityState: activityState, updatedAt: updatedAt, brief: brief, briefUpdatedAt: briefUpdatedAt, canStop: true)
     }
 #endif

@@ -115,6 +115,9 @@ import spacesterminalcore
     private var runtimeTargetTitlePassDepth = 0
     /// Persistence hook, wired to the client database; called after every layout change.
     var onLayoutChanged: ((PanelScope, PanelLayout) -> Void)?
+    /// Which coding agents' brief columns the user has hidden or shown again. Held here rather than on
+    /// a pane because the choice belongs to the agent, which outlives any one pane and session.
+    private var agentBriefVisibility = AgentBriefVisibility()
 
     // MARK: - Panel access
 
@@ -145,6 +148,7 @@ import spacesterminalcore
             self.movePaneToNewPanelWindow(scope: scope, paneID: paneID)
         }
         view.onFocusPane = { [weak self] paneID in self?.focusPane(scope: scope, paneID: paneID, moveKeyboardFocus: true) }
+        view.onToggleBrief = { [weak self] in self?.toggleAgentBrief(scope: scope) }
         // Only a `.workspace` panel draws the empty state, so only it can fire these; both act on the
         // workspace the scope names.
         view.onStartWorkspace = { [weak self] in
@@ -1584,6 +1588,7 @@ import spacesterminalcore
             self.refreshTabTitles(forSessionID: sessionID)
         }
         contentControllers[sessionID] = content
+        content.applyAgentBrief(shownAgentBrief(forSessionID: sessionID))
     }
 
     private func scheduleTerminalPaneContentPreparation(request: AppKitController.DeviceTerminalOpenRequest, focusIntent: TerminalOpenFocusIntent) {
@@ -1878,6 +1883,70 @@ import spacesterminalcore
             followsSidebar = false
         }
         let workspaceLabel = workspaceID.map { host.findWorkspace(id: $0)?.1.displayName ?? $0 } ?? "Workspace"
-        return PanelWindowIdentity(workspaceLabel: workspaceLabel, paneTitle: tabTitle(forTabID: tab.id, in: layout), followsSidebar: followsSidebar)
+        return PanelWindowIdentity(
+            workspaceLabel: workspaceLabel, paneTitle: tabTitle(forTabID: tab.id, in: layout), followsSidebar: followsSidebar,
+            brief: agentBriefToggleState(scope: scope))
+    }
+
+    // MARK: - Agent briefs
+
+    /// Re-renders every open terminal pane's brief column from the installed overviews, then the
+    /// workspace footer's brief glyph. Called on every overview install (see
+    /// `SidebarController.rebuildFlatSidebarData`), which is the only way a brief reaches this client;
+    /// each column skips the markdown render when its text did not change.
+    func refreshAgentBriefs() {
+        for (sessionID, content) in contentControllers { content.applyAgentBrief(shownAgentBrief(forSessionID: sessionID)) }
+        host.refreshWorkspaceFooterBriefToggle()
+    }
+
+    /// The brief toggle state of the pane a toggle in `scope` acts on.
+    func agentBriefToggleState(scope: PanelScope) -> AgentBriefToggleState {
+        guard let sessionID = briefToggleSessionID(scope: scope), let brief = agentBrief(forSessionID: sessionID) else { return .unavailable }
+        return agentBriefVisibility.state(agentKey: brief.agentKey, brief: brief.markdown)
+    }
+
+    /// Shows or hides the brief of the pane a toggle in `scope` acts on. Returns false when that pane has
+    /// no brief to toggle.
+    @discardableResult func toggleAgentBrief(scope: PanelScope) -> Bool {
+        guard let sessionID = briefToggleSessionID(scope: scope) else { return false }
+        return toggleAgentBrief(forSessionID: sessionID)
+    }
+
+    /// Shows or hides the brief of the agent whose session `sessionID` is, wherever its pane lives.
+    /// Returns false when the session's agent has no brief.
+    @discardableResult func toggleAgentBrief(forSessionID sessionID: String) -> Bool {
+        guard let brief = agentBrief(forSessionID: sessionID) else { return false }
+        agentBriefVisibility.toggle(agentKey: brief.agentKey, brief: brief.markdown)
+        refreshAgentBriefs()
+        // A global window's strip glyph reads the state through its identity.
+        if let placement = placement(forSessionID: sessionID) { refreshTabTitles(scope: placement.scope) }
+        return true
+    }
+
+    /// The session of the pane the scope's chrome names, which is the one its brief toggles act on: the
+    /// focused pane the workspace footer shows, or the pane a global window's identity strip shows.
+    private func briefToggleSessionID(scope: PanelScope) -> String? {
+        let layout = layout(for: scope)
+        switch scope {
+        case .workspace:
+            guard let paneID = layout.focusedPaneID else { return nil }
+            return PanelLayoutEngine.pane(withID: paneID, in: layout)?.content.terminalSessionID
+        case .globalWindow: return layout.tabs.first.flatMap(PanelLayoutEngine.selectedPane)?.content.terminalSessionID
+        }
+    }
+
+    /// The brief of the coding agent whose session `sessionID` is, read from the overview of the
+    /// workspace the pane belongs to. Nil when the session is no coding agent's or the agent has no brief.
+    private func agentBrief(forSessionID sessionID: String) -> AgentBriefPresentation? {
+        guard let workspaceID = contentControllers[sessionID]?.workspaceID,
+            let row = host.codingAgentRow(forSessionID: sessionID, workspaceID: workspaceID), let markdown = row.brief
+        else { return nil }
+        return AgentBriefPresentation(agentKey: row.agentID ?? row.id, markdown: markdown, updatedAt: row.briefUpdatedAt)
+    }
+
+    /// The brief a pane's column shows: its agent's brief while that brief is shown, else nil.
+    private func shownAgentBrief(forSessionID sessionID: String) -> AgentBriefPresentation? {
+        guard let brief = agentBrief(forSessionID: sessionID) else { return nil }
+        return agentBriefVisibility.state(agentKey: brief.agentKey, brief: brief.markdown) == .shown ? brief : nil
     }
 }
