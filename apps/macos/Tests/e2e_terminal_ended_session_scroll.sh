@@ -161,9 +161,6 @@ else:
 PY
 }
 
-# The pane's currently rendered text: prefer the ghostty surface's visible grid
-# (visibleSurfaceOutput) and fall back to renderedOutput, matching how the mobile and
-# edit-shortcut e2e scripts read terminal content out of the window state dump.
 dump_visible_text() {
   python3 - "$DUMP_PATH" <<'PY'
 import json

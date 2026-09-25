@@ -140,9 +140,7 @@ class ShaperState:
 
 
 async def reader_loop(reader, queue):
-    """Reads chunks and stamps each with its arrival time. A None sentinel
-    marks EOF so the paired pacer can finish draining and half-close.
-    """
+    """A None sentinel marks EOF so the paired pacer can finish draining and half-close."""
     try:
         while True:
             data = await reader.read(CHUNK_SIZE)

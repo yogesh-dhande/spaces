@@ -113,7 +113,6 @@ public final class PortReserver: Sendable {
         for port in ports { _heldPorts.pointee.remove(port) }
     }
 
-    /// The ports this process currently holds placeholders on.
     public func reservedPorts() -> Set<Int> {
         lock.lock()
         defer { lock.unlock() }

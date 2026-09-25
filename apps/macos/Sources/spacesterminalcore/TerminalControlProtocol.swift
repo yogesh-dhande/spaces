@@ -564,7 +564,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
 public struct TerminalControlResponse: Codable, Sendable, Equatable {
     public let ok: Bool
     public let message: String
-    /// Machine-readable failure category. Nil on success and omitted from the wire when nil.
+    /// Nil on success and omitted from the wire when nil.
     public let errorCode: SpacesDeviceErrorCode?
     /// The selection's plain text, set on a successful `setSelection` (so the requesting client can
     /// copy-on-select) and `readSelectionText`. Nil for every other command and when there is no

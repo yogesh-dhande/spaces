@@ -369,8 +369,8 @@ final class SpacesProfileTests: XCTestCase {
             defer { SpacesProfile.resetCacheForTesting() }
 
             // The bug this guards against: `let profile = try? SpacesProfile.currentOrNilIfUnresolved()`
-            // here would compile and pass with `profile == nil`, exactly like the seven call sites did
-            // before the fix. `currentOrNilIfUnresolved()` must be called with `try` and observed to throw.
+            // here would compile and pass with `profile == nil`, the same silent failure the seven call
+            // sites once had. `currentOrNilIfUnresolved()` must be called with `try` and observed to throw.
             XCTAssertThrowsError(try SpacesProfile.currentOrNilIfUnresolved()) { error in
                 guard case SpacesProfileResolutionError.testHostRefusedLiveUserProfile = error else {
                     return XCTFail("Expected testHostRefusedLiveUserProfile, got \(error).")
@@ -380,8 +380,8 @@ final class SpacesProfileTests: XCTestCase {
     }
 
     /// The legitimate use of `currentOrNilIfUnresolved()` — an isolated profile resolves normally, exactly
-    /// like `current()` — must keep working, so the fix has not turned a non-fatal "no profile" path into
-    /// a crash for every other test in the suite.
+    /// like `current()` — must keep working, so throwing on refusal has not turned a non-fatal "no profile"
+    /// path into a crash for every other test in the suite.
     func testCurrentOrNilIfUnresolvedResolvesNormallyForAnIsolatedProfile() throws {
         let databasePath = tempHomeURL.appendingPathComponent("profiles/current-or-nil-if-unresolved/spaces.db").path
 

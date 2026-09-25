@@ -3,7 +3,6 @@ import XCTest
 @testable import workspacecore
 
 final class ErrorsTests: XCTestCase {
-    // Tests error descriptions cover all cases by arranging representative inputs and asserting the expected result.
     func testErrorDescriptionsCoverAllCases() {
         XCTAssertEqual(WorkspaceError.missingProject(dir: "/tmp/project").errorDescription, "Project not found: /tmp/project")
         XCTAssertEqual(WorkspaceError.projectAlreadyExists(dir: "/tmp/project").errorDescription, "Project already exists: /tmp/project")

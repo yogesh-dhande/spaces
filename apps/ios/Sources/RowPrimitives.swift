@@ -10,7 +10,6 @@ import spacesterminalcore
 
 // MARK: - Status dot
 
-/// Compact status indicator: 14pt slot, 8pt dot, 1.5pt stroke for outlined states.
 struct StatusDot: View {
     enum Kind {
         case running
@@ -61,7 +60,6 @@ struct StatusDot: View {
 
 // MARK: - Type-icon tile
 
-/// 24×24 rounded tile with a tinted background and SF Symbol glyph.
 struct TypeIconTile: View {
     let systemName: String
     var background: Color = Theme.accentTint

@@ -27,7 +27,6 @@ final class RestorableSessionsSchemaMigrationTests: XCTestCase {
 
         XCTAssertEqual(try scalar(database, "SELECT current_version FROM migration_state"), "\(DatabaseSchema.currentVersion)")
 
-        // The pre-existing session row reads back with every value intact.
         XCTAssertEqual(try scalar(database, "SELECT COUNT(*) FROM terminal_sessions"), "1")
         XCTAssertEqual(try scalar(database, "SELECT workspace_id FROM terminal_sessions WHERE session_id = 'session-1'"), "ws-1")
         XCTAssertEqual(try scalar(database, "SELECT kind FROM terminal_sessions WHERE session_id = 'session-1'"), "agent")
@@ -41,8 +40,6 @@ final class RestorableSessionsSchemaMigrationTests: XCTestCase {
         // relaunch and is correctly never offered as restorable.
         XCTAssertEqual(try scalar(database, "SELECT launch_command IS NULL FROM terminal_sessions WHERE session_id = 'session-1'"), "1")
 
-        // An upgraded profile holds an offer for a session in the workspace it carried forward, and
-        // reads it back whole.
         try store.replaceRestorableSessions(
             generation: "gen-1", capturedAt: "2026-09-11T00:00:00Z",
             captures: [
@@ -71,7 +68,6 @@ final class RestorableSessionsSchemaMigrationTests: XCTestCase {
 
         XCTAssertEqual(try scalar(database, "SELECT current_version FROM migration_state"), "\(DatabaseSchema.currentVersion)")
 
-        // The agent row carried forward whole, and had no relaunch command recorded for it yet.
         let migrated = try XCTUnwrap(try store.agentWindowByTerminalSession(terminalSessionID: "session-1"))
         XCTAssertEqual(migrated.id, "agent-1")
         XCTAssertEqual(migrated.sessionKey, "conv-1")

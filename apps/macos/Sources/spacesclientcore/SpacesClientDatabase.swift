@@ -952,11 +952,11 @@ private final class DefaultDatabaseStorage: @unchecked Sendable {
     }
 
     /// Every read through `SpacesClientDatabase.defaultDatabase()` — including every shortcut-setting
-    /// lookup the sidebar re-issues while it reloads — used to call `defaultPath()` first, which reruns
-    /// full profile resolution (including a repo-local dev build's synchronous git probe) before this
-    /// cache ever got a chance to compare paths. Checking `defaultPathCacheKey()` first skips resolution
-    /// entirely when none of its cheap inputs changed, so the probe runs once per process per distinct
-    /// key rather than once per call.
+    /// lookup the sidebar re-issues while it reloads — checks `defaultPathCacheKey()` first rather than
+    /// calling `defaultPath()` directly, since `defaultPath()` reruns full profile resolution (including
+    /// a repo-local dev build's synchronous git probe) on every call. Checking the cheap key first skips
+    /// resolution entirely when none of its inputs changed, so the probe runs once per process per
+    /// distinct key rather than once per call.
     ///
     /// The key intentionally excludes anything about the resolved profile's git state (branch, HEAD):
     /// a dev build that switches its worktree's branch while the app keeps running keeps resolving to the

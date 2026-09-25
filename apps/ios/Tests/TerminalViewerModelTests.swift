@@ -1853,10 +1853,6 @@
         /// across the redial would leave the viewer detached with nothing able to notice: the connect would
         /// skip its attach, and the fresh snapshot's missing row would read as no loss, there being no
         /// confirmed attachment to lose.
-        /// A `.state` read answered before the outage still lists an attachment the lease has since expired,
-        /// so a redial that consults it skips the attach it exists to make, and nothing afterwards notices:
-        /// with no confirmed attachment there is none to lose, so the fresh stream's snapshot without this
-        /// client reports nothing either.
         func testARedialAttachesAgainWhenFetchedStateStillListsTheUnconfirmedAttachment() async throws {
             let tracker = AttachRequestTracker()
             let backend = StageTrackerTestBackend(transportFactory: { AttachedClientStateRequestTransport(tracker: tracker) })
@@ -3381,7 +3377,7 @@
             await backend.fireFrame(
                 Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:40:00Z"))
             await waitUntil("the initial export to be applied") { model.latestState?.emittedAt == "2026-06-04T14:40:00Z" }
-            // The recovery an export like this used to start runs on its own task, so the apply above is
+            // The recovery an export like this starts runs on its own task, so the apply above is
             // the anchor and this is the slack behind it.
             try await Task.sleep(for: .milliseconds(250))
             XCTAssertEqual(ownership.attachCount(), 2, "an export older than the re-attach must not send a second one")
@@ -6161,7 +6157,7 @@
         /// land an ended payload while the outage banner is up. `applyReducedState`'s `isEndedState` block
         /// cancels the stream and the reconnect task, after which the disconnect that cancel triggers
         /// returns early (`isEndedState` is true), so nothing else in that path ever calls
-        /// `clearConnectionOutage()`. Before the fix, this left a stale "Device unreachable" banner over
+        /// `clearConnectionOutage()`. Without this, a stale "Device unreachable" banner would stay over
         /// the ended view forever.
         func testAnEndedStateAppliedFromARefreshClearsTheOutageBanner() async throws {
             let backend = StageTrackerTestBackend()
@@ -6217,7 +6213,7 @@
             XCTAssertNil(model.errorMessage, "an exhausted-candidates failure is transport-class and must never surface as errorMessage")
         }
 
-        /// P1 regression: a fast dial failure can report through `onDisconnect` before `connect()`'s own
+        /// A fast dial failure can report through `onDisconnect` before `connect()`'s own
         /// `subscribe()` call has resumed and installed the returned handle onto `streamHandle`, since
         /// both that installation and the disconnect callback are ordinary main-actor jobs racing each
         /// other. Before `dialExhaustedAllCandidates` traveled on the disconnect event itself, the verdict
@@ -6295,13 +6291,12 @@
             XCTAssertTrue(redialed, "the stage 2 ladder's automatic redial must still fire on schedule")
         }
 
-        /// P2 regression: `beginStop()` used to cancel only the grace and probe tasks, leaving
-        /// `connectionStageTracker`, `connectionStage`, and `isConnectionBannerVisible` however stage 2
-        /// had left them. A retained detail stopped while `.unreachable` and later restarted would show
-        /// the stale banner immediately and resume the old stage 2 backoff ladder, even though the new
-        /// run has not observed any failure of its own yet. `beginStop()` now routes through
-        /// `clearConnectionOutage()`, the same reset a live frame or an ended-state load uses, so a stop
-        /// always leaves the next `start()` a clean lifecycle.
+        /// `beginStop()` routes through `clearConnectionOutage()`, the same reset a live frame or an
+        /// ended-state load uses, so a stop always leaves the next `start()` a clean lifecycle. Canceling
+        /// only the grace and probe tasks would leave `connectionStageTracker`, `connectionStage`, and
+        /// `isConnectionBannerVisible` however stage 2 had left them: a retained detail stopped while
+        /// `.unreachable` and later restarted would show the stale banner immediately and resume the old
+        /// stage 2 backoff ladder, even though the new run has not observed any failure of its own yet.
         func testStoppingTheViewerClearsTheOutageSoARestartBeginsClean() async throws {
             let backend = StageTrackerTestBackend()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
@@ -6407,7 +6402,7 @@
             XCTAssertTrue(model.isConnectionBannerVisible, "the verdict captured on the handle, not a live re-query, must drive stage 2")
         }
 
-        /// F1 regression: a stream that delivered at least one frame and later stalls is only stage 1
+        /// A stream that delivered at least one frame and later stalls is only stage 1
         /// evidence, even when the resolver reports every candidate exhausted, because that exhaustion
         /// describes some other, unrelated dial, not this stream's own: this stream already proved it
         /// could reach the device. Before gating `handleDisconnect`'s evidence check on
@@ -6472,8 +6467,8 @@
         /// Regression test for the reset-before-subscribe fix in `connect()`: the subscription's first
         /// frame can arrive, and run `registerLiveStreamFrame()`, before `bridgeClient.subscribe(...)`
         /// even returns its handle to `connect()`, since the closure runs on the MainActor while
-        /// `connect()` is still suspended awaiting that call. Before the fix, the `currentStreamDeliveredFrame
-        /// = false` reset ran only after `subscribe()` returned, so it silently overwrote a delivery that
+        /// `connect()` is still suspended awaiting that call. Without this, the `currentStreamDeliveredFrame
+        /// = false` reset would run only after `subscribe()` returns, silently overwriting a delivery that
         /// had already landed for this same attempt. On a single-host device with every stream candidate
         /// already exhausted, that stale reset makes the very next stall read as a dial failure and jumps
         /// straight to `.unreachable` instead of the ordinary stage 1 `.reconnecting`.
@@ -6861,9 +6856,9 @@
             await waitForRedialBootstrapToLand(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 2)
 
-            // The replacement stream's own bare request timeout must be free to start its own probe: before
-            // the fix, stream A's still in-flight probe task blocked this outright and `pingCallCount` never
-            // moved past 1.
+            // The replacement stream's own bare request timeout must be free to start its own probe: without
+            // this, stream A's still in-flight probe task would block this outright and `pingCallCount` would
+            // never move past 1.
             await model.sendKey("b")
             let secondProbeStarted = await backend.waitForPingCallCount(2, timeout: .seconds(5))
             XCTAssertTrue(
@@ -6876,7 +6871,7 @@
             XCTAssertEqual(model.connectionStage, .connected, "a stale probe answer for the replaced stream must not tear the replacement down")
         }
 
-        /// F2 regression: `allCandidatesUnreachable` on an input send is conclusive stage 2 evidence on
+        /// `allCandidatesUnreachable` on an input send is conclusive stage 2 evidence on
         /// its own, unlike a bare request timeout, so it must not be swallowed as merely transient or
         /// routed through the ping-corroboration probe. It tears the live stream down and escalates
         /// straight to stage 2, with the automatic reconnect armed on `TerminalUnreachableBackoff`'s
@@ -6905,10 +6900,11 @@
             XCTAssertTrue(redialed, "the automatic reconnect must redial on the unreachable ladder")
         }
 
-        /// Mac sibling of the fix above: `DeviceTerminalSessionStateModel.reportFailedInputSend` had a
-        /// `guard !isStateStreamDisconnected else { return true }` ahead of its own classification, which
-        /// discarded conclusive stage 2 evidence arriving while a reconnect was already armed at stage 1.
-        /// `handleInputSendError` on iOS now carries the same gate for a stream that is already gone
+        /// Mac counterpart to the case above: without a stage 1 exception,
+        /// `DeviceTerminalSessionStateModel.reportFailedInputSend`'s
+        /// `guard !isStateStreamDisconnected else { return true }` ahead of its own classification would
+        /// discard conclusive stage 2 evidence arriving while a reconnect is already armed at stage 1.
+        /// `handleInputSendError` on iOS carries the same gate for a stream that is already gone
         /// (`streamHandle == nil`, `connectionStage != .connected`), with the same stage 1 exception: an
         /// `allCandidatesUnreachable` failure arriving while still at stage 1 is conclusive stage 2
         /// evidence and still escalates. This test covers the case where that gate is not taken: the
@@ -6953,10 +6949,10 @@
         /// Regression for the ladder re-arm bug: once the link is already reported down (`.unreachable`,
         /// `streamHandle == nil`, a reconnect already armed on the ladder), a repeat `allCandidatesUnreachable`
         /// from a keystroke typed into the outage is only a repeat of evidence the tracker already has, not
-        /// new evidence. Before the fix every such keystroke still ran the full teardown path
+        /// new evidence. Without this, every such keystroke would still run the full teardown path
         /// (`tearDownStream` -> `handleDisconnect` -> `registerUnreachableConnectionAttempt()` ->
-        /// `scheduleReconnect`), which advanced the 1/2/4/8/15 s backoff ladder and replaced the pending
-        /// timer on every keystroke, so typing while "Device unreachable" was showing kept postponing the
+        /// `scheduleReconnect`), which would advance the 1/2/4/8/15 s backoff ladder and replace the pending
+        /// timer on every keystroke, so typing while "Device unreachable" is showing would keep postponing the
         /// very redial that would recover. This proves the 1 s redial armed when the device first became
         /// unreachable still fires on schedule even while the user keeps typing into the outage.
         func testTypingWhileUnreachableDoesNotPostponeTheAutomaticRedial() async throws {
@@ -6993,12 +6989,13 @@
 
         /// Covers a redial that dials successfully (accepted, then closed clean, e.g. a daemon that
         /// accepts a connection and then restarts before subscribing) while the tracker is already
-        /// `.unreachable`. `handleDisconnect`'s `error == nil` branch used to fall straight through to
+        /// `.unreachable`. `handleDisconnect`'s `error == nil` branch must not fall through to
         /// `registerTransientConnectionLoss()` -- a no-op once already `.unreachable` (`streamLost()`
         /// only escalates from `.connected`/`.reconnecting`) -- and then `scheduleReconnect` with the
-        /// fixed 150 ms/1 s cadence instead of the stage 2 ladder, dropping the redial pace exactly when
-        /// the daemon is proven still unreachable. This proves a clean close in that state keeps the
-        /// tracker on the 1/2/4/8/15 s ladder (docs/spec.md:287) instead of reverting to the fast cadence.
+        /// fixed 150 ms/1 s cadence instead of the stage 2 ladder, which would drop the redial pace
+        /// exactly when the daemon is proven still unreachable. This proves a clean close in that state
+        /// keeps the tracker on the 1/2/4/8/15 s ladder (docs/spec.md) instead of reverting to the fast
+        /// cadence.
         func testACleanCloseWhileUnreachableKeepsTheRedialOnTheLadder() async throws {
             let backend = StageTrackerTestBackend()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
@@ -7027,7 +7024,7 @@
             // false` regardless of it (see `fireDisconnect`'s doc comment).
             await backend.fireDisconnect(nil)
 
-            // Before the fix this clean close drops back to the 150 ms silent-owner cadence, so a third
+            // Without this, a clean close drops back to the 150 ms silent-owner cadence, so a third
             // subscribe would already be in by ~150-300 ms; assert it has NOT happened within 1.2 s.
             let prematureRedial = await backend.waitForSubscribeCount(3, timeout: .milliseconds(1200))
             XCTAssertFalse(prematureRedial, "a clean close while already unreachable must not drop back to the fast owner cadence")
@@ -7043,9 +7040,10 @@
         /// The device comes back, but the terminal it hosted was removed on the daemon in the meantime, so
         /// the redial's subscribe is rejected with "terminal session ... is not available". That verdict is
         /// final: the viewer switches to the unavailable message and nothing it dials can ever change the
-        /// answer. Before the fix, only the failing attempt stopped -- the stage 2 tick is armed
-        /// independently of any one attempt's outcome, so it kept ticking up the ladder and opening a fresh
-        /// subscription on every rung, forever, behind a UI that could never move.
+        /// answer. The rejection must retire every attempt, not just the one that failed: the stage 2 tick
+        /// is armed independently of any one attempt's outcome, so stopping only the failing attempt would
+        /// leave it ticking up the ladder and opening a fresh subscription on every rung, forever, behind a
+        /// UI that could never move.
         func testASessionUnavailableRejectionStopsTheUnreachableRedialCadence() async throws {
             let backend = StageTrackerTestBackend()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
@@ -7089,7 +7087,7 @@
         /// -- while already `.unreachable` -- calls `registerUnreachableConnectionAttempt()` and spends
         /// the ladder rung `connectionStageTracker.retryRequested()` had just reset, so a failed Retry
         /// paced its next attempt at the ladder's second rung (2 s) instead of the promised first rung
-        /// (1 s). `retryConnection()` now retires the generation synchronously, before the cancel, so the
+        /// (1 s). `retryConnection()` retires the generation synchronously, before the cancel, so the
         /// cancel's own callback is stale no matter when it actually arrives.
         ///
         /// `StageTrackerTestBackend`'s stream handle does not itself invoke `onDisconnect` on `cancel()`
@@ -7145,10 +7143,10 @@
         /// before the underlying dial completes and long before any frame arrives, so once the 1 s ladder
         /// redial fires (`waitForSubscribeCount(2)` below), `streamHandle` is non-nil again while the stage
         /// is still `.unreachable` -- the redial is in flight but has not yet proven the link recovered.
-        /// Before the fix, `handleInputSendError`'s gate read `streamHandle == nil`, so it was skipped once
-        /// that handle existed: a keystroke's connection-level failure fell to the bare connection-level
-        /// branch, which tore the just-redialed stream down through `tearDownStream(reportingLoss:)`.
-        /// Gating on the tracker's stage alone (this fix) recognizes the in-flight redial as still "link
+        /// Gating `handleInputSendError` on `streamHandle == nil` instead would skip once that handle
+        /// existed: a keystroke's connection-level failure would fall to the bare connection-level
+        /// branch, tearing the just-redialed stream down through `tearDownStream(reportingLoss:)`.
+        /// Gating on the tracker's stage alone recognizes the in-flight redial as still "link
         /// already reported down" and drops the keystroke without touching it, so the redial that already
         /// fired keeps running. The assertion is on the redial's stream handle never being cancelled
         /// rather than on a subscribe count: the stage 2 ladder is a redial cadence that dials again on
@@ -7184,7 +7182,7 @@
             // The redial's own bootstrap `.state` read (see `waitForRedialBootstrapToLand`) answers with an
             // ownerless snapshot that clears ownership once it lands; `sendKey` below silently no-ops
             // without it, which would pass this test for the wrong reason (no send ever reaches
-            // `handleInputSendError` either before or after the fix). Wait for it, then reassert ownership,
+            // `handleInputSendError` at all). Wait for it, then reassert ownership,
             // exactly like `testInputSendFailingOnEveryCandidateEscalatesFromStage1EvenWithAReconnectAlreadyArmed`.
             await waitForRedialBootstrapToLand(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 2)
@@ -7209,10 +7207,10 @@
 
         /// The stage 2 ladder is a redial cadence, not a per-failure delay: when a rung elapses with an
         /// attempt still in flight, a fresh dial starts alongside the stale one instead of waiting for it
-        /// to give up. That is the point of the fix for #676 -- the attempt that is hanging on an address
+        /// to give up. That is the behavior #676 requires -- the attempt that is hanging on an address
         /// that was dead when it started is exactly the one that cannot notice the link coming back, so
-        /// waiting for its transport budget made a phone that regained its link take a fixed ten seconds
-        /// to paint. Whichever dial delivers a frame first wins, the older one included, and from that
+        /// waiting for its transport budget would make a phone that regained its link take a fixed ten
+        /// seconds to paint. Whichever dial delivers a frame first wins, the older one included, and from that
         /// instant the loser is cancelled and everything it still has in flight is ignored.
         func testAnUnreachableLadderTickRacesAFreshDialAndTheFirstFrameWins() async throws {
             let backend = StageTrackerTestBackend()
@@ -7243,7 +7241,7 @@
             let cancelsDuringTheRace = await backend.currentCancelCount()
             XCTAssertEqual(cancelsDuringTheRace, 0, "the in-flight attempt must be raced, not superseded and cancelled")
 
-            // The stale dial is the one that reaches the device, which is the case the fix exists for.
+            // The stale dial is the one that reaches the device, the scenario this race is built to handle.
             await backend.fireFrame(Self.outputState(title: "stale-wins", emittedAt: "2026-06-04T14:23:40Z"), onStream: 2)
             await waitUntil("the stage to return to connected") { model.connectionStage == .connected }
             XCTAssertFalse(model.isConnectionBannerVisible, "the winning frame must clear the banner")
@@ -7537,14 +7535,14 @@
 
         /// `TerminalScrollCoalescer` allows only one in-flight batch at a time (`queuedBatchCount`),
         /// releasing that slot from `onFinished`, which `enqueueCoalescedScrollBatch` fires when its
-        /// queued send completes. A batch that never runs because `cancelQueuedInputSends()`
-        /// (`inputSendQueue.cancelAll()`) discarded it while still queued behind an earlier, failed key
-        /// send used to never call `onFinished` at all, so `queuedBatchCount` stayed stuck above zero and
-        /// every later `append` -- which only schedules a flush when `queuedBatchCount == 0` -- silently
-        /// piled into `pending` forever. `TerminalInputSerialQueue.enqueue`'s `onDiscarded` parameter is
-        /// the fix: it fires exactly once for a task discarded before `operation` ever ran, and
-        /// `enqueueCoalescedScrollBatch` wires it to the same `onFinished` the operation itself would have
-        /// called, so the coalescer's slot is released either way.
+        /// queued send completes. `TerminalInputSerialQueue.enqueue`'s `onDiscarded` parameter fires
+        /// exactly once for a task discarded before `operation` ever ran, and `enqueueCoalescedScrollBatch`
+        /// wires it to the same `onFinished` the operation itself would have called, so the coalescer's
+        /// slot is released either way. Without it, a batch discarded by `cancelQueuedInputSends()`
+        /// (`inputSendQueue.cancelAll()`) while still queued behind an earlier, failed key send would never
+        /// call `onFinished` at all, so `queuedBatchCount` would stay stuck above zero and every later
+        /// `append` -- which only schedules a flush when `queuedBatchCount == 0` -- would silently pile
+        /// into `pending` forever.
         func testAScrollBatchDroppedWithTheInputBacklogDoesNotWedgeLaterScrolling() async throws {
             let tracker = ScrollAfterKeyFailureTracker()
             let backend = StageTrackerTestBackend(transportFactory: { ScrollAfterKeyFailureRequestTransport(tracker: tracker) })
@@ -7587,16 +7585,16 @@
             await waitUntil("the post-recovery scroll to reach the transport", timeout: .seconds(3)) { tracker.currentScrollRequestCount() == 1 }
         }
 
-        /// K1 regression: a connection-level transport failure on an input send (a reset, refused, or
+        /// A connection-level transport failure on an input send (a reset, refused, or
         /// aborted socket, not a bare client-deadline timeout) is conclusive evidence the link itself is
         /// down, the same way Mac's `DeviceTerminalSessionStateModel.reportFailedInputSend` classifies it
-        /// via `isTransportFailureEvidenceOfLostLink`. Before the fix, `handleInputSendError`'s guard
-        /// classified this shape as merely `isTransientInputTransportError` and, since it is not the
-        /// narrower `.requestTimedOut` case that starts the corroboration probe, silently swallowed it:
-        /// the model never reacted at all and the stream stayed apparently open until its own 8 s silence
-        /// watchdog eventually noticed independently. This proves the model instead tears the stream down
-        /// immediately as stage 1 evidence, reaching `.reconnecting`, never `.unreachable`, since
-        /// `allCandidatesUnreachable` stays the only stage 2 evidence, and redials.
+        /// via `isTransportFailureEvidenceOfLostLink`. Classifying this shape in `handleInputSendError`'s
+        /// guard as merely `isTransientInputTransportError` -- since it is not the narrower
+        /// `.requestTimedOut` case that starts the corroboration probe -- would silently swallow it: the
+        /// model would never react at all and the stream would stay apparently open until its own 8 s
+        /// silence watchdog eventually noticed independently. This proves the model instead tears the
+        /// stream down immediately as stage 1 evidence, reaching `.reconnecting`, never `.unreachable`,
+        /// since `allCandidatesUnreachable` stays the only stage 2 evidence, and redials.
         func testInputSendFailingWithAConnectionResetTearsTheStreamDownAsStage1Evidence() async throws {
             let backend = StageTrackerTestBackend(transportFactory: { InputConnectionResetRequestTransport() })
             let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
@@ -7625,9 +7623,9 @@
         /// A lost route (`EHOSTUNREACH` here; `EHOSTDOWN`, `ENETDOWN`, `ENETUNREACH` are the same class)
         /// is the shape an established connection reports when the Wi-Fi radio drops or a tailnet route
         /// is withdrawn. It is connection-level evidence exactly like a reset, and the stream classifier
-        /// (`isStreamHostTransportFailure`) already reads it that way; before the fix the input-path
-        /// classifiers did not, so the send fell through to a red `errorMessage` and the stale stream was
-        /// left standing.
+        /// (`isStreamHostTransportFailure`) already reads it that way; the input-path classifiers must
+        /// read it the same way too, or the send falls through to a red `errorMessage` and the stale
+        /// stream is left standing.
         func testInputSendFailingWithARouteLossTearsTheStreamDownAsStage1Evidence() async throws {
             let backend = StageTrackerTestBackend(transportFactory: { InputRouteLossRequestTransport() })
             let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
@@ -7651,11 +7649,11 @@
 
         /// A daemon-busy rejection ("Timed out waiting for the terminal to accept the send.") is a decoded
         /// `SpacesDeviceAPIClientError.requestFailed` answer, not a transport-level timeout: the daemon was
-        /// reachable enough to decode the request and answer it. Before the fix,
-        /// `isConnectionLevelInputTransportError` substring-matched "timed out" in the message and treated
-        /// this the same as a real connection timeout, tearing down a healthy stream and forcing a redial.
-        /// The rejection still gets swallowed as transient (no red `errorMessage`) by
-        /// `isTransientInputTransportError`, exactly as before this fix; only the stream teardown is wrong.
+        /// reachable enough to decode the request and answer it. `isConnectionLevelInputTransportError`
+        /// must not substring-match "timed out" in the message and treat this the same as a real
+        /// connection timeout, or it tears down a healthy stream and forces a redial. The rejection is
+        /// swallowed as transient (no red `errorMessage`) by `isTransientInputTransportError`; only the
+        /// stream teardown would be wrong.
         func testADaemonTimeoutRejectionOfAnInputSendLeavesTheStreamAlone() async throws {
             let backend = StageTrackerTestBackend(transportFactory: { InputDaemonTimeoutRejectionRequestTransport() })
             let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
@@ -7686,7 +7684,7 @@
         /// which `isConnectionLevelInputTransportError` deliberately excludes as a decoded answer: on
         /// that read the send is swallowed as merely transient and the dead stream is left standing
         /// until the 8 s watchdog notices on its own.
-        /// This proves the fix instead tears the stream down as stage 1 evidence, exactly like a reset.
+        /// This proves the stream is torn down as stage 1 evidence instead, exactly like a reset.
         func testAPeerClosingTheCommandConnectionUnderAnInputSendTearsTheStreamDown() async throws {
             let backend = StageTrackerTestBackend(transportFactory: { InputConnectionClosedRequestTransport() })
             let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
@@ -7906,8 +7904,8 @@
             }
         }
 
-        /// Sibling of the reclaim test above, for the other half of the product contract (docs/spec.md
-        /// line 313): a former owner reclaims only a session the bootstrap snapshot still shows as
+        /// Sibling of the reclaim test above, for the other half of the product contract (docs/spec.md):
+        /// a former owner reclaims only a session the bootstrap snapshot still shows as
         /// ownerless. When another pane (the Mac, here) took the session over while this client was
         /// disconnected, the returning owner comes back a mere viewer of that owner, exactly like a
         /// former viewer, and the ordinary Take Over affordance (`showsTakeOverAction`) is how the user
@@ -8056,7 +8054,7 @@
             XCTAssertEqual(mode, .viewer, "the recovering attach must stay a viewer attach")
         }
 
-        /// The P1 this exercises: `connect()`'s bootstrap read is only one of the two sources a
+        /// `connect()`'s bootstrap read is only one of the two sources a
         /// reconnect's armed reattach check can settle from. When the bootstrap read answers nothing (a
         /// request failure, or its own fixed timeout) before the subscription's stream has delivered
         /// anything, deciding the check right there and then would skip it forever: `hasAttachedToSession`
@@ -8181,7 +8179,7 @@
             XCTAssertEqual(takeoverCount, 0, "a former viewer recovering this way must not take over")
         }
 
-        /// codex P1 (round 6): `lifecycle` and `clientID` alone do not tell a reconnect's own settling
+        /// `lifecycle` and `clientID` alone do not tell a reconnect's own settling
         /// snapshot apart from a snapshot the connection it replaces submitted just before disconnecting
         /// -- a reconnect keeps both unchanged from the connection it replaces, so a stale submission that
         /// still names this client attached can pass `isCurrentStateRefresh` and clear the check without
@@ -8320,12 +8318,12 @@
             XCTAssertEqual(mode, .viewer, "the recovering attach must stay a viewer attach")
         }
 
-        /// K2 regression: a keystroke queued behind a conclusively failing send must not go out once a
+        /// A keystroke queued behind a conclusively failing send must not go out once a
         /// new stream is up. Mirrors Mac's `RemoteGhosttySessionHost.reportInputFailure`, which calls
         /// `inputQueue.cancelAll()` exactly when `reportFailedInputSend` returns `true` (a teardown), so
         /// a backlog addressed to a link that failure just proved is gone never gets a second life on the
-        /// replacement stream. Before the fix, `handleInputSendError` tore the stream down but left
-        /// `inputSendQueue` draining, so "b" queued right behind the failing "a" would still reach the
+        /// replacement stream. `handleInputSendError` must tear the stream down and also stop
+        /// `inputSendQueue` from draining, or "b" queued right behind the failing "a" would still reach the
         /// transport. "a" fails on the transport's first `.key` send; "b" is enqueued immediately after,
         /// while "a" is still being handled, so it sits behind "a" in the serial queue and never starts
         /// until `cancelQueuedInputSends()` has already cancelled it.
@@ -10460,8 +10458,8 @@
         /// A replay left showing from an earlier gesture must not survive the program switching into the
         /// alternate screen underneath it: a fresh gesture that resolves to the daemon has to drop the
         /// stale replay before forwarding, or the swipe would drive a hidden screen the phone still paints
-        /// over with old history. `isShowingLocalScrollFrame` is the public read of the replay this fix
-        /// clears, so it stands in for asserting the private state directly.
+        /// over with old history. `isShowingLocalScrollFrame` is the public read of the replay state the
+        /// drop clears, so it stands in for asserting the private state directly.
         func testAGestureRoutedToTheDaemonDropsAStaleReplayFirst() async throws {
             let recorder = DeviceAPIRequestRecorder()
             let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
@@ -10654,8 +10652,9 @@
             model.noteScrollGestureBegan()
             model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
             // Give a wrongly-triggered continuation read time to reach the recorder before asserting its
-            // absence: this is the failing half of the test without the fix, since a bare "still equal"
-            // check immediately after the gesture can pass even when a read is merely still in flight.
+            // absence: this is the half of the test that catches a wrongly-triggered read, since a bare
+            // "still equal" check immediately after the gesture can pass even when a read is merely still
+            // in flight.
             try? await Task.sleep(for: .milliseconds(200))
             let requestsAfterGesture = await Self.transcriptRequests(in: recorder.snapshot()).count
             XCTAssertEqual(requestsAfterGesture, requestsBeforeGesture, "with nothing new to page in, the next gesture must read nothing more")
@@ -10698,8 +10697,9 @@
             model.noteScrollGestureBegan()
             model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
             // Give a wrongly-triggered continuation read time to reach the recorder before asserting its
-            // absence: this is the failing half of the test without the fix, since a bare "still equal"
-            // check immediately after the gesture can pass even when a read is merely still in flight.
+            // absence: this is the half of the test that catches a wrongly-triggered read, since a bare
+            // "still equal" check immediately after the gesture can pass even when a read is merely still
+            // in flight.
             try? await Task.sleep(for: .milliseconds(200))
             let requestsAfterGesture = await Self.transcriptRequests(in: recorder.snapshot()).count
             XCTAssertEqual(requestsAfterGesture, requestsBeforeGesture, "with nothing new to page in, the next gesture must read nothing more")

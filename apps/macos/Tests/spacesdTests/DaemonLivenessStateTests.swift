@@ -80,11 +80,11 @@ import XCTest
             XCTAssertNil(response.errorCode)
         }
 
-        /// Regression test for issue #325: `shutdownInProgress` used to feed only the session-create gate,
-        /// so a ping sent while the daemon was merely shutting down (not handing off) still reported "ok"
-        /// even though `handle(_:)` and every off-main RPC handler had already started refusing every
-        /// other command. `pingResponse()` must read the same `teardownRejection()` predicate those guards
-        /// consult, so a poller never sees the daemon as live while it is on its way out.
+        /// Regression test for issue #325: without reading `teardownRejection()`, a ping sent while the
+        /// daemon is merely shutting down (not handing off) reports "ok" even though `handle(_:)` and
+        /// every off-main RPC handler have already started refusing every other command.
+        /// `pingResponse()` must read the same `teardownRejection()` predicate those guards consult, so a
+        /// poller never sees the daemon as live while it is on its way out.
         func testPingRejectsWhileShutdownInProgress() {
             let state = DaemonLivenessState()
 
@@ -144,8 +144,8 @@ import XCTest
         /// Issue #325's follow-up: the two teardown latches must produce distinct wire codes, because a
         /// waiting client (`TerminalService.ensureRunning`) treats them oppositely — it waits out a
         /// handoff (a successor is coming) but must spawn immediately on a shutdown (nothing is coming).
-        /// Sharing one code, as both latches did before this test existed, would silently reintroduce the
-        /// 15s stall issue #334 flags for a plain shutdown.
+        /// Sharing one code would silently reintroduce the 15s stall issue #334 flags for a plain
+        /// shutdown.
         func testShutdownAndHandoffProduceDistinctErrorCodes() {
             let shuttingDownState = DaemonLivenessState()
             shuttingDownState.storeShutdownInProgress(true)

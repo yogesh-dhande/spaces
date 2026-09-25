@@ -41,7 +41,7 @@ final class LiveInMemorySessionMergeTests: XCTestCase {
         XCTAssertEqual(merged.first?.runtimeState.state, .running, "the DB entry wins over the in-memory one")
     }
 
-    /// The stored row no longer tracks title changes (an agent TUI animating a spinner in its title would
+    /// The stored row does not track title changes (an agent TUI animating a spinner in its title would
     /// otherwise commit a SQLite transaction per frame), so the live core is the authority for what a
     /// running session is currently reporting and the merge has to take the title from it.
     func testLiveTitleComesFromTheInMemoryCoreForASessionInBoth() {

@@ -20,7 +20,7 @@ final class TerminalOverviewSignalTests: XCTestCase {
         wait(for: [received], timeout: 1)
     }
 
-    /// Issue #322 follow-up: `post`'s cross-process half used to swallow a test-host refusal with
+    /// Issue #322 follow-up: `post`'s cross-process half must not swallow a test-host refusal with
     /// `try?`, indistinguishable from an ordinary "no profile" resolution failure. It cannot trap on the
     /// refusal instead (see `SpacesProfile.currentOrNilLoggingRefusal`'s doc comment — this fires from a
     /// detached engine-actor task on every runtime-state change, so trapping would abort the whole merged

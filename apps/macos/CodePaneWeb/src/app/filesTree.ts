@@ -110,8 +110,8 @@ export interface FilesTreeHandle {
  *
  * Unlike `fileList.ts`'s Changes tree (small, bounded by how many files are actually dirty) and
  * fully expanded on every render, this listing is capped at 50,000 paths. Materializing every
- * row's DOM and listeners up front, or rebuilding the whole tree on every file open (as this used
- * to do), blocks the WKWebView at that size. So directories render collapsed by default, a
+ * row's DOM and listeners up front, or rebuilding the whole tree on every file open, blocks the
+ * WKWebView at that size. So directories render collapsed by default, a
  * directory's children are built into its `.dir-children` element only the first time it is
  * expanded (a collapsed directory that's never opened costs nothing beyond its own `.dirrow`), and
  * `FilesTreeHandle.setSelected` moves the highlight in place, expanding and materializing just the

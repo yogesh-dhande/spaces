@@ -6,8 +6,7 @@ import workspacecore
 
 /// Owns the device/sidebar data cache: the flattened project and workspace state for every paired
 /// device, the local device's identity, and the per-device sidebar sections built from device
-/// overviews. Extracted from `AppKitController` as a behavior-preserving move (part of the ongoing
-/// decomposition of that type); `AppKitController` holds this as `deviceModel` and sibling
+/// overviews. `AppKitController` holds this as `deviceModel` and sibling
 /// sub-controllers reach it as `host.deviceModel`.
 @MainActor final class DeviceModelStore {
     var projects: [ProjectSummary] = []

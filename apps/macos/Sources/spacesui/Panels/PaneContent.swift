@@ -24,7 +24,7 @@ import AppKit
     /// Pane removed: detach clients and release everything. The controller is discarded
     /// afterwards.
     func close()
-    /// Moves keyboard focus into the content. Returns false when not currently possible.
+    /// Returns false when not currently possible.
     @discardableResult func makeContentFirstResponder() -> Bool
     /// Whether the given responder lives inside this content (drives focused-pane
     /// tracking from window first-responder changes).

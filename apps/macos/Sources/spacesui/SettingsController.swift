@@ -43,8 +43,8 @@ import workspacecore
     /// first status fetch happens when the user opens the section, not when Settings is constructed.
     lazy var codingAgents = CodingAgentsView(host: host)
 
-    /// Opens user settings as a floating dialog on the given section. The dialog floats over the
-    /// main window, so the current sidebar selection and detail pane are left untouched.
+    /// The dialog floats over the main window, so the current sidebar selection and detail pane are
+    /// left untouched.
     func openSettings(section: SettingsSection) {
         // Same handoff as a sidebar section switch: this rebuilds the window's content, and the Devices pane
         // keeps state in the views that are about to go away.
@@ -57,8 +57,6 @@ import workspacecore
 
     func closeSettingsWindow() { settingsWindow?.performClose(nil) }
 
-    /// Clears settings-window UI references when the window closes. Called from the
-    /// host's shared `windowWillClose` delegate.
     func handleSettingsWindowClosed() {
         if selectedSettingsSection == .devices { host.devicePairing.prepareDeviceSettingsForContentReplacement() }
         // The rows are off screen, so a change to an agent's own config has nothing left to update.

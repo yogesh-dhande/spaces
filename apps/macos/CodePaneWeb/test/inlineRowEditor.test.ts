@@ -45,7 +45,7 @@ describe("inlineRowEditor: beginInlineRowEdit", () => {
     expect(commit).toHaveBeenCalledWith("  renamed.ts  ");
     await vi.waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
     expect(row.querySelector("input.inline-name")).toBeNull();
-    expect(row.querySelector(".fn")?.textContent).toBe("original.ts"); // original content restored
+    expect(row.querySelector(".fn")?.textContent).toBe("original.ts");
   });
 
   it("Escape closes without calling commit and restores the row's original content", () => {
@@ -104,8 +104,8 @@ describe("inlineRowEditor: beginInlineRowEdit", () => {
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
     await vi.waitFor(() => expect(field.disabled).toBe(false));
-    expect(onClose).not.toHaveBeenCalled(); // stays open
-    expect(field.value).toBe("renamed.ts"); // value preserved
+    expect(onClose).not.toHaveBeenCalled();
+    expect(field.value).toBe("renamed.ts");
     const error = row.nextElementSibling as HTMLElement;
     expect(error.className).toBe("inline-error");
     expect(error.textContent).toBe("'renamed.ts' already exists.");

@@ -14,7 +14,6 @@ beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
 });
 
-/** The `<use>` targets of every file-type icon a container rendered, in document order. */
 function iconTargets(container: HTMLElement): string[] {
   return [...container.querySelectorAll(".ficon use")].map((use) => use.getAttribute("href") ?? "");
 }

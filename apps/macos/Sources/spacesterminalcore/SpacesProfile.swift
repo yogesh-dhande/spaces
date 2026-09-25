@@ -382,7 +382,6 @@ public struct SpacesProfile: Sendable, Equatable {
 
     public static func ipcObject(profileRoot: String) -> String { "spaces.profile.\(shortStableHash(canonicalPath(profileRoot)))" }
 
-    /// Well-known local Caddy router port for the single installed/production instance.
     public static let installedRouterPort = 7391
 
     /// Default local Caddy router port for this profile. The installed/production profile keeps
@@ -613,7 +612,6 @@ public enum SpacesProfileComponent: Sendable {
     case database
     case runtimeDirectory
 
-    /// The environment variable that overrides this half.
     public var environmentVariable: String {
         switch self {
         case .database: return SpacesProfile.databasePathEnvironmentVariable

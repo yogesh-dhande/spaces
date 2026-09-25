@@ -50,11 +50,10 @@ extension WorkspaceOrchestrator {
         try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
     }
 
-    /// Single-quotes a token for safe interpolation into an automation command string.
     func automationShellQuoted(_ token: String) -> String { shellSingleQuoted(token) }
 
     /// Whether a built-in terminal session is still live (control socket present, interactive runtime
-    /// state, service PID alive). Exposed for the automation executor's attributed-session sweep.
+    /// state, service PID alive).
     func automationSessionIsLive(sessionID: String) -> Bool { builtInSessionIsStillLive(sessionID: sessionID) }
 
     /// Whether a built-in terminal session's launch is still pending — its runtime row is absent or stale
@@ -66,11 +65,9 @@ extension WorkspaceOrchestrator {
     /// as a completed or dead session that should finalize the run.
     func automationSessionLaunchIsPending(sessionID: String) -> Bool { builtInSessionLaunchIsPending(sessionID: sessionID) }
 
-    /// Terminates a built-in terminal session through the daemon's existing termination machinery.
     func automationTerminateSession(sessionID: String) { builtInTerminalSessionTerminator(sessionID) }
 
-    /// Writes input to an automation's terminal session, used by the agent-kind executor to deliver a seed
-    /// prompt. `appendNewline: true` is the submit path: the session host's send chokepoint writes the text
+    /// `appendNewline: true` is the submit path: the session host's send chokepoint writes the text
     /// and the Enter that submits it, so every supported agent TUI runs the line. Routes through the
     /// process-wide input writer the daemon installs; with none installed (non-daemon callers, which never
     /// spawn agent automations) the write throws.

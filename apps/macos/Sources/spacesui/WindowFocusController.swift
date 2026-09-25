@@ -13,15 +13,13 @@ import workspacecore
 /// by-process focus, MRU window-cycling (cycle-burst cursors, keyed per workspace), global hotkey
 /// summon/toggle/reveal (including moving a window to the active Space), global window navigation
 /// (workspace-agnostic next/prev), and the command-palette/attention-item focus path shared by both.
-/// Extracted from `AppKitController` as a behavior-preserving move (part of the ongoing decomposition
-/// of that type); `AppKitController` holds this as `windowFocus` and reaches it as `host.windowFocus`
-/// from other files (`ShortcutsController`, `CommandPaletteController`, `AlertsController`,
-/// `SidebarController`, `TransientOverlaysController`, the `SidebarRuntimeTargetItem` extension) that
-/// dispatch a shortcut, present the palette, or focus an attention item. `AppKitController` stays the
-/// host for device resolution, sidebar/overview state, the target-derivation layer
-/// (`workspaceShortcutTargets`, `windowShortcutTargetResolution`, and friends), generic perf-metric
-/// logging (`logPerfMetric`, `windowShortcutElapsedMS`), and the workspace/detail-pane state this
-/// controller reads and mutates through `host.`.
+/// Part of the ongoing decomposition of `AppKitController`; `AppKitController` holds this as
+/// `windowFocus` and reaches it as `host.windowFocus` from other files that dispatch a shortcut,
+/// present the palette, or focus an attention item. `AppKitController` stays the host for device
+/// resolution, sidebar/overview state, the target-derivation layer (`workspaceShortcutTargets`,
+/// `windowShortcutTargetResolution`, and friends), generic perf-metric logging (`logPerfMetric`,
+/// `windowShortcutElapsedMS`), and the workspace/detail-pane state this controller reads and mutates
+/// through `host.`.
 ///
 /// `HotkeyPerfContext`, `PendingCommandPalettePresentation`, and `GlobalNavigationWorkspaceResolution`
 /// are declared here; `AppKitController` keeps transitional `typealias`es to them (matching the
@@ -33,9 +31,8 @@ import workspacecore
 
     init(host: AppKitController) { self.host = host }
 
-    /// Cancels in-flight deferred work owned by this controller. Called from
-    /// `AppKitController.applicationWillTerminate` so a pending selection refresh never fires after
-    /// the app starts tearing down.
+    /// Called from `AppKitController.applicationWillTerminate` so a pending selection refresh never
+    /// fires after the app starts tearing down.
     func cancelDeferredWork() { deferredHotkeySelectionRefreshTask?.cancel() }
 
     /// The app finished activating: log and clear an in-flight shortcut profile (the route landed while
@@ -305,7 +302,7 @@ import workspacecore
     /// `AppKitController.applicationDidFinishLaunching`, before any shortcut can fire.
     func loadStoredWindowCycleMode() { windowCycleMode = host.clientWindowCycleMode() }
 
-    /// Steps to the next cycling mode. Bound to the `Cycle mode` shortcut.
+    /// Bound to the `Cycle mode` shortcut.
     func stepWindowCycleMode() { selectWindowCycleMode(windowCycleMode.next) }
 
     /// Adopts a cycling mode and persists it. The mode shortcut and the sidebar cycling row's menu

@@ -152,9 +152,9 @@ APP_PID="$!"
 sleep 3
 
 for iteration in $(seq 1 "$ITERATIONS"); do
-  # `workspace_terminal_open_ui` is the app-side workspace-terminal-open metric. The pre-rework
-  # `terminal_session_wait_ready` (now emitted by the daemon-side orchestrator) and
-  # `terminal_window_summon` (only the terminal show/focus IPC path) are no longer on the
+  # `workspace_terminal_open_ui` is the app-side workspace-terminal-open metric.
+  # `terminal_session_wait_ready` is emitted by the daemon-side orchestrator, and
+  # `terminal_window_summon` fires only on the terminal show/focus IPC path; neither is on the
   # open-workspace-terminal path, so this scenario measures the UI open latency.
   ui_pattern="spaces: perf metric=workspace_terminal_open_ui target=workspace=${WORKSPACE_ID} success=1"
   ui_baseline="$(grep -Ec "$ui_pattern" "$APP_LOG" || true)"

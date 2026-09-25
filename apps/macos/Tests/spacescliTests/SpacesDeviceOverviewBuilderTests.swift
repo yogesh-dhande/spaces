@@ -188,7 +188,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(rows.first(where: { $0.name == "web" })?.runState, .notStarted)
     }
 
-    /// Codex round 7 (P2) on issue #438: a configured process removed while running keeps its row (removal
+    /// Issue #438: a configured process removed while running keeps its row (removal
     /// never deletes tracked rows), stale templateID and all, and a later edit reuses that name for a
     /// *different*, newly configured process under a fresh id. The stale row must not be claimed by the new
     /// template via the name fallback: `launchMissingConfiguredProcesses`

@@ -61,14 +61,14 @@ import workspacecore
                 commandPaletteIsVisible: true))
     }
 
-    /// Codex round 5 (P1) on issue #438: `isRunning` turns true the instant an ad hoc terminal or agent
-    /// session starts, independent of whether any configured process is actually running, so gating Start
-    /// purely on `isRunning` hides it exactly in the state where it is the right (non-destructive) action.
+    /// `isRunning` turns true the instant an ad hoc terminal or agent session starts, independent of
+    /// whether any configured process is actually running, so gating Start purely on `isRunning` hides it
+    /// exactly in the state where it is the right (non-destructive) action (issue #438).
     @Test func workspaceLifecycleControlsOfferStartWheneverConfiguredRuntimeIsMissing() {
-        // Stopped: Start is offered regardless of the missing count (matches today's behavior).
+        // Stopped: Start is offered regardless of the missing count.
         #expect(AppKitController.workspaceLifecycleControlsOfferStart(projectKind: .standard, isRunning: false, missingConfiguredProcessCount: 0))
         #expect(AppKitController.workspaceLifecycleControlsOfferStart(projectKind: .standard, isRunning: false, missingConfiguredProcessCount: 1))
-        // Running with every configured process up: Start stays hidden, matching today's behavior.
+        // Running with every configured process up: Start stays hidden.
         #expect(!AppKitController.workspaceLifecycleControlsOfferStart(projectKind: .standard, isRunning: true, missingConfiguredProcessCount: 0))
         // Running from ad hoc/agent runtime alone, with a configured process still missing: Start must be
         // offered instead of forcing the user through the destructive Restart action.

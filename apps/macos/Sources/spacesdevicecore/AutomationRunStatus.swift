@@ -12,7 +12,6 @@ public enum AutomationRunStatus: String, Codable, Sendable, CaseIterable {
     case failed
     /// The command exceeded the automation's timeout and was terminated.
     case timedOut = "timed_out"
-    /// The run was canceled through the cancel entry point.
     case canceled
     /// The fire never executed a command: a concurrency policy blocked it, or a missed cron occurrence
     /// was skipped on daemon start. `skipReason` records which.

@@ -165,17 +165,14 @@ extension OrchestratorTests {
             "path-ok")
     }
 
-    // Tests refresh all workspace windows reports no mutation when nothing changed by arranging representative inputs and asserting the expected result.
     func testRefreshAllWorkspaceWindowsReportsNoMutationWhenNothingChanged() throws {
         let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
 
-        // No tracked windows and workspace is not running — refresh should report no DB mutation.
         var result: WorkspaceOrchestrator.RefreshResult?
         result = try orchestrator.refreshAllWorkspaceWindows()
 
         let refreshResult = try XCTUnwrap(result)
         XCTAssertFalse(refreshResult.didMutateDB)
-        // All non-archived workspaces should still appear in tracked counts (with zero windows).
         XCTAssertFalse(refreshResult.trackedWindowCounts.isEmpty)
         for (_, count) in refreshResult.trackedWindowCounts { XCTAssertEqual(count, 0) }
     }
@@ -404,7 +401,6 @@ extension OrchestratorTests {
 
     // MARK: - buildWorkspaceEnv
 
-    // Tests build workspace env sets spaces workspace dir by arranging representative inputs and asserting the expected result.
     func testBuildWorkspaceEnvSetsSpacesWorkspaceDir() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -414,7 +410,6 @@ extension OrchestratorTests {
         XCTAssertEqual(env["SPACES_WORKSPACE_DIR"], "/tmp/project/ws")
     }
 
-    // Tests build workspace env sets spaces project dir by arranging representative inputs and asserting the expected result.
     func testBuildWorkspaceEnvSetsSpacesProjectDir() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -424,7 +419,6 @@ extension OrchestratorTests {
         XCTAssertEqual(env["SPACES_PROJECT_DIR"], "/tmp/project")
     }
 
-    // Tests build workspace env does not contain scoped key by arranging representative inputs and asserting the expected result.
     func testBuildWorkspaceEnvDoesNotContainScopedKey() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -435,7 +429,6 @@ extension OrchestratorTests {
         XCTAssertTrue(scopedKeys.isEmpty, "Expected no scoped cross-project keys, found: \(scopedKeys)")
     }
 
-    // Tests build workspace env includes service ports by arranging representative inputs and asserting the expected result.
     func testBuildWorkspaceEnvIncludesServicePorts() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -531,14 +524,12 @@ extension OrchestratorTests {
 
     // MARK: - resolveEnvVars
 
-    // Tests applyEnvVars substitutes a single named variable.
     func testApplyEnvVarsSubstitutesSingleVar() {
         let orchestrator = makeTestOrchestrator(store: try! makeTemporaryStore())
         let result = orchestrator.applyEnvVars("PORT=$SPACES_FRONTEND_PORT npm run dev", env: ["SPACES_FRONTEND_PORT": "20002"])
         XCTAssertEqual(result, "PORT=20002 npm run dev")
     }
 
-    // Tests applyEnvVars substitutes multiple variables in one command.
     func testApplyEnvVarsSubstitutesMultipleVars() {
         let orchestrator = makeTestOrchestrator(store: try! makeTemporaryStore())
         let result = orchestrator.applyEnvVars(
@@ -547,22 +538,18 @@ extension OrchestratorTests {
         XCTAssertEqual(result, "PORT=3000 BACKEND=4000 node server.js")
     }
 
-    // Tests applyEnvVars leaves unknown variables unchanged.
     func testApplyEnvVarsLeavesUnknownVarsUnchanged() {
         let orchestrator = makeTestOrchestrator(store: try! makeTemporaryStore())
         let result = orchestrator.applyEnvVars("PORT=$UNKNOWN npm start", env: ["SPACES_FRONTEND_PORT": "3000"])
         XCTAssertEqual(result, "PORT=$UNKNOWN npm start")
     }
 
-    // Tests applyEnvVars returns command unchanged when env is empty.
     func testApplyEnvVarsEmptyEnvReturnsCommandUnchanged() {
         let orchestrator = makeTestOrchestrator(store: try! makeTemporaryStore())
         let result = orchestrator.applyEnvVars("PORT=$SPACES_FRONTEND_PORT npm run dev", env: [:])
         XCTAssertEqual(result, "PORT=$SPACES_FRONTEND_PORT npm run dev")
     }
 
-    // Tests resolveEnvVars replaces the service port variable with the allocated port number, and
-    // does not substitute the bare service name.
     func testResolveEnvVarsReplacesServicePortVar() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -577,7 +564,6 @@ extension OrchestratorTests {
         XCTAssertEqual(resolved, "PORT=20002 host=$frontend")
     }
 
-    // Tests resolveEnvVars resolves multiple service ports.
     func testResolveEnvVarsResolvesMultipleServicePorts() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -593,7 +579,6 @@ extension OrchestratorTests {
         XCTAssertEqual(resolved, "FRONTEND=3000 BACKEND=4000 node app.js")
     }
 
-    // Tests resolveEnvVars leaves command unchanged when no ports are allocated.
     func testResolveEnvVarsNoPorts() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -607,7 +592,6 @@ extension OrchestratorTests {
         XCTAssertEqual(resolved, "npm start")
     }
 
-    // Tests resolveEnvVars injects SPACES_WORKSPACE_DIR into command.
     func testResolveEnvVarsInjectsWorkspaceDir() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -623,7 +607,6 @@ extension OrchestratorTests {
 
     // MARK: - updatePortRange
 
-    // Tests updatePortRange persists to the app config by arranging representative inputs and asserting the expected result.
     func testUpdatePortRangePersists() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -636,7 +619,6 @@ extension OrchestratorTests {
 
     // MARK: - workspacePorts
 
-    // Tests workspacePortsNamed returns named ports by arranging representative inputs and asserting the expected result.
     func testWorkspacePortsNamedReturnsNamedPorts() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -677,7 +659,6 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.projects().map(\.dir), [normalizedProjectDir])
     }
 
-    // Tests resolvedWorkspaceBrowserSessions expands port env vars to their allocated values.
     func testResolvedWorkspaceBrowserSessionsExpandsPortEnvVars() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)

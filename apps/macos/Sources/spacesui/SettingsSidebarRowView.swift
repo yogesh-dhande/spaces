@@ -2,7 +2,6 @@ import AppKit
 import systembridge
 
 /// A selectable row used in the settings detail's left navigation panel.
-/// Shows a persistent highlight when selected and a subtle hover highlight otherwise.
 final class SettingsSidebarRowView: NSView {
     var isSelected: Bool { didSet { updateBackgroundColor() } }
 

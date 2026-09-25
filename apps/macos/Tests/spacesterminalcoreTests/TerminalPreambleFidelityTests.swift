@@ -300,10 +300,10 @@ import ghosttyvtshim
     // MARK: - Extended text decorations (blink / overline / underline style + color)
 
     /// Blink, overline, underline STYLE (double/curly/dotted/dashed), and underline COLOR must survive
-    /// the transcript preamble. The pen used to be built only from `spaces_ghostty_vt_flags_for_style`,
+    /// the transcript preamble. The pen must not be built only from `spaces_ghostty_vt_flags_for_style`,
     /// which retains a generic underline bit but drops the underline *variant* and color and has no
-    /// blink/overline bits at all, so before the fix these attributes plained out: every underline
-    /// emitted as a bare `;4` and blink/overline/underline-color were dropped entirely, durably losing
+    /// blink/overline bits at all: doing so would plain these attributes out -- every underline would
+    /// emit as a bare `;4` and blink/overline/underline-color would be dropped entirely, durably losing
     /// them from the rewritten transcript.
     ///
     /// The oracle here is a ROUND-TRIP FIXPOINT of the preamble, not the client snapshot: the snapshot

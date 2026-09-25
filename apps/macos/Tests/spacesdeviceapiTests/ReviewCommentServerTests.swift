@@ -233,7 +233,7 @@
             }
         }
 
-        /// Round-12 Fix 3: delete is DRAFT-only, mirroring the upsert handler's already-sent guard above
+        /// Delete is DRAFT-only, mirroring the upsert handler's already-sent guard above
         /// (`testUpsertRejectsEditingAnAlreadySentComment`). A comment that has already been sent is part of
         /// the append-only archive; the row must survive the rejected delete with its `sentAt` untouched.
         func testDeleteRejectsAnAlreadySentComment() throws {
@@ -517,7 +517,7 @@
             }
         }
 
-        /// Fix 4 (P1): `.workspaceReviewCommentsSend` and `.workspaceReviewCommentUpsert` serialize on the
+        /// `.workspaceReviewCommentsSend` and `.workspaceReviewCommentUpsert` serialize on the
         /// server's `reviewCommentQueue`, closing the TOCTOU window a `revision` check alone cannot: a send
         /// validates each comment's `revision` well before it archives, and an edit that lands in that gap
         /// would otherwise be silently discarded once the (already-validated, now-stale) send text is
@@ -623,12 +623,13 @@
             }
         }
 
-        /// round-13 Fix 3: `.workspaceReviewCommentUpsert`/`.workspaceReviewCommentDelete` divert to
+        /// `.workspaceReviewCommentUpsert`/`.workspaceReviewCommentDelete` divert to
         /// `terminalControlQueue` (see `runsOnTerminalControlQueue`) instead of running on the main serial
-        /// device-API queue. Before this fix, an upsert blocked on `reviewCommentQueue` behind an in-flight
-        /// send would block on the STATE queue itself (a single serial executor), stalling every unrelated
-        /// request — including a `.ping` sent purely to check whether the connection is still alive — behind
-        /// one comment save. This test proves the state queue stays responsive: a third connection's `.ping`
+        /// device-API queue: running on that queue would let an upsert blocked on `reviewCommentQueue`
+        /// behind an in-flight send block the STATE queue itself (a single serial executor), stalling every
+        /// unrelated request — including a `.ping` sent purely to check whether the connection is still
+        /// alive — behind one comment save. This test proves the state queue stays responsive: a third
+        /// connection's `.ping`
         /// resolves quickly even while a send is blocked mid-flight holding `reviewCommentQueue` and a
         /// concurrent upsert is queued behind it on that same queue.
         func testPingStaysResponsiveWhileSendAndUpsertAreBlockedOnReviewCommentQueue() throws {

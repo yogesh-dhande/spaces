@@ -30,7 +30,6 @@ final class GhosttyEmbeddedSessionIdleCostTests: XCTestCase {
             createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
     }
 
-    /// A session whose observable state does not move: a fixed child pid and a fixed foreground process.
     @TerminalEngineActor private static func makeSteadySession(_ launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths)
         throws -> GhosttyEmbeddedSessionHost
     {
@@ -134,9 +133,9 @@ final class GhosttyEmbeddedSessionIdleCostTests: XCTestCase {
     }
 
     /// An agent TUI animates a spinner in its terminal title, setting a new one several times a second for
-    /// as long as it runs. Each set used to force a durable write, so a spinning agent committed a SQLite
-    /// transaction per animation frame; on a machine running a few agents that was megabytes per second of
-    /// WAL. The title is served to clients from the core's in-memory state, so the stored row does not have
+    /// as long as it runs. Forcing a durable write on every set would make a spinning agent commit a SQLite
+    /// transaction per animation frame; on a machine running a few agents that would be megabytes per second
+    /// of WAL. The title is served to clients from the core's in-memory state, so the stored row does not have
     /// to track it.
     func testSpinnerTitleFramesDoNotRewriteTheStoredRuntimeState() async throws {
         try useIsolatedSpacesProfile()
@@ -170,8 +169,8 @@ final class GhosttyEmbeddedSessionIdleCostTests: XCTestCase {
         }
     }
 
-    /// Overview pushes used to ride the durable runtime-state write, so dropping `title` from the persist
-    /// signature would have left the sidebar showing a stale title indefinitely. The signal is owed on every
+    /// Overview pushes do not ride the durable runtime-state write, so dropping `title` from the persist
+    /// signature would leave the sidebar showing a stale title indefinitely. The signal is owed on every
     /// title change but coalesced onto the 1 Hz tick, so a spinning agent costs one overview rebuild per
     /// second rather than one per animation frame.
     func testTitleFramesOweExactlyOneCoalescedOverviewSignal() async throws {

@@ -77,11 +77,9 @@ public struct TerminalServiceAutomationAgentSummary: Codable, Sendable, Equatabl
     /// The agent's raw `AgentWindowStatus`: the row's status, or the row-less `idle`/`exited` value matching
     /// the session's liveness.
     public let status: String
-    /// Whether the agent's terminal session is currently live.
     public let live: Bool
     /// The agent's visible label (row label, or the session's own name when no row exists).
     public let title: String?
-    /// The workspace the agent runs in.
     public let workspaceID: String?
 
     public init(terminalSessionID: String, status: String, live: Bool, title: String?, workspaceID: String?) {

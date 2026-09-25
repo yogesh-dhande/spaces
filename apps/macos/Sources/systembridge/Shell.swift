@@ -175,9 +175,6 @@ public enum Shell {
     /// (e.g. injected mock command stubs) are reflected in the returned dictionary.
     private static func processEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
-        // getenv reads the C-level environment, which includes setenv() changes
-        // made after process start (e.g. in test helpers that inject mock binaries
-        // or shell-config overrides applied while the app remains running).
         for key in [
             "PATH", "SHELL", "HOME", "USER", "LOGNAME", "TMPDIR", "ZDOTDIR", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS", "TERM",
             "SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", "SPACES_LOGIN_SHELL_PATH_FAILURE_CACHE_SECONDS",

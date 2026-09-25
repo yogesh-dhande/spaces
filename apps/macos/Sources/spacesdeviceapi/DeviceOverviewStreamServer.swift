@@ -86,7 +86,6 @@ final class DeviceOverviewStreamServer: @unchecked Sendable {
         }
     }
 
-    /// Pushes the current overview to all connected subscribers.
     func broadcast() {
         queue.async {
             guard !self.clientSources.isEmpty, let data = self.lineProvider() else { return }
@@ -132,7 +131,6 @@ final class DeviceOverviewStreamServer: @unchecked Sendable {
         source.cancel()
     }
 
-    /// Device and inode of the socket file at `path`, or nil when nothing is there.
     private static func socketFileIdentity(at path: String) -> SocketFileIdentity? {
         var status = stat()
         guard lstat(path, &status) == 0 else { return nil }

@@ -19,7 +19,7 @@ export interface QuickOpenCallbacks {
 }
 
 /**
- * The ⌘P quick-open overlay (Design O): a centered floating panel available in both Diff and
+ * The ⌘P quick-open overlay: a centered floating panel available in both Diff and
  * Editor mode, replacing Editor mode's old always-visible path input + suggestion dropdown. The
  * panel, its keyboard model, and its match highlighting are `pickerOverlay.ts`'s, shared with the
  * Files tree's Move to… folder picker; everything below is about which paths to offer.
@@ -164,8 +164,7 @@ export class QuickOpen {
     }
   }
 
-  /** The rows for the field's current text: recents before anything is typed, fuzzy matches after.
-   *  Called by the overlay on open, on every keystroke, and on a listing fetch resolving; arrow-key
+  /** Called by the overlay on open, on every keystroke, and on a listing fetch resolving; arrow-key
    *  navigation never reaches here, so it never recomputes a fuzzy match (over a potentially large
    *  workspace listing) on a keypress that only moves the highlight. */
   private content(query: string): PickerContent<PickerRow> {

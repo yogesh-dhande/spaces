@@ -15,8 +15,7 @@ protocol FormGenerationTagged { var formTag: Int { get } }
 /// window/field-reference state, the unsaved-changes and generation-tag bookkeeping that guards a
 /// stale control's action, the multi-step add-project flow (device → source → loading → config), the
 /// add-workspace branch-mode UI, and the Device API calls each form's Save/Create/Import/Export/Delete
-/// buttons send. Extracted from `AppKitController` as a behavior-preserving move (part of the ongoing
-/// decomposition of that type); `AppKitController` holds this as `projectForms` and reaches it as
+/// buttons send. `AppKitController` holds this as `projectForms` and reaches it as
 /// `host.projectForms` from other files (`ShortcutsController`, `SidebarController`,
 /// `WorkspaceVisibilityController`, `AutomationsController`) that need to know whether a form is open
 /// or must close one before presenting something else. `AppKitController` stays the host for device
@@ -220,7 +219,6 @@ protocol FormGenerationTagged { var formTag: Int { get } }
         stack.addArrangedSubview(dirField)
         constrainFormFieldToFillWidth(dirField, in: stack)
 
-        // --- Fields ---
         let setupScriptSection = ScriptSection(
             title: "Setup Script", editAccessibilityIdentifier: "setup-script-edit", formAccessibilityPrefix: "project-setup-script",
             value: projectSettings.setupScript ?? "", subtitle: "Runs when each new workspace is created.")
@@ -256,7 +254,6 @@ protocol FormGenerationTagged { var formTag: Int { get } }
             constrainFormFieldToFillWidth(section, in: stack)
         }
 
-        // --- Buttons ---
         let saveButton = actionButton(
             title: "Save", symbol: nil, tooltip: "Save project (⌘S)", action: #selector(saveProject(_:)), primary: true, target: self)
         saveButton.identifier = NSUserInterfaceItemIdentifier(project.id)
@@ -1191,7 +1188,6 @@ protocol FormGenerationTagged { var formTag: Int { get } }
         stack.spacing = 16
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        // --- Fields ---
         let baseBranchField = NSComboBox()
         baseBranchField.usesDataSource = false
         baseBranchField.completes = true
@@ -1221,7 +1217,6 @@ protocol FormGenerationTagged { var formTag: Int { get } }
         notesField.setAccessibilityIdentifier("add-workspace-notes")
         let autoNameState = AddWorkspaceAutoNameState()
 
-        // --- Content card ---
         let contentStack = NSStackView()
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
@@ -1262,7 +1257,6 @@ protocol FormGenerationTagged { var formTag: Int { get } }
         stack.addArrangedSubview(contentStack)
         constrainFormFieldToFillWidth(contentStack, in: stack)
 
-        // --- Buttons ---
         let createButton = actionButton(
             title: "Create", symbol: nil, tooltip: "Create workspace", action: #selector(createWorkspace(_:)), primary: true, target: self)
         createButton.setAccessibilityIdentifier("add-workspace-create")
@@ -1504,7 +1498,7 @@ protocol FormGenerationTagged { var formTag: Int { get } }
     /// Resolves the live field references for a control's action, rejecting stale controls. A control
     /// carries the generation tag of the form it was built for; if that no longer matches the live
     /// form's `formTag` (the form was rebuilt or closed, or `liveRefs` is already nil), the action is
-    /// dropped. This replaces the previous global tag-keyed caches now that each dialog is single-instance.
+    /// dropped.
     static func liveFormRefs<Refs: FormGenerationTagged>(_ liveRefs: Refs?, forSenderTag senderTag: Int) -> Refs? {
         guard let liveRefs, liveRefs.formTag == senderTag else { return nil }
         return liveRefs

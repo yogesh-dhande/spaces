@@ -94,10 +94,10 @@ extension ProcessProfileEnvironmentSuites {
             controller.rebuildFlatSidebarData()
 
             // Device A's workspace survives the collision (first-wins) and must resolve against device
-            // A's own project record -- not device B's hidden copy of the same id. Before the fix,
-            // `projects` kept both copies and the id-keyed lookup that backs `findWorkspace` resolved the
-            // last one installed (device B's, hidden), so a visible workspace silently paired with a
-            // hidden project.
+            // A's own project record -- not device B's hidden copy of the same id. Keeping both copies in
+            // `projects` would leave the id-keyed lookup that backs `findWorkspace` resolving to whichever
+            // was installed last (device B's, hidden), silently pairing a visible workspace with a hidden
+            // project.
             let (project, workspace) = try #require(controller.findWorkspace(id: "ws-a"))
             #expect(workspace.deviceID == "device-a")
             #expect(project.deviceID == "device-a")
@@ -111,9 +111,9 @@ extension ProcessProfileEnvironmentSuites {
         @Test func findWorkspaceDoesNotLeakAShadowedDevicesWorkspaceWhenTheWinningSectionHasNone() throws {
             // Device A wins the shared project id (it is first) but reports zero workspaces for it.
             // Device B, a shadowed copy of the same profile, reports one workspace under the same id.
-            // Before the fix, `workspacesByProject.merge` only resolves first-wins for keys present in
-            // both dicts -- a key device A's dict never wrote fell through to device B's value, so
-            // device B's workspace ended up displayed under device A's (visible, winning) project row.
+            // `workspacesByProject.merge` resolving first-wins only for keys present in both dicts would
+            // let a key device A's dict never wrote fall through to device B's value, displaying
+            // device B's workspace under device A's (visible, winning) project row.
             let controller = makeController()
             let deviceA = sectionWithNoWorkspaces(deviceID: "device-a", isLocal: true, projectIsHidden: false)
             let deviceB = section(deviceID: "device-b", isLocal: false, projectIsHidden: true, workspaceID: "ws-b")

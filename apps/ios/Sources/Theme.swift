@@ -13,9 +13,7 @@ import spacesterminalcore
 enum Theme {
     // MARK: Surfaces
 
-    /// App background.
     static let bg = dynamic(\.background)
-    /// Section card background.
     static let surface = dynamic(\.surface)
     /// Secondary surface used inside cards (inputs, code-like content).
     static let surface2 = dynamic(\.surface2)
@@ -35,11 +33,10 @@ enum Theme {
 
     static let accent = dynamic(\.accent)
     static let accentStrong = dynamic(\.accentStrong)
-    /// Accent-tinted fill (selected rows, browser/agent tiles). Alpha differs per mode.
+    /// Alpha differs per mode.
     static let accentTint = dynamic(\.accentTint)
     /// Fill for primary action buttons — bright teal in both appearances so dark ink reads.
     static let primaryButtonFill = dynamic(\.primaryButtonFill)
-    /// Dark ink text for primary action buttons.
     static let primaryButtonText = dynamic(\.primaryButtonText)
 
     // MARK: Semantic status
@@ -55,14 +52,11 @@ enum Theme {
     /// Always alpha 1, and darkened from `statusFailed` in dark appearance so `onConnectionBanner`
     /// text clears WCAG's 4.5:1 floor; see `ThemeAppearanceTokens.connectionBannerFill`.
     static let connectionBannerFill = dynamic(\.connectionBannerFill)
-    /// Foreground for the connection-health banner's label, spinner, icon, and Retry text.
     static let onConnectionBanner = dynamic(\.onConnectionBanner)
 
     // MARK: Chips & tiles
 
-    /// Neutral chip background (shortcut, metadata chips).
     static let chipBg = dynamic(\.chipBackground)
-    /// Running status dot halo.
     static let statusRunningHalo = dynamic(\.statusRunningHalo)
 
     // MARK: Terminal chrome

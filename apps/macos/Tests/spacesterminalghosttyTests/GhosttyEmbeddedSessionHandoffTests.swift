@@ -141,8 +141,6 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         waitpid(pty.childPID, &status, WNOHANG)
     }
 
-    /// A handoff record identical to `record` but pointing at a freshly adopted PTY and
-    /// liveness child (see `AdoptablePTY`).
     private static func handoffRecord(from record: DaemonHandoffSessionRecord, adopting pty: AdoptablePTY) -> DaemonHandoffSessionRecord {
         DaemonHandoffSessionRecord(
             sessionID: record.sessionID, masterFD: pty.master, childPID: pty.childPID, columns: record.columns, rows: record.rows,
@@ -232,11 +230,8 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         }
         try await resumedCore.resumeFromHandoff(Self.handoffRecord(from: record, adopting: pty))
 
-        // Scrollback/screen rebuilt from the replayed output.log.
         try await waitAsync { Self.snapshotText(of: resumedCore)?.contains(marker) == true }
 
-        // PTY I/O is live through the adopted fd: bytes injected on the slave surface
-        // on the resumed core and land in output.log exactly once.
         let secondMarker = "HANDOFF_MARKER_BETA"
         XCTAssertGreaterThan(write(pty.slave, "\(secondMarker)\n", secondMarker.utf8.count + 1), 0)
         try await waitAsync { Self.snapshotText(of: resumedCore)?.contains(secondMarker) == true }
@@ -626,7 +621,7 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         XCTAssertEqual(Self.occurrences(of: afterMarker, in: transcript), 1)
     }
 
-    // MARK: - 6. Input drain before handoff (finding D1)
+    // MARK: - 6. Input drain before handoff
 
     /// A `terminal send --submit` is acknowledged before its bytes reach the PTY: it becomes two sequencer
     /// writes (the pasted text, then the carriage return) sitting behind the host's asynchronous PTY write

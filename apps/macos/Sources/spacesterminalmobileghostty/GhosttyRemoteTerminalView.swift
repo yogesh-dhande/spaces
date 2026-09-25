@@ -636,9 +636,8 @@ import Foundation
             reportInputReadinessIfNeeded(force: true)
         }
 
-        /// Applies a new terminal font size, retuning the live mirror in place. The render state
-        /// (`latestSnapshot`, `latestRenderFrame`, owner epoch) is deliberately kept — unlike
-        /// `prepareForDismantle()` — so the terminal re-renders its current content at the new size
+        /// The render state (`latestSnapshot`, `latestRenderFrame`, owner epoch) is deliberately kept —
+        /// unlike `prepareForDismantle()` — so the terminal re-renders its current content at the new size
         /// instead of blanking until the daemon sends the next frame. The new grid is reported after
         /// the re-render so the daemon resizes to the surface's own cell metrics rather than the
         /// `cellMetrics()` estimate a mirror-less viewport would produce.
@@ -2207,10 +2206,9 @@ import Foundation
             private static let activationHorizontalMargin: CGFloat = 8
             private static let activationVerticalMargin: CGFloat = 12
             private static let releaseMargin: CGFloat = 100
-            // How far the finger must slide from where it landed before a direction
-            // registers. The control is a relative thumbstick: the touch-down point is the
-            // neutral origin, so the swipe direction—not where the press started—decides the
-            // arrow key. A stationary tap stays neutral and sends nothing.
+            // The control is a relative thumbstick: the touch-down point is the neutral origin,
+            // so the swipe direction—not where the press started—decides the arrow key. A
+            // stationary tap stays neutral and sends nothing.
             private static let directionActivationDistance: CGFloat = 16
 
             var onDirection: ((String) -> Void)?
@@ -2251,7 +2249,6 @@ import Foundation
                 trackingOrigin = nil
             }
 
-            // Updates the held direction from how far the finger has slid since touch-down.
             // Pauses while the touch sits within the neutral zone or strays outside the
             // release area; resumes against the original origin when it slides back in.
             private func updateTracking(at point: CGPoint) {
@@ -2264,9 +2261,7 @@ import Foundation
                 setActiveDirection(Self.direction(forTranslationX: point.x - origin.x, y: point.y - origin.y))
             }
 
-            // Sets the direction being held, firing it immediately and (re)starting the
-            // repeat loop. Passing nil, or releasing, stops the repeat. The fire is
-            // synchronous, so a quick flick sends exactly one key before the initial delay.
+            // The fire is synchronous, so a quick flick sends exactly one key before the initial delay.
             private func setActiveDirection(_ direction: String?) {
                 guard direction != activeDirection else { return }
                 activeDirection = direction

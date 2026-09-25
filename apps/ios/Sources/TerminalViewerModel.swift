@@ -147,13 +147,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// touches the device's real clipboard. Nil in the app, where the write goes to
     /// `UIPasteboard.general`.
     var pasteboardOverrideForTesting: UIPasteboard?
-    /// True while a `connect()` attempt is outstanding. Derived from `connectionState`, the stored
-    /// state; see `TerminalViewerState.swift`.
     var isConnecting: Bool { connectionState == .connecting }
     private var connectionState = TerminalViewerConnectionState.idle
     /// True while a takeover attempt is outstanding and still sending — either the normal in-flight
     /// case or the window where a fresh attempt began sending during a recovery handler's own await.
-    /// Derived from `takeoverAttemptState`, the stored state; see `TerminalViewerState.swift`.
     var isBusy: Bool {
         switch takeoverAttemptState {
         case .awaitingConfirmation, .sendingAfterRecoveryClearedConfirmation: true
@@ -168,11 +165,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
     var isSessionUnavailable = false
-    /// True for the run body of an ownership-synchronization pass. Derived from `ownershipSyncState`,
-    /// the stored state; see `TerminalViewerState.swift`.
     var isSynchronizingOwnership: Bool { ownershipSyncState == .running }
-    /// True for the debounce window before a pass starts through its run. Derived from
-    /// `ownershipSyncState`, the stored state; see `TerminalViewerState.swift`.
+    /// True for the debounce window before a pass starts through its run.
     var isOwnershipSynchronizationScheduled: Bool {
         switch ownershipSyncState {
         case .scheduled, .running: true
@@ -203,7 +197,6 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     var isPreparingLinkPreview = false
     var linkPreviewErrorMessage: String?
     var linkPreview: TerminalLinkPreview?
-    /// Drives the in-app Safari sheet for a resolved plain web page link (see `TerminalSafariLink`).
     var safariLink: TerminalSafariLink?
     /// Set when a tapped terminal link resolves to a loopback host (e.g. `http://localhost:3000`):
     /// that address only makes sense on the session's host Mac, so this shows an explanatory banner
@@ -293,9 +286,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// The single in-flight ping-corroboration probe for a timed-out input send (see
     /// `startInputTimeoutCorroborationProbe`). At most one runs at a time.
     private var inputTimeoutCorroborationProbeTask: Task<Void, Never>?
-    /// The attempt `streamAttemptGeneration` names, if it is still live.
     private var currentStreamAttempt: TerminalConnectAttempt? { streamAttemptGeneration.flatMap { connectAttempts[$0] } }
-    /// The live stream this viewer is reading, i.e. `currentStreamAttempt`'s handle.
     private var streamHandle: SpacesDeviceAPIStreamHandle? { currentStreamAttempt?.handle }
     /// The address `streamHandle`'s live stream actually connected to (see
     /// `SpacesDeviceAPIStreamHandle.host`). `nil` for a backend with no host concept (Demo Mode) or
@@ -399,22 +390,17 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private var needsOwnershipSynchronizationAfterCurrentRun = false
     /// True while a takeover attempt's confirmation is outstanding — either the normal in-flight case
     /// or the window where a recovery handler cleared `isBusy` while the attempt was still suspended
-    /// awaiting its own response. Derived from `takeoverAttemptState`, the stored state; see
-    /// `TerminalViewerState.swift`.
+    /// awaiting its own response.
     private var isAwaitingTakeoverConfirmation: Bool {
         switch takeoverAttemptState {
         case .awaitingConfirmation, .confirmationPendingAfterRecoveryClearedBusy: true
         case .none, .sendingAfterRecoveryClearedConfirmation: false
         }
     }
-    /// True once this lifecycle has been asked to stop. Derived from `runState`, the stored state; see
-    /// `TerminalViewerState.swift`.
     private var isStopping: Bool {
         if case .stopped = runState { return true }
         return false
     }
-    /// True once this lifecycle's stop has sent its detach. Derived from `runState`, the stored state;
-    /// see `TerminalViewerState.swift`.
     private var hasSentStopDetach: Bool { runState == .stopped(detachSent: true) }
     private var runState = TerminalViewerRunState.running
     private var hasAttachedToSession = false
@@ -519,8 +505,6 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// Foreground ownership is decided by one explicit state read after the scene is active. A payload
     /// reduced while iOS still runs the app in the background cannot settle that decision, because its
     /// lease may expire during the rest of the suspension.
-    /// True while the scene is foregrounded. Derived from `sceneState`, the stored state; see
-    /// `TerminalViewerState.swift`.
     private var isSceneActive: Bool {
         if case .active = sceneState { return true }
         return false
@@ -560,8 +544,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// attachment lifecycle, so a later recovery never decides on an answer about an earlier one.
     private var ownerClientIDReportedByAttachAcknowledgement: String?
     /// True while a foreground-ownership evaluation is outstanding for the current
-    /// `foregroundResumeCycle`, in either scene state. Derived from `sceneState`, the stored state; see
-    /// `TerminalViewerState.swift`.
+    /// `foregroundResumeCycle`, in either scene state.
     private var isForegroundResumeEvaluationPending: Bool {
         switch sceneState {
         case .active(let resume), .backgrounded(let resume): resume == .pending
@@ -618,7 +601,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }, apply: { [weak self] output in self?.applyReducedState(output) },
         didSubmit: { [openScreenHold, weak self] in
             // Off the main actor (this hook is `@Sendable`, not `@MainActor`; see the pipeline's own doc),
-            // so the release itself runs right here, synchronously, exactly as it always has; only the
+            // so the release itself runs right here, synchronously; only the
             // perf-log emission below hops onto the main actor, and only when this call is the one that
             // actually released the hold (the ordinary case for a non-barrier payload: see the comment
             // above `releaseForApplyingMatchingFrame` for why a barrier can instead win that race there).
@@ -876,8 +859,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// Validates that a downloaded external link actually returned the artifact kind the daemon's resolve
     /// step promised, rather than merely returning some previewable kind. Without this, a URL that
     /// resolved as (say) `.image` but that actually redirects to an HTML sign-in page would pass a looser
-    /// "is this any previewable kind" check — text/HTML is itself a previewable kind now that the
-    /// classifier covers documents, not just media — and get cached and shown as if it were the image.
+    /// "is this any previewable kind" check — text/HTML is itself a previewable kind, since the
+    /// classifier covers documents as well as media — and get cached and shown as if it were the image.
     /// If the server reports a generic or plain-text type, the resolved/final URL extension is allowed
     /// to confirm the promised artifact kind; a conflicting specific type such as an HTML sign-in page
     /// still fails before caching.
@@ -1069,7 +1052,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
         // A screen the app already has beats waiting for one: the retained paint goes up now, and the hold
         // is not armed at all, because the hold exists to keep an unwanted grid off an empty screen and
-        // this screen is not empty. Without one, the open holds its first paint exactly as it always has.
+        // this screen is not empty. Without one, the open holds its first paint.
         if !paintRetainedScreenIfAvailable() { beginOpenScreenHold() }
         scheduleReconnect(after: .zero)
     }
@@ -1311,8 +1294,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             trace("foreground_arm_remounted_state_evaluation cycle=\(foregroundResumeCycle)")
         }
         // A stream held across a suspension long enough to have missed a keepalive is not one this viewer
-        // can tell apart from a dead one, and waiting for its own watchdog to say so is the whole of what
-        // a return to the foreground used to cost. Anything shorter kept a keepalive flowing, so the
+        // can tell apart from a dead one, so it is redialed at once rather than left to its own watchdog,
+        // which would leave the returning user waiting. Anything shorter kept a keepalive flowing, so the
         // stream is live and replacing it would throw a working connection away.
         if backgroundedAt.map({ monotonicNow - $0 > Self.foregroundRedialSuspensionThreshold }) ?? false { isForegroundRedialOwed = true }
         backgroundedAt = nil
@@ -1564,8 +1547,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // A stop is the end of this run's lifecycle, not evidence about the connection: leaving the
         // banner and stage 2 ladder stale would show a retained detail's next start() picking up mid
         // outage, immediately displaying a banner and skipping straight to backoff, for a session that
-        // never observed its own failure. clearConnectionOutage() cancels the grace and probe tasks and
-        // resets the tracker so the next start() begins from .connected.
+        // never observed its own failure.
         clearConnectionOutage()
         releaseOpenScreenHold(reason: "stop")
         cancelTrailingRenderUpdateResync()
@@ -2395,8 +2377,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     /// Ends the gesture that was driving the replay and returns the screen to the session's own frames.
-    /// Used by an input send, which jumps the session to its own bottom, and by the jump-to-bottom
-    /// control. Dropping the screen is not enough on its own: a flick interrupted mid-momentum keeps
+    /// Dropping the screen is not enough on its own: a flick interrupted mid-momentum keeps
     /// delivering deltas, and the first one after would republish the replay over the screen the session
     /// has moved on to.
     private func endLocalScrollGesture(reason: String) {
@@ -3098,9 +3079,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // synthesized `allCandidatesUnreachable`, so `handleDisconnect` reads this as stage 1 loss
             // evidence only; `allCandidatesUnreachable` above stays the only stage 2 evidence. Every other
             // transient shape here (a cancelled send, a full send buffer, a bad local file descriptor) is
-            // not network evidence at all and stays silently swallowed, exactly as before this stage
-            // tracker existed: the stream's own `onDisconnect`/reconnect path is what surfaces an actual
-            // lost link.
+            // not network evidence at all and stays silently swallowed: the stream's own
+            // `onDisconnect`/reconnect path is what surfaces an actual lost link.
             guard Self.isConnectionLevelInputTransportError(error) else { return }
             Task { [weak self] in await self?.tearDownStream(reportingLoss: error) }
             cancelQueuedInputSends()
@@ -3228,9 +3208,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     /// Downloads a local-file terminal link's contents into the preview cache using the shared chunked
-    /// transfer helper. The hand-rolled loop this replaced re-checked the request generation before and
-    /// after every chunk; that per-chunk check is now `Task.checkCancellation()` inside the helper, driven
-    /// by running the download as its own cancellable `Task` that `invalidateLinkPreviewRequests()`
+    /// transfer helper. Per-chunk cancellation runs through `Task.checkCancellation()` inside the helper,
+    /// driven by running the download as its own cancellable `Task` that `invalidateLinkPreviewRequests()`
     /// interrupts mid-transfer, the same way it already interrupts an in-flight external download. The
     /// generation check after the transfer completes stays as an explicit guard so a request superseded in
     /// the instant between the last chunk and this function returning still can't publish a stale preview.
@@ -3407,9 +3386,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         return isFirstPayload
     }
 
-    /// Declares the connection outage over: cancels the grace timer and any in-flight input-timeout
-    /// corroboration probe, then returns `connectionStageTracker` to `.connected` (hiding the banner and
-    /// resetting its stage 2 ladder). Used both when a live stream frame proves the connection itself
+    /// Used both when a live stream frame proves the connection itself
     /// recovered (`registerLiveStreamFrame`) and when the session's final, already-ended state is learned
     /// (`applyReducedState`'s `isEndedState` transition, which covers every state apply including a
     /// recovery's own load, and `acceptEndedStateRecovery`, which covers the daemon's answer even when
@@ -3526,11 +3503,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     /// Called by the banner's Retry button (stage 2 only; the button does not exist otherwise).
-    /// Resets the backoff ladder and redials immediately: cancels whatever reconnect delay is currently
-    /// pending, drops this viewer's own cached endpoint resolution and command connection (mirroring
-    /// `SpacesMobileAppModel.resetActiveConnectionEndpoint()`'s pattern, scoped to this viewer's own
-    /// client/channel rather than the app-wide one (see `replaceCommandChannel()`), and schedules an
-    /// immediate reconnect attempt.
+    /// Resets the backoff ladder and redials immediately, mirroring
+    /// `SpacesMobileAppModel.resetActiveConnectionEndpoint()`'s pattern but scoped to this viewer's own
+    /// client/channel rather than the app-wide one (see `replaceCommandChannel()`).
     func retryConnection() {
         guard connectionStage == .unreachable else { return }
         trace("retry_connection")
@@ -3619,11 +3594,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     /// Cancels the live stream connection and routes through `handleDisconnect` exactly as if the
     /// stream's own `onDisconnect` had fired with `error`, so the banner's grace period and reconnect
-    /// cadence behave identically regardless of what actually noticed the loss. Used by the
-    /// ping-corroboration probe above (see its call site for why it passes a synthetic `.streamStalled`
-    /// instead of its own failure) and by `handleInputSendError` (passes the real
-    /// `SpacesDeviceAPIClientError.allCandidatesUnreachable` it caught, so `handleDisconnect`'s
-    /// `isAllCandidatesUnreachableError` check recognizes it as stage 2 evidence).
+    /// cadence behave identically regardless of what actually noticed the loss.
     private func tearDownStream(reportingLoss error: Error) async {
         // Addressed at the attempt whose stream this is, not at "the model's stream": in stage 2 several
         // attempts can be live and only this one is being torn down.
@@ -3865,7 +3836,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// start a fresh dial alongside it anyway, so a dead dial only needs to be gone before it costs a
     /// concurrency slot. And a foreground resume's redial: it dials the address the shell's own foreground
     /// refresh just proved, so a dial that produces nothing in four seconds is worth replacing rather than
-    /// waiting out. Neither changes the other, and the unreachable ladder paces itself exactly as before.
+    /// waiting out. Neither changes the other: the unreachable ladder still paces itself independently.
     private func streamInitialEventTimeout(forAttempt generation: UInt64) -> Duration {
         connectionStage == .unreachable || foregroundRedialAttemptGeneration == generation
             ? Self.unreachableRedialStreamInitialEventTimeout : Self.streamInitialEventTimeout
@@ -5131,9 +5102,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // Kept on the message: the daemon's `.sessionNotAvailable` code is coarser than this iOS
         // distinction — it also covers a still-starting session with no live state stream yet — so
         // branching on it would show "session ended" for a session that is merely not ready.
-        // `.streamRejected` carries the same decoded-daemon-message shape `.streamFailed` used to before
-        // the two were split apart (see `SpacesDeviceAPIClientError.isStreamHostTransportFailure`), so it
-        // is matched here alongside it.
+        // `.streamRejected` carries the same decoded-daemon-message shape as `.streamFailed`
+        // (see `SpacesDeviceAPIClientError.isStreamHostTransportFailure`), so it is matched here
+        // alongside it.
         case SpacesDeviceAPIClientError.requestFailed(let message, _), SpacesDeviceAPIClientError.streamFailed(let message, _),
             SpacesDeviceAPIClientError.streamRejected(let message, _):
             return message.localizedStandardContains("terminal session") && message.localizedStandardContains("is not available")
@@ -5266,8 +5237,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // request and respond, so no message text in it is link evidence, however it reads ("Timed out
         // waiting for the terminal to accept the send." is the daemon reporting a busy engine, not a
         // dead connection; see `TerminalControlHandling.swift`). That rejection still gets swallowed as
-        // transient by `isTransientInputTransportError` exactly as before; it just never tears the
-        // stream down here.
+        // transient by `isTransientInputTransportError`; it just never tears the stream down here.
         return false
     }
 
@@ -5818,7 +5788,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // actually keeps a stale frame off the screen is the owner-epoch gate on both ends of the wire:
             // the daemon's `GhosttyRenderUpdateFactory.canDelta` refuses to build a delta once the export
             // baseline's `ownerEpoch` no longer matches the frame's, forcing the first export after a
-            // handoff to a full frame (GhosttyRenderUpdate.swift:326-329), and `GhosttyRenderUpdateApplier`
+            // handoff to a full frame (`GhosttyRenderUpdate.swift`), and `GhosttyRenderUpdateApplier`
             // enforces the same equality when applying a delta on this client, so a delta stamped for an
             // epoch this client's baseline never saw throws `ownerEpochMismatch` and drives a resync
             // instead of drawing it.
@@ -6305,7 +6275,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         ownershipSyncState = .idle
         needsOwnershipSynchronizationAfterCurrentRun = false
         // The payload above carries no render update, so the apply above never sets an owner render
-        // epoch on its own; that piece is still injected directly, same as before.
+        // epoch on its own; that piece is still injected directly.
         let bootstrapSnapshot = GhosttyTerminalSnapshot(
             columns: 80, rows: 24, cursorColumn: 0, cursorRow: 0, cursorVisible: true, defaultForegroundRGB: 0xFFFF_FFFF, defaultBackgroundRGB: 0,
             cells: [])

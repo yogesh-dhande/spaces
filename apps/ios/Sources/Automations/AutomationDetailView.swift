@@ -2,22 +2,18 @@ import SwiftUI
 import spacesdevicecore
 import spacesterminalcore
 
-/// Per-automation detail, pushed by tapping a row in `AutomationsListView`: the automation's schedule,
-/// target workspace, and command up top, and this automation's own run history below. The "Next run"
-/// fact is the screen's one interactive control, a chip opening `AutomationNextRunSheet`, which holds
-/// both Run Now and the one-time next-run picker. Run Now stays enabled while a run is already in
-/// flight: the daemon's concurrency policy decides whether the new attempt runs, queues, or is skipped,
-/// and that outcome shows up as a new row in the runs list once the overview refreshes, mirroring how
-/// `SpacesMobileAppModel.triggerAutomation` already surfaces the outcome elsewhere with no separate
-/// confirmation.
+/// Per-automation detail, pushed by tapping a row in `AutomationsListView`. Run Now stays enabled while
+/// a run is already in flight: the daemon's concurrency policy decides whether the new attempt runs,
+/// queues, or is skipped, and that outcome shows up as a new row in the runs list once the overview
+/// refreshes, mirroring how `SpacesMobileAppModel.triggerAutomation` already surfaces the outcome
+/// elsewhere with no separate confirmation.
 struct AutomationDetailView: View {
     @Bindable var model: SpacesMobileAppModel
     let automationID: String
     @Binding var selectedSession: SelectedTerminalSessionRoute?
     /// Retained run history fetched directly from the daemon (nil until first fetched), reconciled with
     /// the live overview window via `SpacesMobileAutomations.mergedRunRows` — see that function's doc
-    /// comment for why the overview wins on conflict. Mirrors the machinery the per-automation
-    /// `AutomationRunsView` mode used before this screen replaced it.
+    /// comment for why the overview wins on conflict.
     @State private var fetchedRuns: [TerminalServiceAutomationRunSummary]?
     @State private var isShowingNextRunSheet = false
 

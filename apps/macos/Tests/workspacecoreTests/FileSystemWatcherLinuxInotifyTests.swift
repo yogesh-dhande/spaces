@@ -190,8 +190,9 @@
         ///
         /// Also watches `a/b`, a descendant registered as its OWN separate descriptor (inotify is not
         /// recursive): `IN_MOVE_SELF` fires only for `a`'s own descriptor when `a` moves, never for `b`'s,
-        /// even though `b` moves right along with it, so the fix must also drop every descendant descriptor
-        /// whose path sits beneath the moved directory, not just the moved directory's own. A write inside
+        /// even though `b` moves right along with it, so `IN_MOVE_SELF` handling must also drop every
+        /// descendant descriptor whose path sits beneath the moved directory, not just the moved directory's
+        /// own. A write inside
         /// the moved `b` at its new location must never be reported under its old path either.
         @Test func movingAWatchedDirectoryOutsideTheRootDropsItsStaleWatchMapping() async throws {
             let root = try makeTempDirectory()

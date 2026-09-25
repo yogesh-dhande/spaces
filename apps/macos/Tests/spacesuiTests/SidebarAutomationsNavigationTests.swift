@@ -59,7 +59,7 @@ extension ProcessProfileEnvironmentSuites {
         }
 
         /// Mirrors the outline wiring in `AppKitController.makeLeftPane` without the surrounding sidebar
-        /// chrome: a column, the controller as delegate and data source, and a scroll view in a window.
+        /// chrome.
         private func attachOutline(_ controller: AppKitController) {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
             controller.outlineView.addTableColumn(column)

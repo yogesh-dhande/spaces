@@ -8,7 +8,7 @@ import Foundation
 /// its own deltas, including movement a one-shot read happened to drain in between, or its mirrored
 /// selection carry falls out of sync with the real screen.
 ///
-/// This type is the fix: a self-contained export folds its drained rects in here instead of letting
+/// This type closes that gap: a self-contained export folds its drained rects in here instead of letting
 /// them vanish, and the next `.streamDeltaAllowed` export drains the carry and prepends it (older
 /// movement first) to whatever rects it captured itself. The carry is reset to empty on every drain,
 /// so it only ever holds movement consumed since the last stream export.

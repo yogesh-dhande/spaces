@@ -185,7 +185,7 @@ enum AgentHookJSONWriter {
 
     private static func write(root: [String: Any], to fileURL: URL, fileManager: FileManager) throws {
         var data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-        data.append(0x0A)  // trailing newline
+        data.append(0x0A)
         try AgentHookConfigFile.write(data, to: fileURL, fileManager: fileManager)
     }
 }

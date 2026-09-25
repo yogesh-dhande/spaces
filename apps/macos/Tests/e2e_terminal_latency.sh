@@ -912,9 +912,9 @@ def run_mac_input_latency() -> dict:
         # harness's clock and so carries CLI spawn (`event_to_host_input_ms`, tens of ms), and
         # `event_to_visible_ms` ends at a polled subprocess and swings by >100ms with unrelated host
         # load. Either one would let a real render regression hide inside driver noise.
-        # The gated metric used to resolve for almost no attempts (issue #358) because the phase chain
-        # paired events latest-in-window; with revision pairing it resolves for every attempt, which
-        # the coverage check below enforces.
+        # Without revision pairing, the gated metric would resolve for almost no attempts (issue #358)
+        # because the phase chain paired events latest-in-window; with revision pairing it resolves for
+        # every attempt, which the coverage check below enforces.
         "summary": summarize_latencies(measurements, "host_input_to_frame_apply_ms"),
         "summary_metric": "host_input_to_frame_apply_ms",
         "phase_summaries": summarize_phases(measurements),

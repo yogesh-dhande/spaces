@@ -160,7 +160,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
 
     /// The (workspace, ref) scope the live diff-signature stream is pointed at. Every initial `workspaceDiffManifestChunk`
     /// call is the signal to (re)point this: `realBridge.ts`'s `subscribeDiffSignature` never messages
-    /// Swift at all (see its doc comment), so the resolved scope of each diff fetch is the only place
+    /// Swift at all, so the resolved scope of each diff fetch is the only place
     /// scope changes are observable from the host side. Also cleared by an actual stream disconnect
     /// (see `handleDiffSignatureDisconnect`), so a same-scope `workspaceDiffManifestChunk` after a daemon restart
     /// resubscribes instead of silently no-op'ing forever.
@@ -399,9 +399,9 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// must wait for all of them, not just the most recent. `evaluateJavaScript` (what
     /// `evaluateCodePaneScript` wraps) always calls its completion, success or failure, so this is
     /// guaranteed to return to zero and never strands a deferred `ready` forever. Folded into one
-    /// counter (renamed from `outstandingEditorFlushCount`) rather than tracked separately per flush
-    /// kind: every flush gates the exact same `ready` decision, so one shared count is the cleaner
-    /// mirror and there is nothing any one flush kind needs to know about another's count.
+    /// counter rather than tracked separately per flush kind: every flush gates the exact same `ready`
+    /// decision, so one shared count is the cleaner mirror and there is nothing any one flush kind
+    /// needs to know about another's count.
     private var outstandingTeardownFlushCount = 0
     /// Count of in-flight review-comment mutation RPCs (`reviewCommentUpsert`/
     /// `reviewCommentDelete`/`reviewCommentsSend`) — kept separate from `outstandingTeardownFlushCount`
@@ -629,7 +629,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
 
     /// Tears the web view down; `rootView` is left in place so the pane tree keeps a stable view to
     /// re-parent the next time this pane becomes visible. `editorState`/`currentMode` are left
-    /// untouched — hibernation must not lose them (see their doc comments).
+    /// untouched — hibernation must not lose them.
     ///
     /// A Files-tree rename or move still awaiting the daemon holds the teardown off until it settles
     /// (see `teardownWebViewWhenEntryMovesSettle()`).
@@ -843,7 +843,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// resolver to apply a reused/focused pane's requested mode (see docs/implementation.md).
     ///
     /// Deliberately does not set `currentMode` on the live-push path: `currentMode` is a
-    /// single-source-of-truth mirror of the page's own live state (see its doc comment), fed only by
+    /// single-source-of-truth mirror of the page's own live state, fed only by
     /// the following complete `workspaceStateChanged` notification — this method just asks the page to
     /// switch, the same way a toolbar click does, and waits for that notification to confirm it landed. The not-live path
     /// (page torn down, or never loaded yet) has no page to echo back from, so it sets `currentMode`
@@ -1074,9 +1074,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// external change. A matching CAS base proves the snapshot predates the write. A create write has
     /// no disk base; it is admitted only for a snapshot from the same page generation, which is the
     /// native proof that this is still the page that issued the write rather than a later replacement.
-    /// The record's lifetime is bounded separately by
-    /// `clearCommittedFileWriteIfSettled()` (see its doc comment for why the CAS-chain guard alone is
-    /// not enough across time). Called from both the write completion and `storeFlushedWorkspaceState`,
+    /// The record's lifetime is bounded separately by `clearCommittedFileWriteIfSettled()`. Called
+    /// from both the write completion and `storeFlushedWorkspaceState`,
     /// because the flush and the write settle in either order — patching only at completion would be overwritten by
     /// a later-arriving flush that stored the pre-write snapshot; patching only at flush time would miss
     /// a write that completes and commits its baseline AFTER the flush already stored a snapshot at
@@ -2722,8 +2721,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         // `client.stop()` (called by the success-arm guard below, or by a later resubscribe) cannot
         // retract a frame that is already queued as a `Task { @MainActor in ... }` closure — the guard
         // here is what stops a stale A frame from being forwarded/recorded after B has taken over.
-        // Mirrors `resubscribeFileSignature`'s `onFrame` guard exactly (see its doc comment for the
-        // fuller stakes, which are worse on the file-signature side).
+        // Mirrors `resubscribeFileSignature`'s `onFrame` guard exactly; the stakes are worse on the
+        // file-signature side.
         let onFrame: @Sendable (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void = { [weak self] frame in
             Task { @MainActor in
                 guard let self, self.diffSignatureSubscriptionGeneration == subscriptionGeneration else { return }
@@ -2786,8 +2785,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// a bounded-backoff retry loop (see `scheduleDiffSignatureReconnect`) so a pane's live updates
     /// recover on their own instead of staying dead until the user happens to change scope (see
     /// docs/spec.md's "live-updates as the working tree changes" promise). Guarded by
-    /// `subscriptionGeneration` (see its doc comment) so a disconnect belonging to an already-
-    /// superseded subscription can't clobber a newer one's state.
+    /// `subscriptionGeneration` so a disconnect belonging to an already-superseded subscription can't
+    /// clobber a newer one's state.
     ///
     /// A successful retry needs no explicit nudge to the web app: `DeviceOverviewStreamServer`
     /// sends the subscription's current signature as the very first frame on connect (before its
@@ -3062,8 +3061,8 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     }
 
     /// Schedules the next reconnect attempt for the file-signature stream on the same bounded-
-    /// exponential curve `scheduleDiffSignatureReconnect` uses (see its doc comment), against this
-    /// stream's own floor/cap/failure-count fields.
+    /// exponential curve `scheduleDiffSignatureReconnect` uses, against this stream's own
+    /// floor/cap/failure-count fields.
     private func scheduleFileSignatureReconnect(path: String, generation: Int) {
         pendingFileSignatureReconnectPath = path
         fileSignatureReconnectFailures += 1

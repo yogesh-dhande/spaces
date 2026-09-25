@@ -20,7 +20,6 @@ public enum TerminalServiceInstanceLockError: Error, Equatable, CustomStringConv
 }
 
 public final class TerminalServiceInstanceLock {
-    /// The live owner of a profile lock.
     public struct ActiveOwner: Equatable, Sendable {
         public let processID: Int32
         /// The database schema version the owner's build maintains, as the owner declared it when it

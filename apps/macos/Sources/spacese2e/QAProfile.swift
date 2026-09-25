@@ -213,11 +213,9 @@ private enum QAProfileLane {
         print("runtime-dir\t\(profile.runtimeDirectory)")
     }
 
-    /// Waits until the QA profile's app-owner lease names the launched process. The lease is the app's own
-    /// statement that it has taken this profile, so it is what proves the launch reached the profile the
-    /// binding named rather than some other one.
-    /// Waits for the launched app to take the QA profile's app-owner lease, and leaves nothing running if
-    /// it does not.
+    /// Waits until the QA profile's app-owner lease names the launched process, and leaves nothing running
+    /// if it does not. The lease is the app's own statement that it has taken this profile, so it is what
+    /// proves the launch reached the profile the binding named rather than some other one.
     ///
     /// The lease is how every other verb finds this app, so an app that never takes it is an app `stop`
     /// cannot reach: it would keep serving the QA profile with no handle on it but a pid this command is
@@ -402,10 +400,6 @@ private enum QAProfileLane {
         }
     }
 
-    /// Uploads the archive and runs the installer it carries, which is what creates the device's `qa`
-    /// profile: `install.sh --profile qa` lays everything that profile owns under
-    /// `~/.spaces-dev/profiles/spaces/qa/` and runs it as the `spacesd@qa.service` unit instance. The
-    /// device's installed `~/.spaces` daemon is untouched, and re-running simply reinstalls.
     /// Where the archive lands on the device, relative to the login home.
     ///
     /// Relative because `scp` speaks SFTP on current macOS, and SFTP resolves a path itself instead of
@@ -414,6 +408,10 @@ private enum QAProfileLane {
     /// is the same directory the SSH-side commands reach through `$HOME`, so the two agree on one location.
     static let remoteStagingRelativePath = ".cache/spaces-qa-deploy"
 
+    /// Uploads the archive and runs the installer it carries, which is what creates the device's `qa`
+    /// profile: `install.sh --profile qa` lays everything that profile owns under
+    /// `~/.spaces-dev/profiles/spaces/qa/` and runs it as the `spacesd@qa.service` unit instance. The
+    /// device's installed `~/.spaces` daemon is untouched, and re-running simply reinstalls.
     static func installRemoteDaemon(device: RemoteDevice, archiveURL: URL) throws {
         let stagingDirectory = "$HOME/\(remoteStagingRelativePath)"
         let remoteArchivePath = "\(stagingDirectory)/\(archiveURL.lastPathComponent)"

@@ -6,9 +6,7 @@ import Testing
 
 @Suite struct AppKitControllerAddProjectLifecycleTests {
     @Test func addProjectRequiresDeviceSelectionOnlyWithMultipleDevices() {
-        // A single device (the local Mac) skips the device step and opens configuration directly.
         #expect(!ProjectFormsController.addProjectRequiresDeviceSelection(deviceCount: 1))
-        // More than one paired device shows the device-selection step first.
         #expect(ProjectFormsController.addProjectRequiresDeviceSelection(deviceCount: 2))
     }
 

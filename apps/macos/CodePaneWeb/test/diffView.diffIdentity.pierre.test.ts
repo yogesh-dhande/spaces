@@ -157,7 +157,7 @@ describe("DiffView diff object identity", () => {
 
     // Either the highlight lands and paints highlighted tokens, or Pierre reports the mismatch
     // instead of painting them. Waiting on that choice keeps the assertions below from passing
-    // vacuously before Pierre has done the render that used to throw.
+    // vacuously before Pierre has done the render that would otherwise throw.
     await vi.waitFor(() => {
       expect(errors.length > 0 || queryOpenShadowRoots(container, "span[style]").length > 0).toBe(true);
     });

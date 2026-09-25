@@ -24,8 +24,6 @@ final class AutomationCronScheduleTests: XCTestCase {
 
     // MARK: - Basic matching
 
-    // Tests every-minute schedules fire on the next minute boundary by arranging a fixed start
-    // and asserting the immediate next minute is returned.
     func testEveryMinuteFiresOnNextMinuteBoundary() throws {
         let schedule = try AutomationCronSchedule.parse("* * * * *")
         let start = date(2024, 1, 15, 10, 30)
@@ -33,8 +31,6 @@ final class AutomationCronScheduleTests: XCTestCase {
         XCTAssertEqual(next, date(2024, 1, 15, 10, 31))
     }
 
-    // Tests every-minute schedules also fire from a sub-minute offset by truncating seconds
-    // before advancing, so 10:30:45 still lands on 10:31:00 rather than 10:32:00.
     func testEveryMinuteTruncatesSecondsBeforeAdvancing() throws {
         let schedule = try AutomationCronSchedule.parse("* * * * *")
         var calendar = Calendar(identifier: .gregorian)
@@ -44,8 +40,6 @@ final class AutomationCronScheduleTests: XCTestCase {
         XCTAssertEqual(next, date(2024, 1, 15, 10, 31))
     }
 
-    // Tests a specific weekday time schedule skips the weekend and lands on the following
-    // Monday, by arranging a start just after Friday's occurrence and asserting the result.
     func testSpecificWeekdayTimeSkipsWeekendAcrossWeekBoundary() throws {
         // Jan 1 2024 is a Monday, so Jan 5 2024 is a Friday and Jan 8 2024 is the next Monday.
         let schedule = try AutomationCronSchedule.parse("30 6 * * 1-5")
@@ -54,8 +48,6 @@ final class AutomationCronScheduleTests: XCTestCase {
         XCTAssertEqual(next, date(2024, 1, 8, 6, 30))
     }
 
-    // Tests every-15-minutes steps produce exactly the expected minute set by walking four
-    // consecutive fires from a start that is not itself on a step boundary.
     func testStepSyntaxProducesQuarterHourBoundaries() throws {
         let schedule = try AutomationCronSchedule.parse("*/15 * * * *")
         var cursor = date(2024, 1, 15, 10, 5)
@@ -67,7 +59,6 @@ final class AutomationCronScheduleTests: XCTestCase {
         }
     }
 
-    // Tests a stepped range (`a-b/n`) restricts to the given hour range at the given cadence.
     func testSteppedRangeRestrictsToHourWindow() throws {
         let schedule = try AutomationCronSchedule.parse("0 9-17/4 * * *")
         let next = schedule.nextFireDate(after: date(2024, 1, 15, 0, 0), timeZone: utc)
@@ -76,8 +67,6 @@ final class AutomationCronScheduleTests: XCTestCase {
         XCTAssertEqual(following, date(2024, 1, 15, 13, 0))
     }
 
-    // Tests ranges combined with lists (e.g. business hours plus a specific extra minute) by
-    // asserting membership at the boundaries and the list value.
     func testRangesCombinedWithLists() throws {
         let schedule = try AutomationCronSchedule.parse("0,30 9-11 * * *")
         var cursor = date(2024, 1, 15, 8, 0)
@@ -89,8 +78,6 @@ final class AutomationCronScheduleTests: XCTestCase {
         }
     }
 
-    // Tests month and day-of-week 3-letter names (mixed case) parse and match the same as their
-    // numeric equivalents.
     func testMonthAndDayOfWeekNamesMatchNumericEquivalents() throws {
         let named = try AutomationCronSchedule.parse("0 0 1 Jan,JUL *")
         let numeric = try AutomationCronSchedule.parse("0 0 1 1,7 *")
@@ -103,8 +90,7 @@ final class AutomationCronScheduleTests: XCTestCase {
 
     // MARK: - Day-of-month / day-of-week interaction
 
-    // Tests the standard cron OR rule: when both dom and dow are restricted, a date matches if
-    // EITHER matches, by walking the sequence of Fridays and the 13th across January 2024.
+    // Standard cron OR rule: when both dom and dow are restricted, a date matches if EITHER matches.
     func testDomAndDowOrRuleWhenBothRestricted() throws {
         // January 2024: Fridays are the 5th, 12th, 19th, 26th; the 13th is a Saturday.
         let schedule = try AutomationCronSchedule.parse("0 0 13 * 5")
@@ -117,8 +103,8 @@ final class AutomationCronScheduleTests: XCTestCase {
         }
     }
 
-    // Tests that when only day-of-month is restricted (dow is `*`), matching is a plain AND,
-    // i.e. only the 13th fires regardless of weekday.
+    // When only day-of-month is restricted (dow is `*`), matching is a plain AND: only the 13th
+    // fires regardless of weekday.
     func testDomOnlyRestrictedFiresOnlyOnThatDayOfMonth() throws {
         let schedule = try AutomationCronSchedule.parse("0 0 13 * *")
         let next = schedule.nextFireDate(after: date(2024, 1, 1, 0, 0), timeZone: utc)
@@ -127,15 +113,15 @@ final class AutomationCronScheduleTests: XCTestCase {
         XCTAssertEqual(following, date(2024, 2, 13, 0, 0))
     }
 
-    // Tests that when only day-of-week is restricted (dom is `*`), matching is a plain AND,
-    // i.e. every Friday fires regardless of day-of-month.
+    // When only day-of-week is restricted (dom is `*`), matching is a plain AND: every Friday
+    // fires regardless of day-of-month.
     func testDowOnlyRestrictedFiresOnlyOnThatWeekday() throws {
         let schedule = try AutomationCronSchedule.parse("0 0 * * 5")
         let next = schedule.nextFireDate(after: date(2024, 1, 1, 0, 0), timeZone: utc)
         XCTAssertEqual(next, date(2024, 1, 5, 0, 0))
     }
 
-    // Tests the standard cron rule that a day field STARTING with `*` — a step like `*/2`, not just a
+    // The standard cron rule: a day field STARTING with `*` — a step like `*/2`, not just a
     // bare `*` — counts as unrestricted for the dom/dow interaction, so matching stays a plain AND:
     // `0 0 */2 * MON` fires only on Mondays that fall on an odd day of the month, never on every odd
     // day OR every Monday. January 2024 Mondays: the 1st, 8th, 15th, 22nd, 29th; the even ones (8th,
@@ -163,8 +149,6 @@ final class AutomationCronScheduleTests: XCTestCase {
         XCTAssertEqual(following, date(2024, 2, 13, 0, 0))
     }
 
-    // Tests day-of-week 0 and 7 are equivalent Sunday aliases: both parse to the same schedule
-    // and produce identical fire dates.
     func testSundayZeroAndSevenAreEquivalent() throws {
         let zero = try AutomationCronSchedule.parse("0 0 * * 0")
         let seven = try AutomationCronSchedule.parse("0 0 * * 7")
@@ -176,7 +160,6 @@ final class AutomationCronScheduleTests: XCTestCase {
 
     // MARK: - Strict "after" semantics
 
-    // Tests that a date exactly on a fire time returns the NEXT fire, not the same instant.
     func testExactFireTimeReturnsNextOccurrenceNotSameInstant() throws {
         let schedule = try AutomationCronSchedule.parse("0 0 * * *")
         let exactlyOnFireTime = date(2024, 1, 15, 0, 0)
@@ -186,22 +169,18 @@ final class AutomationCronScheduleTests: XCTestCase {
 
     // MARK: - Rollover
 
-    // Tests a monthly schedule rolls from the middle of one month into the first of the next.
     func testMonthRollover() throws {
         let schedule = try AutomationCronSchedule.parse("0 0 1 * *")
         let next = schedule.nextFireDate(after: date(2024, 1, 15, 0, 0), timeZone: utc)
         XCTAssertEqual(next, date(2024, 2, 1, 0, 0))
     }
 
-    // Tests a monthly schedule rolls across a year boundary from December into January.
     func testYearRollover() throws {
         let schedule = try AutomationCronSchedule.parse("0 0 1 * *")
         let next = schedule.nextFireDate(after: date(2024, 12, 15, 0, 0), timeZone: utc)
         XCTAssertEqual(next, date(2025, 1, 1, 0, 0))
     }
 
-    // Tests a Feb 29 schedule starting from a non-leap year skips forward to the next leap year
-    // rather than matching a nonexistent Feb 29 in between.
     func testFeb29SchedulesSkipToNextLeapYear() throws {
         let schedule = try AutomationCronSchedule.parse("0 0 29 2 *")
         // 2023 is not a leap year; 2024 is. The search must skip 2023 entirely.
@@ -211,9 +190,6 @@ final class AutomationCronScheduleTests: XCTestCase {
 
     // MARK: - DST
 
-    // Tests a schedule targeting a wall-clock time inside the DST spring-forward gap does not
-    // hang and resolves to a later valid date once the gap has passed.
-    //
     // Documented behavior: in America/New_York, clocks jump from 01:59:59 to 03:00:00 on the
     // 2024-03-10 transition, so 02:30 never occurs as a wall-clock time that day. This schedule
     // does not fire on the transition day at all; it fires the next day (2024-03-11) once 02:30
@@ -234,10 +210,6 @@ final class AutomationCronScheduleTests: XCTestCase {
         XCTAssertEqual(components.minute, 30)
     }
 
-    // Tests a schedule spanning the DST fall-back repeated hour resolves each of the two real
-    // instants that share the same wall-clock reading, then rolls over to the next day, and
-    // does not hang.
-    //
     // Documented behavior: in America/New_York, 2024-11-03 replays 01:00-01:59 twice (once at
     // UTC-4, once at UTC-5). This search advances through real elapsed time one minute at a
     // time, so it visits both instants that display as "01:30" and treats each as a distinct
@@ -274,8 +246,6 @@ final class AutomationCronScheduleTests: XCTestCase {
 
     // MARK: - Time zone sensitivity
 
-    // Tests that the same schedule evaluated in two different time zones from the same instant
-    // resolves to two different absolute instants, offset by the zones' UTC difference.
     func testSameScheduleDiffersByTimeZone() throws {
         let schedule = try AutomationCronSchedule.parse("0 9 * * *")
         let start = date(2024, 1, 1, 0, 0, timeZone: utc)
@@ -290,15 +260,12 @@ final class AutomationCronScheduleTests: XCTestCase {
 
     // MARK: - Equatable
 
-    // Tests that equivalent field syntax (explicit list vs range) parses to an equal schedule,
-    // since both expand to the same underlying value sets.
     func testEquivalentSyntaxProducesEqualSchedules() throws {
         let viaList = try AutomationCronSchedule.parse("1,2,3 * * * *")
         let viaRange = try AutomationCronSchedule.parse("1-3 * * * *")
         XCTAssertEqual(viaList, viaRange)
     }
 
-    // Tests that schedules with different matched values are not equal.
     func testDifferingSchedulesAreNotEqual() throws {
         let a = try AutomationCronSchedule.parse("0 9 * * *")
         let b = try AutomationCronSchedule.parse("0 10 * * *")
@@ -307,7 +274,6 @@ final class AutomationCronScheduleTests: XCTestCase {
 
     // MARK: - Parse errors
 
-    // Tests parse rejects an expression without exactly 5 fields.
     func testParseRejectsWrongFieldCount() {
         XCTAssertThrowsError(try AutomationCronSchedule.parse("* * * *")) { error in XCTAssertTrue(error.localizedDescription.contains("5 fields")) }
         XCTAssertThrowsError(try AutomationCronSchedule.parse("* * * * * *")) { error in
@@ -315,17 +281,14 @@ final class AutomationCronScheduleTests: XCTestCase {
         }
     }
 
-    // Tests parse rejects an out-of-range minute value.
     func testParseRejectsOutOfRangeMinute() {
         XCTAssertThrowsError(try AutomationCronSchedule.parse("60 * * * *")) { error in XCTAssertTrue(error.localizedDescription.contains("minute")) }
     }
 
-    // Tests parse rejects an out-of-range hour value.
     func testParseRejectsOutOfRangeHour() {
         XCTAssertThrowsError(try AutomationCronSchedule.parse("* 24 * * *")) { error in XCTAssertTrue(error.localizedDescription.contains("hour")) }
     }
 
-    // Tests parse rejects an out-of-range day-of-month value.
     func testParseRejectsOutOfRangeDayOfMonth() {
         XCTAssertThrowsError(try AutomationCronSchedule.parse("* * 32 * *")) { error in
             XCTAssertTrue(error.localizedDescription.contains("day-of-month"))
@@ -335,84 +298,73 @@ final class AutomationCronScheduleTests: XCTestCase {
         }
     }
 
-    // Tests parse rejects an out-of-range month value.
     func testParseRejectsOutOfRangeMonth() {
         XCTAssertThrowsError(try AutomationCronSchedule.parse("* * * 13 *")) { error in XCTAssertTrue(error.localizedDescription.contains("month")) }
     }
 
-    // Tests parse rejects an out-of-range day-of-week value.
     func testParseRejectsOutOfRangeDayOfWeek() {
         XCTAssertThrowsError(try AutomationCronSchedule.parse("* * * * 8")) { error in
             XCTAssertTrue(error.localizedDescription.contains("day-of-week"))
         }
     }
 
-    // Tests parse rejects an inverted numeric range.
     func testParseRejectsInvertedRange() {
         XCTAssertThrowsError(try AutomationCronSchedule.parse("5-3 * * * *")) { error in
             XCTAssertTrue(error.localizedDescription.contains("inverted range"))
         }
     }
 
-    // Tests parse rejects an inverted named range.
     func testParseRejectsInvertedNamedRange() {
         XCTAssertThrowsError(try AutomationCronSchedule.parse("0 0 * * fri-mon")) { error in
             XCTAssertTrue(error.localizedDescription.contains("inverted range"))
         }
     }
 
-    // Tests parse rejects a zero step.
     func testParseRejectsZeroStep() {
         XCTAssertThrowsError(try AutomationCronSchedule.parse("*/0 * * * *")) { error in
             XCTAssertTrue(error.localizedDescription.contains("invalid step"))
         }
     }
 
-    // Tests parse rejects a non-numeric step.
     func testParseRejectsNonNumericStep() {
         XCTAssertThrowsError(try AutomationCronSchedule.parse("*/x * * * *")) { error in
             XCTAssertTrue(error.localizedDescription.contains("invalid step"))
         }
     }
 
-    // Tests parse rejects a step applied to a bare value with no range or wildcard base.
     func testParseRejectsStepWithoutRangeOrWildcard() {
         XCTAssertThrowsError(try AutomationCronSchedule.parse("5/2 * * * *")) { error in
             XCTAssertTrue(error.localizedDescription.contains("step without a range"))
         }
     }
 
-    // Tests parse rejects an unrecognized month name.
     func testParseRejectsUnknownMonthName() {
         XCTAssertThrowsError(try AutomationCronSchedule.parse("* * * foo *")) { error in
             XCTAssertTrue(error.localizedDescription.contains("unrecognized value"))
         }
     }
 
-    // Tests parse rejects an unrecognized day-of-week name.
     func testParseRejectsUnknownDayOfWeekName() {
         XCTAssertThrowsError(try AutomationCronSchedule.parse("* * * * xyz")) { error in
             XCTAssertTrue(error.localizedDescription.contains("unrecognized value"))
         }
     }
 
-    // Tests parse rejects an empty list item produced by a stray comma.
     func testParseRejectsEmptyListItem() {
         XCTAssertThrowsError(try AutomationCronSchedule.parse("1,,3 * * * *")) { error in
             XCTAssertTrue(error.localizedDescription.contains("empty list item"))
         }
     }
 
-    // Tests parse rejects a range with a missing bound.
     func testParseRejectsRangeWithMissingBound() {
         XCTAssertThrowsError(try AutomationCronSchedule.parse("1- * * * *")) { error in
             XCTAssertTrue(error.localizedDescription.contains("missing value"))
         }
     }
 
-    // Tests a step at Int.max does not trap while expanding the field: a step wider than the field's span
-    // yields only the lower bound (00), and the parsed schedule still computes a next fire. The step is
-    // validated only as `> 0`, so this guards the expansion loop against integer overflow on `current + step`.
+    // A step wider than the field's span yields only the lower bound (00), and the parsed schedule
+    // still computes a next fire. The step is validated only as `> 0`, so this guards the expansion
+    // loop against integer overflow on `current + step`.
     func testMaximumStepExpandsToLowerBoundWithoutOverflow() throws {
         let schedule = try AutomationCronSchedule.parse("*/9223372036854775807 * * * *")
         // The minute field expands to just {0}; every hour/day/month is `*`, so the next fire is the next

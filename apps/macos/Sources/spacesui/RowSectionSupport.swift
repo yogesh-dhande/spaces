@@ -108,7 +108,6 @@ private nonisolated(unsafe) var rowSectionRetainKey: UInt8 = 0
 /// Wraps a section's content in the standard transparent rounded "card" used
 /// across the workspace-detail sections.
 @MainActor enum RowSectionCard {
-    /// Pins `content` to the edges of a fresh card view and returns the card.
     static func wrap(_ content: NSView) -> NSView {
         let card = ColoredBackgroundView()
         card.fillColor = .clear
@@ -128,8 +127,7 @@ private nonisolated(unsafe) var rowSectionRetainKey: UInt8 = 0
 }
 
 extension NSStackView {
-    /// Removes and detaches every arranged subview. Shared by the row sections
-    /// when they re-render their rows stack.
+    /// Shared by the row sections when they re-render their rows stack.
     func removeAllArrangedSubviews() {
         for arrangedSubview in arrangedSubviews {
             removeArrangedSubview(arrangedSubview)

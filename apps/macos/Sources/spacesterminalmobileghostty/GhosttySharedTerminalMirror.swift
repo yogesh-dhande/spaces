@@ -142,9 +142,9 @@ import Foundation
             }
         }
 
-        /// Retunes the live mirror to a new font size. The mirror is not rebuilt: Ghostty's
-        /// `set_font_size` binding action rebuilds the font grid on the existing surface, which
-        /// keeps the surface and its renderer resources — the expensive part — in place.
+        /// The mirror is not rebuilt: Ghostty's `set_font_size` binding action rebuilds the font grid on
+        /// the existing surface, which keeps the surface and its renderer resources — the expensive part
+        /// — in place.
         func setFontSize(_ fontSize: TerminalFontSize, from view: GhosttyRemoteTerminalHostView) {
             guard holder === view, let mirror else { return }
             applyFontSize(fontSize, to: mirror)
@@ -156,8 +156,8 @@ import Foundation
             surfaceHostView.isHidden = false
         }
 
-        /// Describes the shared surface host to Ghostty. The renderer holds the view unretained, which
-        /// is safe precisely because this one view outlives every holder.
+        /// The renderer holds the view unretained, which is safe precisely because this one view
+        /// outlives every holder.
         func makeSurfaceHost(scaleFactor: Double) -> ghostty_surface_host_s {
             var host = ghostty_surface_host_s()
             host.platform_tag = GHOSTTY_PLATFORM_IOS

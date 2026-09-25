@@ -18,7 +18,7 @@ import {
 
 // Captures the options the most recently constructed (fake) CodeView was built with — DiffView and
 // EditorView share the same `CodeView` class, but only EditorView's instance ever exercises
-// `onItemEditChange` (Finding C's tests dirty the editor buffer this way, the same technique
+// `onItemEditChange` (these tests dirty the editor buffer this way, the same technique
 // editorView.test.ts's own `capturedCodeViewOptions` uses). EditorView constructs its CodeView
 // lazily, on the first successful open (see `ensureCodeView`), which is always after DiffView's own
 // construction at mount — so by the time a test needs it, `.current` is the editor's instance.
@@ -140,7 +140,7 @@ afterEach(async () => {
   window.requestAnimationFrame = nativeRequestAnimationFrame;
 });
 
-// Mutable (not `const`) so Fix 1's describe block below can substitute a payload carrying a dirty
+// Mutable (not `const`) so the describe block below can substitute a payload carrying a dirty
 // `editorState` for its one test, then restore the default afterward — the bridge mock's
 // `notifyReady` reads this binding at call time, not at module-evaluation time, so reassigning it
 // before `mountRoot` is called is enough; no `vi.hoisted` indirection needed.
@@ -172,7 +172,7 @@ let INIT_PAYLOAD: CodePaneInitPayload = {
   },
   theme: "dark",
   // Badges the compare dialog's base-branch entry; not exercised by most of this file's tests,
-  // which use the compare menu's "Last commit" item purely as a scope-switch trigger (Fix B is
+  // which use the compare menu's "Last commit" item purely as a scope-switch trigger (these tests are
   // about stale-response ordering, not about which scope is picked).
   baseBranch: "main",
   isGitRepository: true,
@@ -185,7 +185,7 @@ let INIT_PAYLOAD: CodePaneInitPayload = {
 
 // vi.mock factories are hoisted above every import in this file, so the state
 // they close over has to come from vi.hoisted rather than a plain top-level
-// const — this is the "controllable promise resolution" mock bridge Fix B's
+// const — this is the "controllable promise resolution" mock bridge these
 // tests need: each workspaceDiff call is held open until the test resolves
 // or rejects it explicitly, in whatever order the test chooses.
 const hoisted = vi.hoisted(() => {
@@ -202,7 +202,7 @@ const hoisted = vi.hoisted(() => {
   const workspaceFileList = vi.fn().mockRejectedValue(new Error("not used"));
   // Controllable the same way: defaults to the same permanent rejection every other
   // not-under-test bridge method uses, but the Files/Changes sidebar describe block's recent-files
-  // tests (Finding C) need a real open to actually complete, so they configure a per-test resolution
+  // tests need a real open to actually complete, so they configure a per-test resolution
   // instead of relying on the default.
   const workspaceFileRead = vi.fn().mockRejectedValue(new Error("not used"));
   // Last Commit inline editing verifies the live file against the immutable revision pinned in
@@ -300,7 +300,7 @@ const hoisted = vi.hoisted(() => {
     manifests.delete(request.manifestID);
     return Promise.resolve();
   });
-  // round-16 Fix 1: captures every `subscribeDiffSignature` callback root.ts registers, in order,
+  // Captures every `subscribeDiffSignature` callback root.ts registers, in order,
   // so a test can simulate a diff-signature push event by invoking one directly — mirroring
   // `pendingDiffCalls`' "controllable" approach for `workspaceDiff` above, but for the push side.
   // `resubscribeDiffSignature` replaces the previous subscription on every scope change, so the
@@ -562,8 +562,8 @@ describe("mountRoot's refreshDiff — stale-response guard (Fix B)", () => {
     // returning — so it's deliberately left pending here rather than awaited.
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
 
-    // round-16 Fix 1: with scope A's pull still in flight, a scope switch to B no longer fires a
-    // second concurrent request — it coalesces into a single trailing pull (see the round-16
+    // With scope A's pull still in flight, a scope switch to B does not fire a
+    // second concurrent request — it coalesces into a single trailing pull (see the
     // describe blocks below for direct coverage of that coalescing), so this stays at 1 call.
     switchToLastCommit(container); // dispatches setScope -> refreshDiff (scope B), coalesced
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1);
@@ -584,7 +584,7 @@ describe("mountRoot's refreshDiff — stale-response guard (Fix B)", () => {
     const mounted = mountRoot(container);
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
 
-    // round-16 Fix 1: coalesces into the trailing slot instead of firing a second concurrent
+    // Coalesces into the trailing slot instead of firing a second concurrent
     // request (see the note in the sibling test above).
     switchToLastCommit(container);
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1);
@@ -732,7 +732,7 @@ describe("mountRoot's refreshDiff — bounded-backoff retry on failure (round-6 
     rejectDiff(totalCalls - 1, new Error("b0"));
     await vi.advanceTimersByTimeAsync(0);
 
-    // WITH THE FIX: the scope change reset diffRetryFailures to 0, so this retry is due at the 1s
+    // The scope change reset diffRetryFailures to 0, so this retry is due at the 1s
     // floor, not at 16s (the delay `1000 * 2 ** 4` would inherit from scope A's climbed counter).
     await vi.advanceTimersByTimeAsync(999);
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(totalCalls); // not yet due
@@ -4151,7 +4151,7 @@ describe("mountRoot's refreshDiff: coalesced diff-signature storm (round-16 Fix 
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
 
     // 3 more events while pull #2 is still held: without the gate, each would issue its own
-    // `workspaceDiff` call (5 held/pending calls total, not 2): that's the bug this fix closes.
+    // `workspaceDiff` call (5 held/pending calls total, not 2): that's the failure the gate prevents.
     fireDiffSignature();
     fireDiffSignature();
     fireDiffSignature();
@@ -4409,9 +4409,8 @@ describe("mountRoot's refreshDiff — `internalError` joins `unavailable` as a r
   });
 
   // Per the daemon-side split (SpacesDeviceWorkspaceDiffEngine.assertRefIsResolvable): a bad ref is
-  // now rejected as a durable `invalidArgument`, and `internalError` is reserved for the daemon's own
-  // transient git trouble — so unlike before this fix, `internalError` must be retried the same way
-  // `unavailable` already is.
+  // rejected as a durable `invalidArgument`, and `internalError` is reserved for the daemon's own
+  // transient git trouble, so `internalError` must be retried the same way `unavailable` already is.
   it("renders the internalError message and still schedules a retry at the floor", async () => {
     const mounted = mountRoot(container);
     await vi.advanceTimersByTimeAsync(0);
@@ -4461,7 +4460,7 @@ describe("mountRoot's refreshDiff — a typed error that clears the diff also cl
   let setCommentsSpy: ReturnType<typeof vi.spyOn>;
   const defaultInitPayload = INIT_PAYLOAD;
   // A provisional (never round-tripped) draft anchored to "a.ts" — same seeding shape as the
-  // round-16 Fix 1a test above (`comments.restorePendingState` runs synchronously during init, so
+  // test above (`comments.restorePendingState` runs synchronously during init, so
   // this draft exists in the controller's mirror before the first `workspaceDiff` call settles).
   const pendingEntry: PendingReviewCommentEntry = {
     id: "pending-1",
@@ -4481,7 +4480,7 @@ describe("mountRoot's refreshDiff — a typed error that clears the diff also cl
     container = document.createElement("div");
     INIT_PAYLOAD = { ...defaultInitPayload, workspaceState: { ...defaultInitPayload.workspaceState, pendingReviewComments: [pendingEntry] } };
     // Not mocked at the module level (only @pierre/diffs's CodeView is faked): spying on the real
-    // CommentsController's own `DiffView.setComments` calls (round-16 Fix 1's same technique, see
+    // CommentsController's own `DiffView.setComments` calls (the same technique, see
     // its doc comment above) is the only place `comments.setFiles([])`'s effect is externally
     // observable — `CommentsController.files` itself is a private field with no getter, and
     // `reanchorComments` only clears a draft's `position` (not its body/tray visibility) when its
@@ -4524,8 +4523,8 @@ describe("mountRoot's refreshDiff — a typed error that clears the diff also cl
     // The seeded draft's own filePath still appears in the tray row's location text (the tray
     // shows a comment's `comment.filePath` regardless of anchoring — see `renderTray`), so "a.ts"
     // presence/absence in `container.textContent` is not a reliable signal here; the file-list/diff
-    // area's own clearing is already covered by the round-8/round-12 describe blocks above. What
-    // this fix changes is `seededDraftPosition()` below.
+    // area's own clearing is already covered by the describe blocks above. What
+    // changes here is `seededDraftPosition()` below.
     expect(container.textContent).toContain("git command timed out");
     expect(seededDraftPosition()).toBeUndefined(); // comments' anchor input cleared alongside the diff
 
@@ -4552,7 +4551,7 @@ describe("mountRoot's refreshDiff — a typed error that clears the diff also cl
     expect(container.textContent).toContain("could not be resolved");
     expect(seededDraftPosition()).toBeUndefined(); // comments' anchor input cleared
 
-    // Existing durable-branch expectation (round-8/round-12 blocks above): no retry is scheduled.
+    // Existing durable-branch expectation (see the blocks above): no retry is scheduled.
     await vi.advanceTimersByTimeAsync(60000);
     expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2); // still never retried
   });
@@ -5488,7 +5487,7 @@ describe("mountRoot's spaces:setMode wiring", () => {
 
     expect(hoisted.notifyModeChanged).toHaveBeenCalled();
     expect(hoisted.notifyModeChanged.mock.calls.at(-1)).toEqual(["editor"]);
-    // `.file-list` is shared across both modes (Design K); what swaps is its single child — Editor
+    // `.file-list` is shared across both modes; what swaps is its single child — Editor
     // mode's Files/Changes sidebar (`.editor-sidebar`) replaces Diff mode's bare changed-files list.
     expect(container.querySelector(".editor-sidebar")).not.toBeNull();
 
@@ -5561,10 +5560,10 @@ describe("mountRoot's init ordering — the hibernated editor snapshot is restor
     // the Swift host tearing this pane down before init has fully settled.
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
 
-    // Before Fix 1, `editorView.restoreState` ran after this await, so `EditorView` would still be
-    // empty here and this flush would return `null` — silently overwriting the host's hibernated
-    // snapshot with nothing. Fix 1 moves the restore above every network await in the init tail, so
-    // the buffer is already live by the time this synchronous teardown pull can fire.
+    // If `editorView.restoreState` ran after this await, `EditorView` would still be empty here and
+    // this flush would return `null`, silently overwriting the host's hibernated snapshot with
+    // nothing. Restoring above every network await in the init tail is what keeps the buffer already
+    // live by the time this synchronous teardown pull can fire.
     const collected = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
     expect(collected.editorState).toEqual(dirtyEditorState);
 
@@ -5646,16 +5645,15 @@ describe("mountRoot's init ordering — the seeded pending comment state is rest
     // init's first network await, parked here to stand in for a teardown mid-init.
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
 
-    // Before Fix 1a, `comments.restorePendingState` ran after this await (or after `loadInitial`'s
-    // own await), so this flush would return `null` here — silently discarding the seeded comment
-    // text. Fix 1a moves the restore above every network await in the init tail (see root.ts), so
-    // the draft is already live in the controller's mirror by the time this synchronous teardown
-    // pull can fire.
+    // If `comments.restorePendingState` ran after this await (or after `loadInitial`'s own await),
+    // this flush would return `null` here, silently discarding the seeded comment text. Restoring
+    // above every network await in the init tail (see root.ts) is what keeps the draft already live
+    // in the controller's mirror by the time this synchronous teardown pull can fire.
     const collected = JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}");
     const parsedEntries = collected.pendingReviewComments as PendingReviewCommentEntry[];
     expect(parsedEntries).toHaveLength(1);
     // The id itself is not preserved: `restorePendingState` mints a fresh provisional id for the
-    // recreated draft (`provisionalSequence` restarts at 0 every page load — see its doc comment)
+    // recreated draft (`provisionalSequence` restarts at 0 every page load)
     // rather than reusing the pre-teardown one, so only the rest of the anchor plus the live body
     // are checked against what was seeded.
     expect(parsedEntries[0]).toMatchObject({
@@ -5691,7 +5689,7 @@ describe("mountRoot's file-list-signature push — sidebar refresh gated to Edit
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
     resolveDiff(0, [], "sig-a");
     await mounted;
-    // EditorSidebar's constructor never fires a listing fetch on its own (Finding 1): a pane
+    // EditorSidebar's constructor never fires a listing fetch on its own: a pane
     // mounted (and, here, still sitting) in Diff mode must not pay for a hidden `workspaceFileList`
     // RPC merely for the sidebar existing, unattached, off-screen.
     expect(hoisted.workspaceFileList).not.toHaveBeenCalled();
@@ -5740,7 +5738,7 @@ describe("mountRoot's file-list-signature push — ⌘P overlay refresh is not m
     // absolute `workspaceFileList` call count, which cross-test leakage would make unreliable.
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true }));
     // Typing narrows to a fuzzy-match result (an empty query shows "recents", which is empty here —
-    // nothing has been opened yet) — the same technique Finding E's test above uses to get a row.
+    // nothing has been opened yet) — the same technique the test above uses to get a row.
     const input = container.querySelector("#code-pane-quick-open-input") as HTMLInputElement;
     input.value = "a.ts";
     input.dispatchEvent(new Event("input"));
@@ -5947,7 +5945,7 @@ describe("mountRoot's editor-mode-only startup triggers the sidebar's first fetc
     // This path never touches dispatch's "setMode" branch (renderBody() mounted the sidebar
     // straight from the initial `state.mode`, with no action ever dispatched) — root.ts's own
     // explicit `editorSidebar.reattach()` call right after the initial render is what has to
-    // trigger this fetch, since EditorSidebar's constructor no longer starts one on its own.
+    // trigger this fetch, since EditorSidebar's constructor does not start one on its own.
     await vi.waitFor(() => expect(hoisted.workspaceFileList).toHaveBeenCalledTimes(1));
     await vi.waitFor(() => expect(container.querySelector('.row[data-path="a.ts"]')).not.toBeNull());
   });
@@ -5994,10 +5992,10 @@ describe("mountRoot's init ordering — rehydrating into editor mode reads the r
 
     // `restoreState`'s clean-restoration branch (state.dirty === false) fires `handleExternalChange`,
     // whose own `workspaceFileRead` call is that method's first statement — invoked synchronously,
-    // before root.ts's own `await editorView.restoreState(...)` line even returns. The relocated
-    // `editorSidebar.reattach()` call now runs after that await, so its `workspaceFileList` scan is
+    // before root.ts's own `await editorView.restoreState(...)` line even returns. The
+    // `editorSidebar.reattach()` call runs after that await, so its `workspaceFileList` scan is
     // queued on the daemon's serial per-workspace git queue strictly after the restored file's read,
-    // not ahead of it (the bug this fix closes). `invocationCallOrder` is what proves the ordering,
+    // not ahead of it. `invocationCallOrder` is what proves the ordering,
     // the same technique the Diff-mode ⌘P out-of-diff-jump test above uses for `openInEditor`.
     await vi.waitFor(() => expect(hoisted.workspaceFileRead).toHaveBeenCalledWith(cleanEditorState.path, "editor"));
     await vi.waitFor(() => expect(hoisted.workspaceFileList).toHaveBeenCalledTimes(1));
@@ -6029,7 +6027,7 @@ describe("mountRoot's Diff→Editor round trip re-attaches the sidebar's current
     await vi.waitFor(() => expect(container.querySelector(".editor-sidebar-list")!.textContent).toContain("a.ts"));
 
     // Diff mode's own renderBody reparents `changesListEl` out of the sidebar's list host — without
-    // Finding B's fix, coming back to Editor mode on the Changes tab would show a blank list until
+    // this, coming back to Editor mode on the Changes tab would show a blank list until
     // the user manually toggled tabs, since the sidebar never re-renders on that reparent.
     clickButton(container, "Diff");
     clickButton(container, "Editor");
@@ -6123,7 +6121,7 @@ describe("mountRoot: submodule (gitlink) entries (A3)", () => {
     await Promise.resolve();
     expect(hoisted.workspaceFileRead).not.toHaveBeenCalled();
     // The discard-consent banner element always exists in the DOM; it is shown by clearing
-    // `display: none` (see the dirty-buffer "Finding C" tests above). A no-op click must leave it
+    // `display: none` (see the dirty-buffer tests above). A no-op click must leave it
     // exactly as unshown as it started.
     expect((container.querySelector(".banner.conflict") as HTMLElement | null)?.style.display).toBe("none");
     expect(container.querySelector(".editor-path")?.textContent ?? "").not.toContain("sbc_hal");
@@ -6234,7 +6232,7 @@ describe("mountRoot's Diff-mode ⌘P jump to an out-of-diff file opens it before
     await mounted;
     await vi.waitFor(() => expect(container.textContent).toContain("a.ts"));
 
-    // "b.ts" is outside the current diff, so — unlike Finding E's in-diff jump, which stays in Diff
+    // "b.ts" is outside the current diff, so — unlike the earlier in-diff jump, which stays in Diff
     // mode — picking it goes through `openInEditor` and switches the pane to Editor mode. Opening
     // the overlay itself issues its own listing fetch via `QuickOpen.show()`; wait for that to
     // settle (the row only renders once it has) and clear both mocks so only the calls the click
@@ -6334,7 +6332,7 @@ describe("mountRoot's Editor mode — Files/Changes sidebar and recent-files rec
     hoisted.notifyEditorUIStateChanged.mockClear();
     hoisted.workspaceFileList.mockClear();
     hoisted.workspaceFileRead.mockReset();
-    // A successful open is now the norm for this block (Finding C's recording only fires once
+    // A successful open is the norm for this block (recording only fires once
     // `workspaceFileRead` actually resolves) — individual tests override with a rejection or a
     // controllable pending promise where they need to exercise the refused/failed paths instead.
     hoisted.workspaceFileRead.mockImplementation((path: string) =>
@@ -6344,8 +6342,8 @@ describe("mountRoot's Editor mode — Files/Changes sidebar and recent-files rec
     container = document.createElement("div");
   });
 
-  /** Mounts (in the default Diff mode, so `EditorSidebar`'s constructor fires no fetch of its own —
-   *  see its doc comment), seeds the Files tab's listing with `paths`, settles the initial diff pull
+  /** Mounts (in the default Diff mode, so `EditorSidebar`'s constructor fires no fetch of its own),
+   *  seeds the Files tab's listing with `paths`, settles the initial diff pull
    *  (empty — these tests don't care about diff content) so `mountRoot`'s own promise resolves, then
    *  switches to Editor mode and waits for the Files tree to actually render. Entering Editor mode is
    *  what triggers the sidebar's first-ever listing fetch here, via dispatch's `setMode` branch
@@ -6379,8 +6377,7 @@ describe("mountRoot's Editor mode — Files/Changes sidebar and recent-files rec
   }
 
   /** Opens `path` via the Files tree and waits for the resulting recording push to land — recording
-   *  now happens asynchronously, after `workspaceFileRead` resolves (Finding C), rather than
-   *  synchronously on click. */
+   *  happens asynchronously, after `workspaceFileRead` resolves, not synchronously on click. */
   async function openFileRowAndWait(path: string): Promise<void> {
     clickFileRow(path);
     await vi.waitFor(() =>
@@ -6453,7 +6450,7 @@ describe("mountRoot's Editor mode — Files/Changes sidebar and recent-files rec
     ).toBe(true);
   });
 
-  // Finding C: `openInEditor` no longer records unconditionally — only `EditorView`'s `onFileOpened`
+  // `openInEditor` does not record unconditionally — only `EditorView`'s `onFileOpened`
   // success callback does, so a refused (dirty-buffer) or failed open must not pollute `recentPaths`
   // or move the Files tree's selection.
   describe("Finding C — recording only follows a successful open", () => {
@@ -6592,7 +6589,6 @@ describe("mountRoot's Files tree: a confirmed move rewrites every remembered pat
     return row;
   }
 
-  /** The `fileTreeExpandedPaths` the pane last persisted into its workspace-state snapshot. */
   function persistedExpandedPaths(): readonly string[] {
     const [state] = hoisted.notifyWorkspaceStateChanged.mock.calls.at(-1)!;
     return (state as { fileTreeExpandedPaths: readonly string[] }).fileTreeExpandedPaths;

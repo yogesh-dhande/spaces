@@ -59,7 +59,7 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    /// Fix 2: a sender vended before a recovery follows the rebuilt request client.
+    /// A sender vended before a recovery follows the rebuilt request client.
     @MainActor func testVendedRequestSenderFollowsRebuiltRequestClient() throws {
         let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
         let pairingStore = AlwaysAuthorizedRecoveryPairingStore()
@@ -106,7 +106,7 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         XCTAssertFalse(response.ok)
     }
 
-    /// Fix A: a sender vended before a recovery — and a transcript fetch — authenticate with the box's
+    /// A sender vended before a recovery — and a transcript fetch — authenticate with the box's
     /// rotated auth token, not the token captured at init. A local daemon whose pairing state was reset
     /// mints a fresh token that the recovery swings into the box alongside the rebuilt client, so every
     /// vended sender must present the new token. Asserts on the token the in-process server actually
@@ -215,7 +215,7 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
             "the transcript read reached server B without the rotated token: \(storeB.presentedTokens)")
     }
 
-    /// Fix 3: a superseded stream client's late disconnect is ignored; a current-stream disconnect clears it.
+    /// A superseded stream client's late disconnect is ignored; a current-stream disconnect clears it.
     @MainActor func testSupersededStreamDisconnectIsIgnoredWhileCurrentDisconnectClears() throws {
         let unreachableDevice = SpacesPairedDeviceRecord(
             id: "remote-unreachable-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: 1,
@@ -244,7 +244,7 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         XCTAssertFalse(model.hasActiveStreamClientForTesting)
     }
 
-    /// Fix B1: a reachable daemon that rejects the subscribe must surface the rejection to `onDisconnect`
+    /// A reachable daemon that rejects the subscribe must surface the rejection to `onDisconnect`
     /// as `SpacesDeviceAPIRequestClientError.requestRejected` carrying the daemon's error code, not an
     /// opaque `.connectionFailed`. The disconnect handler branches on `.unauthorized` to re-authenticate,
     /// so the code has to survive the stream client's decode-error mapping. Drives a real in-process
@@ -282,7 +282,7 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         XCTAssertEqual(code, .unauthorized)
     }
 
-    /// Fix 1: a transcript request the reachable daemon rejects for an unauthorized (revoked) token must
+    /// A transcript request the reachable daemon rejects for an unauthorized (revoked) token must
     /// surface as `SpacesDeviceClientError.requestRejected` carrying the daemon's `.unauthorized` error code,
     /// not an opaque `.unavailable`. The instance-level transcript recovery branches on that code to
     /// re-bootstrap credentials, so the code has to survive the request/response mapping. Drives a real

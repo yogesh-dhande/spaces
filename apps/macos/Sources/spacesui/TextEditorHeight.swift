@@ -76,7 +76,7 @@ struct TextEditorHeightRule: Equatable {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         documentView = editor
-        // Installs the constraint (a pinned editor never revisits it) and then measures the seed text.
+        // A pinned editor never revisits this constraint.
         heightConstraint.isActive = true
         applyContentHeight()
         // Target-action observation rather than a block: the notification centre holds the observer

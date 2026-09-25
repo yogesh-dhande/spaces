@@ -87,8 +87,8 @@
             }
         }
 
-        /// The letter of a ctrl chord. Only letters are named; every other ctrl combination still reaches
-        /// the terminal through the text path.
+        /// Only letters are named; every other ctrl combination still reaches the terminal through the
+        /// text path.
         private static func controlChordKey(for event: NSEvent, flags: NSEvent.ModifierFlags) -> String? {
             guard flags.contains(.control) else { return nil }
             guard let flaglessCharacters = event.charactersIgnoringModifiers, flaglessCharacters.count == 1,

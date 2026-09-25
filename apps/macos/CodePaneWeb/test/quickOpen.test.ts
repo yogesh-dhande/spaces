@@ -126,8 +126,8 @@ describe("QuickOpen — recents before typing", () => {
     await vi.waitFor(() => expect(rowPaths(host)).toEqual(["a.ts", "c.ts"]));
   });
 
-  // Finding D: a recent path's absence from a *truncated* listing isn't evidence the file is gone —
-  // it may simply have sorted past the cap — so filtering must be skipped in that case, unlike the
+  // A recent path's absence from a *truncated* listing isn't evidence the file is gone — it may
+  // simply have sorted past the cap — so filtering must be skipped in that case, unlike the
   // complete-listing case above which does filter.
   it("does not filter recents against a truncated listing, even though the listing excludes one", async () => {
     const { cache } = makeCache(vi.fn().mockResolvedValue(makeResult(["a.ts", "c.ts"], /* truncated */ true)));
@@ -167,7 +167,7 @@ describe("QuickOpen — revalidation on show() (Finding 1)", () => {
     quickOpen.close();
 
     // Reopening serves the cached listing instantly (no visible gap) while kicking a background
-    // revalidation — this is the fix: root.ts's diff-signature push never fires here, so without
+    // revalidation: root.ts's diff-signature push never fires here, so without
     // show()-time revalidation this cache would stay stale forever.
     quickOpen.show();
     expect(bridge).toHaveBeenCalledTimes(2);

@@ -164,13 +164,12 @@
             // The surface userdata is the daemon's engine-actor-isolated `GhosttyEmbeddedSurfaceUserData`
             // (mirror surfaces set none, so this only ever runs for daemon surfaces -- the guard above
             // early-returns for the null mirror userdata). Hop to the engine actor to read the surface,
-            // preserving the pre-existing "complete on a later turn" pattern.
+            // matching the codebase's "complete on a later turn" pattern.
             let surfaceUserData = Unmanaged<GhosttyEmbeddedSurfaceUserData>.fromOpaque(userdata).takeUnretainedValue()
             let stateAddress = state.map { UInt(bitPattern: $0) }
             Task { @TerminalEngineActor in
-                // If the surface vanished before this turn lands, the request is left uncompleted. This
-                // was already true before this ABI port (Ghostty owns tearing down `state` on its own in
-                // that case) and only happens during teardown.
+                // If the surface vanished before this turn lands, the request is left uncompleted: Ghostty
+                // owns tearing down `state` on its own in that case, and this only happens during teardown.
                 guard let surface = surfaceUserData.surface() else { return }
                 let statePointer = stateAddress.flatMap(UnsafeMutableRawPointer.init(bitPattern:))
                 sendClipboardCompletion(surface: surface, contents: contents, available: available, state: statePointer, confirmed: confirmed, remember: remember)

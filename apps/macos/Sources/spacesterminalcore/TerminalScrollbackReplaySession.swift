@@ -67,7 +67,6 @@ final class TerminalScrollbackReplaySession: @unchecked Sendable {
             from: rawSnapshot, mouseReportingActive: false, alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: session))
     }
 
-    /// The replay's current scrollbar, or nil when the underlying query fails.
     func scrollbar() -> TerminalScrollbackReplayScrollbar? {
         var raw = SpacesGhosttyVtScrollbar()
         guard spaces_ghostty_vt_session_scrollbar(session, &raw) else { return nil }

@@ -107,9 +107,6 @@ public final class ChromeAdapter {
         return windowID
     }
 
-    /// Closes the tabs whose URL matches `urlPrefix` inside the Chrome window with the given
-    /// AppleScript window id. Returns true when at least one matching tab was closed.
-    ///
     /// Used to tear down a workspace browser session's tab when the workspace stops. Only the
     /// matching tabs are closed, never the whole window, so any other tabs the user opened in that
     /// window survive (and Chrome closes the window itself only if the session tab was its last).
@@ -217,7 +214,6 @@ public final class ChromeAdapter {
             frontmostWindowID: (frontmostWindowID ?? 0) > 0 ? frontmostWindowID : nil)
     }
 
-    /// Focuses the tab matching `urlPrefix` within a specific window, raising that window.
     /// Returns false when the window no longer exists or no longer holds a matching tab, so
     /// callers can adopt a moved tab or reopen the session. Scoping to one window id keeps the
     /// fast path on the window currently tracked for that browser-session URL.

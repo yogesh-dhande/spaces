@@ -11,8 +11,7 @@ import workspacecore
 /// preparing and resolving pane open requests, sending Device API terminal-control requests, closing
 /// panes, the pane-policy pure decision functions (what an open/close/hold does to the panel layout,
 /// whether a device may be acted on), and the built-in (local ad hoc) terminal session launcher and
-/// terminator registered with `WorkspaceOrchestrator`. Extracted from `AppKitController` as a
-/// behavior-preserving move (part of the ongoing decomposition of that type); `AppKitController` holds
+/// terminator registered with `WorkspaceOrchestrator`. `AppKitController` holds
 /// this as `terminalPanes` and reaches it as `host.terminalPanes` from other files (`PanelCoordinator`,
 /// `SidebarController`, `AppKitController+TerminalTextSize`, `AppKitController+TerminalPaneContent`,
 /// `DeviceTerminalSessionStateModel`) that open or close panes, gate daemon-backed terminal controls
@@ -648,22 +647,6 @@ import workspacecore
             includesRenderUpdate: true)
     }
 
-    /// Issues a terminal control request to the session's owning device and returns
-    /// the control response. When the response carries session state (notably a
-    /// successful takeover), it is applied to the state model immediately so the
-    /// window reflects the new owner without waiting for the live subscription.
-    ///
-    /// Attachment-changing controls (attach/detach, and takeover when the daemon
-    /// omits the post-takeover render) do not echo session state, so
-    /// `refreshStateAfterControl` fetches the post-control state and applies the new
-    /// ownership directly. This forces the state model off its pre-control attachment
-    /// snapshot at once rather than depending on the live subscription to redeliver
-    /// the change — the subscription may be connecting or reconnecting during window
-    /// open/close, which would otherwise leave the window showing the wrong owner (or
-    /// retrying attachments) until another stream event arrives. The follow-up fetch
-    /// is best-effort: the control already succeeded, and a stale-by-emission payload
-    /// is dropped by the model, so a failed refresh falls back to the subscription
-    /// instead of failing the completed control.
     /// Whether a pane's keep-alive heartbeat should keep running after the daemon answered it. Only the
     /// daemon's own verdict that the client is no longer attached (`notFound`) or that its session is
     /// over (`sessionNotRunning`) stops it; any other refusal, and every success, keeps it going. The
@@ -675,6 +658,16 @@ import workspacecore
         return code != .notFound && code != .sessionNotRunning
     }
 
+    /// When the response carries session state (notably a successful takeover), it is applied to the
+    /// state model at once so the window reflects the new owner without waiting for the live subscription.
+    ///
+    /// Attachment-changing controls (attach/detach, and takeover when the daemon omits the post-takeover
+    /// render) do not echo session state, so `refreshStateAfterControl` fetches the post-control state and
+    /// applies the new ownership directly. The subscription may be connecting or reconnecting during window
+    /// open/close, which would otherwise leave the window showing the wrong owner (or retrying attachments)
+    /// until another stream event arrives. The follow-up fetch is best-effort: the control already
+    /// succeeded, and a stale-by-emission payload is dropped by the model, so a failed refresh leaves the
+    /// update to the subscription instead of failing the completed control.
     nonisolated static func sendDeviceTerminalControl(
         sessionID: String, request: TerminalControlRequest, requestSender: RemoteGhosttyTerminalServiceRequestSender,
         refreshStateAfterControl: Bool = false, applyState: @Sendable (GhosttyRemoteSessionStatePayload) -> Void
@@ -949,8 +942,8 @@ import workspacecore
         case missingPane = "missing_pane"
     }
 
-    /// Pure so the case that used to be swallowed, a hold for a workspace with no materialized panel, is
-    /// directly testable as a distinct outcome rather than as "no pane, nothing to do".
+    /// Pure so the case that would otherwise be swallowed, a hold for a workspace with no materialized
+    /// panel, is directly testable as a distinct outcome rather than as "no pane, nothing to do".
     nonisolated static func terminalPaneCloseRoute(hasPlacement: Bool, disposition: TerminalPaneCloseDisposition) -> TerminalPaneCloseRoute {
         if hasPlacement { return .pane }
         return disposition == .awaitReplacement ? .hold : .missingPane

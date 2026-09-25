@@ -1,7 +1,7 @@
 /**
- * Drag-resize for the file-list/diff-area divider (docs mockup "D — Drag divider"). Pointer-events
- * based — no drag library — using `setPointerCapture` so the drag keeps tracking even if the
- * pointer leaves the thin divider strip mid-gesture.
+ * Drag-resize for the file-list/diff-area divider. Pointer-events based — no drag library — using
+ * `setPointerCapture` so the drag keeps tracking even if the pointer leaves the thin divider strip
+ * mid-gesture.
  */
 
 const STORAGE_KEY = "spaces.codePane.fileListWidth";
@@ -10,9 +10,8 @@ const STORAGE_KEY = "spaces.codePane.fileListWidth";
  *  runs on mount (see root.ts). */
 export const DEFAULT_FILE_LIST_WIDTH = 212;
 const MIN_FILE_LIST_WIDTH = 160;
-/** Fraction of the pane's own width the file list may grow to — half the pane, per the approved
- *  mockup, rather than an absolute cap that would mean something different on a wide vs. narrow
- *  pane. */
+/** Fraction of the pane's own width the file list may grow to — half the pane, rather than an
+ *  absolute cap that would mean something different on a wide vs. narrow pane. */
 const MAX_FILE_LIST_WIDTH_FRACTION = 0.5;
 /** Pixels one arrow keypress moves the divider — big enough to cross the list in a handful of
  *  presses, small enough to land a deliberate width. */
@@ -51,10 +50,6 @@ export function storeFileListWidth(width: number): void {
 }
 
 /**
- * Wires the file list's width lifecycle: applies the restored (or default) width immediately,
- * pointer-drag resizing on `divider`, and re-clamping against `pane`'s live width whenever the
- * pane resizes. Persists the final width on pointer-up.
- *
  * The width the user last chose (restored or dragged) is tracked separately from the width
  * actually applied — the applied width is always `clampFileListWidth(desired, paneWidth)` — so a
  * persisted-wide width restored into a narrow pane (or the pane narrowing later) can never push

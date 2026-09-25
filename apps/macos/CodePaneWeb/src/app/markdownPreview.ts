@@ -486,19 +486,6 @@ export class MarkdownPreview {
   }
 
   /**
-   * Stamps `data-source-line="<1-based first line>"` on every top-level block's opening tag, which
-   * is what `visibleSourceLine`/`scrollToSourceLine` read. Overriding `renderToken` (rather than
-   * adding a rule per block type) covers every block kind that falls through to it (paragraphs,
-   * headings, lists, blockquotes, tables, `hr`) in one place.
-   *
-   * Only a `level === 0` token qualifies: nested content (a paragraph inside a blockquote, an item
-   * inside a list) would otherwise also carry a line number, and since it renders between its
-   * parent's own start and end, attributing it would make the sequence of stamped lines
-   * non-monotonic, breaking the ascending-order walk both scroll-sync methods rely on. Only an
-   * opening or self-closing tag (`nesting !== -1`) is stamped, so a block's *closing* tag (itself
-   * `level === 0` too) doesn't get a second, later attribute for the same block.
-   */
-  /**
    * Stamps an `id` on every heading token and records it, so a `#fragment` link can resolve against
    * the document it is written in. markdown-it adds no heading ids of its own, and `html: false`
    * leaves an author no way to write one, so without this every in-document link would name
@@ -534,6 +521,19 @@ export class MarkdownPreview {
     }
   }
 
+  /**
+   * Stamps `data-source-line="<1-based first line>"` on every top-level block's opening tag, which
+   * is what `visibleSourceLine`/`scrollToSourceLine` read. Overriding `renderToken` (rather than
+   * adding a rule per block type) covers every block kind that falls through to it (paragraphs,
+   * headings, lists, blockquotes, tables, `hr`) in one place.
+   *
+   * Only a `level === 0` token qualifies: nested content (a paragraph inside a blockquote, an item
+   * inside a list) would otherwise also carry a line number, and since it renders between its
+   * parent's own start and end, attributing it would make the sequence of stamped lines
+   * non-monotonic, breaking the ascending-order walk both scroll-sync methods rely on. Only an
+   * opening or self-closing tag (`nesting !== -1`) is stamped, so a block's *closing* tag (itself
+   * `level === 0` too) doesn't get a second, later attribute for the same block.
+   */
   private installSourceLineAttribution(): void {
     const baseRenderToken = this.md.renderer.renderToken.bind(this.md.renderer);
     this.md.renderer.renderToken = (tokens, idx, options) => {

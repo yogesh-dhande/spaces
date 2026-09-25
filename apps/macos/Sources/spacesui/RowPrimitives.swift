@@ -3,12 +3,11 @@ import QuartzCore
 import spacesterminalcore
 
 /// Small view builders shared across the workspace detail, sidebar, and
-/// alerts screens. Encodes the compact row vocabulary from
-/// `design-mocks/workspace-detail/shared.css`: a status dot, a tinted type
-/// icon tile, and a handful of chips (shortcut, project, branch).
+/// alerts screens: a status dot, a tinted type icon tile, and a handful of
+/// chips (shortcut, project, branch).
 ///
 /// Keep these primitives dumb and composable. Hover/selection/edit behaviors
-/// live in the row container that will be introduced in Phase 2.
+/// live in the row container (`HoverRevealRowView`).
 enum RowPrimitives {
     static let statusSlotWidth: CGFloat = 14
 
@@ -165,7 +164,6 @@ enum RowPrimitives {
         makeChip(text: text, font: Typography.metadata, foreground: Theme.muted, minWidth: 0)
     }
 
-    /// Branch name chip (e.g. "main").
     @MainActor static func branchChip(_ text: String) -> NSView {
         makeChip(text: text, font: Typography.monoMetadata, foreground: Theme.muted, minWidth: 0)
     }
@@ -320,7 +318,6 @@ extension SidebarAttentionStatus {
 
 nonisolated(unsafe) private var rowClickTargetAssocKey: UInt8 = 0
 
-/// Attach a click action to `view` by adding an `NSClickGestureRecognizer`.
 /// The `RowClickTarget` is retained via `objc_setAssociatedObject` so callers
 /// don't need to store it separately.
 @MainActor func attachRowClickAction(to view: NSView, action: @escaping () -> Void) {

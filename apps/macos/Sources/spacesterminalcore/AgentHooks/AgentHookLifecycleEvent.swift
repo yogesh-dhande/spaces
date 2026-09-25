@@ -5,12 +5,10 @@ import Foundation
 public enum AgentHookLifecycleEvent: String, CaseIterable, Sendable {
     /// Session started; identify and attach the terminal.
     case initialize = "init"
-    /// Agent is working on the user's request.
     case working
     /// Agent is blocked waiting on the user (permission or input).
     case blocked
     /// Agent finished a turn.
     case done
-    /// Session ended.
     case exit
 }

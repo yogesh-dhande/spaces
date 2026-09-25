@@ -108,7 +108,7 @@ extension ProcessProfileEnvironmentSuites {
         }
 
         /// The measured failure: the app is holding the pre-start snapshot when the focus arrives, so the
-        /// process is only a configured target and the old resolution answered `no_match`. The focus now
+        /// process is only a configured target and the old resolution answered `no_match`. The focus
         /// waits for the reload it triggers and resolves against the running row that reload brings.
         @Test func aProcessFocusThatMissesTheCurrentSnapshotResolvesAgainstTheNextOne() async throws {
             let controller = makeController()
@@ -165,7 +165,7 @@ extension ProcessProfileEnvironmentSuites {
                 workspaceID: Self.workspaceID, deviceID: deviceID, sessionID: sessionID, title: sessionID, workingDirectory: "/tmp", kind: .shell)
         }
 
-        /// The review finding this covers: `openOrFocusTerminalPane` also returns nil when the device
+        /// `openOrFocusTerminalPane` also returns nil when the device
         /// cannot service the open (already reported here, since `mayActOnTerminalPane` calls
         /// `showTerminalOpenRequestDeviceUnavailableError`) or when content construction fails, neither of
         /// which is a stale-snapshot problem. Retrying either would only repeat the same refusal, so the

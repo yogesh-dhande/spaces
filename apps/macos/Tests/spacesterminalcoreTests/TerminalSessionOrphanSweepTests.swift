@@ -78,7 +78,6 @@ final class TerminalSessionOrphanSweepTests: XCTestCase {
         }
     }
 
-    // An orphan directory past the grace period is reclaimed; one still inside the grace period survives.
     func testRemovesOldOrphanKeepsFreshOrphan() throws {
         let old = try makeSessionDirectory("old-orphan", age: 7200)
         let fresh = try makeSessionDirectory("fresh-orphan", age: 60)
@@ -90,8 +89,7 @@ final class TerminalSessionOrphanSweepTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: fresh), "An orphan inside the grace period may be a creation racing the sweep.")
     }
 
-    // A directory named by a known or an active session ID is a real session and must survive regardless
-    // of age; the active set guards live in-memory cores whose row has not committed yet.
+    // The active set guards live in-memory cores whose row has not committed yet.
     func testKeepsKnownAndActiveDirectoriesRegardlessOfAge() throws {
         let known = try makeSessionDirectory("known", age: 7200)
         let active = try makeSessionDirectory("active", age: 7200)
@@ -103,8 +101,6 @@ final class TerminalSessionOrphanSweepTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: active), "A directory in the active set must never be deleted.")
     }
 
-    // A crash-stranded output.log.trim past the grace period inside a real session dir is removed, while
-    // output.log and the dir itself survive; an in-flight (fresh) trim is left alone.
     func testRemovesStaleTrimFileButKeepsTranscriptAndFreshTrim() throws {
         let staleDir = try makeSessionDirectory("has-stale-trim", age: 7200)
         let outputPath = URL(fileURLWithPath: staleDir).appendingPathComponent("output.log").path
@@ -125,8 +121,6 @@ final class TerminalSessionOrphanSweepTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: freshTrimPath), "An in-flight trim inside the grace period must survive.")
     }
 
-    // A removal failure on one entry is contained: it is reported through onFailure and the sweep still
-    // reclaims the other candidates.
     func testContainsRemovalFailureAndSweepsRemainingEntries() throws {
         let leaky = try makeSessionDirectory("leaky-orphan", age: 7200)
         let clean = try makeSessionDirectory("clean-orphan", age: 7200)
@@ -141,15 +135,12 @@ final class TerminalSessionOrphanSweepTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: clean))
     }
 
-    // A missing sessions root is not an error: the sweep has nothing to iterate and returns empty.
     func testMissingSessionsRootReturnsEmpty() throws {
         var removed: [String] = []
         XCTAssertNoThrow(removed = try sweep())
         XCTAssertTrue(removed.isEmpty)
     }
 
-    // A non-directory stray at the root is not a session dir the sweep owns; it must be left untouched even
-    // when past the grace period, while orphan directories around it are still reclaimed.
     func testLeavesNonDirectoryStrayUntouched() throws {
         let strayPath = URL(fileURLWithPath: try TerminalSessionPaths.sessionsRootDirectory()).appendingPathComponent("stray.txt").path
         try writeFile(strayPath, contents: "not a session", mtime: oldMtime)

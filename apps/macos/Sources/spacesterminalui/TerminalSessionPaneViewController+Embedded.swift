@@ -7,8 +7,6 @@ import spacesterminalcore
 /// (frame restore, ordering front, deferred first-present) do not apply. These are the
 /// window shell's `show`/`windowWillClose`/focus flows reduced to their content parts.
 extension TerminalSessionPaneViewController {
-    /// Prepares and attaches the pane's content for display inside a container view:
-    /// refreshes state, attaches the local client, and brings the Ghostty host up.
     /// `focus` additionally moves keyboard focus into the terminal.
     public func showEmbedded(requestID: String? = nil, focus: Bool) {
         stateProvider.refreshState()
@@ -26,7 +24,6 @@ extension TerminalSessionPaneViewController {
         if focus { focusEmbeddedTerminalInput() }
     }
 
-    /// Moves keyboard focus into the terminal content.
     public func focusEmbeddedTerminalInput() {
         assignPreferredFirstResponder()
         syncGhosttyOwnerFocus(reason: "embedded_focus", requestWindowFocus: true)
@@ -36,8 +33,7 @@ extension TerminalSessionPaneViewController {
     /// focus without detaching, so switching back is instant.
     public func hideEmbedded() { syncGhosttyOwnerFocus(reason: "embedded_hidden", requestWindowFocus: false, focused: false) }
 
-    /// Whether `responder` lives inside this pane's view tree. Drives focused-pane
-    /// tracking from window first-responder changes.
+    /// Drives focused-pane tracking from window first-responder changes.
     public func ownsResponder(_ responder: NSResponder) -> Bool {
         var current = responder as? NSView
         while let candidate = current {
@@ -47,9 +43,7 @@ extension TerminalSessionPaneViewController {
         return false
     }
 
-    /// Tears the pane down when it is explicitly closed — the embedded equivalent of
-    /// the window shell's `windowWillClose`: release the renderer surface, detach the
-    /// local client, and notify the close callback.
+    /// The embedded equivalent of the window shell's `windowWillClose`.
     public func closeEmbedded(sessionIsTerminating: Bool = false) {
         guard !didCloseWindow else { return }
         didCloseWindow = true

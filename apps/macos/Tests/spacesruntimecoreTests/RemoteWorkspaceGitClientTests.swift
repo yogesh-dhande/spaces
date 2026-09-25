@@ -72,7 +72,7 @@ final class RemoteWorkspaceGitClientTests: XCTestCase {
 
     /// Regression coverage for `runGitAndCapture`'s bounded-capture mode (`maxOutputBytes`): a command
     /// whose stdout exceeds the cap must be terminated and reaped rather than left blocked writing into an
-    /// undrained pipe. There is no clean way to assert "no leaked process" directly (per the fix spec, via
+    /// undrained pipe. There is no clean way to assert "no leaked process" directly (via
     /// `waitUntilExit` semantics rather than `pgrep`), so this asserts indirectly: the call throws
     /// `outputExceededCap` and returns well within a small timeout, which would not happen if the
     /// implementation were blocked waiting on the child (the metadata-command default timeout elsewhere in
@@ -118,10 +118,10 @@ final class RemoteWorkspaceGitClientTests: XCTestCase {
         XCTAssertEqual(data, expected)
     }
 
-    /// Regression coverage for the deadline-enforcement bug: `runGitAndCapture` used to call
-    /// `PipeDrain.waitForData()` (which only ever returns at pipe EOF) before enforcing `timeout`, so a
-    /// subprocess that stops producing output without exiting — nothing to do with a large-output cap — could
-    /// hang the caller forever regardless of the configured timeout. `gitExecutable` is already a test seam
+    /// Regression coverage for the deadline-enforcement bug: without enforcing `timeout` before calling
+    /// `PipeDrain.waitForData()` (which only ever returns at pipe EOF), a subprocess that stops producing
+    /// output without exiting — nothing to do with a large-output cap — could hang the caller forever
+    /// regardless of the configured timeout. `gitExecutable` is already a test seam
     /// (used above for the destructive-command-recording wrapper), so this substitutes `/bin/sleep` for a
     /// long-running, output-silent, SIGTERM-killable child and asserts the real production method returns
     /// within its deadline plus a small margin rather than blocking for the sleep's full duration.
@@ -170,12 +170,13 @@ final class RemoteWorkspaceGitClientTests: XCTestCase {
         }
     }
 
-    /// Regression coverage for round-11's fix: `runGitAndCapture`'s post-observation drain waits
-    /// (`.exited`, `.capExceeded`, `.timedOut`) used to call `PipeDrain.waitForData()` unconditionally,
-    /// which only returns once every writer of the pipe has closed it. A descendant the git process spawns
+    /// Regression coverage: `runGitAndCapture`'s post-observation drain waits
+    /// (`.exited`, `.capExceeded`, `.timedOut`) call `PipeDrain.waitForData()`, which only returns once
+    /// every writer of the pipe has closed it. A descendant the git process spawns
     /// and detaches — the concrete real case is git's `fsmonitor--daemon`, launched by `git status` under
-    /// `core.fsmonitor` — inherits the pipe's write end and can outlive git itself, so EOF never arrives and
-    /// even the *timeout* path used to hang forever waiting on a straggler nobody was timing out anymore.
+    /// `core.fsmonitor` — inherits the pipe's write end and can outlive git itself, so EOF never arrives.
+    /// Without a bounded grace period on the wait, even the *timeout* path would hang forever waiting on
+    /// a straggler nobody was timing out anymore.
     ///
     /// `gitExecutable` is substituted with a stub script that backgrounds a long-lived, detached `sleep`
     /// (inheriting the pipes' write ends) and then exits immediately itself — the `.exited` branch, where
@@ -230,11 +231,11 @@ final class RemoteWorkspaceGitClientTests: XCTestCase {
         kill.waitUntilExit()
     }
 
-    /// Regression coverage for Fix 2: the `.exited` branch's stderr drain used to reuse `drainTimeout`,
-    /// the value computed once *before* the stdout wait, instead of recomputing it from what remained of
-    /// the deadline. When a stdout straggler ties up a meaningful chunk of the deadline before finally
-    /// releasing, that bug let a stderr straggler add a second, nearly-full-length wait on top — up to
-    /// ~2x the caller's remaining budget after the caller had already given up.
+    /// Regression coverage: the `.exited` branch's stderr drain must recompute its timeout from what
+    /// remains of the deadline rather than reuse `drainTimeout`, the value computed once *before* the
+    /// stdout wait. When a stdout straggler ties up a meaningful chunk of the deadline before finally
+    /// releasing, reusing that stale value would let a stderr straggler add a second, nearly-full-length
+    /// wait on top — up to ~2x the caller's remaining budget after the caller had already given up.
     ///
     /// The stub script here backgrounds two detached stragglers, one holding each pipe's write end (via
     /// `exec`-redirecting the *other* fd to `/dev/null` inside each subshell, then a second `exec` into
@@ -244,15 +245,16 @@ final class RemoteWorkspaceGitClientTests: XCTestCase {
     /// same as the sibling test above. Unlike that test, the stdout straggler here is killed by the test
     /// partway through the drain window (~2s into a 4s deadline) rather than only in cleanup, so the
     /// stdout wait consumes about half the deadline before returning — the scenario that distinguishes
-    /// the fix (stderr gets only what remains, ~2s) from the bug (stderr would get a fresh ~4s on top,
-    /// pushing total elapsed to ~6s). The stderr straggler is held for the whole run and only killed in
+    /// recomputing the timeout from the remaining deadline (stderr gets only what remains, ~2s) from
+    /// reusing the stale `drainTimeout` (stderr would get a fresh ~4s on top, pushing total elapsed to
+    /// ~6s). The stderr straggler is held for the whole run and only killed in
     /// `defer`, so the stderr wait genuinely times out rather than returning early on its own.
     ///
     /// Because the stdout drain does get EOF (the released straggler lets it complete) within its
     /// timeout, `runGitAndCapture` does not throw here — the stub's own exit code is 0 and stdout capture
     /// succeeds with empty output — so this asserts on the call's wall-clock duration rather than on an
-    /// error, which is what actually distinguishes the fix from the bug (both paths return successfully;
-    /// only the fixed path returns in bounded time).
+    /// error, which is what actually distinguishes recomputing the timeout from reusing the stale one
+    /// (both paths return successfully; only the bounded-time path is correct).
     func testRunGitAndCaptureRecomputesTheStderrDrainTimeoutFromTheRemainingDeadlineAfterAStdoutStragglerReleasesPartway() throws {
         let root = try makeTempDirectory()
         let scriptURL = root.appendingPathComponent("stub-two-detaching-children.sh")

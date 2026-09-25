@@ -33,9 +33,7 @@ import spacesterminalcore
     enum Outcome {
         /// The verdict is unchanged, or an earlier attempt is still outstanding.
         case noChange
-        /// The daemon stopped answering.
         case lostContact(error: any Error)
-        /// The daemon answers again.
         case regainedContact
     }
 

@@ -6,10 +6,10 @@ import spacesterminalcore
 
 @testable import spacesui
 
-/// Guards the fix for issue #185: driving a device-backed terminal session's state stream must never
+/// Guards issue #185: driving a device-backed terminal session's state stream must never
 /// block the main actor on the pinned-TLS connect. The connect is gated by a dispatch-semaphore wait,
 /// and when it ran on the main actor a stale or unreachable Device API endpoint froze the UI for the
-/// full connect timeout (~10s) in repeated bursts. The connect now runs off the main actor, so
+/// full connect timeout (~10s) in repeated bursts. The connect runs off the main actor, so
 /// registering a listener returns to the caller immediately regardless of endpoint reachability.
 ///
 /// A remote device is used deliberately: the local-device path additionally re-resolves the daemon's

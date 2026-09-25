@@ -68,8 +68,8 @@ export interface EditorViewCallbacks {
  * clean merged buffer or a decision that this isn't auto-mergeable at all.
  *
  * Inputs are split on `"\n"` rather than left to `diff3Merge`'s default whitespace splitting: a
- * source file's merge needs line granularity ("non-overlapping edits" per the locked UX means
- * non-overlapping *lines*), not token granularity. Splitting and rejoining on `"\n"` round-trips
+ * source file's merge needs line granularity ("non-overlapping edits" means non-overlapping
+ * *lines*), not token granularity. Splitting and rejoining on `"\n"` round-trips
  * exactly whenever nothing conflicts (`s.split("\n").join("\n") === s` always holds), so a clean
  * merge never mangles line endings it didn't touch.
  *
@@ -172,8 +172,7 @@ function formatByteSize(bytes: number): string {
 export class EditorView {
   private readonly bridge: SpacesBridge;
   /** The top bar's path display — the open file's path, or the "⌘P to open a file" hint when none
-   *  is open (Design O; see this class's doc comment). Not an input: there is nothing to type into
-   *  it, only to read. */
+   *  is open. Not an input: there is nothing to type into it, only to read. */
   private readonly pathLabel: HTMLElement;
   /** The top bar's autosave status pill: the one place a save's state is reported (see
    *  `renderSaveStatus`). There is no Save button anywhere in Editor mode. */
@@ -256,7 +255,7 @@ export class EditorView {
    *  moment any of: another edit lands on top of the merge (undo would silently discard it), an
    *  external change replaces the buffer, a new file is opened, or a real conflict is entered.
    *  Deliberately NOT part of
-   *  `CodePaneEditorState` (see its doc comment) — a hibernation cycle simply drops the Undo offer,
+   *  `CodePaneEditorState` — a hibernation cycle simply drops the Undo offer,
    *  which is an accepted, cheap-to-lose affordance rather than a data-loss risk. */
   private pendingMergeUndo: string | undefined;
   private editGeneration = 0;
@@ -326,7 +325,7 @@ export class EditorView {
    *  now-readable file heals through the normal decoded-outcome path either way, so nothing is lost
    *  by not carrying this flag across the snapshot.
    *
-   *  Round-24 Fix 3 (P2): also cleared by `loadFile()`'s own success arm — a switch to a different
+   *  Also cleared by `loadFile()`'s own success arm — a switch to a different
    *  file must not carry this flag forward into that file's first `handleExternalChange` reconcile,
    *  which would otherwise clear it AND hide whatever unrelated banner (discard consent, merge
    *  indicator) that file has put up in the meantime. */
@@ -452,7 +451,7 @@ export class EditorView {
   }
 
   /** Sets the top bar's path display: the open file's path, or the "⌘P to open a file" hint when
-   *  none is open (Design O). */
+   *  none is open. */
   private setPathLabel(path: string | undefined): void {
     this.pathLabel.textContent = path ?? "⌘P to open a file";
     this.pathLabel.classList.toggle("hint", path === undefined);
@@ -1078,7 +1077,7 @@ export class EditorView {
     this.focusRestoreGeneration += 1;
   }
 
-  /** Paints the top bar's chip, the single surface for save state (Option C). Idle is the absence of
+  /** Paints the top bar's chip, the single surface for save state. Idle is the absence of
    *  the chip: a file nobody has typed into has nothing to report. The "Retry now" action rides
    *  alongside the failed state only, since it is the only state with a wait to skip. */
   private renderSaveStatus(status: AutosaveStatus): void {
@@ -1188,7 +1187,7 @@ export class EditorView {
     this.confirmedBaseSHA256 = undefined;
     this.pendingMergeUndo = undefined;
     this.banner.style.display = "none";
-    // Fix 3 (round-24, P2): the flag scopes an unreadable-file error banner to the file that raised
+    // The flag scopes an unreadable-file error banner to the file that raised
     // it (see the flag's own doc comment). A successful open establishes a fresh file context, so it
     // must not leak into the next file's first decoded `handleExternalChange` reconcile, whose
     // unconditional-on-this-flag clear would otherwise hide an unrelated banner (the merge
@@ -1252,11 +1251,10 @@ export class EditorView {
   }
 
   /** (Re)points the one live `spaces:fileSignature` stream at `path`, replacing rather than
-   *  layering on top of the previous subscription — mirrors `root.ts`'s `resubscribeDiffSignature`,
-   *  and the same one-scope-at-a-time model `SpacesBridge.subscribeFileSignature`'s doc comment
-   *  describes. A stray event for a path this pane has since navigated away from (a slow unsubscribe
-   *  racing a fast reopen) is filtered by the `event.path !== this.currentPath` check rather than
-   *  relied upon to never happen. */
+   *  layering on top of the previous subscription — the same one-scope-at-a-time model
+   *  `SpacesBridge.subscribeFileSignature`'s doc comment describes. A stray event for a path this
+   *  pane has since navigated away from (a slow unsubscribe racing a fast reopen) is filtered by the
+   *  `event.path !== this.currentPath` check rather than relied upon to never happen. */
   private subscribeToFileSignature(path: string): void {
     this.fileSignatureUnsubscribe?.();
     this.fileSignatureUnsubscribe = this.bridge.subscribeFileSignature(path, (event) => {
@@ -1270,10 +1268,10 @@ export class EditorView {
    * file-signature listener above (a push event) and by `performSave()`'s CAS-conflict arm (a rejected
    * write is itself evidence disk moved). Always does its own fresh `workspaceFileRead` rather than
    * trusting whatever triggered it: a `FileSignatureEvent` is deliberately just a "go look" signal
-   * with no content payload (see its doc comment), and a save conflict's `currentSHA256` can already
+   * with no content payload, and a save conflict's `currentSHA256` can already
    * be stale again by the time this runs if anything else touched disk since.
    *
-   * Implements the locked 4-case UX (see this class's doc comment). Runs unchanged while already in
+   * Implements the four-case UX this class's doc comment describes. Runs unchanged while already in
    * conflict (e.g. a second external change arriving before the first is resolved, or "Keep mine"
    * itself hitting a fresh conflict — see `resolveConflictKeepMine`): `this.latestContent` is frozen
    * while `this.conflict` is true (the compare view's `CodeView` item isn't in edit mode, so nothing
@@ -1300,11 +1298,10 @@ export class EditorView {
     } catch (err) {
       // Superseded before this failure even landed (a newer loadFile() or a newer external-change fetch
       // already started) — nothing below would matter, including scheduling a retry for content
-      // nobody is looking at anymore. Mirrors root.ts's identical early bail at the top of
-      // `refreshDiff`'s own catch block.
+      // nobody is looking at anymore.
       if (generation !== this.openGeneration || fetchToken !== this.externalChangeFetchToken) return;
       if (err instanceof SpacesBridgeError && err.code === "invalidArgument") {
-        // Fix 3 (round-2): `invalidArgument` is the daemon's durable, decoded answer for a file that
+        // `invalidArgument` is the daemon's durable, decoded answer for a file that
         // can never be read as text — over the 10 MiB `workspaceFileRead` cap, or not valid UTF-8
         // (see `CodePaneBridge.swift`'s `fileReadPayload`/`mapClientError`), not a transient failure
         // like the generic branch below handles. Retrying it forever would silently poll a file that
@@ -1347,8 +1344,7 @@ export class EditorView {
     // A decoded answer landed — either a successful read or `notFound`'s authoritative "the file is
     // gone" — so this run is done retrying. Reset here (not just on the next scheduled attempt) so a
     // later transient failure, from a fresh trigger, starts its own backoff at the floor instead of
-    // inheriting whatever count this run left behind — mirrors root.ts's identical reset on a
-    // durable outcome in `refreshDiff`.
+    // inheriting whatever count this run left behind.
     this.externalChangeRetryFailures = 0;
     if (generation !== this.openGeneration) return; // a later loadFile() already won
     if (fetchToken !== this.externalChangeFetchToken) return; // a later external-change fetch already won
@@ -1416,7 +1412,7 @@ export class EditorView {
       // Canonical trigger: this pane's OWN save. The CAS write lands on disk, the 2s file-signature
       // poll picks it up and pushes an external-change event, and this read completes before the
       // save's own network response returns. That push already bumped `externalChangeFetchToken`, so
-      // the save's late success arm correctly stands down per its existing fetch-token guard (:1067)
+      // the save's late success arm correctly stands down per its existing fetch-token guard
       // — this branch is what records the clean outcome instead, since that guard only defers to
       // whatever `handleExternalChange` decides. An external writer that coincidentally writes exactly
       // the buffer's content reconciles identically through this same branch.
@@ -1702,7 +1698,7 @@ export class EditorView {
    *  disappears (`handleExternalChange`'s not-dirty+missing branch) and when the conflict compare
    *  view's "Close without saving" is clicked on a missing file. Resets to a no-open-file state
    *  internally (there is nothing left to save or diff against) while leaving the path visible in
-   *  the top bar's path label, per the locked UX ("path stays in box"). `collectEditorState` returns
+   *  the top bar's path label ("path stays in box"). `collectEditorState` returns
    *  `undefined` for this state (same as never having opened a file) — an accepted simplification,
    *  since there is nothing meaningful left to survive a hibernation cycle here beyond the path
    *  itself, which isn't part of the persisted snapshot's contract.
@@ -1756,11 +1752,11 @@ export class EditorView {
    *   survive — a re-read here would silently discard them in favor of whatever is on disk.
    *   `state.conflict` restores straight into conflict state (skipping edit mode entirely): the
    *   snapshot doesn't distinguish "changed" from "deleted on disk" on disk (`diskMissing` is
-   *   deliberately not part of `CodePaneEditorState` — see its doc comment), so this always shows
+   *   deliberately not part of `CodePaneEditorState`), so this always shows
    *   the more common "changed" wording until `handleExternalChange` (below) corrects it.
    * - not dirty: the buffer matched disk when it was pushed, so the snapshot's own content is
    *   restored directly, the same shape the dirty branches use, rather than re-read through
-   *   `loadFile()` (round-16 Fix 1). `loadFile()`'s catch renders a bare error and returns on a read
+   *   `loadFile()`. `loadFile()`'s catch renders a bare error and returns on a read
    *   failure, leaving no path in the box and no subscription installed — strictly worse than the
    *   "File deleted on disk" placeholder a visible pane shows for the same deletion. Restoring the
    *   snapshot first and reconciling through `handleExternalChange` gives the clean case every
@@ -1891,9 +1887,10 @@ export class EditorView {
 
   /** Trailing debounce for the push on buffer edits: a keystroke-by-keystroke push would be wasted
    *  work between keystrokes, while the immediate pushes above already cover every transition that
-   *  can't tolerate the delay. A buffer edit inside this window used to be at risk of loss if a
-   *  hibernating teardown landed before the timer fired; that race is closed by the unified
-   *  `window.__spacesCollectWorkspaceState` collector, which the Swift host pulls synchronously. */
+   *  can't tolerate the delay. A buffer edit inside this window would otherwise be at risk of loss if
+   *  a hibernating teardown landed before the timer fired; the unified
+   *  `window.__spacesCollectWorkspaceState` collector, which the Swift host pulls synchronously,
+   *  closes that race. */
   private scheduleEditorStatePush(): void {
     clearTimeout(this.editorStatePushTimer);
     this.editorStatePushTimer = setTimeout(() => this.pushEditorStateNow(), EDITOR_STATE_DEBOUNCE_MS);
@@ -1935,7 +1932,7 @@ export class EditorView {
     // moves on and this call's completion must not touch `baseSHA256`/`dirty`/`conflict`/the banner:
     // all of those now describe the newly opened file, not this one.
     const generation = this.openGeneration;
-    // Fix 2 (round-2): `generation` alone only guards against a NEWER loadFile() — it says nothing about
+    // `generation` alone only guards against a NEWER loadFile() — it says nothing about
     // a `handleExternalChange` reconcile completing for the SAME file while this write is still in
     // flight (e.g. a live `spaces:fileSignature` push for this pane's own write landing on disk,
     // racing this call's own success/failure response). That reconcile can set `pendingMergeUndo`,
@@ -1948,7 +1945,7 @@ export class EditorView {
       // success arm below) what ends up on disk. `this.latestContent` can move on underneath this
       // call if the user keeps typing while the write is in flight — the two must not be conflated.
       const submitted = this.latestContent;
-      // Fix 1: identifies this in-flight write's exact content for `handleExternalChange` to
+      // Identifies this in-flight write's exact content for `handleExternalChange` to
       // recognize (see `pendingSaveSubmitted`'s doc comment). Cleared in this method's `finally`.
       this.pendingSaveSubmitted = submitted;
       let result: WorkspaceFileWriteResult;
@@ -1959,7 +1956,7 @@ export class EditorView {
         });
       } catch (err) {
         if (generation !== this.openGeneration) return "clean"; // a later loadFile() already won; this failure is moot
-        // Fix 2 (round-2): a `handleExternalChange` reconcile for this same file completed while this
+        // A `handleExternalChange` reconcile for this same file completed while this
         // write was in flight and already decided this file's UI state (merge indicator, conflict
         // compare, or a silent clean reload) — this failure is for a write that's now superseded by
         // that decision, so reporting it would back off a write the reconcile has already reshaped.
@@ -1987,14 +1984,14 @@ export class EditorView {
         // Captured so the arm below can tell a reconcile that actually moved this pane's CAS
         // baseline from one that could not.
         const refusedBaseline = this.baseSHA256;
-        // Deliberately NOT guarded by `fetchToken` (Fix 2, round-2): this only re-invokes
+        // Deliberately NOT guarded by `fetchToken`: this only re-invokes
         // `handleExternalChange()`, which is idempotent against whatever an already-in-flight
         // reconcile did — it always does its own fresh read and re-derives state from scratch, so
         // calling it again here (superseded or not) is harmless. Route into the same external-change
         // handling a live file-signature push uses: a CAS rejection is itself evidence disk moved
         // since this save's baseline, and `handleExternalChange` always does its own fresh read
         // rather than trusting this result's (possibly already-stale-again)
-        // `currentSHA256`/`fileMissing`, see its doc comment. That ladder either merges (leaving a
+        // `currentSHA256`/`fileMissing`. That ladder either merges (leaving a
         // dirty buffer the scheduler writes again straight away, against the baseline it adopted) or
         // enters conflict, which is the block reported here.
         await this.handleExternalChange();
@@ -2009,7 +2006,7 @@ export class EditorView {
         }
         return "clean";
       }
-      // Fix 2 (round-2): a `handleExternalChange` reconcile for this same file completed while this
+      // A `handleExternalChange` reconcile for this same file completed while this
       // write was in flight and already decided this file's UI state — this plain-success path must
       // not overwrite it with a now-stale baseline/dirty/banner. See `fetchToken`'s doc comment
       // above. The write itself did land on disk, so it is still reported as saved: the reconcile

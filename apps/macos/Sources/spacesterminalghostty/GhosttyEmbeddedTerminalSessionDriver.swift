@@ -219,12 +219,8 @@
             hostPTY.adopt(masterFD: masterFD, childPID: childPID)
         }
 
-        /// Shared construction body for `startIfNeeded` and `adoptFromHandoff`: creates
-        /// the headless GhosttyKit session, wires the surface data/state callbacks and
-        /// the host-managed PTY receive callbacks identically, and installs the host
-        /// PTY output/closed handlers. It does NOT start or adopt the PTY — the caller
-        /// decides whether to fork a fresh child (`hostPTY.startIfNeeded()`) or adopt an
-        /// inherited one (`hostPTY.adopt(...)`).
+        /// It does NOT start or adopt the PTY — the caller decides whether to fork a fresh child
+        /// (`hostPTY.startIfNeeded()`) or adopt an inherited one (`hostPTY.adopt(...)`).
         private func configureNewSession() throws -> (session: ghostty_session_t, hostPTY: HostManagedPTYTerminalSessionDriver) {
             try GhosttyEmbeddedAppService.shared.startIfNeeded()
             guard let app = GhosttyEmbeddedAppService.shared.app else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty app missing") }
@@ -288,8 +284,6 @@
             return (createdSession, hostPTY)
         }
 
-        /// Undoes `configureNewSession` when the host PTY fails to start: mirror the
-        /// teardown the old inline `startIfNeeded` catch performed.
         private func rollbackSessionConfiguration(_ createdSession: ghostty_session_t) {
             hostPTY?.setOutputHandler(nil)
             hostPTY?.setSessionClosedHandler(nil)
@@ -304,8 +298,7 @@
             ghostty_session_free(createdSession)
         }
 
-        /// Post-construction bring-up shared by fresh starts and handoff resumes. When
-        /// `startReadLoop` is false the caller has already converged the grid and driven
+        /// When `startReadLoop` is false the caller has already converged the grid and driven
         /// the PTY setup (handoff replay path), so this only refreshes and publishes.
         private func finalizeSessionAdoption(
             _ createdSession: ghostty_session_t, hostPTY: HostManagedPTYTerminalSessionDriver, initialSize: (columns: Int, rows: Int),
@@ -353,7 +346,7 @@
         // MARK: - Exec-in-place handoff (quiesce side)
 
         /// The live PTY master fd + child pid to carry across the handoff, or nil when
-        /// there is nothing to hand off. Forwarded from the host PTY driver.
+        /// there is nothing to hand off.
         func handoffDescriptorSnapshot() -> (masterFD: Int32, childPID: Int32)? { hostPTY?.handoffDescriptorSnapshot() }
 
         /// Flush accepted-but-unwritten input toward the PTY master for handoff quiesce: pump Ghostty so any
@@ -625,10 +618,9 @@
             return true
         }
 
-        /// Delivers one button press or release to the session's terminal. The surface encodes the
-        /// mouse report against its own live mouse mode and writes it to the child through the same
-        /// receive buffer that carries keyboard input, so nothing here has to know the reporting
-        /// format the application asked for.
+        /// The surface encodes the mouse report against its own live mouse mode and writes it to the child
+        /// through the same receive buffer that carries keyboard input, so nothing here has to know the
+        /// reporting format the application asked for.
         @discardableResult func sendMouseButton(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) -> Bool {
             guard let session, let surface else { return false }
             let mods = ghostty_input_mods_e(pointerPosition?.mods ?? GHOSTTY_MODS_NONE.rawValue)
@@ -697,14 +689,13 @@
             return didSet
         }
 
-        /// Clears the surface's selection. Never triggers a clipboard write.
+        /// Never triggers a clipboard write.
         func clearSelection() {
             guard let surface else { return }
             ghostty_surface_clear_selection(surface)
             requestSurfaceRefresh()
         }
 
-        /// The text of the surface's current selection, or nil when there is none.
         func readSelectionText() -> String? {
             guard let surface, ghostty_surface_has_selection(surface) else { return nil }
             var text = ghostty_text_s()

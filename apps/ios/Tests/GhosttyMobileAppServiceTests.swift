@@ -556,8 +556,7 @@
         /// normally again once a frame covering the viewport's columns has been applied. The other tests
         /// around this one check the two halves separately (that the coverage flag tracks a real applied
         /// frame's width, and that the tap gate reads whatever the flag says); this one drives both
-        /// halves together through the real `update(snapshot:)` apply path and the real tap entry point,
-        /// which is what the deleted UI-test phase used to be the only coverage for.
+        /// halves together through the real `update(snapshot:)` apply path and the real tap entry point.
         func testTapOnAColumnCroppedFrameDoesNotProbeLinks() throws {
             GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
             let window = UIWindow(frame: UIScreen.main.bounds)
@@ -1742,9 +1741,9 @@
             XCTAssertFalse(GhosttySharedTerminalMirror.shared.isSurfaceHostAttachedForTesting)
         }
 
-        /// Opening a terminal and leaving it, over and over, is the navigation that used to charge the
-        /// process a whole new mirror and IOSurface per visit. Every visit must land on the same
-        /// native surface instead, so the footprint is bounded no matter how many sessions are opened.
+        /// Opening a terminal and leaving it, over and over, is the navigation that would otherwise
+        /// charge the process a whole new mirror and IOSurface per visit. Every visit must land on the
+        /// same native surface instead, so the footprint is bounded no matter how many sessions are opened.
         func testRepeatedTerminalVisitsReuseOneMirrorAndOneSurface() throws {
             GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
             let window = UIWindow(frame: UIScreen.main.bounds)
@@ -2071,10 +2070,10 @@
         /// A cold open has a window and nonzero bounds well before the first daemon snapshot arrives
         /// (the render pipeline is what delivers the snapshot in the first place). Acquisition only
         /// requires those two things (`isEntitledToSharedMirror`), not content, so it must happen even
-        /// when a snapshot never comes. Before the fix, `scheduleMirrorAcquisitionIfNeeded()` was only
+        /// when a snapshot never comes. Without this, `scheduleMirrorAcquisitionIfNeeded()` would only be
         /// reachable from `renderLatestSnapshot()`'s post-snapshot path, so a view that never receives a
-        /// snapshot never acquired a mirror, and the open-screen hold this feeds never saw a viewport
-        /// report until its own timeout.
+        /// snapshot would never acquire a mirror, and the open-screen hold this feeds would never see a
+        /// viewport report until its own timeout.
         func testHostViewAcquiresTheMirrorBeforeAnySnapshotArrives() throws {
             GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
             let window = UIWindow(frame: UIScreen.main.bounds)
@@ -2097,10 +2096,10 @@
 
         /// A mirror that fails to acquire (a genuine creation failure, not a timing race that resolves on
         /// its own) must not become an unbounded reschedule loop, and must not leave the view stuck
-        /// suppressing viewport reports forever. Before the fix, `acquireMirrorIfNeeded()`'s catch branch
-        /// only traced the failure: the view stayed entitled, so `scheduleMirrorAcquisitionIfNeeded()`'s
-        /// own completion (`renderLatestSnapshot()`) rescheduled another acquisition attempt on every
-        /// turn, and `isMirrorAcquisitionImminent` stayed true forever, suppressing the estimate-based
+        /// suppressing viewport reports forever. Without this, `acquireMirrorIfNeeded()`'s catch branch
+        /// would only trace the failure: the view would stay entitled, so `scheduleMirrorAcquisitionIfNeeded()`'s
+        /// own completion (`renderLatestSnapshot()`) would reschedule another acquisition attempt on every
+        /// turn, and `isMirrorAcquisitionImminent` would stay true forever, suppressing the estimate-based
         /// report that is otherwise this view's only viewport source. Regression test for
         /// `didFailMirrorAcquisition`, which latches the failure so both stop.
         func testFailedMirrorAcquisitionStopsReschedulingAndResumesEstimateReporting() throws {

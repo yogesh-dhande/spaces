@@ -76,8 +76,8 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         let paths = try seedSession(sessionID: sessionID, servicePID: getpid(), state: .running)
         try seedLiveOwnerClient(sessionID: sessionID, paths: paths)
 
-        // Precondition establishing the pre-fix gap: this pid is ALIVE, so a dead-pid-only sweep
-        // (`guard !isProcessAlive(servicePID)`) would skip the row and leave it `.running` forever.
+        // This pid is ALIVE, so a dead-pid-only sweep (`guard !isProcessAlive(servicePID)`) would skip
+        // the row and leave it `.running` forever.
         XCTAssertEqual(kill(getpid(), 0), 0, "own pid must be alive, which is exactly why the plain dead-pid rule can't repair it")
         XCTAssertTrue(try TerminalSessionPersistence.activeAttachments(paths: paths).count == 1)
 
@@ -260,9 +260,9 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         TerminalSessionPersistence.closeDatabaseConnection()
         defer { if let originalPermissions { try? fileManager.setAttributes([.posixPermissions: originalPermissions], ofItemAtPath: databasePath) } }
 
-        // Pre-fix behavior: the suppressed write (`try?`) would still append this session to `finalized`.
-        // Post-fix: the bounded retry exhausts, the session is reported `unrepaired`, and the row is left
-        // untouched in its prior `.running` state with its clients still attached.
+        // A suppressed write (`try?`) would wrongly append this session to `finalized`. The bounded retry
+        // instead exhausts, the session is reported `unrepaired`, and the row is left untouched in its
+        // prior `.running` state with its clients still attached.
         //
         // `reconcile` blocks synchronously through every retry attempt, so exhausting all of them here would
         // otherwise cost real wall-clock time (production's `repairWriteRetryDelay` * (attempts - 1)); inject

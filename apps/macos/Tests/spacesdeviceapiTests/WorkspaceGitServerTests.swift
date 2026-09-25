@@ -573,7 +573,7 @@
 
                 XCTAssertFalse(response.ok)
                 XCTAssertEqual(response.errorCode, .notFound)
-                // Round-10 fix 3: the workspace-git routing chokepoint rejects an id that does not resolve
+                // The workspace-git routing chokepoint rejects an id that does not resolve
                 // to a real workspace before it ever mints that id's entry in the per-workspace queue
                 // registry, so an arbitrary/nonexistent id can never grow it without bound.
                 XCTAssertNil(server.workspaceGitQueuesByWorkspaceID["no-such-workspace"])
@@ -714,13 +714,12 @@
             }
         }
 
-        /// Fix A regression: the prior `filterToOpenableFiles` kept any non-directory lstat type, so a
-        /// tracked symlink pointing at a directory or at somewhere outside the workspace was listed even
-        /// though `workspaceFileRead` can never open it (a dead row in the Editor's file tree — opening it
-        /// always fails, since the reader resolves symlinks and rejects a non-file/an escape). `isOpenableFile`
-        /// must instead decide a symlink exactly the way `workspaceFileRead`'s own path resolver would: a
-        /// symlink to a regular file inside the workspace is listed, a symlink to a directory or to outside
-        /// the workspace is not.
+        /// A tracked symlink pointing at a directory or at somewhere outside the workspace must not be
+        /// listed merely because it is stat-openable via lstat: `workspaceFileRead` can never open it (a
+        /// dead row in the Editor's file tree — opening it always fails, since the reader resolves symlinks
+        /// and rejects a non-file/an escape). `isOpenableFile` must instead decide a symlink exactly the way
+        /// `workspaceFileRead`'s own path resolver would: a symlink to a regular file inside the workspace
+        /// is listed, a symlink to a directory or to outside the workspace is not.
         func testWorkspaceFileListDecidesATrackedSymlinkByWhereItResolvesRatherThanItsOwnLstatType() throws {
             try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
                 try "linked content".write(to: repo.appendingPathComponent("linked-file.txt"), atomically: true, encoding: .utf8)
@@ -808,12 +807,11 @@
             }
         }
 
-        /// Fix A regression on the non-git branch: `listFilesystemFiles` used to keep only `.typeRegular`,
-        /// dropping a symlink to a regular file inside the workspace even though `workspaceFileRead` can open
-        /// it fine (unreachable in practice before this fix, since the Editor has no direct-path input other
-        /// than this listing — but wrong once `isOpenableFile` is the shared predicate both branches use). A
-        /// symlink to a directory must still be excluded, since there is no git index here to say what kind of
-        /// entry it is meant to be and `workspaceFileRead` could never open a directory either way.
+        /// On the non-git branch, `listFilesystemFiles` must not keep only `.typeRegular`: dropping a symlink
+        /// to a regular file inside the workspace would be wrong once `isOpenableFile` is the shared
+        /// predicate both branches use, even though `workspaceFileRead` can open it fine. A symlink to a
+        /// directory must still be excluded, since there is no git index here to say what kind of entry it
+        /// is meant to be and `workspaceFileRead` could never open a directory either way.
         func testWorkspaceFileListOnANonGitWorkspaceListsASymlinkToARegularFileButNotToADirectory() throws {
             try withNonGitWorkspaceFixture { workspaceID, dir, _, requestClient, clientApp, authToken in
                 try "linked content".write(to: dir.appendingPathComponent("linked-file.txt"), atomically: true, encoding: .utf8)
@@ -887,7 +885,6 @@
 
                 XCTAssertFalse(response.ok)
                 XCTAssertEqual(response.errorCode, .notFound)
-                // Mirrors `testWorkspaceFileReadOnAnUnknownWorkspaceReturnsNotFound`'s queue-registry check.
                 XCTAssertNil(server.workspaceGitQueuesByWorkspaceID["no-such-workspace"])
             }
         }
@@ -972,7 +969,7 @@
             }
         }
 
-        /// round-13 Fix 4: a stale `expectedSHA256` whose bytes already match what's on disk is a retry of an
+        /// A stale `expectedSHA256` whose bytes already match what's on disk is a retry of an
         /// already-landed write (its original response lost to a transport drop or the client hibernating
         /// mid-round-trip), not a genuine conflict — the client asks to write exactly the content that is
         /// already there. This must report an idempotent success (`didWrite: true`), not the `.conflict`
@@ -1064,8 +1061,7 @@
             }
         }
 
-        /// Mirrors the write handler's fix: an existing-but-unreadable file must not be conflated with a
-        /// missing one on the read path either.
+        /// An existing-but-unreadable file must not be conflated with a missing one on the read path either.
         func testWorkspaceFileReadOnAnExistingButUnreadableFileReturnsInternalError() throws {
             try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
                 let path = repo.appendingPathComponent("UNREADABLE.md")
@@ -1175,12 +1171,12 @@
             }
         }
 
-        /// Round-3 codex finding: a dangling symlink (the link exists; its target does not) whose target
-        /// names a location OUTSIDE the workspace must not let a create-CAS write land there. Before the
-        /// fix, `fileExists` (which follows links) reported the dangling link as a plain missing component,
-        /// so the walk reappended the remaining path literally under the workspace root and containment
-        /// passed against the wrong (workspace-relative) candidate while the actual write followed the link
-        /// straight outside.
+        /// A dangling symlink (the link exists; its target does not) whose target names a location OUTSIDE
+        /// the workspace must not let a create-CAS write land there. Without lstat-based detection,
+        /// `fileExists` (which follows links) reports the dangling link as a plain missing path component,
+        /// so the walk would reappend the remaining path literally under the workspace root and containment
+        /// would pass against the wrong (workspace-relative) candidate while the actual write follows the
+        /// link straight outside.
         func testWorkspaceFileWriteThroughADanglingSymlinkToOutsideTheWorkspaceRejectsItAndCreatesNothing() throws {
             try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
                 let outside = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -2385,13 +2381,12 @@
             }
         }
 
-        /// Round-9: a workspace can be a plain directory with no `.git` (single workspace = project dir is
+        /// A workspace can be a plain directory with no `.git` (single workspace = project dir is
         /// a supported product type, docs/spec.md), and the picker offers Diff for every workspace
-        /// regardless. Before the fix, `workspaceDiff` against such a directory surfaced whatever generic
-        /// failure the first git invocation happened to produce; the fix probes `rev-parse
-        /// --is-inside-work-tree` up front and returns a typed, client-renderable refusal instead.
-        /// `workspaceFileRead` must keep working unmodified in the same workspace: the editor path is
-        /// git-independent by design and this fix must not touch it.
+        /// regardless, so `workspaceDiff` against such a directory must return a typed, client-renderable
+        /// refusal (probing `rev-parse --is-inside-work-tree` up front) rather than surfacing whatever
+        /// generic failure the first git invocation would produce. `workspaceFileRead` must keep working
+        /// unmodified in the same workspace: the editor path is git-independent by design.
         func testWorkspaceDiffOnANonGitWorkspaceReturnsInvalidArgument() throws {
             try withNonGitWorkspaceFixture { workspaceID, dir, _, requestClient, clientApp, authToken in
                 try "hello".write(to: dir.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
@@ -2415,9 +2410,9 @@
             }
         }
 
-        /// round-14 Fix 1 regression: a caller-supplied ref that simply does not resolve must still be
-        /// rejected as `.invalidArgument` — this must keep working unmodified after `assertRefIsResolvable`'s
-        /// rewrite to an exit-code-based check.
+        /// `assertRefIsResolvable`'s exit-code-based check (`allowedExitCodes: [0, 1]`, distinguished by
+        /// whether stdout is non-empty) must still reject a caller-supplied ref that simply does not
+        /// resolve, as `.invalidArgument`.
         func testWorkspaceDiffWithANonexistentRefReturnsInvalidArgument() throws {
             try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
                 let response = try requestClient.send(
@@ -2432,9 +2427,9 @@
             }
         }
 
-        /// round-14 Fix 1 regression: a ref that DOES resolve (the fixture repo's own "main" branch) must
-        /// keep succeeding — `assertRefIsResolvable`'s move to `allowedExitCodes: [0, 1]` and a non-empty-stdout
-        /// check must not turn a legitimate resolvable ref into a failure.
+        /// A ref that DOES resolve (the fixture repo's own "main" branch) must succeed:
+        /// `assertRefIsResolvable`'s `allowedExitCodes: [0, 1]` and non-empty-stdout check must not treat a
+        /// legitimate resolvable ref as a failure.
         func testWorkspaceDiffWithAResolvableRefSucceeds() throws {
             try withWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
                 let response = try requestClient.send(
@@ -2684,9 +2679,9 @@
 
         /// A branch that exists only on `origin` (no local branch of the same name) must be listed under its
         /// full `origin/<name>` name, not the bare stripped name: the bare name is not resolvable
-        /// (`git rev-parse --verify remote-only^{commit}` fails), while `origin/remote-only` is. This
-        /// reproduces the bug the fix addresses — before it, this branch was listed stripped of its
-        /// `origin/` prefix, and selecting it in the Compare dialog durably failed `assertRefIsResolvable`.
+        /// (`git rev-parse --verify remote-only^{commit}` fails), while `origin/remote-only` is. Listing it
+        /// stripped of the `origin/` prefix would offer a name that durably fails `assertRefIsResolvable`
+        /// once selected in the Compare dialog.
         /// A branch that exists both locally and on origin (here, "main") appears twice, as "main" and as
         /// "origin/main", since a local branch and its origin counterpart are distinct refs that can
         /// diverge — not deduped into one entry.
@@ -2898,16 +2893,15 @@
             }
         }
 
-        /// round-14 Fix 1: the actual bug fix under test. Before the fix, `assertRefIsResolvable` wrapped its
-        /// `runGitAndCapture` call in `try?`, so ANY thrown failure — including an already-exhausted
-        /// request-wide deadline, simulated here by handing it a `deadlineStart` far in the past —
-        /// collapsed into the same "ref could not be resolved" 400 this function throws for an actually-bad
-        /// ref. That is wrong even for "main", a perfectly resolvable ref in this fixture: the failure is the
-        /// daemon's own trouble (a blown deadline), not a caller typo, and must propagate uncaught so the
-        /// server's normal mapping (`SpacesDeviceAPIServer.errorCode(for:)`) reports it as `.internalError` —
-        /// which the client's retry classification retries with backoff — rather than the permanent
-        /// `.invalidArgument` rejection a genuinely bad ref gets. This test would have FAILED before the fix:
-        /// the old `try?` swallowed the deadline-exhaustion throw and always produced the 400 NSError instead.
+        /// `assertRefIsResolvable`'s `runGitAndCapture` call must not be wrapped in `try?`: doing so would
+        /// collapse ANY thrown failure — including an already-exhausted request-wide deadline, simulated
+        /// here by handing it a `deadlineStart` far in the past — into the same "ref could not be resolved"
+        /// 400 this function throws for an actually-bad ref. That is wrong even for "main", a perfectly
+        /// resolvable ref in this fixture: the failure is the daemon's own trouble (a blown deadline), not a
+        /// caller typo, and must propagate uncaught so the server's normal mapping
+        /// (`SpacesDeviceAPIServer.errorCode(for:)`) reports it as `.internalError` — which the client's
+        /// retry classification retries with backoff — rather than the permanent `.invalidArgument`
+        /// rejection a genuinely bad ref gets.
         func testAssertRefIsResolvablePropagatesADeadlineExhaustionInsteadOfMisclassifyingItAsABadRef() throws {
             let repo = FileManager.default.temporaryDirectory.appendingPathComponent(
                 "spaces-assert-ref-resolvable-\(UUID().uuidString)", isDirectory: true)
@@ -2937,15 +2931,13 @@
             }
         }
 
-        /// round-15: `buildDiff` now takes the same `deadlineStart` parameter `assertRefIsResolvable` above
-        /// already accepted, so `handleWorkspaceDiffRequest` can share ONE clock across repo/ref validation
-        /// and diff-building instead of `buildDiff` starting its own fresh `Date()` internally. Before this
-        /// fix, handing `buildDiff` an already-exhausted `deadlineStart` would have had no effect at all —
-        /// the parameter did not exist, and `buildDiff` measured its 45s window from its own call. This test
-        /// mirrors `testAssertRefIsResolvablePropagatesADeadlineExhaustionInsteadOfMisclassifyingItAsABadRef`
-        /// above: a `deadlineStart` far enough in the past that `remainingTimeout` sees zero budget left
-        /// must make `buildDiff` throw immediately (`scopeSignature`'s first probe never gets a positive
-        /// timeout), never spawn git as if it had a fresh 45s.
+        /// `buildDiff` takes the same `deadlineStart` parameter `assertRefIsResolvable` above accepts, so
+        /// `handleWorkspaceDiffRequest` can share ONE clock across repo/ref validation and diff-building
+        /// instead of `buildDiff` starting its own fresh `Date()` internally. This test mirrors
+        /// `testAssertRefIsResolvablePropagatesADeadlineExhaustionInsteadOfMisclassifyingItAsABadRef` above:
+        /// a `deadlineStart` far enough in the past that `remainingTimeout` sees zero budget left must make
+        /// `buildDiff` throw immediately (`scopeSignature`'s first probe never gets a positive timeout),
+        /// never spawn git as if it had a fresh 45s.
         func testBuildDiffWithAnAlreadyExpiredDeadlineStartThrowsImmediately() throws {
             let repo = FileManager.default.temporaryDirectory.appendingPathComponent(
                 "spaces-build-diff-expired-deadline-\(UUID().uuidString)", isDirectory: true)
@@ -2958,7 +2950,7 @@
 
             // Well past the real 45s `diffBuildDeadline` (private to the engine, so mirrored here as a
             // literal — see this file's own `-1000` above and `SpacesDeviceWorkspaceGitTests.swift`'s
-            // round-9/12 comments on why this engine has no configurable-deadline test seam).
+            // comments on why this engine has no configurable-deadline test seam).
             let expiredDeadlineStart = Date().addingTimeInterval(-1000)
             XCTAssertThrowsError(
                 try SpacesDeviceWorkspaceDiffEngine.buildDiffPlanSnapshot(
@@ -2971,21 +2963,19 @@
             }
         }
 
-        /// round-15: proves `deadlineStart` is a SHARED clock rather than each call getting its own,
-        /// without the flaky knife-edge timing `SpacesDeviceWorkspaceGitTests.swift`'s round-9/12 comments
-        /// explicitly avoid (there is no seam here to observe the exact timeout value a fake git client
-        /// would receive — `RemoteWorkspaceGitClient` is a real, non-injectable `final class`). Instead this
-        /// hands `assertRefIsResolvable` and `buildDiff` the SAME `deadlineStart`, already most of the way
+        /// Proves `deadlineStart` is a SHARED clock rather than each call getting its own, without the
+        /// flaky knife-edge timing `SpacesDeviceWorkspaceGitTests.swift`'s comments explicitly avoid (there
+        /// is no seam here to observe the exact timeout value a fake git client would receive —
+        /// `RemoteWorkspaceGitClient` is a real, non-injectable `final class`). This hands
+        /// `assertRefIsResolvable` and `buildDiff` the SAME `deadlineStart`, already most of the way
         /// through the 45s window (3s of budget left — generous for this tiny fixture repo's real git
         /// calls, far from the near-zero edge that would risk flaking on a loaded machine), simulating ref
         /// validation having already burned most of the shared request budget before `buildDiff` ever runs.
-        /// Before this round's fix, `buildDiff` would have ignored that already-elapsed time entirely (it
-        /// had no `deadlineStart` parameter and always measured a fresh 45s from its own call) — this test
-        /// would still have passed on unfixed code, since a fresh 45s is even more generous than 3s, so its
-        /// real value is regression coverage once combined with the fully-expired test above: together they
-        /// show `buildDiff` neither ignores the shared clock (this test would still need the code to accept
-        /// the parameter at all, which is the round-15 API change) nor treats a non-zero remainder as
-        /// insufficient when a real git call is fast enough to fit inside it.
+        /// A `buildDiff` that ignored the already-elapsed time (measuring a fresh 45s from its own call
+        /// instead of accepting `deadlineStart`) would still pass this test, since a fresh 45s is even more
+        /// generous than 3s — so its real value is regression coverage once combined with the fully-expired
+        /// test above: together they show `buildDiff` neither ignores the shared clock nor treats a
+        /// non-zero remainder as insufficient when a real git call is fast enough to fit inside it.
         func testASharedDeadlineStartAcrossRefValidationAndBuildDiffStillLeavesEnoughBudgetForAnOrdinaryDiff() throws {
             let repo = FileManager.default.temporaryDirectory.appendingPathComponent(
                 "spaces-build-diff-shared-deadline-\(UUID().uuidString)", isDirectory: true)
@@ -3007,23 +2997,23 @@
             XCTAssertTrue(result.plans.contains { $0.path == "README.md" })
         }
 
-        /// round-17 Fix B1: `assertIsGitRepository` now calls `isRepoStrict` (which throws on a could-not-run
-        /// probe) instead of `isRepo` (which folded that into a plain `false`), so an execution failure must
-        /// surface as the existing retryable `gitCommandFailed` → `.internalError` shape rather than the
-        /// permanent "not a git repository" 400 a real non-repo gets. `RemoteWorkspaceGitClient` has no fake
-        /// git executable errors to inject directly, but its `gitExecutable` initializer parameter is already
-        /// an established test seam (see `RemoteWorkspaceGitClientTests.swift`'s `/bin/sleep` and
-        /// stub-script substitutions) for exactly this: this stub ignores its arguments entirely and just
-        /// hangs, so whatever `isRepoStrict` invokes always times out and gets killed rather than exiting
-        /// with any real status — a clean simulation of "git could not run to completion" that is agnostic to
-        /// the exact arguments `isRepoStrict` happens to pass. `metadataCommandTimeout` is shortened so the
-        /// kill (and this test) happens promptly rather than waiting out the client's default 2s.
+        /// `assertIsGitRepository` calls `isRepoStrict` (which throws on a could-not-run probe), not
+        /// `isRepo` (which folds that into a plain `false`), so an execution failure must surface as the
+        /// existing retryable `gitCommandFailed` → `.internalError` shape rather than the permanent "not a
+        /// git repository" 400 a real non-repo gets. `RemoteWorkspaceGitClient` has no fake git executable
+        /// errors to inject directly, but its `gitExecutable` initializer parameter is already an
+        /// established test seam (see `RemoteWorkspaceGitClientTests.swift`'s `/bin/sleep` and stub-script
+        /// substitutions) for exactly this: this stub ignores its arguments entirely and just hangs, so
+        /// whatever `isRepoStrict` invokes always times out and gets killed rather than exiting with any
+        /// real status — a clean simulation of "git could not run to completion" that is agnostic to the
+        /// exact arguments `isRepoStrict` happens to pass. `metadataCommandTimeout` is shortened so the kill
+        /// (and this test) happens promptly rather than waiting out the client's default 2s.
         ///
         /// The real non-repo regression (a confirmed non-repo directory must still report `.invalidArgument`)
         /// is already covered end-to-end by `testWorkspaceDiffOnANonGitWorkspaceReturnsInvalidArgument` above,
         /// which exercises this same `assertIsGitRepository` call through the real server path against a real
-        /// plain (non-git) directory — that test would have failed to distinguish this bug (both outcomes
-        /// look identical, a 400), which is exactly why this new test exists alongside it.
+        /// plain (non-git) directory — that test cannot distinguish this bug from a real non-repo (both
+        /// outcomes look identical, a 400), which is why this test exists alongside it.
         func testAssertIsGitRepositoryPropagatesAnExecutionFailureInsteadOfMisclassifyingItAsANotARepo() throws {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(
                 "spaces-assert-is-git-repository-exec-failure-\(UUID().uuidString)", isDirectory: true)
@@ -3050,11 +3040,11 @@
             }
         }
 
-        /// round-17 Fix B2: `buildDiff`'s HEAD-existence probe (and `scopeSignature`'s parallel `headSHA`
-        /// probe, now the textually identical `rev-parse --verify --quiet HEAD` invocation) must throw on an
+        /// `buildDiff`'s HEAD-existence probe (and `scopeSignature`'s parallel `headSHA`
+        /// probe, the textually identical `rev-parse --verify --quiet HEAD` invocation) must throw on an
         /// execution failure rather than collapsing it into "HEAD does not exist" (an unborn repo). `buildDiff`
         /// calls `scopeSignature` first, so in this fixture the throw actually originates from
-        /// `scopeSignature`'s copy of the probe — that is expected and, since both call sites now share the
+        /// `scopeSignature`'s copy of the probe — that is expected and, since both call sites share the
         /// exact same command shape, this is valid regression coverage for both: a fix to only one of them
         /// (or a future regression reintroducing `try?` in either) would be caught here.
         ///
@@ -3106,17 +3096,17 @@
             }
         }
 
-        /// round-17 Fix B3: `buildDiff`'s workspace-prefix (`--show-prefix`) probe (and `scopeSignature`'s
-        /// parallel `prefix` probe, now the textually identical invocation) must throw on an execution
-        /// failure rather than collapsing it into `""` — which used to silently produce an UNSCOPED
+        /// `buildDiff`'s workspace-prefix (`--show-prefix`) probe (and `scopeSignature`'s
+        /// parallel `prefix` probe, the textually identical invocation) must throw on an execution
+        /// failure rather than collapsing it into `""`, which would silently produce an UNSCOPED
         /// enumeration for subtree workspaces (every path in the whole repo resolved against the wrong root,
-        /// not just the workspace's subtree). As with the B2 test above, `buildDiff` calls `scopeSignature`
+        /// not just the workspace's subtree). As with the HEAD-existence probe test above, `buildDiff` calls `scopeSignature`
         /// first, so the throw actually originates from `scopeSignature`'s copy of the probe here too; that is
         /// valid shared coverage for the same reason.
         ///
         /// This stub script lets `rev-parse --verify --quiet HEAD` and `status --porcelain -z
         /// --untracked-files=all` run against the real repo normally, and hangs only on the `--show-prefix`
-        /// invocation, isolating the fix under test from the probes ahead of it in `scopeSignature`.
+        /// invocation, isolating the behavior under test from the probes ahead of it in `scopeSignature`.
         ///
         /// The real subtree-scoping regression (a subtree workspace's enumeration and patches stay
         /// workspace-relative) is already covered by `SpacesDeviceWorkspaceGitTests.swift`'s
@@ -3165,12 +3155,12 @@
         /// Unix-socket producer (`DeviceOverviewStreamServer`) starts successfully; releasing a still-suspended
         /// `DispatchSourceTimer` traps in libdispatch. Pre-occupying the producer's socket path with a
         /// directory forces that `start()` to fail (unlink/bind cannot succeed against a directory), which
-        /// exercises the exact path the fix guards: before the fix, `addWorkspaceDiffSignatureSubscriber`
-        /// throwing here deallocated `subscription` — and its still-suspended `pollTimer` — as the throw
-        /// unwound, trapping the whole daemon process. With the fix (`WorkspaceDiffSignatureSubscription.start()`
-        /// resumes-then-cancels the timer before rethrowing), the subscribe request fails cleanly instead, and
-        /// a second, unrelated subscription proves the failure did not corrupt the server's subscriber-registry
-        /// state (e.g. a stuck `queue` or a leaked scope entry blocking future subscribers).
+        /// exercises the path where `addWorkspaceDiffSignatureSubscriber` throwing here would deallocate
+        /// `subscription` — and its still-suspended `pollTimer` — as the throw unwound, trapping the whole
+        /// daemon process: `WorkspaceDiffSignatureSubscription.start()` must resume-then-cancel the timer
+        /// before rethrowing so the subscribe request fails cleanly instead. A second, unrelated subscription
+        /// proves the failure did not corrupt the server's subscriber-registry state (e.g. a stuck `queue`
+        /// or a leaked scope entry blocking future subscribers).
         func testSubscribeWorkspaceDiffSignatureWithABlockedSocketPathReturnsAnErrorInsteadOfCrashingTheServer() throws {
             try withWorkspaceFixture { workspaceID, repo, server, _, clientApp, authToken in
                 let blockedSocketPath = try TerminalServicePaths.workspaceDiffSignatureSocketPath(workspaceID: workspaceID, refName: nil)
@@ -3201,7 +3191,7 @@
                 wait(for: [rejected], timeout: 5)
                 blockedClient.stop()
 
-                // Round 9: `relayWorkspaceDiffSignatureSubscription` refuses up front for a workspace whose
+                // `relayWorkspaceDiffSignatureSubscription` refuses up front for a workspace whose
                 // directory is not a git repository (`assertWorkspaceDiffScopeIsGitRepository`), which
                 // includes a workspace ID with no matching row at all. This "unrelated" scope must resolve
                 // to a real workspace over a real git repo so it exercises registry isolation rather than
@@ -3229,10 +3219,10 @@
         }
 
         /// `lastCommit` and `refName` are mutually exclusive on the subscribe path too, mirroring
-        /// `testWorkspaceDiffRejectsLastCommitCombinedWithRefName`'s pull-path coverage above. Before the fix,
-        /// `handleWorkspaceDiffRequest` rejected this combination but the subscribe transports (this one, the
-        /// macOS `NWConnection` relay via `relayWorkspaceDiffSignatureSubscription`, and the Linux TLS relay via
-        /// `prepareLinuxSubscribe`) both registered it, so a client subscribing to it would sit alongside a pull
+        /// `testWorkspaceDiffRejectsLastCommitCombinedWithRefName`'s pull-path coverage above. If the subscribe
+        /// transports (this one, the macOS `NWConnection` relay via `relayWorkspaceDiffSignatureSubscription`,
+        /// and the Linux TLS relay via `prepareLinuxSubscribe`) registered this combination while
+        /// `handleWorkspaceDiffRequest` rejects it, a client subscribing to it would sit alongside a pull
         /// path that always 400s for the identical scope: it could never successfully fetch a diff for what it
         /// just subscribed to. The client must instead see the subscription itself rejected as `invalidArgument`.
         func testSubscribeWorkspaceDiffSignatureRejectsLastCommitCombinedWithRefName() throws {
@@ -3294,7 +3284,7 @@
             let bCounter = InvocationCounter()
 
             // Dedicated per-scope queues, named exactly the way `addWorkspaceDiffSignatureSubscriber` names them,
-            // so this exercises the same "never shared" contract the fix establishes.
+            // so this exercises the same "never shared" contract that naming establishes.
             let queueA = DispatchQueue(label: "spaces.workspace-diff-signature.\(scopeA.workspaceID).uncommitted")
             let subscriptionA = SpacesDeviceAPIServer.WorkspaceDiffSignatureSubscription(
                 scope: scopeA, socketPath: socketPathA, streamQueue: queueA, watch: watchA,
@@ -4064,8 +4054,8 @@
                 providerCallCounter.value, 2, "the poll timer must still be calling the provider each tick even though it isn't rebroadcasting")
         }
 
-        /// Guards `computeWorkspaceFileScopeSignature`'s stat-before-hash type guard (Phase 5 review round-1
-        /// Fix 2), through the real production path rather than an injected provider: a subscribed regular
+        /// Guards `computeWorkspaceFileScopeSignature`'s stat-before-hash type guard, through the real
+        /// production path rather than an injected provider: a subscribed regular
         /// file replaced on disk by a FIFO must have its poll tick skipped silently (no frame, no crash) —
         /// the type guard refuses the FIFO before the hashing open that would otherwise block this scope's
         /// `streamQueue` forever — and, crucially, a LATER tick once the path is a regular file again must
@@ -4125,11 +4115,11 @@
             }
         }
 
-        /// Guards the round-11 finding that `computeWorkspaceFileScopeSignature` hashed a watched file's
-        /// entire content on every 2s poll tick with no size bound, unlike `handleWorkspaceFileReadRequest`'s
-        /// bounded read — so a client's recovery subscription for a file whose *open* was rejected as
+        /// `computeWorkspaceFileScopeSignature` must not hash a watched file's entire content on every 2s
+        /// poll tick with no size bound, unlike `handleWorkspaceFileReadRequest`'s bounded read: doing so
+        /// would make a client's recovery subscription for a file whose *open* was rejected as
         /// oversized (see the comment block in `CodePaneContentController.restoreFileSignatureMonitoringAfterFailedOpen`)
-        /// would re-hash a multi-GB file indefinitely for as long as the pane stayed subscribed. Also guards
+        /// re-hash a multi-GB file indefinitely for as long as the pane stayed subscribed. Also guards
         /// the shrink-recovery contract that same client subscription depends on: crossing back under the
         /// cap must still produce a real content-hash frame, not a stuck sentinel.
         func testSubscribeWorkspaceFileSignatureReportsAStableOversizedSentinelAndRecoversWhenTheFileShrinks() throws {
@@ -4175,9 +4165,9 @@
 
                 // Step 3: the sentinel must be STABLE — at least 2 further poll ticks (this 4.5s window
                 // covers t≈+2s and t≈+4s from the oversized frame) must not produce another frame while the
-                // file stays oversized. This is the "stable" half of the fix: without it, an actively
-                // oversized file would keep broadcasting every tick just like the unbounded-hash bug it
-                // replaces, only with a constant payload instead of a real hash.
+                // file stays oversized. This is the "stable" half of sentinel deduping: without it, an
+                // actively oversized file would keep broadcasting every tick just like the unbounded-hash
+                // bug it replaces, only with a constant payload instead of a real hash.
                 Thread.sleep(forTimeInterval: 4.5)
                 XCTAssertEqual(
                     frames.count, framesAtOversized,
@@ -4777,7 +4767,7 @@
         // The Uncommitted and ref scopes take their inline-edit baseline from `workspaceFileRead` with the
         // diff row's `comparisonBaseRevision`. Inside a submodule that revision is one of the submodule's
         // own commits, so the comparison side has to be read from the submodule's repository while the
-        // worktree side is read from disk exactly as before.
+        // worktree side is read from disk the same way it is for a non-submodule file.
         func testWorkspaceFileReadComparisonBaseInsideASubmoduleReadsThatSubmodulesCommit() throws {
             try withNestedSubmoduleWorkspaceFixture { workspaceID, repo, _, requestClient, clientApp, authToken in
                 let submodule = repo.appendingPathComponent("A")

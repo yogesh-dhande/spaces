@@ -178,10 +178,10 @@
 
         /// A connect that dials, subscribes, and delivers a frame logs a `stream_first_frame` (the first
         /// payload the stream ever delivers, the moment the connection is actually proven up) and no
-        /// `stream_connect_end`: that event's success branch was removed because `subscribe` returning is
-        /// only proof the dial and TLS handshake completed, not that the connection is usable, so it can
-        /// no longer misreport a near-zero "success" for an attempt that then fails; `stream_connect_end`
-        /// now fires only from the failure branch in `handleConnectError`.
+        /// `stream_connect_end`: `subscribe` returning is only proof the dial and TLS handshake completed,
+        /// not that the connection is usable, so logging success there would misreport a near-zero result
+        /// for an attempt that then fails; `stream_connect_end` fires only from the failure branch in
+        /// `handleConnectError`.
         func testFirstFrameIsLoggedAndConnectEndIsNotForAConnectThatDeliversAFrame() async throws {
             let events = EventCollector()
             SpacesDeviceTerminalPerformanceLogger.sinkForTesting = { events.record($0) }
@@ -206,7 +206,7 @@
 
         /// The keyboard resizes nothing on the daemon, so what a toggle produces is a shorter rendered
         /// window out of the grid the session already holds. `keyboard_shift_applied` measures exactly
-        /// that, once per toggle, and the resize event it replaces must be gone.
+        /// that, once per toggle, with no resize event logged for it.
         func testKeyboardToggleLogsTheClientSideShiftAndNoResize() async throws {
             let events = EventCollector()
             SpacesDeviceTerminalPerformanceLogger.sinkForTesting = { events.record($0) }

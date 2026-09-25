@@ -10,7 +10,6 @@ public struct AutomationAttributedSession: Sendable, Equatable {
     public let kind: TerminalSessionKind
     /// The session's stable name: the user's rename when one is stored, else the launch title.
     public let name: String
-    /// The workspace the attributed session ran in.
     public let workspaceID: String?
 
     public init(sessionID: String, kind: TerminalSessionKind, name: String, workspaceID: String?) {

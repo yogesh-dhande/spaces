@@ -217,9 +217,9 @@ import spacesterminalcore
         #expect(try probe.request(Self.request(.ping), pinnedHost: "lan").ok)
 
         let sendTimeout = try #require(dialer.connections().first?.capturedSendTimeout())
-        // Pre-fix, this would be the full 1-second timeoutSeconds every time: the connect stage's 0.7
-        // seconds would not have touched it. Post-fix, the 0.7-second connect stage leaves at most
-        // about 0.3 seconds of the shared deadline for send.
+        // A budget reissued fresh to each stage would show the full 1-second timeoutSeconds here every
+        // time, since the connect stage's 0.7 seconds would not have touched it. The shared deadline this
+        // asserts leaves at most about 0.3 seconds of it for send.
         #expect(sendTimeout < 0.5)
     }
 

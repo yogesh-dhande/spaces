@@ -7,9 +7,9 @@ import XCTest
     import Darwin
 
     final class TerminalServiceTests: XCTestCase {
-        // Regression: capturing output used to wait for exit before draining the pipe, which
-        // deadlocks as soon as the child writes more than the kernel's 64KB pipe buffer
-        // (observed live with `lsof -nP -U` during socket-owner lookups).
+        // Regression: waiting for exit before draining the pipe deadlocks as soon as the child writes
+        // more than the kernel's 64KB pipe buffer (observed live with `lsof -nP -U` during socket-owner
+        // lookups).
         func testCapturedStandardOutputDrainsOutputLargerThanThePipeBuffer() throws {
             let result = try XCTUnwrap(
                 TerminalService.capturedStandardOutput(
@@ -20,8 +20,8 @@ import XCTest
             XCTAssertEqual(result.output.count, 256 * 1024)
         }
 
-        // Regression: the lsof sweep behind serviceProcessIDsOwningSocket had no deadline, so a
-        // loaded machine could block CaddyService.stop()'s bounded shutdown indefinitely.
+        // Regression: without a deadline, the lsof sweep behind serviceProcessIDsOwningSocket could
+        // block CaddyService.stop()'s bounded shutdown indefinitely on a loaded machine.
         func testCapturedStandardOutputReturnsNilPromptlyWhenChildOutlivesTimeout() throws {
             let startedAt = Date()
 

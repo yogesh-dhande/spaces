@@ -4202,7 +4202,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     /// Render frames arrive continuously, so the mirror may reclaim first responder only when
     /// focus fell back to the window itself (the state re-parenting leaves behind). A frame
     /// update must never steal focus from another focused control — that is exactly how the
-    /// tab-rename editor and sidebar editors used to lose their editing session.
+    /// tab-rename editor and sidebar editors would lose their editing session otherwise.
     @MainActor func testRemoteOwnerFrameUpdateReclaimsFirstResponderOnlyFromWindowFloor() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -4948,8 +4948,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     }
 
     /// The open-throttle sibling of the case above: a resync required AFTER the window has expired, while
-    /// the attach's read is still in flight, must also stay owed. The unthrottled path used to stamp the
-    /// throttle and call straight into the fetch, which refused on the in-flight guard — consuming the
+    /// the attach's read is still in flight, must also stay owed. An unthrottled path would stamp the
+    /// throttle and call straight into the fetch, which refuses on the in-flight guard — consuming the
     /// request unsent, the same swallowed resync one branch over.
     @MainActor func testResyncRequiredAfterTheWindowWhileAFetchIsInFlightStaysOwed() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -5454,10 +5454,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         }
     }
 
-    /// Guards Change 1 (report a lost link from every interactive control path, not just typed input)
-    /// and Change 2 (a link the model reports gone discards this pane's queued input rather than
-    /// delivering it late) from `RemoteGhosttySessionHost`'s own send paths, using
-    /// `ScriptedControlRequestSender` and an injected `inputFailureHandler` in place of a real socket —
+    /// Guards two behaviors of `RemoteGhosttySessionHost`'s own send paths: a lost link is reported from
+    /// every interactive control path, not just typed input, and a link the model reports gone discards
+    /// this pane's queued input rather than delivering it late. Uses `ScriptedControlRequestSender` and
+    /// an injected `inputFailureHandler` in place of a real socket —
     /// the daemon side of these failures is exercised elsewhere (transport timeouts, coded rejections);
     /// here the host's wiring from "the send threw" to "the pane's queued input is gone" is what is
     /// under test.
@@ -5498,7 +5498,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     }
 
     /// See `testFailedScrollReportsTheLostLink`; the resize send runs off `inputQueue` in its own
-    /// detached task (a `try?` there used to swallow the thrown error entirely — see Change 1), so this
+    /// detached task (a `try?` there would otherwise swallow the thrown error entirely), so this
     /// pins the resize path separately rather than assuming the queued paths' fix covers it too.
     @MainActor func testFailedResizeReportsTheLostLink() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -5537,7 +5537,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(failureCount, 1, "the resize's failure must reach inputFailureHandler")
     }
 
-    /// The regression Change 2 fixes: a keystroke typed while the link is down used to keep buffering
+    /// Without this, a keystroke typed while the link is down would keep buffering
     /// behind the failed one, then deliver in full — including any Enter — once the link recovered
     /// minutes later. `TerminalInputSerialQueue.enqueue` chains every send behind its predecessor, so the
     /// second and third sends are still queued behind the first when it fails; `inputFailureHandler`
@@ -5579,7 +5579,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         )
     }
 
-    /// The other half of Change 2's contract: a reachable daemon's coded rejection is not evidence the
+    /// A reachable daemon's coded rejection is not evidence the
     /// link is gone, so `inputFailureHandler` answering `false` must leave the queue running — the next
     /// keystroke is still delivered rather than silently dropped alongside a rejected one.
     @MainActor func testCodedRejectionNeitherReportsALostLinkNorDropsInput() async throws {
@@ -5610,12 +5610,12 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(sender.controlRequestTexts, ["first", "second"], "a coded rejection must not drop the next send behind it")
     }
 
-    /// The fix for the main-thread-stall keystroke drop: a REQUEST TIMEOUT — the round trip did not
+    /// Guards against the main-thread-stall keystroke drop: a REQUEST TIMEOUT — the round trip did not
     /// answer inside the interactive control deadline — is not by itself proof the link is down (an
     /// app-side stall busy past the deadline looks identical to a slow network from here), so
     /// `DeviceTerminalSessionStateModel.reportFailedInputSend` answers `false` for one, the same as a
     /// coded rejection. The timed-out send must still reach `inputFailureHandler` — the failure itself
-    /// is reported exactly as before (Change 1's contract) — but a `false` answer must leave the queued
+    /// is still reported — but a `false` answer must leave the queued
     /// backlog alone, so the keystrokes typed during the stall are not silently discarded. Only the
     /// timed-out ("first") request fails; "second" and "third" are scripted to succeed, so seeing all
     /// three land proves they were actually attempted, not merely that the queue was not cancelled.

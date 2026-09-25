@@ -115,8 +115,7 @@ extension SQLiteStore {
         return Dictionary(grouping: rows.compactMap { decodeRunningProcess(row: $0) }, by: { $0.workspaceID })
     }
 
-    /// Every running-process row (across all workspaces) whose `terminal_session_id` references a given
-    /// terminal session. The session-retention release path (`WorkspaceOrchestrator
+    /// The session-retention release path (`WorkspaceOrchestrator
     /// .releaseEndedTerminalSessionReferences`) uses this to find the process rows pinning a long-ended
     /// terminal session so it can drop them without the live-termination side effects of
     /// `stopRunningProcess`.

@@ -62,8 +62,8 @@ struct WorkspaceControlBar: View {
     }
 }
 
-/// Compact pill button used by the workspace control bar. Workspace lifecycle actions are not obvious
-/// from an icon alone (Start starts *what*, exactly), so each carries a text label beside its glyph.
+/// Workspace lifecycle actions are not obvious from an icon alone (Start starts *what*, exactly), so
+/// each carries a text label beside its glyph.
 private struct WorkspaceControlButton: View {
     let title: String
     let systemImage: String

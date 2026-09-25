@@ -174,8 +174,6 @@ class ShaperTestCase(unittest.TestCase):
                     events.append(json.loads(line))
         return events
 
-    # --- tests -----------------------------------------------------------
-
     def test_relays_bytes_both_ways(self):
         listen_port, _control_port, _log_path = self.start_shaper("good")
         with socket.create_connection(("127.0.0.1", listen_port), timeout=5) as s:

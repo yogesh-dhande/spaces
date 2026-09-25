@@ -197,7 +197,7 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
     }
 
     /// A regression check that an ordinary multi-row selection whose boundary rows both still intersect
-    /// the column window (rather than missing it entirely) rebases exactly as before the trimming fix:
+    /// the column window (rather than missing it entirely) rebases normally:
     /// the boundary rows clamp into the window and no `extends` flag is invented.
     func testCropDoesNotTrimAStreamSelectionWhoseBoundaryRowsIntersectTheColumnWindow() {
         let snapshot = makeSnapshot(

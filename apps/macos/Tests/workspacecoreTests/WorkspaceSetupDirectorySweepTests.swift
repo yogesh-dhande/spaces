@@ -87,8 +87,8 @@ final class WorkspaceSetupDirectorySweepTests: XCTestCase {
         return root
     }
 
-    /// Writes an `.orphaned` marker inside `directory` and backdates its mtime by `age` seconds
-    /// (negative = in the past), simulating a marker created `age` seconds ago by an earlier sweep.
+    /// Backdates the `.orphaned` marker's mtime by `age` seconds (negative = in the past), simulating a
+    /// marker created `age` seconds ago by an earlier sweep.
     private func writeMarker(in directory: URL, age: TimeInterval) throws {
         let markerPath = directory.appendingPathComponent(orphanMarkerFileName, isDirectory: false)
         try Data().write(to: markerPath)

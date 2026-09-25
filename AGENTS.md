@@ -90,4 +90,8 @@
 ## Project Structure Rules
 - Keep types split into focused files instead of combining many unrelated types in one file.
 - Prefer unit tests for core logic; use UI tests only when unit tests are not possible.
-- Add comments only where they reduce real ambiguity.
+- Comments capture what the code cannot say on its own: non-obvious choices, key product or implementation decisions, invariants and contracts the types don't enforce, and hard-learned lessons from debugging (name the failure the code's shape prevents). Do not write comments that:
+    - restate the code, a name, or a signature, or narrate a body step by step
+    - narrate history ("previously", "used to", "no longer", "was renamed"); state the current behavior, and keep a past failure only when it explains the current shape
+    - carry review-process labels ("Fix 3", "round 2", "Finding C", "Option B", "P1"); issue references like `#123` are fine
+    - list callers ("Used by X and Y") or cite docs by line number

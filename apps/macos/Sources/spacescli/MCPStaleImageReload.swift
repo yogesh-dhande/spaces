@@ -63,7 +63,6 @@ struct MCPStaleImageReload {
     /// `realpath` at every decision rather than once here, so an indirection an update repointed is
     /// followed afresh instead of pinning the release it named at launch.
     private let executablePath: String?
-    /// Identity of the image this process is running (see the same-image guard above).
     private let runningImage: SpacesBinaryFileIdentity?
     private let identityReader: (String) -> SpacesBinaryFileIdentity?
     private let pathResolver: (String) -> String?
@@ -96,8 +95,8 @@ struct MCPStaleImageReload {
         return targets.execPath
     }
 
-    /// Replaces this process with `path`. On success it never returns; on failure the server keeps
-    /// serving the stale image and re-decides on the next mismatch.
+    /// On success it never returns; on failure the server keeps serving the stale image and re-decides
+    /// on the next mismatch.
     func reload(into path: String, arguments: [String] = CommandLine.arguments) { replaceExecutable(path, arguments) }
 
     /// What to exec, and whose file identity decides whether that exec would change anything. They differ

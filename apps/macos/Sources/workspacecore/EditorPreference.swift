@@ -48,7 +48,6 @@ public enum EditorPreference: String, Codable, Sendable, CaseIterable {
         }
     }
 
-    /// Launch family, which selects how a remote workspace is opened.
     public var family: EditorFamily {
         switch self {
         // `.builtin` never reaches an external launch; its value here is never consulted.

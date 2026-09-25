@@ -100,8 +100,7 @@ export function editorLineForDiffLine(patch: string, side: "old" | "new", line: 
           const next = hunk.lines[end];
           // Deletions never advance `newLine`, so it already names the position right after the
           // run: the kept line there (context or addition), or, when the run ends the hunk, the
-          // line the file continues with. See the doc comment for when that position is known to
-          // exist and when the last kept line (one behind it) is reported instead.
+          // line the file continues with.
           if (next !== undefined && (next.startsWith(" ") || next.startsWith("+"))) return newLine;
           if (!isLastHunk || isPureDeletion) return newLine;
           return Math.max(1, newLine - 1);

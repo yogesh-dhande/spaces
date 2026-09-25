@@ -59,7 +59,6 @@ final class TerminalClientKindMigrationTests: XCTestCase {
 
         XCTAssertEqual(try scalar(database, "SELECT current_version FROM migration_state"), "\(DatabaseSchema.currentVersion)")
 
-        // terminal_clients.kind is rewritten for both rows.
         XCTAssertEqual(try scalar(database, "SELECT kind FROM terminal_clients WHERE client_id = 'client-local'"), "local")
         XCTAssertEqual(try scalar(database, "SELECT kind FROM terminal_clients WHERE client_id = 'client-remote'"), "remote")
 
@@ -73,7 +72,6 @@ final class TerminalClientKindMigrationTests: XCTestCase {
         // payload with today's enum produces byte for byte.
         XCTAssertEqual(rewrittenJSON, currentEncodedWithClients)
 
-        // The client-less payload is untouched.
         XCTAssertEqual(
             try scalar(database, "SELECT payload_json FROM terminal_remote_session_states WHERE session_id = 'session-no-clients'"), encodedNoClients)
     }

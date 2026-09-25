@@ -9,7 +9,6 @@ extension AppKitController {
             persistedRawValue: (try? SpacesClientDatabase.defaultDatabase().setting(key: ClientSettingsKey.terminalTextSize)) ?? nil)
     }
 
-    /// Moves the app-wide terminal text size one zoom step and re-renders every open pane at it.
     /// Reached only from a focused terminal pane's zoom keys. A step that would leave the size's range
     /// resolves to the size already in use, so it persists nothing and repaints nothing: pressing zoom
     /// past either end does nothing at all.

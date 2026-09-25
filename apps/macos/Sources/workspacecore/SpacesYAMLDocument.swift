@@ -7,7 +7,7 @@ public struct SpacesYAMLDocument: Codable, Equatable, Sendable {
     public var version: Int
     public var setupScript: String?
     public var stopScript: String?
-    /// Service names declared by the project. Each is a DNS-1123 label and routes through Caddy.
+    /// Each service name is a DNS-1123 label and routes through Caddy.
     public var services: [String]
     public var processes: [Process]
     public var browserSessions: [BrowserSessionConfig]

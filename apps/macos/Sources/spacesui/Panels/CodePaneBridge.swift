@@ -1119,8 +1119,7 @@ enum CodePaneBridge {
         let agents: [AgentPayload]
     }
 
-    /// One running agent, as sent in `InitPayload.agents` and `AgentsPayload.agents`. Mirrors
-    /// `CodePaneRunningAgent`; `sessionId` is what `reviewCommentsSend` writes into.
+    /// One running agent. Mirrors `CodePaneRunningAgent`; `sessionId` is what `reviewCommentsSend` writes into.
     struct AgentPayload: Encodable, Equatable {
         let id: String
         let label: String

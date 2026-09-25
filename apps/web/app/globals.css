@@ -80,7 +80,7 @@ body {
   }
 }
 
-/* The base theme (mono type + dark Terminal palette) is now global, in :root and body.
+/* The base theme (mono type + dark Terminal palette) lives globally, in :root and body.
    `.lp` gives the landing page a CRT-screen texture and the large display heading sizes.
    Three stacked layers: a teal phosphor bloom from the top and a soft edge vignette, both
    locked to the viewport (background-attachment: fixed) so the "screen" frame holds steady

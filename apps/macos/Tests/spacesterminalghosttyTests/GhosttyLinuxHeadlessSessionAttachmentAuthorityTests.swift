@@ -414,7 +414,7 @@
             await shutDownAndDrain(box.value)
         }
 
-        // MARK: - Fix 2: a failed launch-configuration write terminates the core
+        // MARK: - A failed launch-configuration write terminates the core
 
         /// A prior write against a healthy database is what gives `breakDatabase` below a file to break: the
         /// database a fresh session writes to does not exist until something creates it, and `breakDatabase`
@@ -468,7 +468,7 @@
             let databasePath = try SpacesProfile.current().databasePath
             try Self.breakDatabase(at: databasePath)
 
-            // Fix 4: `terminate()` alone never calls `onSessionClosed`, only the natural child-exit path does,
+            // `terminate()` alone never calls `onSessionClosed`, only the natural child-exit path does,
             // so a core terminated over a failed launch-configuration write must call it explicitly, or the
             // daemon's session registry keeps the dead core registered forever. Record whether it fired.
             let onSessionClosedFired = MutableBox(false)
@@ -513,7 +513,7 @@
             await box.value.drainPersistenceForShutdown()
         }
 
-        // MARK: - Fix 5: a failed attachment-snapshot reseed is retried, not cached as empty
+        // MARK: - A failed attachment-snapshot reseed is retried, not cached as empty
 
         /// `resumeFromHandoff` reseeds `cachedAttachmentSnapshot` from disk (`seedAttachmentSnapshot`) as
         /// close to the top of resume as possible, since the durable attachment rows it reads there are
@@ -521,7 +521,7 @@
         /// reseed cached an empty snapshot instead of nil, `hasLiveAttachments()` would answer false for a
         /// session the durable rows say is still owned, and the daemon's `.whileAttached` reaper would tear
         /// down a live, attached session on nothing more than a transient disk hiccup, with no read left
-        /// that would ever notice the mistake. Fix 5 caches nil on a failed read instead: `hasLiveAttachments`
+        /// that would ever notice the mistake. Caching nil on a failed read instead means `hasLiveAttachments`
         /// answers conservatively (live) while the database stays broken, and the next access after it is
         /// restored retries the read and recovers the real, attached answer.
         @Test func resumeFromHandoffRetriesAFailedAttachmentSeedRatherThanCachingItEmpty() async throws {
@@ -556,7 +556,7 @@
             // (`readRuntimeState`) is already `try?`-wrapped for the same reason, so nothing here surfaces
             // the broken database as a thrown error. `resumeFromHandoff` also re-enqueues the launch-
             // configuration write, which will independently exhaust its retries against the still-broken
-            // database and terminate this core sometime after this call returns (Fix 4); that race is
+            // database and terminate this core sometime after this call returns; that race is
             // immaterial below, since `hasLiveAttachments()` and the attachment snapshot it and
             // `currentRemoteStatePayload` read from are unaffected by `terminate()`.
             try await core.resumeFromHandoff(record)

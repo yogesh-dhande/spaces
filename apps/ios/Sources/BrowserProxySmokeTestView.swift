@@ -95,8 +95,8 @@
         }
     }
 
-    /// Bare `WKWebView` wrapper. `reloadToken` changes drive a fresh `load`
-    /// (used by the Retry button); navigation results are reported back
+    /// Bare `WKWebView` wrapper. `reloadToken` changes drive a fresh `load`;
+    /// navigation results are reported back
     /// through `onCommit`/`onFail` rather than exposed as view state, since
     /// the delegate callbacks arrive outside SwiftUI's update cycle.
     private struct WebProbeView: UIViewRepresentable {
@@ -166,8 +166,7 @@
         private var connectionsByID: [ObjectIdentifier: NWConnection] = [:]
 
         /// Tears down any prior listener/connections and starts a fresh
-        /// listener bound to an ephemeral loopback port. Safe to call repeatedly
-        /// (used by the initial `.task` and by Retry).
+        /// listener bound to an ephemeral loopback port. Safe to call repeatedly.
         func start() {
             stop()
             sawExpectedHost = false

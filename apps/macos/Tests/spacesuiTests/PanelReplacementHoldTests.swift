@@ -63,9 +63,8 @@ extension ProcessProfileEnvironmentSuites {
 
         /// The same case driven through the handler the close IPC actually lands in, which is one layer
         /// above the coordinator and is where a placement gate was swallowing the disposition: the
-        /// coordinator never saw the hold, so a workspace the user was not viewing lost its pane position
-        /// exactly as it did before the hold existed. Every close is forwarded now, whatever the layout
-        /// currently holds in memory.
+        /// coordinator never saw the hold, so a workspace the user was not viewing lost its pane position.
+        /// Every close is forwarded, whatever the layout currently holds in memory.
         @Test func theCloseHandlerForwardsAHoldForAWorkspaceWhosePanelWasNeverShown() {
             let controller = makeController()
             #expect(controller.panelCoordinator.placement(forSessionID: "predecessor") == nil, "precondition: nothing is materialized")
@@ -76,7 +75,7 @@ extension ProcessProfileEnvironmentSuites {
         }
 
         /// And the handler's own report tells the three outcomes apart, so a hold recorded without a pane
-        /// is a success rather than the nothing-to-do case it used to be filed under.
+        /// is a success rather than the nothing-to-do case.
         @Test func theCloseHandlerReportsAHoldSeparatelyFromHavingNothingToDo() {
             #expect(TerminalPaneService.terminalPaneCloseRoute(hasPlacement: false, disposition: .awaitReplacement) == .hold)
             #expect(TerminalPaneService.terminalPaneCloseRoute(hasPlacement: false, disposition: .teardown) == .missingPane)
@@ -281,7 +280,7 @@ extension ProcessProfileEnvironmentSuites {
                 "the pane survived the refresh pointing at the replacement instead of being pruned away")
         }
 
-        /// Fix for the remote-daemon gap one step further than `aPlacedPaneIsHandedOverWithNoCloseEverArriving`:
+        /// The remote-daemon gap one step further than `aPlacedPaneIsHandedOverWithNoCloseEverArriving`:
         /// there the predecessor's panel had already been restored (its pane was placed, just unheld). Here
         /// the panel has never been materialized this launch either, so the predecessor starts with neither
         /// a hold nor an in-memory placement — only a persisted layout. The restore attempt does not depend

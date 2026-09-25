@@ -27,7 +27,6 @@
             super.tearDown()
         }
 
-        /// An empty `hosts` list is rejected before any connection attempt.
         func testConnectThrowsInvalidEndpointForEmptyHosts() async {
             var settings = SpacesMobileConnectionSettings()
             settings.hosts = []
@@ -269,15 +268,6 @@
             XCTAssertEqual(cachedHostAfterCleanClose, "127.0.0.1")
         }
 
-        /// K3 regression: a stream that ends because the daemon decoded the frame and declined it (the
-        /// session already ended, say) proves the address itself is fine, so it must not be recorded
-        /// against the resolver's shared per-host failure count the way a genuine transport failure is
-        /// (`testStreamDisconnectWithErrorClearsCachedWinner`, above). Mirrors Mac's
-        /// `SpacesDeviceAPIStreamEndpoint.isHostTransportFailure`, which excludes a decoded rejection from
-        /// its transport-failure allowlist for the same reason. Before the fix, every non-nil disconnect
-        /// error, rejection included, was recorded via `noteStreamFailed(host:)`; with the resolver shared
-        /// across every pane's stream, a rejection on this host plus a real dial failure on a second
-        /// candidate would read as "every candidate is down" even though this one plainly answered.
         /// A broken pipe while writing the subscribe request means the peer vanished underneath the
         /// connection, the same lost-link evidence as a reset. The input path already classifies `EPIPE`
         /// that way; the stream classifier must agree so the reconnect records the failed candidate and
@@ -334,6 +324,15 @@
             } catch { XCTFail("expected connectionClosed, got \(error)") }
         }
 
+        /// A stream that ends because the daemon decoded the frame and declined it (the session already
+        /// ended, say) proves the address itself is fine, so it must not be recorded against the
+        /// resolver's shared per-host failure count the way a genuine transport failure is
+        /// (`testStreamDisconnectWithErrorClearsCachedWinner`, above). Mirrors Mac's
+        /// `SpacesDeviceAPIStreamEndpoint.isHostTransportFailure`, which excludes a decoded rejection from
+        /// its transport-failure allowlist for the same reason. Recording every non-nil disconnect error,
+        /// rejection included, via `noteStreamFailed(host:)` would mean a rejection on this host plus a
+        /// real dial failure on a second candidate reads as "every candidate is down" even though this
+        /// one plainly answered.
         func testStreamRejectionDoesNotRecordAFailedCandidateOrExhaustDialCandidates() async throws {
             let server = try PinnedTLSLoopbackServer()
             let port = try await server.start()
@@ -416,9 +415,9 @@
         }
 
         /// The bug the stream keepalive exists for: the peer's transport dies without closing the socket,
-        /// so nothing arrives and nothing fails. The viewer used to keep a frozen screen indefinitely,
-        /// with keystrokes still "succeeding" on the separate request channel. Silence past the timeout
-        /// now ends the stream as `streamStalled`, and (like every other ending) releases it.
+        /// so nothing arrives and nothing fails, leaving a frozen screen indefinitely while keystrokes
+        /// still "succeed" on the separate request channel. Silence past the timeout ends the stream as
+        /// `streamStalled`, and (like every other ending) releases it.
         func testASilentConnectionStallsTheStreamAndReleasesItsSubscription() async throws {
             let server = try PinnedTLSLoopbackServer()
             let port = try await server.start()
@@ -658,8 +657,7 @@
         /// failure and a later query, so a caller re-deriving the verdict from the resolver's current
         /// state would wrongly read "not every candidate has failed". `noteStreamFailed(host:)`'s return
         /// value is what a caller must use instead, because it is captured atomically with the recording
-        /// it describes and so cannot be raced out from under the caller that way. Mirrors the Mac
-        /// resolver's `testNoteStreamFailedReturnsTheVerdictAtTheMomentOfRecordingNotAtALaterQuery`.
+        /// it describes and so cannot be raced out from under the caller that way.
         func testNoteStreamFailedReturnsTheVerdictAtTheMomentOfRecordingNotAtALaterQuery() async {
             var settings = SpacesMobileConnectionSettings()
             settings.hosts = ["10.0.0.5"]
@@ -740,7 +738,7 @@
 
         /// `sendPinnedPing` must spend one end-to-end deadline across connect, send, and read, not a
         /// fresh `timeout` budget reissued to each stage. A connect that succeeds only after consuming
-        /// most of `timeout` (`PinnedTLSLoopbackServer(acceptDelay:)`, see its doc comment), paired with
+        /// most of `timeout` (`PinnedTLSLoopbackServer(acceptDelay:)`), paired with
         /// a server that then never answers, is the shape of a half-alive link: the dial finally goes
         /// through, but nothing useful happens after. The bug this guards against handed connect, send,
         /// and read each their own full `timeout`, so a connect that used most of one budget still let
@@ -827,10 +825,6 @@
         }
     }
 
-    /// A bare TCP listener with no TLS behind it: stands in for "something answered at the transport
-    /// level" so a test can exercise the pin-mismatch path without a real pinned-TLS daemon. Accepts and
-    /// immediately parks every incoming connection (never sends a TLS handshake), which is what makes a
-    /// pinned-TLS `NWConnection` against it time out rather than succeed or fail outright.
     /// Stands in for everything a live `StreamSubscription` keeps alive. Held only by the event callback
     /// the subscription owns, so its deallocation is a direct read of whether that subscription was
     /// released. `noteEvent` exists so the capture is an unambiguous use rather than a discardable one.
@@ -874,6 +868,10 @@
         func value() -> Int { lock.withLock { stored } }
     }
 
+    /// A bare TCP listener with no TLS behind it: stands in for "something answered at the transport
+    /// level" so a test can exercise the pin-mismatch path without a real pinned-TLS daemon. Accepts and
+    /// immediately parks every incoming connection (never sends a TLS handshake), which is what makes a
+    /// pinned-TLS `NWConnection` against it time out rather than succeed or fail outright.
     private final class LoopbackConnectionSink: @unchecked Sendable {
         private let listener: NWListener
         private let queue = DispatchQueue(label: "spaces.device.api.resolver-test.sink")

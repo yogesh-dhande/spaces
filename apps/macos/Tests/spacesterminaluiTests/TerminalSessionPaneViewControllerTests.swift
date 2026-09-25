@@ -3675,9 +3675,9 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
     /// (`resolveVisibleRenderer` resolves it straight to `.ghosttyOwner`, never the takeover screen), so
     /// a paste attempt here is not blocked with a "take over ownership" message — it just fails silently
     /// (a beep, no status text) because there is no real renderer host in this unit-test environment to
-    /// carry it. This test predates that redesign and used to assert the opposite (paste disabled, an
-    /// ownership-nagging status message) back when an owner-with-no-surface pane was misclassified as
-    /// the same "another client owns this" screen a genuine viewer sees.
+    /// carry it. Misclassifying this owner-with-no-surface pane as the same "another client owns this"
+    /// screen a genuine viewer sees would disable paste and show an ownership-nagging status message
+    /// instead.
     @MainActor func testGhosttyOwnerPaneAllowsPasteAttemptEvenBeforeRendererIsReady() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -4123,11 +4123,11 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugState, "state: running    child: 2222")
     }
 
-    /// A `session_metadata` state-stream payload must cause at most one `refreshNow()`, not two. Before
-    /// the fix, `TerminalRemoteSessionStateNotificationRouting` fanned this reason out to both
+    /// A `session_metadata` state-stream payload must cause at most one `refreshNow()`, not two: if
+    /// `TerminalRemoteSessionStateNotificationRouting` fanned this reason out to both
     /// `.spacesTerminalSessionMetadataDidChange` and `.spacesTerminalRuntimeStateDidChange`, and this
-    /// pane observes both with the identical unconditional refresh — so one title rewrite from a coding
-    /// agent (which can happen many times a second) ran the full refresh twice. Posts through the real
+    /// pane observes both with the identical unconditional refresh, one title rewrite from a coding
+    /// agent (which can happen many times a second) would run the full refresh twice. Posts through the real
     /// routing table (`postStateStreamNotifications`), not the individual `debugSimulate*` hooks, so the
     /// assertion exercises the fan-out itself rather than one notification in isolation.
     @MainActor func testSessionMetadataStateStreamPayloadCausesExactlyOneRefresh() throws {
@@ -5033,7 +5033,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
     }
 
     /// Typing into a dead pane stays unconsumed — the pulse is emphasis only and must not start
-    /// swallowing keys that previously fell through.
+    /// swallowing keys that would otherwise fall through.
     @MainActor func testTypingIntoEndedSessionIsNotConsumed() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }

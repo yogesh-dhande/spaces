@@ -2490,8 +2490,8 @@ private struct SpacesSurfacePayload: Codable {
     let frontWindowIdentifier: String?
     let frontWindowTitle: String?
     let frontWindowKind: String
-    /// Identity of the focused window's active terminal pane (post-panel-rework terminals are
-    /// panes inside one shared window, so the window title/identifier no longer encodes them).
+    /// Identity of the focused window's active terminal pane (terminals are panes inside one shared
+    /// window, so the window title/identifier does not encode them).
     let frontTerminalPaneSessionID: String?
     let frontTerminalPaneMode: String?
     let frontTerminalPaneTitle: String?
@@ -2668,7 +2668,6 @@ private func workspaceSettingsPayload(_ settings: WorkspaceSettings) -> Workspac
         browserSessions: settings.browserSessions.map { .init(name: $0.name, url: $0.url) })
 }
 
-/// Shared JSON encoder for the shell harness.
 // MARK: - Automation helpers (test seam; automation authoring is GUI-only in the product)
 
 /// Sends a profile automation command to the adjacent daemon and emits its response section as JSON,
@@ -2948,7 +2947,7 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
 
     /// Opens a subscription stream, collects every newline-delimited payload line, and returns once the
     /// stream has been idle for `settleSeconds` (with at least one line received) or `overallSeconds`
-    /// elapses. Used by the demo recorder to capture a session's settled steady-state frames.
+    /// elapses.
     func collectStream(requestData: Data, settleSeconds: Double, overallSeconds: Double) throws -> [Data] {
         let connection = makeConnection()
         defer { connection.cancel() }

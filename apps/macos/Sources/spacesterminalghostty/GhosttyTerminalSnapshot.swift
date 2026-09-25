@@ -107,11 +107,10 @@
                 scrollbarOffset: snapshot.scrollbar_offset)
         }
 
-        /// Decodes the snapshot's selection out of `selection_flags` and the four viewport-relative,
-        /// grid-clipped endpoint fields. Ghostty already did the clipping and the viewport rebase (this
-        /// is an embedded surface, so its exported snapshot IS the viewport), so this is a direct field
-        /// copy with no projection math, unlike the headless core which has to rebase a screen-space
-        /// selection into whichever viewport it is exporting.
+        /// Ghostty already did the clipping and the viewport rebase (this is an embedded surface, so its
+        /// exported snapshot IS the viewport), so this is a direct field copy with no projection math,
+        /// unlike the headless core which has to rebase a screen-space selection into whichever viewport
+        /// it is exporting.
         private static func selection(of snapshot: ghostty_terminal_snapshot_s) -> GhosttyTerminalSelectionRange? {
             let flags = snapshot.selection_flags
             guard flags & 0x1 != 0 else { return nil }
@@ -120,9 +119,8 @@
                 endRow: snapshot.selection_end_y, isRectangle: flags & 0x2 != 0, extendsAbove: flags & 0x4 != 0, extendsBelow: flags & 0x8 != 0)
         }
 
-        /// Rebuilds a cell's grapheme cluster from the exported base codepoint plus the extra codepoints
-        /// the snapshot carries. Cells with no extras — nearly all of them — carry no cluster and render
-        /// from the base codepoint alone.
+        /// Cells with no extras — nearly all of them — carry no cluster and render from the base
+        /// codepoint alone.
         private static func cluster(for cell: ghostty_terminal_snapshot_cell_s) -> String? {
             guard let extras = cell.grapheme_extras, cell.grapheme_extra_len > 0, let base = UnicodeScalar(cell.codepoint) else { return nil }
             var scalars = String.UnicodeScalarView()

@@ -73,10 +73,11 @@ final class SpacesDevicePairingStoreTests: XCTestCase {
     }
 
     /// The steady state this store spends nearly all its time in: an already-paired client re-presents its
-    /// current token, so nothing about the pairing changes except when it was last seen. That used to
-    /// re-encode and atomically rewrite the whole pairings file — on `issueToken`, which the daemon runs on
-    /// its main actor for every `bootstrapLocalClient`, and on `authorize`, which runs in front of every
-    /// request including each keystroke's control request. It must now write nothing.
+    /// current token, so nothing about the pairing changes except when it was last seen. Rewriting the
+    /// whole pairings file on this path (`issueToken`, which the daemon runs on its main actor for every
+    /// `bootstrapLocalClient`, and `authorize`, which runs in front of every request including each
+    /// keystroke's control request) would be an atomic re-encode on the hot path, so this steady state
+    /// must write nothing.
     func testSteadyStateBootstrapAndAuthorizeWriteNothing() throws {
         try withTemporaryProfile {
             let store = try SpacesDevicePairingStore()

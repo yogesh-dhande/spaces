@@ -138,11 +138,12 @@
             }
         }
 
-        /// The cross-session guarantee the per-session lanes exist for. Before them every session's
-        /// controls and `.state` exports shared one serial queue, so a keystroke for one pane waited behind
-        /// however many other sessions were mid-round-trip — each able to hold the queue for the client's
-        /// full 5s control deadline, which is why the freeze appeared at roughly five streaming agents.
-        /// A control stalled on one session's engine must now leave another session's control untouched.
+        /// The cross-session guarantee the per-session lanes exist for: without them, every session's
+        /// controls and `.state` exports would share one serial queue, so a keystroke for one pane would
+        /// wait behind however many other sessions were mid-round-trip — each able to hold the queue for
+        /// the client's full 5s control deadline, which is why the freeze appeared at roughly five
+        /// streaming agents. A control stalled on one session's engine must leave another session's
+        /// control untouched.
         func testAStalledControlOnOneSessionDoesNotDelayAControlOnAnotherSession() throws {
             try withTemporaryProfile {
                 let stalledSessionID = "session-lane-stalled-\(UUID().uuidString)"
@@ -273,11 +274,12 @@
             }
         }
 
-        /// The other half of the false-banner mechanism: the corroboration `.ping` used to be answered
-        /// inline on the shared `spaces.device.api` queue, behind the inline `.overview` work that
-        /// dominates that queue's busy time on a loaded daemon. A daemon busy enough to time a keystroke
-        /// out is exactly the daemon whose inline backlog delayed the probe, so the probe failed precisely
-        /// when it was needed and the pane raised a connection-lost banner over a healthy link.
+        /// The other half of the false-banner mechanism: without answering the corroboration `.ping` on
+        /// the connection's own queue, it would be answered inline on the shared `spaces.device.api`
+        /// queue, behind the inline `.overview` work that dominates that queue's busy time on a loaded
+        /// daemon. A daemon busy enough to time a keystroke out is exactly the daemon whose inline
+        /// backlog would delay the probe, failing it precisely when it was needed and raising a
+        /// connection-lost banner over a healthy link.
         func testASlowInlineOverviewDoesNotDelayAPingOnAnotherConnection() throws {
             try withTemporaryProfile {
                 let overviewRequestArrived = DispatchSemaphore(value: 0)
@@ -409,10 +411,9 @@
             }
         }
 
-        /// Proves the fix for the finding that motivated splitting `workspaceSetupQueue` out of
-        /// `workspaceTeardownQueue`: before the split, `.runWorkspaceSetup` shared one serial queue with
-        /// `.archiveWorkspace`/`.deleteProject`/`.stopWorkspace`, so a long or hung setup script on one
-        /// workspace blocked teardown of every other workspace behind it. This seeds a second, unrelated
+        /// Pins why `workspaceSetupQueue` is split out of `workspaceTeardownQueue`: sharing one serial queue
+        /// with `.archiveWorkspace`/`.deleteProject`/`.stopWorkspace` would let a long or hung setup script
+        /// on one workspace block teardown of every other workspace behind it. This seeds a second, unrelated
         /// workspace with no setup script and archives it while the first workspace's setup is blocked on
         /// the fifo; the archive must complete promptly rather than waiting behind the setup.
         func testAnArchiveOnAnotherWorkspaceDoesNotWaitBehindARunningSetup() throws {
@@ -474,10 +475,9 @@
             }
         }
 
-        /// Proves the fix for the finding that motivated splitting `workspaceStopQueue` out of
-        /// `workspaceTeardownQueue`: before the split, `.stopWorkspace` shared one serial queue with
-        /// `.archiveWorkspace`/`.deleteProject`, so a hung stop script on one workspace blocked archive or
-        /// delete of every other workspace behind it. This seeds a workspace whose stop script blocks on a
+        /// Pins why `workspaceStopQueue` is split out of `workspaceTeardownQueue`: sharing one serial queue
+        /// with `.archiveWorkspace`/`.deleteProject` would let a hung stop script on one workspace block
+        /// archive or delete of every other workspace behind it. This seeds a workspace whose stop script blocks on a
         /// fifo, issues `.stopWorkspace` for it, and archives an unrelated second workspace while the first
         /// workspace's stop is blocked; the archive must complete promptly rather than waiting behind the
         /// stop.

@@ -143,7 +143,6 @@ public final class SpacesDeviceEndpointResolver: @unchecked Sendable {
         return hosts
     }
 
-    /// The candidate most recently proven reachable, if any.
     public func currentCachedHost() -> String? {
         lock.lock()
         defer { lock.unlock() }
@@ -249,8 +248,7 @@ public final class SpacesDeviceEndpointResolver: @unchecked Sendable {
         return !hosts.isEmpty && hosts.allSatisfy(streamFailedHosts.contains)
     }
 
-    /// Opens one pinned-TLS connection to a specific candidate, without racing. Used by the stream
-    /// transports, which pick their candidate through `nextStreamHost()`.
+    /// Opens one pinned-TLS connection to a specific candidate, without racing.
     ///
     /// A completed handshake here proves the address exactly as much as a race win does (the pin is what
     /// validates the daemon, and it is the same pin), so it is recorded the same way. Without that, a

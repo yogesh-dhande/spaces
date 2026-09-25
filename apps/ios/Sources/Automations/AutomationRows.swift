@@ -50,7 +50,7 @@ enum SpacesMobileAutomations {
     }
 
     /// The raw status of an automation's most recent run (by start-or-create time), or nil if it has
-    /// never run — mirrors `AutomationsViewModel.lastRunStatus` on the Mac.
+    /// never run.
     static func lastRunStatus(automationID: String, in runs: [TerminalServiceAutomationRunSummary]) -> String? {
         runs.filter { $0.automationID == automationID }.max { lhs, rhs in (lhs.startedAt ?? lhs.createdAt) < (rhs.startedAt ?? rhs.createdAt) }?
             .status
@@ -123,8 +123,7 @@ enum SpacesMobileAutomations {
 
     /// Whether a run's still-live attributed coding agents should offer "End agents": only once the run
     /// itself has reached a terminal status (`running`/`queued` keep their Cancel affordance instead), and
-    /// only if at least one attributed agent's terminal session is still live. Mirrors
-    /// `AutomationsViewModel.endAgentsAvailable` on the Mac.
+    /// only if at least one attributed agent's terminal session is still live.
     static func endAgentsAvailable(_ run: TerminalServiceAutomationRunSummary) -> Bool {
         let status = AutomationRunStatus(rawValue: run.status)
         guard status != .running, status != .queued else { return false }
@@ -305,8 +304,6 @@ enum SpacesMobileAutomations {
     }()
 }
 
-/// Pure derivation of automation-run alert entries, mirroring `AutomationsViewModel.alertEntries` on
-/// the Mac.
 enum SpacesMobileAutomationAlerts {
     static func entries(runs: [TerminalServiceAutomationRunSummary]) -> [SpacesMobileAutomationAlertEntry] {
         runs.filter { run in

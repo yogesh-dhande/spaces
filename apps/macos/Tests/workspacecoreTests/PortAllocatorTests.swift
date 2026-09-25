@@ -3,7 +3,6 @@ import XCTest
 @testable import workspacecore
 
 final class PortAllocatorTests: XCTestCase {
-    // Tests allocate skips reserved ports by arranging representative inputs and asserting the expected result.
     func testAllocateSkipsReservedPorts() throws {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path
@@ -31,7 +30,6 @@ final class PortAllocatorTests: XCTestCase {
         XCTAssertEqual(named[1].port, 20003)
     }
 
-    // Tests allocate throws when insufficient ports by arranging representative inputs and asserting the expected result.
     func testAllocateThrowsWhenInsufficientPorts() throws {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path
@@ -55,7 +53,6 @@ final class PortAllocatorTests: XCTestCase {
         XCTAssertEqual(stored, [])
     }
 
-    // Tests allocate with empty definitions allocates no ports by arranging representative inputs and asserting the expected result.
     func testAllocateWithEmptyDefinitionsAllocatesNoPorts() throws {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path

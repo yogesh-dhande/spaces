@@ -21,9 +21,9 @@ final class SpacesYAMLDocumentTests: XCTestCase {
         XCTAssertTrue(document.browserSessions.isEmpty)
     }
 
-    /// A spaces.yaml written before configured coding agents were removed still carries `agent_launchers:`.
-    /// The decoder ignores keys it does not know, so such a file keeps importing with the rest of its
-    /// configuration intact rather than failing the whole import.
+    /// A spaces.yaml may still carry the retired `agent_launchers:` key. The decoder ignores keys it does
+    /// not know, so such a file keeps importing with the rest of its configuration intact rather than
+    /// failing the whole import.
     func testDecodeIgnoresRetiredAgentLaunchersKey() throws {
         let document = try SpacesYAMLService.decode(
             """

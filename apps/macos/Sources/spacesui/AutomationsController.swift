@@ -343,8 +343,8 @@ import workspacecore
         let rowView = AutomationsTableRowView { [weak self] in self?.presentEditor(deviceID: row.deviceID, automationID: automation.id) }
         rowView.menu = makeAutomationRowMenu(row)
         rowView.setAccessibilityIdentifier("automations.row.\(row.id)")
-        // The table has no room for the one-line excerpt the card layout showed, so what an automation
-        // actually does stays reachable as the row's tooltip.
+        // The table has no room for a one-line excerpt, so what an automation actually does stays
+        // reachable as the row's tooltip.
         let excerpt = AutomationsViewModel.excerpt(for: automation)
         if !excerpt.isEmpty { rowView.toolTip = excerpt }
         // A disabled automation dims whole-row, the same 55% treatment that marks an unreachable device's

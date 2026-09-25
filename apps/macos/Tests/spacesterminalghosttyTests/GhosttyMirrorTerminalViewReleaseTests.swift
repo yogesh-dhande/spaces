@@ -195,5 +195,4 @@ private final class MirrorViewBox: @unchecked Sendable { var view: GhosttyMirror
 /// a release that deallocated the pane from one that merely dropped a reference.
 private final class WeakMirrorViewReference: @unchecked Sendable { weak var view: GhosttyMirrorTerminalView? }
 
-/// Carries the releasing thread's verdict back to the test.
 private final class ReleasingThreadOutcome: @unchecked Sendable { var value = false }

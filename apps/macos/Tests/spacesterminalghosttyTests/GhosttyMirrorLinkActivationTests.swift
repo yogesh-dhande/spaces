@@ -61,8 +61,6 @@ import spacesterminalcore
 
     // MARK: - Harness
 
-    /// Renders a single-line frame holding a URL into a real mirror surface, clicks the URL with the
-    /// given modifiers, and returns what the pane was asked to open.
     private func openedLinks(mouseReportingActive: Bool, modifierFlags: NSEvent.ModifierFlags) throws -> [String] {
         try openedLinks(snapshot: Self.snapshot(text: Self.url, mouseReportingActive: mouseReportingActive), modifierFlags: modifierFlags)
     }

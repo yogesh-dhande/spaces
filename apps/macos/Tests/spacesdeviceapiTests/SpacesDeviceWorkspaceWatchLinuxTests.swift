@@ -153,7 +153,7 @@
         /// new inode, which needs its own fresh `inotify_add_watch`), so the stale `classifiedDirectories`
         /// entry must be forgotten and the path reclassified, not just re-registered as-is. Recreating it
         /// WITH a populated nested `deep` subdirectory in the same step (rather than an empty directory)
-        /// proves the fix walks the whole recreated subtree fresh: re-registering just the top path alone,
+        /// proves reclassification walks the whole recreated subtree fresh: re-registering just the top path alone,
         /// with no reclassification, would restore coverage for `src/new` itself but leave `deep`
         /// unwatched, since inotify only reports the top of a newly created tree. `src/new` (a two-level
         /// path, so `src` itself is also freshly created up front) rather than a single top-level directory
@@ -181,8 +181,8 @@
 
             // Delete and recreate `src/new`, this time with a populated nested `deep` subdirectory created
             // in the same `createDirectory(withIntermediateDirectories:)` call: inotify only reports `new`'s
-            // own creation, never `deep`'s, so a write inside `deep` below only succeeds if the fix
-            // reclassified and expanded the whole recreated subtree rather than re-registering `new` alone.
+            // own creation, never `deep`'s, so a write inside `deep` below only succeeds if
+            // reclassification expanded the whole recreated subtree rather than re-registering `new` alone.
             try FileManager.default.removeItem(at: newDir)
             let deepDir = newDir.appendingPathComponent("deep", isDirectory: true)
             try FileManager.default.createDirectory(at: deepDir, withIntermediateDirectories: true)
@@ -341,10 +341,10 @@
             #expect(box.count == 2, "an ignore-set change that actually moves anything must trigger a full reinstall on Linux")
         }
 
-        /// Fix for a Linux partial-failure gap: an `addPaths` failure (e.g. the inotify watch limit) sets
+        /// A Linux partial-failure gap: an `addPaths` failure (e.g. the inotify watch limit) sets
         /// `lastStartErrorText` but leaves the watcher installed, since only the new directory's
-        /// registration failed, not the whole watch. `subscribe()`'s retry guard used to only fire on a nil
-        /// watcher, so that recorded failure (and the missing coverage behind it) persisted through any
+        /// registration failed, not the whole watch. If `subscribe()`'s retry guard fired only on a nil
+        /// watcher, that recorded failure (and the missing coverage behind it) would persist through any
         /// number of retries; it must instead force a full reinstall whenever an error is recorded, exactly
         /// like a totally failed watch. An injected fake watcher (rather than real inotify) is used here
         /// deliberately, unlike this file's other tests: reproducing a genuine `addPaths` failure
@@ -428,7 +428,7 @@
         /// candidate list (the top directory plus every on-disk descendant) by exact-string membership in
         /// that reported set left every descendant "not ignored" and registered with inotify, e.g. an
         /// `npm install` inside a freshly created, ignored directory would grow the watch-descriptor count
-        /// unbounded. The fix classifies the TOP-LEVEL candidate first (a prefix-aware match, not exact)
+        /// unbounded. Classification checks the TOP-LEVEL candidate first (a prefix-aware match, not exact)
         /// and only expands into descendants when it comes back non-ignored, so an ignored root's subtree
         /// is never even walked into, let alone watched. Verified indirectly: since inotify only reports
         /// events for paths it has an explicit watch on, a write anywhere inside the ignored tree can only
@@ -466,7 +466,7 @@
         /// to any repository at all (it only ever matches a WORKING directory). The ref directory is
         /// created directly here (rather than via `git branch feature/x`) to avoid a real branch-creation
         /// race; a write inside it afterward, standing in for git writing the loose ref file itself, must
-        /// still be observed, which only holds if the fix actually registered the new directory.
+        /// still be observed, which only holds if the new directory was actually registered for a watch.
         @Test func aFileWrittenInANewlyCreatedRefsSubdirectoryIsStillObserved() async throws {
             let root = try makeRepository()
             defer { try? FileManager.default.removeItem(at: root) }
@@ -529,8 +529,9 @@
         /// reports the `mkdir` on the SUPERPROJECT's own watch; `classifyNewDirectories` classifies and
         /// registers `sub`'s own watch only after that single event is processed, so a gitfile write that
         /// already landed before that registration is never separately delivered as its own event, and
-        /// `isRepositoryMapInvalidatingPath`'s `.git`-anywhere rule never fires for it. Without the fix,
-        /// `sub` stays folded into the superproject's coverage until some unrelated event triggers the next
+        /// `isRepositoryMapInvalidatingPath`'s `.git`-anywhere rule never fires for it. Without
+        /// `classifyNewDirectories`'s own `.git`-presence check forcing a map rebuild directly, `sub` stays
+        /// folded into the superproject's coverage until some unrelated event triggers the next
         /// reinstall. The gitfile write is emulated directly (`mkdir` then an immediate, synchronous `.git`
         /// write with no yield in between, guaranteed to finish before the daemon's own dispatch queue can
         /// even wake up to register a watch on the new directory) rather than run through the real `git

@@ -202,8 +202,6 @@ import systembridge
         case .granted, .unavailable: complete()
         case .denied: enter(.denied)
         case .notDetermined:
-            // Only offer the grant path when no ask-derived denial is latched. Leave `denied`/
-            // `promptSuppressed` untouched.
             if mode == nil || mode == .needsGrant { enter(.needsGrant) }
         }
     }

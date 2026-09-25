@@ -3,7 +3,6 @@
     import spacesterminalcore
 
     extension NSColor {
-        /// AppKit conversion for a shared theme color.
         public convenience init(themeColor: ThemeColor) {
             self.init(
                 srgbRed: CGFloat(themeColor.red) / 255.0, green: CGFloat(themeColor.green) / 255.0, blue: CGFloat(themeColor.blue) / 255.0,

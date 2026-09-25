@@ -50,9 +50,9 @@
             try await waitUntil(timeout: 10) { Self.openDescriptorCount(forSocketPaths: [socketPath]) == 0 }
         }
 
-        /// How many descriptors this process holds on Unix sockets bound to `socketPaths`. Reads the
-        /// kernel's own descriptor table rather than the filesystem, so it still sees a descriptor whose
-        /// socket file was unlinked at teardown — which is exactly the leaked state being asserted against.
+        /// Reads the kernel's own descriptor table rather than the filesystem, so it still sees a descriptor
+        /// whose socket file was unlinked at teardown — which is exactly the leaked state being asserted
+        /// against.
         private static func openDescriptorCount(forSocketPaths socketPaths: [String]) -> Int {
             let pid = getpid()
             let bufferSize = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)

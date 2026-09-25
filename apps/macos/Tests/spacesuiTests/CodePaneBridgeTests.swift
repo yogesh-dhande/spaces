@@ -1187,8 +1187,7 @@ extension Result where Failure == CodePaneBridge.BridgeError {
     }
 }
 
-/// Strips a known literal prefix/suffix off `text`, or `nil` if either isn't present — used to pull
-/// the JSON argument back out of a generated script for a round-trip decode.
+/// Used to pull the JSON argument back out of a generated script for a round-trip decode.
 private func stripped(_ text: String, prefix: String, suffix: String) -> String? {
     guard text.hasPrefix(prefix), text.hasSuffix(suffix) else { return nil }
     return String(text.dropFirst(prefix.count).dropLast(suffix.count))

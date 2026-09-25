@@ -32,8 +32,8 @@ enum GhosttyRemoteTerminalSelectionMarshalling {
         var scrollbarOffset: UInt32
     }
 
-    /// Maps a snapshot's shared selection and scrollbar position onto the C struct fields. A nil
-    /// selection clears every selection field (flags 0), which the surface reads as "nothing to paint."
+    /// A nil selection clears every selection field (flags 0), which the surface reads as "nothing to
+    /// paint."
     static func cSnapshotSelectionFields(selection: GhosttyTerminalSelectionRange?, scrollbarTotal: UInt32, scrollbarOffset: UInt32)
         -> CSnapshotSelectionFields
     {

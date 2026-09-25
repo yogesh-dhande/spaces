@@ -77,7 +77,6 @@ final class SessionRetentionTests: XCTestCase {
         XCTAssertFalse(try store.terminalSessionIsReferencedByProduct(endedSession))
         XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).map(\.id), ["proc-live"])
         XCTAssertEqual(try store.windows(workspaceID: workspace.id).map(\.id), ["proc-live"])
-        // The live process's own session is still referenced.
         XCTAssertTrue(try store.terminalSessionIsReferencedByProduct(liveSession))
     }
 
@@ -113,7 +112,6 @@ final class SessionRetentionTests: XCTestCase {
         let (_, subscriberWorkspace) = try makeProjectAndWorkspace(store: store)
         let (_, watchedWorkspace) = try makeProjectAndWorkspace(store: store)
 
-        // The expired bare terminal: referenced only by a runtime_targets focus row, no agent row of its own.
         let subscriberSession = "bare-subscriber-session"
         try store.upsert(
             window: WindowRecord(
@@ -131,8 +129,6 @@ final class SessionRetentionTests: XCTestCase {
 
         try orchestrator.releaseEndedTerminalSessionReferences(sessionID: subscriberSession)
 
-        // The subscriber's outgoing watch edges are gone, the watched agent survives, and the session is
-        // no longer referenced by any product row.
         XCTAssertTrue(try store.agentSubscriptions(subscriberTerminalSessionID: subscriberSession).isEmpty)
         XCTAssertNotNil(try store.agentWindow(id: watchedAgent.id), "The watched agent in another workspace must survive the subscriber's release.")
         XCTAssertFalse(try store.terminalSessionIsReferencedByProduct(subscriberSession))
@@ -167,7 +163,6 @@ final class SessionRetentionTests: XCTestCase {
 
         XCTAssertNil(try store.agentWindow(id: targetAgent.id))
         XCTAssertFalse(try store.terminalSessionIsReferencedByProduct(target))
-        // Everything bound to the other session survives.
         XCTAssertNotNil(try store.agentWindow(id: otherAgent.id))
         XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).map(\.id), ["proc-other"])
         XCTAssertTrue(try store.terminalSessionIsReferencedByProduct(other))

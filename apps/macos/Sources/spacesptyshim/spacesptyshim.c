@@ -39,8 +39,8 @@ void spaces_pty_child_exec(
     }
 
     if (working_directory != NULL) {
-        /* Matching the historical behavior: a missing working directory falls back to
-         * wherever the daemon runs rather than failing the spawn. */
+        /* A missing working directory falls back to wherever the daemon runs rather
+         * than failing the spawn. */
         (void)chdir(working_directory);
     }
 

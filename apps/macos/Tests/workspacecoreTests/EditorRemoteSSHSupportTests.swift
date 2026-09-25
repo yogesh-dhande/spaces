@@ -4,13 +4,11 @@ import XCTest
 @testable import workspacecore
 
 final class EditorRemoteSSHSupportTests: XCTestCase {
-    // Tests init fails for a bundle without VS Code-family product.json fields.
     func testInitFailsWhenProductFieldsMissing() throws {
         let (app, _) = try makeFakeEditor(includeProductFields: false)
         XCTAssertNil(EditorRemoteSSHSupport(appBundleURL: app))
     }
 
-    // Tests the CLI executable path is derived from product.json applicationName.
     func testCLIExecutableURLResolvesFromApplicationName() throws {
         let (app, _) = try makeFakeEditor(applicationName: "devin-desktop")
         let support = try XCTUnwrap(EditorRemoteSSHSupport(appBundleURL: app))
@@ -18,14 +16,14 @@ final class EditorRemoteSSHSupportTests: XCTestCase {
         XCTAssertTrue(support.cliExecutableURL.path.hasSuffix("Contents/Resources/app/bin/devin-desktop"))
     }
 
-    // Tests a remote-SSH extension bundled with the editor (as the forks ship) is detected.
+    // A remote-SSH extension bundled with the editor, the way the forks ship it.
     func testDetectsBuiltInRemoteSSHExtension() throws {
         let (app, home) = try makeFakeEditor(builtInExtensions: ["windsurf-remote-openssh", "eamodio.gitlens"])
         let support = try XCTUnwrap(EditorRemoteSSHSupport(appBundleURL: app))
         XCTAssertTrue(support.hasRemoteSSHExtension(homeDirectory: home))
     }
 
-    // Tests a user-installed remote-SSH extension (as stock VS Code needs) is detected.
+    // A user-installed remote-SSH extension, the way stock VS Code needs it.
     func testDetectsUserInstalledRemoteSSHExtension() throws {
         let (app, home) = try makeFakeEditor(dataFolderName: ".fakecode")
         try FileManager.default.createDirectory(
@@ -34,7 +32,6 @@ final class EditorRemoteSSHSupportTests: XCTestCase {
         XCTAssertTrue(support.hasRemoteSSHExtension(homeDirectory: home))
     }
 
-    // Tests capability is reported missing when no extension name mentions both remote and ssh.
     func testReportsMissingWhenNoRemoteSSHExtension() throws {
         let (app, home) = try makeFakeEditor(builtInExtensions: ["eamodio.gitlens"])
         let support = try XCTUnwrap(EditorRemoteSSHSupport(appBundleURL: app))

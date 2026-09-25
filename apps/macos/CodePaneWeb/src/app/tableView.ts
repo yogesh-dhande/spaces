@@ -23,8 +23,7 @@ function buildRow(row: string[], columnCount: number, cellTag: "th" | "td"): HTM
   return tr;
 }
 
-/** Renders `table` as the read-only CSV/TSV table, replacing whatever `host` held. The first row is
- *  the header and stays visible while the body scrolls. */
+/** The first row is the header and stays visible while the body scrolls. */
 export function renderDelimitedTable(host: HTMLElement, table: DelimitedTable): void {
   host.textContent = "";
 

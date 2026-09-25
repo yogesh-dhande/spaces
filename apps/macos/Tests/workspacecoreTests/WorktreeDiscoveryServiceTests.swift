@@ -52,8 +52,8 @@ import Testing
     }
 
     /// The freeze this guards against: the daemon's main actor is its terminal-I/O
-    /// engine, and installing a git-project watcher used to run the (slow, IPC-bound)
-    /// FSEvents setup synchronously on it. Installs now suspend across the watcher's
+    /// engine, so installing a git-project watcher must not run the (slow, IPC-bound)
+    /// FSEvents setup synchronously on it. Installs suspend across the watcher's
     /// `start()`, so a stalled install must not stall the main actor. A regressed
     /// install that awaited `start()` while holding the main actor would still be
     /// sitting on that await when the round-trips below try to run, so they could not
@@ -352,9 +352,9 @@ import Testing
         }
     }
 
-    /// The retry storm: a project whose watcher stream cannot be created used to be re-attempted by
-    /// every `databaseDidChange`-driven refresh pass — a git spawn, a watcher create, and an error
-    /// report each time, forever. One failure must cost one attempt and one report, and the failure
+    /// The retry storm: a project whose watcher stream cannot be created would otherwise be
+    /// re-attempted by every `databaseDidChange`-driven refresh pass — a git spawn, a watcher create,
+    /// and an error report each time, forever. One failure must cost one attempt and one report, and the failure
     /// must not disturb the projects that watch fine.
     ///
     /// The unwatchable project's directory exists throughout (this is the FSEvents

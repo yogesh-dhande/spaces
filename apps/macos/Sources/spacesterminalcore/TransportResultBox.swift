@@ -9,7 +9,7 @@ public final class TransportResultBox: @unchecked Sendable {
 
     public init() {}
 
-    /// Records an error, overwriting any previously recorded one (last write wins).
+    /// Records an error, overwriting any error already recorded (last write wins).
     public func setError(_ error: any Error) {
         lock.lock()
         storedError = error

@@ -284,12 +284,12 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertTrue(message.contains("Ubuntu 24.04 device"))
     }
 
-    /// Issue #322: `remoteDevelopmentProfileName`'s `providedProfile ?? SpacesProfile.current()` fallback
-    /// used to discard a test-host refusal with `try?`, so a caller that passed no profile (or a test
+    /// Issue #322: if `remoteDevelopmentProfileName`'s `providedProfile ?? SpacesProfile.current()`
+    /// fallback discarded a test-host refusal with `try?`, a caller that passed no profile (or a test
     /// exercising this function directly, as here) would silently get `nil` — indistinguishable from
     /// "this account genuinely has no development profile" — and fall through to `installedRemotePairCommand`,
-    /// the installed-profile command. `remotePairCommand`/`remoteDevelopmentProfileName` already `throw`
-    /// end to end, so nothing but the fix itself stands between the refusal and the caller now.
+    /// the installed-profile command. `remotePairCommand`/`remoteDevelopmentProfileName` throw end to end,
+    /// so the refusal reaches the caller instead.
     func testRemotePairCommandRethrowsTestHostRefusalInsteadOfDegradingToInstalledDefault() throws {
         let accountHomePath = try SpacesProfile.accountHomeDirectory()
 
@@ -306,15 +306,15 @@ final class SpacesDevicePairingClientTests: XCTestCase {
     }
 
     /// Issue #322 follow-up: `localMacClientInstallationID`'s `profile ?? SpacesProfile.current()` fallback
-    /// used to discard a test-host refusal with `try?` and land on the same `NSHomeDirectory()` fallback
-    /// as an ordinary "no profile" outcome, with nothing to tell the two apart. It cannot become `throws`
-    /// (it backs a default parameter value on `SpacesDeviceClient.macOSClientApp`, itself defaulted across
-    /// dozens of call sites — Swift rejects a throwing default argument outright) and, called from that
-    /// default position on essentially every Device API request across the whole app, it is far too widely
-    /// shared to trap on either; see `SpacesProfile.currentOrNilLoggingRefusal`'s doc comment. This proves
-    /// the wiring survives a refusal end to end: a refused resolution still lands on the documented
-    /// fallback — the same id a profile explicitly rooted at `NSHomeDirectory()` would produce — rather
-    /// than crashing or producing something else.
+    /// cannot become `throws` (it backs a default parameter value on `SpacesDeviceClient.macOSClientApp`,
+    /// itself defaulted across dozens of call sites — Swift rejects a throwing default argument outright)
+    /// and, called from that default position on essentially every Device API request across the whole
+    /// app, it is far too widely shared to trap on either; see `SpacesProfile.currentOrNilLoggingRefusal`'s
+    /// doc comment. A `try?` fallback there would discard a test-host refusal and land on the same
+    /// `NSHomeDirectory()` fallback as an ordinary "no profile" outcome, with nothing to tell the two
+    /// apart. This proves the wiring survives a refusal end to end: a refused resolution still lands on the
+    /// documented fallback — the same id a profile explicitly rooted at `NSHomeDirectory()` would produce —
+    /// rather than crashing or producing something else.
     func testLocalMacClientInstallationIDFallsBackToHomeDirectoryIDWhenProfileResolutionIsRefused() throws {
         let accountHomePath = try SpacesProfile.accountHomeDirectory()
         let homeDirectory = NSHomeDirectory()
@@ -498,8 +498,8 @@ final class SpacesDevicePairingClientTests: XCTestCase {
     /// A development profile is installed as an instance of one shared template unit whose `ExecStart` is
     /// resolved from the instance name alone. The template carries no per-profile content — no `Environment=`
     /// assignment of a database, runtime root, host, or port — because a profile-rooted binary resolves all
-    /// of that from where it lives; baking a profile into the unit is what previously pinned a device's one
-    /// daemon to one developer's worktree.
+    /// of that from where it lives; baking a profile into the unit would pin a device's one daemon to one
+    /// developer's worktree.
     func testLinuxArtifactInstallerInstallsOneTemplateUnitPerDevelopmentProfile() throws {
         let scriptURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("scripts/build_linux_spacesd_artifact.sh")

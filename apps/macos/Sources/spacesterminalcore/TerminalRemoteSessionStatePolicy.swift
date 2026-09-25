@@ -16,8 +16,7 @@ public enum TerminalRemoteSessionStatePolicy {
 
     // Keeps a raw `String` entry point (rather than the enum) because a debug/test hook deliberately
     // drives this with an unrecognized reason to prove the pipeline defaults safely (see
-    // `TerminalRemoteSessionStatePolicyTests`). An unrecognized reason parses to `nil` and falls through
-    // to the same `false` a raw-string default branch used to return.
+    // `TerminalRemoteSessionStatePolicyTests`). An unrecognized reason parses to `nil` and returns `false`.
     public static func shouldIncludeScreenState(reason: String, ownerKind: TerminalClientKind? = nil) -> Bool {
         guard let reasonKind = TerminalRemoteSessionStateReason(rawValue: reason) else { return false }
         switch reasonKind {
@@ -157,7 +156,7 @@ public struct TerminalRemoteStateReducer: Sendable {
         // device displaced and repaint the grid that owner was running at. The daemon's session core bumps
         // `ownerEpoch` on every ownership transfer and never lowers it, stamps it on every payload it
         // builds, and always follows a transfer with a full frame at the new epoch, so refusing the older
-        // generation loses nothing. Equal epochs apply in order exactly as before.
+        // generation loses nothing. Equal epochs apply in order through the normal path below.
         //
         // The stream and a control response are two carriers of one session's state, which is what makes
         // this reachable: a takeover's acknowledgment can overtake the subscription's initial payload on a
@@ -264,8 +263,7 @@ public struct TerminalRemoteStateReducer: Sendable {
         guard payload.hasRenderUpdate else { return .usable }
         guard let retained = retainedFrameOrdering, let frame = payload.decodedRenderUpdate?.fullFrame else { return .usable }
         if frame.ownerEpoch != retained.ownerEpoch { return frame.ownerEpoch < retained.ownerEpoch ? .supersededSession : .usable }
-        // An unrevisioned frame on either side cannot be ordered, so it is left to apply as it did before
-        // this guard existed.
+        // An unrevisioned frame on either side cannot be ordered, so it applies without this check.
         guard let frameRevision = frame.sessionRevision, let retainedRevision = retained.sessionRevision else { return .usable }
         if frameRevision > retainedRevision { return .usable }
         // A broken chain (a delta that could not apply nils the baseline) makes the EQUAL-revision response

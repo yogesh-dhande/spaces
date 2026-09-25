@@ -536,7 +536,7 @@ close_existing_spaces_instances() {
 
 hide_all_visible_windows() {
   log_step "hiding visible windows for a clean recording background"
-  # The runtime no longer exposes desktop window ids, so enumerate visible foreground
+  # The runtime does not expose desktop window ids, so enumerate visible foreground
   # application processes via System Events and hide each one. This is a best-effort clean
   # background precondition for screen recording; no test asserts on it, so failures and any
   # windows that survive the hide are tolerated.
@@ -1437,8 +1437,9 @@ run_remote_device_ui_parity() {
     ui_select_outline_row_containing_identifier "sidebar-workspace-title-$REMOTE_DEVICE_WORKSPACE_ID"
   done
   ui_click_identifier "$remote_web_target_id"
-  # The local Caddy router port is profile-scoped (dev/worktree profiles no longer share the
-  # well-known 7391), and a remote browser session is served by the LOCAL router. The result JSON's
+  # The local Caddy router port is profile-scoped (each dev/worktree profile has its own port
+  # rather than sharing the well-known 7391), and a remote browser session is served by the LOCAL
+  # router. The result JSON's
   # browser URL carries the remote daemon's port, so translate it to the local router's actual port
   # (read from this profile's Caddy config) for the HTTP/Chrome assertions — matching the routed URL
   # the app opens.
@@ -1898,8 +1899,8 @@ wait_for_tcp_listener_port() {
 }
 
 # Clicks a workspace-detail runtime-control button by its stable accessibility identifier.
-# Post-panel-rework these actions live in the detail's footer strip (workspace identity and
-# actions moved below the terminal panel), so this resolves the button by identifier anywhere
+# These actions live in the detail's footer strip (workspace identity and
+# actions below the terminal panel), so this resolves the button by identifier anywhere
 # in the window tree via `ui_click_identifier` rather than a hardcoded scroll-area/splitter path.
 ui_click_workspace_detail_header_button() {
   local description="$1"
@@ -2700,8 +2701,8 @@ assert_shortcut_focus_surface_state() {
   if (( ONLY_WINDOW_CYCLE_PROFILE == 1 )); then
     return 0
   fi
-  # Post-panel-rework the workspace terminal is a pane inside the main window, so the surface
-  # snapshot reports mainWindowFocused=true whenever a terminal is focused — it can no longer
+  # The workspace terminal is a pane inside the main window, so the surface
+  # snapshot reports mainWindowFocused=true whenever a terminal is focused — it cannot
   # tell an overview surface from a focused terminal, and its `not mainWindowFocused` primary
   # always times out before the fallbacks accept. Check the fast, decisive signals first: a
   # terminal owner-focused or Chrome frontmost each mean the overview surface is not the active
@@ -2735,8 +2736,8 @@ raise SystemExit(0 if ok else 1)'; then
 
 assert_cycle_focus_surface_state() {
   # Best-effort secondary confirmation that the cycle left no modal/palette/overview picker
-  # blocking the focused target. Non-failing. Post-panel-rework the terminal is a pane inside
-  # the main window, so the surface snapshot's mainWindowFocused can no longer tell a focused
+  # blocking the focused target. Non-failing. The terminal is a pane inside
+  # the main window, so the surface snapshot's mainWindowFocused cannot tell a focused
   # terminal from the overview picker (it always reads true) — the fast AX probe distinguishes
   # them (a focused terminal pane vs. none) and settles quickly instead of double-timing-out.
   if [[ "${LAST_CYCLE_TARGET_FOCUS_VIA_APP_OBSERVATION:-0}" == "1" ]]; then
@@ -3025,9 +3026,9 @@ APPLESCRIPT
 }
 
 # Waits until `expected_session_id`'s terminal pane is the front window's active pane while
-# Spaces is frontmost. Post-panel-rework this reads the pane's `terminal-pane-<sessionID>`
-# AXIdentifier off the front window instead of the shared window's identifier, which no longer
-# encodes the session id.
+# Spaces is frontmost. This reads the pane's `terminal-pane-<sessionID>`
+# AXIdentifier off the front window instead of the shared window's identifier, which does not
+# encode the session id.
 wait_for_spaces_terminal_frontmost_session_optional() {
   local expected_session_id="$1"
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
@@ -3123,8 +3124,8 @@ wait_for_surface_snapshot_python() {
 }
 
 # Waits until the runtime target name (tab title) of Spaces' focused-window terminal pane is
-# `expected_title`. Post-panel-rework this replaces the native window title as the "which
-# session is focused" signal, since the shared window title no longer encodes it. Like the old
+# `expected_title`. This replaces the native window title as the "which
+# session is focused" signal, since the shared window title does not encode it. Like the old
 # surface-snapshot title check it reads the app's focused window regardless of whether Spaces is
 # the OS-frontmost app — callers seed focus with the `open`/focus CLIs that may leave another
 # app (e.g. Chrome) frontmost while Spaces' own front window is the target terminal. The wait
@@ -3222,10 +3223,10 @@ spaces_command_palette_key() {
 }
 
 # The window-identity classifier (spaces_front_window_kind) cannot distinguish which terminal
-# session is frontmost, nor its owner/viewer state, on its own: post-panel-rework every terminal
+# session is frontmost, nor its owner/viewer state, on its own: every terminal
 # session renders as a pane inside one shared window (main or a global panel window) instead of
-# its own dedicated window, so window title/identifier no longer encodes the session id or
-# attachment mode the way a standalone terminal window's title used to. The surface snapshot
+# its own dedicated window, so window title/identifier does not encode the session id or
+# attachment mode the way a standalone terminal window's title would. The surface snapshot
 # reads them directly off the focused window's active terminal pane (the `terminal-pane-<sessionID>`
 # AXIdentifier → session id; its AXValue → owner/viewer, kept current by updateInputOwnershipUI;
 # its AXDescription → the runtime target name / tab title, pushed by PanelCoordinator's render).
@@ -3502,7 +3503,7 @@ spaces_cycle_surface_hidden_probe() {
     case "$front_kind" in
       terminal_owner|terminal_viewer|other|none) ;;
       main)
-        # Post-panel-rework a focused terminal is a pane inside the main window, so the front
+        # A focused terminal is a pane inside the main window, so the front
         # window reads as "main". A terminal pane focused there is a valid surface-hidden state
         # (the overview picker is not blocking); a main window with no terminal pane focused is
         # the overview and is not hidden.
@@ -6190,7 +6191,7 @@ PY
     [[ -z "$(chrome_window_id_for_url "$browser_admin_url")" ]] || fail "admin browser session stayed open after cleanup"
   fi
   # The profile loop's chained docs->frontend->backend->adhoc->agent expectations encode the
-  # pre-#147 static cycle order; cycling follows most-recently-focused order now (docs/spec.md),
+  # pre-#147 static cycle order; cycling follows most-recently-focused order (docs/spec.md),
   # so each step's target depends on the focus history and burst-session timing instead.
   # Skipped until the loop is redesigned around MRU semantics.
   skip_case "$host: window cycle profile loop" "stale static-order expectations since #147 MRU cycling"

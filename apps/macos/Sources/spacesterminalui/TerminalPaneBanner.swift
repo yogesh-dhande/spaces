@@ -63,7 +63,7 @@ public struct TerminalPaneBannerAction: Sendable {
 /// derivative of `statusFailed`; see `ThemeAppearanceTokens.connectionBannerFill`'s doc comment). The
 /// operational sidebar uses the stronger `red` token for an exited process so it wins the workspace
 /// attention rollup unambiguously.
-/// The banner's chrome view. A plain layer-backed `NSView`, not `NSVisualEffectView`: the banner
+/// A plain layer-backed `NSView`, not `NSVisualEffectView`: the banner
 /// reports connection health over content that keeps scrolling underneath it, so it needs a fully
 /// opaque fill rather than a vibrant material that blends with whatever is directly behind it in the
 /// window. `TerminalJumpToBottomControl`, the other floating control over a terminal pane, uses the
@@ -229,8 +229,7 @@ public struct TerminalPaneBannerAction: Sendable {
         render(transientMessage: message)
     }
 
-    /// Single render path for both state layers: a transient banner wins while it is up, otherwise
-    /// the persistent notice shows, otherwise the banner hides.
+    /// Single render path for both state layers.
     private func render(transientMessage: String? = nil) {
         if let transientMode {
             if let transientMessage { label.stringValue = transientMessage }
@@ -458,8 +457,8 @@ public struct TerminalPaneBannerAction: Sendable {
         container.addSubview(stack)
         hostView.addSubview(container)
 
-        // Pinned to the top-trailing corner. The leading constraint keeps a long message from
-        // overflowing a narrow pane: it shrinks and truncates instead of running past the edge.
+        // The leading constraint keeps a long message from overflowing a narrow pane: it shrinks and
+        // truncates instead of running past the edge.
         let leading = container.leadingAnchor.constraint(greaterThanOrEqualTo: hostView.leadingAnchor, constant: 12)
         leading.priority = .defaultHigh
         NSLayoutConstraint.activate([

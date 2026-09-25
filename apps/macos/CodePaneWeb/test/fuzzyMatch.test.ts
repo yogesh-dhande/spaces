@@ -31,12 +31,9 @@ describe("fuzzyMatch", () => {
   });
 
   it("matches a non-contiguous subsequence, indices ascending and one per query character", () => {
-    // "rtm" as a subsequence of "root.ts" -> r(0) o o t(3) . t s -> picks r=0, t=3, ... "m" isn't
-    // in "root.ts" at all, so use a query that genuinely is a subsequence instead.
     const result = fuzzyMatch("rts", "root.ts");
     expect(result).not.toBeNull();
     expect(result!.indices).toHaveLength(3);
-    // Ascending and each position actually holds the matched character.
     const idx = result!.indices;
     expect(idx[0]! < idx[1]!).toBe(true);
     expect(idx[1]! < idx[2]!).toBe(true);

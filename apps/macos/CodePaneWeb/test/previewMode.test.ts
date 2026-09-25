@@ -11,7 +11,6 @@ import {
   resolvePreviewMode,
 } from "../src/app/previewMode";
 
-/** The segments a control offers, as the label/enabled pairs a user would read off the bar. */
 function labels(kind: Parameters<typeof previewModeSegments>[0], treeAvailable = true): Array<[string, boolean]> {
   return previewModeSegments(kind, { treeAvailable }).map((segment) => [segment.label, segment.enabled]);
 }

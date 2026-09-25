@@ -359,9 +359,8 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
     static func canCoalescePendingEvent(_ pending: GhosttyRemoteSessionStatePayload, with update: GhosttyRemoteSessionStatePayload) -> Bool {
         guard pending.sessionID == update.sessionID, pending.reason == update.reason else { return false }
         guard !containsDeltaRenderUpdate(pending), !containsDeltaRenderUpdate(update) else { return false }
-        // An unrecognized reason parses to `nil` and returns `false` here, matching the old
-        // `default: return false` — an update this build cannot classify is never folded into a
-        // pending one.
+        // An unrecognized reason parses to `nil` and returns `false` here: an update this build
+        // cannot classify is never folded into a pending one.
         guard let reasonKind = update.reasonKind else { return false }
         switch reasonKind {
         case .initial, .runtimeState, .resize, .stateChange: return true

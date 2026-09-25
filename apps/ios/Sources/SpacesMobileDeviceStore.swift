@@ -188,7 +188,7 @@ enum SpacesMobileDeviceStore {
         var record = record(from: settings, name: name)
         let fingerprint = record.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         // Match an existing paired device by certificate fingerprint, not the derived id: `hosts` (and
-        // therefore the id, which no longer folds the address in — see `deviceID` below) can differ
+        // therefore the id, which does not fold the address in — see `deviceID` below) can differ
         // across a re-pair, e.g. a QR rescan that adds the Tailscale candidate to an already-paired
         // Mac. Reusing the existing record's id keeps its Keychain auth token and any browser-proxy
         // routes already keyed on that id, so the rescan upgrades the row in place instead of the
@@ -305,7 +305,7 @@ enum SpacesMobileDeviceStore {
     /// Backfills a paired device's `hosts` from the addresses its daemon reports it is reachable at
     /// (`TerminalServiceDaemonStatus.deviceAPIAddresses`). This is how a device paired before its Mac
     /// ever had Tailscale silently gains the tailnet fallback the moment the Mac gets one — with no
-    /// rescan required, since the daemon now advertises its own live addresses on every connection.
+    /// rescan required, since the daemon advertises its own live addresses on every connection.
     ///
     /// No-ops when `hosts` is empty: an empty list means the daemon reported nothing (it predates this
     /// field, or this call raced a path that could not enumerate interfaces), never that the daemon has

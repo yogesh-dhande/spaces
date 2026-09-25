@@ -159,7 +159,6 @@ import workspacecore
         addRow(agentPromptRow, to: stack)
         self.agentPromptRow = agentPromptRow
 
-        // Script-kind rows.
         let scriptRow = host.settingsLabeledField(name: "Script", hint: "Runs in your login shell.", control: makeScriptEditor(seed: seed))
         addRow(scriptRow, to: stack)
         self.scriptRow = scriptRow
@@ -316,7 +315,7 @@ import workspacecore
         cronSectionRows.append(kindRow)
         builderRows.append(kindRow)
 
-        // Preset parameter rows. Every-N-minutes offers only uniform divisors of 60 (a free numeric field
+        // Every-N-minutes offers only uniform divisors of 60 (a free numeric field
         // would let the user pick a step like 40 that cron does not space evenly), so it is a popup.
         let everyNPopUp = makeEveryNPopUp(selected: 15)
         self.everyNPopUp = everyNPopUp
@@ -536,7 +535,6 @@ import workspacecore
 
     // MARK: - Visibility & preview
 
-    /// Shows the agent form or the script form for the current kind. Shared fields stay visible for both.
     private func applyKindVisibility() {
         let isAgent = currentKind == .agent
         workspaceRow?.isHidden = false
@@ -807,8 +805,8 @@ import workspacecore
         errorLabel?.isHidden = false
     }
 
-    /// Re-presents the form, carrying the current control values forward (used when device locality flips the
-    /// Browse button in/out). Reads the live controls into a seed summary so nothing typed is lost.
+    /// Re-presents the form, carrying the current control values forward. Reads the live controls into a
+    /// seed summary so nothing typed is lost.
     private func rebuildPreservingValues() {
         present(title: editingAutomationID == nil ? "New Automation" : "Edit Automation", seed: collectRawFieldsForRebuild())
     }

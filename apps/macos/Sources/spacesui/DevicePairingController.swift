@@ -97,8 +97,6 @@ import workspacecore
         let requiresReconnect: Bool
         let status: DeviceRowStatus
 
-        /// The label shown for this device in the Devices settings list. The local device always
-        /// renders as "Local" regardless of its stored machine name; remote devices show their stored name.
         var displayName: String { isLocal ? "Local" : name }
     }
 
@@ -233,8 +231,6 @@ import workspacecore
         }
     }
 
-    /// Switches the open settings dialog to the Devices section and renders it with the given response.
-    /// Opens the settings dialog on the Devices section when it is not already showing.
     private func showDeviceSettings(_ response: SpacesDeviceAPIControlResponse) {
         if host.settings.settingsWindow?.isVisible == true, host.settings.settingsSectionContentContainer != nil {
             host.settings.selectedSettingsSection = .devices
@@ -297,7 +293,7 @@ import workspacecore
             let statusLabel = host.helpTextLabel(status.message)
             statusLabel.textColor = status.isError ? .systemRed : .secondaryLabelColor
             // Status messages can carry a long unbreakable path; wrap on characters so the path stays
-            // fully visible across lines rather than being clipped at the (now width-capped) window edge.
+            // fully visible across lines rather than being clipped at the width-capped window edge.
             statusLabel.lineBreakMode = .byCharWrapping
             cards.append(statusLabel)
         }
@@ -635,8 +631,7 @@ import workspacecore
         return row
     }
 
-    /// Pops the row's overflow menu below its button. The menu is built with the row so it reflects the
-    /// control response that rendered it.
+    /// The menu is built with the row so it reflects the control response that rendered it.
     @objc func showDeviceRowMenu(_ sender: NSButton) {
         guard let menu = sender.menu else { return }
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
@@ -674,8 +669,7 @@ import workspacecore
     }
 
     /// The add-remote-device form, rendered inline under its disclosure row rather than as an always-open
-    /// card. Field identities and validation are unchanged: a bare SSH host, an optional display name, and
-    /// the optional username/port behind the "Advanced" disclosure.
+    /// card.
     private func remoteDevicePairingPanel() -> NSView {
         var rows: [NSView] = []
         rows.append(
@@ -832,7 +826,6 @@ import workspacecore
         return block
     }
 
-    /// Expands or collapses the optional username/port fields and rotates the disclosure chevron.
     @objc func toggleRemoteDeviceAdvancedFields(_ sender: NSButton) {
         guard let advancedRow = remoteDeviceAdvancedRow else { return }
         let willExpand = advancedRow.isHidden
@@ -1112,9 +1105,6 @@ import workspacecore
         }
     }
 
-    /// Enables or disables the controls that must not act while a remote-device attempt is running: a second
-    /// Connect would start an overlapping pairing, and collapsing the disclosure — or opening a pairing panel,
-    /// which replaces it — would take the status label the attempt reports through away with it.
     /// Saves an open rename editor before an attempt starts. The editor stays reachable by keyboard while an
     /// attempt runs — Return commits, Escape cancels — and either rebuilds the pane, which would take the
     /// attempt's status label and install progress off screen. Committing keeps what was typed rather than
@@ -1124,6 +1114,9 @@ import workspacecore
         commitClientDeviceRename(deviceID: deviceID, newName: field.stringValue)
     }
 
+    /// Enables or disables the controls that must not act while a remote-device attempt is running: a second
+    /// Connect would start an overlapping pairing, and collapsing the disclosure — or opening a pairing panel,
+    /// which replaces it — would take the status label the attempt reports through away with it.
     private func setRemoteDeviceAttemptControlsEnabled(_ enabled: Bool) {
         remoteDeviceConnectButton?.isEnabled = enabled
         addRemoteDeviceToggle?.isEnabled = enabled

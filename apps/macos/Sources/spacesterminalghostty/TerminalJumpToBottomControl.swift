@@ -136,9 +136,9 @@
                 })
         }
 
-        /// Shows or hides the new-output mark. Independent of the fade above: the mark rides whatever the
-        /// control is already doing, so a pane that gathers output while the user reads back does not
-        /// restart the control's animation on every frame.
+        /// Independent of the fade above: the mark rides whatever the control is already doing, so a pane
+        /// that gathers output while the user reads back does not restart the control's animation on
+        /// every frame.
         func setHasNewOutput(_ hasNewOutput: Bool) {
             guard hasNewOutput != self.hasNewOutput else { return }
             self.hasNewOutput = hasNewOutput

@@ -117,8 +117,8 @@ final class PortReservationReconcilerTests: XCTestCase {
         return (store, workspace)
     }
 
-    // Binds an ephemeral port, reads the assigned number, then frees it — yielding a port number that is
-    // free at return time and outside any workspace port range a real daemon reserves.
+    // Yields a port number that is free at return time and outside any workspace port range a real
+    // daemon reserves.
     private func freeEphemeralPort() throws -> Int {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw XCTSkip("Failed to allocate socket.") }

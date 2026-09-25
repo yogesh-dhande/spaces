@@ -64,7 +64,6 @@ enum SpacesMobileUITestDriver {
 
     // MARK: - Navigation helpers
 
-    /// Taps a bottom tab bar button by its label, mirroring `SpacesMobileScreenshotUITests`.
     static func selectTab(_ label: String, in app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
         let predicate = NSPredicate(format: "label == %@", label)
         let deadline = Date().addingTimeInterval(15)
@@ -81,7 +80,7 @@ enum SpacesMobileUITestDriver {
     }
 
     /// Opens the terminal row for `sessionID`, walking the list in both directions when an earlier
-    /// lookup left it scrolled past the row (the same recovery `waitForText` needs).
+    /// lookup left it scrolled past the row.
     static func openTerminalRow(sessionID: String, in app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
         let row = app.buttons["terminal.row.\(sessionID)"]
         guard scanWhileScrolling(in: app, timeout: 20, check: { row.exists }) else {
@@ -91,9 +90,6 @@ enum SpacesMobileUITestDriver {
         row.tap()
     }
 
-    /// Dismisses the terminal detail back to the Spaces list, matching the resilient lookup the other
-    /// UI tests use: the back chrome resolves as a button or a plain identified element, with a
-    /// top-left coordinate tap as the last resort.
     static func leaveTerminalDetail(in app: XCUIApplication) {
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline {
@@ -157,7 +153,6 @@ enum SpacesMobileUITestDriver {
         return missing
     }
 
-    /// Convenience over `waitForElements` for a single identifier.
     static func waitForElement(identifier: String, in app: XCUIApplication, timeout: TimeInterval) -> Bool {
         waitForElements(identifiers: [identifier], in: app, timeout: timeout).isEmpty
     }
@@ -201,14 +196,12 @@ enum SpacesMobileUITestDriver {
     /// Taps the terminal surface to activate it as first responder, which is how a real user brings up
     /// the on-screen keyboard: the surface conforms to `UIKeyInput` and requests first-responder status
     /// from its own tap-to-activate gesture (`GhosttyRemoteTerminalHostView.handleTapToActivateInput` in
-    /// spacesterminalmobileghostty), the same call the takeover UI test's private `focusTerminalSurface`
-    /// makes before a scrollback drag.
+    /// spacesterminalmobileghostty).
     static func focusTerminalSurface(in app: XCUIApplication) {
         let surface = app.otherElements["terminal.surface"]
         if surface.waitForExistence(timeout: 5) { surface.tap() }
     }
 
-    /// Polls for the system software keyboard to be on screen.
     static func waitForKeyboard(in app: XCUIApplication, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -232,12 +225,10 @@ enum SpacesMobileUITestDriver {
         case towardBottom
     }
 
-    /// One flick on the terminal surface, matching the drag gesture and coordinates the takeover UI
-    /// test's private `performScrollback` uses (a short press-then-drag rather than `swipeUp`/
-    /// `swipeDown`, which XCUITest can deliver too fast for the terminal's own scroll-gesture recognizer
-    /// to pick up as scrollback intent rather than a tap). `.towardHistory` drags downward, which reveals
-    /// older content that had scrolled up out of view; `.towardBottom` drags upward, back toward the live
-    /// tail.
+    /// One flick on the terminal surface: a short press-then-drag rather than `swipeUp`/`swipeDown`,
+    /// which XCUITest can deliver too fast for the terminal's own scroll-gesture recognizer to pick up
+    /// as scrollback intent rather than a tap. `.towardHistory` drags downward, which reveals older
+    /// content that had scrolled up out of view; `.towardBottom` drags upward, back toward the live tail.
     static func flickTerminalSurface(_ direction: TerminalFlickDirection, in app: XCUIApplication) {
         let topPoint = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.36))
         let bottomPoint = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.88))

@@ -231,8 +231,6 @@ enum AutomationsViewModel {
     /// device (e.g. "Nightly audit failed (exit 3) on This Mac").
     static func alertEntries(deviceID: String, deviceName: String, runs: [TerminalServiceAutomationRunSummary]) -> [AutomationAlertEntry] {
         runs.compactMap { run -> AutomationAlertEntry? in
-            // Parsed once here, right where each run's raw status enters the alerts pipeline, and reused
-            // below instead of re-deriving it from the raw string a second time in `alertText`.
             let status = AutomationRunStatus(rawValue: run.status)
             guard status == .failed || status == .timedOut else { return nil }
             return AutomationAlertEntry(
@@ -326,7 +324,6 @@ enum AutomationsViewModel {
         return hours % 24 == 0 ? "\(days) d" : "\(days) d \(hours % 24) h"
     }
 
-    /// The placeholder for a column with no value to report.
     private static let placeholderText = "—"
 
     /// Under twelve hours a next run reads better as a countdown; past that the wall-clock time is the more

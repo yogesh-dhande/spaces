@@ -21,8 +21,8 @@ import spacesterminalcore
     /// every suite in flight for ~30 s) from reading a late report as a missing one.
     private static let stallReportCeiling: TimeInterval = 30
 
-    /// The bug this fix is about: the peer keeps the socket open but nothing arrives, so without a
-    /// liveness watch the client sits on a dead stream forever.
+    /// Without a liveness watch, the client would sit on a dead stream forever if the peer keeps the
+    /// socket open but nothing arrives.
     @Test func silenceAfterAPayloadReportsAStallAndReleasesTheConnection() async throws {
         let dialer = StreamingConnectionDialer()
         let events = StreamRecorder()
@@ -43,7 +43,7 @@ import spacesterminalcore
         #expect(connection.isCancelled())
     }
 
-    /// The daemon side of the fix: empty keepalive lines carry no state and never reach `onEvent`, but
+    /// Keepalive frames: empty keepalive lines carry no state and never reach `onEvent`, but
     /// they are bytes off the wire, so an idle terminal's stream stays connected indefinitely.
     ///
     /// Both the keepalive producer and the observation of its effect run on a dedicated thread rather

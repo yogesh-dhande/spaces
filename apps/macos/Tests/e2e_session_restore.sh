@@ -175,7 +175,6 @@ PY
   [[ -n "$DEVICE_API_AUTH_TOKEN" ]] || fail "pairing did not issue an auth token: $pair_response"
 }
 
-# Sends one Device API command as the paired client and prints the raw JSON response.
 device_request() {
   local command="$1" payload="${2:-}" request
   [[ -n "$payload" ]] || payload='{}'
@@ -256,8 +255,8 @@ spawn_fixture_agent() {
   wait_for_identified_agent "$CAPTURED_SESSION_ID"
 }
 
-# Stops the daemon running the named session with `signal`. The daemon that owns a session is the one
-# whose exit ends it, and the session's runtime row records that daemon's pid.
+# The daemon that owns a session is the one whose exit ends it, and the session's runtime row records
+# that daemon's pid.
 stop_daemon() {
   local signal="$1" session_id="$2" daemon_pid deadline
   daemon_pid="$(db_query "SELECT service_pid FROM terminal_runtime_states WHERE session_id = ?" "$session_id")"
@@ -275,7 +274,7 @@ stop_daemon() {
 }
 
 # The restorable record this device holds, as the paired client reads it: the row for `session_id` and the
-# generation the answer has to name. Fails when the session is not offered.
+# generation the answer has to name.
 assert_session_is_offered() {
   local session_id="$1" expected_conversation status_response
   expected_conversation="$(conversation_id_for_session "$session_id")"
@@ -296,10 +295,8 @@ PY
   json_field "$status_response" 'd["result"]["daemonStatus"]["restorableSessions"][0]["generation"]'
 }
 
-# Answers the outstanding offer with Restore and prints the session that replaces `session_id`, after
-# checking what the replacement runs and what it records: it runs a resume command naming that session's
-# conversation exactly once, and records the command the agent was originally started with, so restoring
-# it again rewrites the original rather than stacking a second resume selector onto the first.
+# Restoring records the command the agent was originally started with, so restoring the replacement
+# again rewrites that original command instead of stacking a second resume selector onto the first.
 restore_offered_session() {
   local session_id="$1" generation="$2" restore_response replacement conversation wrapped recorded selectors
   restore_response="$(device_request restoreSessions "{\"generation\":\"$generation\"}")"

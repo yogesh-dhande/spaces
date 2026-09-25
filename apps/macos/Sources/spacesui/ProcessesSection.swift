@@ -2,11 +2,8 @@ import AppKit
 import spacesterminalcore
 import workspacecore
 
-/// Phase 2b.1 prototype. Replaces the table-style `ProcessEditor` for processes
-/// with the live-and-config row pattern from the workspace-detail mocks
-/// (`design-mocks/workspace-detail/variant-d.html`): each row shows status +
-/// shortcut + name/command, expanding inline into a Name/Command/On-exit form
-/// when the pencil icon is clicked.
+/// Each row shows status + shortcut + name/command, expanding inline into a
+/// Name/Command/On-exit form when the pencil icon is clicked.
 ///
 /// This section owns transient form state (what's typed while editing) and
 /// publishes committed edits through `onCommit`. The host view is responsible
@@ -161,7 +158,6 @@ import workspacecore
             rows.append(row)
             rowsStack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
-            // Restore editing state if this row was mid-edit pre-refresh.
             if let snapshot = existingEditing[row.identity(from: process)] { row.enterEditing(prefill: snapshot, animated: false) }
         }
 
@@ -175,7 +171,7 @@ import workspacecore
         }
 
         countLabel.stringValue = "\(processes.count + supplementalRows.count)"
-        _ = animated  // animation polish deferred to 2b.2 — see prototype notes
+        _ = animated
     }
     // MARK: Row callbacks
 
@@ -255,7 +251,6 @@ import workspacecore
 // MARK: - ProcessRowView
 
 @MainActor final class ProcessRowView: HoverRevealRowView {
-    // Callbacks
     var onBeginEdit: (() -> Void)?
     var onCancel: (() -> Void)?
     var onSave: ((ProcessTemplate) -> Void)?
@@ -286,7 +281,6 @@ import workspacecore
     private let allowsEditing: Bool
     private let allowsRemoval: Bool
 
-    // Fields that appear in the editing subtree.
     private var nameField: NSTextField?
     private var commandField: NSTextField?
     private var onExitSegmented: NSSegmentedControl?

@@ -3,7 +3,6 @@ import systembridge
 
 extension RunningProcessRecord {
     /// Identity used to correlate runtime rows that refer to the same terminal slot.
-    /// Spaces uses its session ID as the terminal identity.
     public var terminalTrackingIdentity: TerminalTrackingIdentity? {
         if let sessionID = terminalTrackingID, !sessionID.isEmpty { return .session(sessionID) }
         return nil

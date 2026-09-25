@@ -9,8 +9,7 @@ import workspacecore
 /// browser sessions, the open workspace settings dialog's Services section (whose port texts a
 /// forward start/stop refreshes in place), focusing or closing the local Chrome tabs those
 /// sessions track, and the pure URL-matching helpers that decide whether an observed browser tab
-/// or window belongs to a configured browser session. Extracted from `AppKitController` as a
-/// behavior-preserving move (part of the ongoing decomposition of that type); `AppKitController`
+/// or window belongs to a configured browser session. `AppKitController`
 /// holds this as `browserSessions` and reaches it as `host.browserSessions` from other files
 /// (`SidebarController`, `WorkspaceDeletionCoordinator`, `AppKitController+WorkspaceSettingsDialog`,
 /// `AppKitController+StopAllQuit`, `CommandPaletteItems`) that reconcile forwards, read the

@@ -4,7 +4,6 @@ import XCTest
 @testable import workspacecore
 
 final class HotkeySpecTests: XCTestCase {
-    // Tests parse normalizes modifiers by arranging representative inputs and asserting the expected result.
     func testParseNormalizesModifiers() throws {
         let spec = try HotkeySpec.parse("shift cmd A")
         XCTAssertEqual(spec.key, "a")
@@ -12,7 +11,6 @@ final class HotkeySpecTests: XCTestCase {
         XCTAssertEqual(spec.normalized, "cmd+shift+a")
     }
 
-    // Tests parse supports named keys by arranging representative inputs and asserting the expected result.
     func testParseSupportsNamedKeys() throws {
         let spec = try HotkeySpec.parse("option-ctrl-f5")
         XCTAssertEqual(spec.key, "f5")
@@ -38,31 +36,26 @@ final class HotkeySpecTests: XCTestCase {
         }
     }
 
-    // Tests parse supports punctuation keys by arranging representative inputs and asserting the expected result.
     func testParseSupportsPunctuationKeys() throws {
         let spec = try HotkeySpec.parse("cmd+shift+=")
         XCTAssertEqual(spec.key, "=")
         XCTAssertEqual(spec.normalized, "cmd+shift+=")
     }
 
-    // Tests parse rejects missing key by arranging representative inputs and asserting the expected result.
     func testParseRejectsMissingKey() {
         XCTAssertThrowsError(try HotkeySpec.parse("cmd+shift")) { error in XCTAssertEqual(error.localizedDescription, "Hotkey is missing a key") }
     }
 
-    // Tests parse rejects multiple keys by arranging representative inputs and asserting the expected result.
     func testParseRejectsMultipleKeys() {
         XCTAssertThrowsError(try HotkeySpec.parse("cmd+a+b")) { error in
             XCTAssertEqual(error.localizedDescription, "Hotkey has multiple keys: a and b")
         }
     }
 
-    // Tests parse rejects empty value by arranging representative inputs and asserting the expected result.
     func testParseRejectsEmptyValue() {
         XCTAssertThrowsError(try HotkeySpec.parse("  \n")) { error in XCTAssertEqual(error.localizedDescription, "Hotkey cannot be empty") }
     }
 
-    // Tests parse supports modifier aliases and named keys by arranging representative inputs and asserting the expected result.
     func testParseSupportsModifierAliasesAndNamedKeys() throws {
         let spec = try HotkeySpec.parse("command option control shift spacebar")
         XCTAssertEqual(spec.key, "space")
@@ -70,34 +63,29 @@ final class HotkeySpecTests: XCTestCase {
         XCTAssertEqual(spec.normalized, "cmd+shift+alt+ctrl+space")
     }
 
-    // Tests parse supports directional and delete aliases by arranging representative inputs and asserting the expected result.
     func testParseSupportsDirectionalAndDeleteAliases() throws {
         XCTAssertEqual(try HotkeySpec.parse("ctrl-left").key, "left")
         XCTAssertEqual(try HotkeySpec.parse("alt forwarddelete").key, "forwarddelete")
         XCTAssertEqual(try HotkeySpec.parse("cmd-esc").key, "escape")
     }
 
-    // Tests parse rejects unsupported key by arranging representative inputs and asserting the expected result.
     func testParseRejectsUnsupportedKey() {
         XCTAssertThrowsError(try HotkeySpec.parse("cmd+volumeup")) { error in XCTAssertEqual(error.localizedDescription, "Unsupported key: volumeup")
         }
     }
 
-    // Tests key code and modifier flags by arranging representative inputs and asserting the expected result.
     func testKeyCodeAndModifierFlags() throws {
         let spec = try HotkeySpec.parse("cmd+shift+a")
         XCTAssertEqual(spec.keyCode, UInt32(kVK_ANSI_A))
         XCTAssertEqual(spec.modifiersCarbon, UInt32(cmdKey | shiftKey))
     }
 
-    // Tests unknown key code falls back to a and normalized without modifiers by arranging representative inputs and asserting the expected result.
     func testUnknownKeyCodeFallsBackToAAndNormalizedWithoutModifiers() {
         let spec = HotkeySpec(key: "unknown", modifiers: [])
         XCTAssertEqual(spec.keyCode, UInt32(kVK_ANSI_A))
         XCTAssertEqual(spec.normalized, "unknown")
     }
 
-    // Tests parse supports punctuation aliases by name by arranging representative inputs and asserting the expected result.
     func testParseSupportsNamedPunctuationAliases() throws {
         XCTAssertEqual(try HotkeySpec.parse("cmd minus").key, "minus")
         XCTAssertEqual(try HotkeySpec.parse("cmd dash").key, "minus")
@@ -119,7 +107,6 @@ final class HotkeySpecTests: XCTestCase {
         XCTAssertEqual(try HotkeySpec.parse("cmd backtick").key, "`")
     }
 
-    // Tests parse supports enter and backspace aliases by arranging representative inputs and asserting the expected result.
     func testParseSupportsEnterAndBackspaceAliases() throws {
         XCTAssertEqual(try HotkeySpec.parse("cmd return").key, "return")
         XCTAssertEqual(try HotkeySpec.parse("cmd enter").key, "enter")
@@ -131,13 +118,11 @@ final class HotkeySpecTests: XCTestCase {
         XCTAssertEqual(try HotkeySpec.parse("cmd down").key, "down")
     }
 
-    // Tests parse supports digit keys by arranging representative inputs and asserting the expected result.
     func testParseSupportsDigitKeys() throws {
         XCTAssertEqual(try HotkeySpec.parse("cmd 0").key, "0")
         XCTAssertEqual(try HotkeySpec.parse("cmd 9").key, "9")
     }
 
-    // Tests parse supports all function key variants by arranging representative inputs and asserting the expected result.
     func testParseSupportsFunctionKeys() throws {
         XCTAssertEqual(try HotkeySpec.parse("cmd f1").key, "f1")
         XCTAssertEqual(try HotkeySpec.parse("cmd f12").key, "f12")
@@ -146,7 +131,6 @@ final class HotkeySpecTests: XCTestCase {
         XCTAssertThrowsError(try HotkeySpec.parse("cmd f0")) { error in XCTAssertEqual(error.localizedDescription, "Unsupported key: f0") }
     }
 
-    // Tests modifiersCarbon includes alt and ctrl flags by arranging representative inputs and asserting the expected result.
     func testModifiersCarbonIncludesAltAndCtrl() throws {
         let altOnly = try HotkeySpec.parse("alt+a")
         XCTAssertEqual(altOnly.modifiersCarbon, UInt32(optionKey))
@@ -158,7 +142,6 @@ final class HotkeySpecTests: XCTestCase {
         XCTAssertEqual(allModifiers.modifiersCarbon, UInt32(cmdKey | shiftKey | optionKey | controlKey))
     }
 
-    // Tests keyCode returns correct virtual key code for mapped keys by arranging representative inputs and asserting the expected result.
     func testKeyCodeForMappedKeys() throws {
         XCTAssertEqual(try HotkeySpec.parse("cmd+z").keyCode, UInt32(kVK_ANSI_Z))
         XCTAssertEqual(try HotkeySpec.parse("cmd+0").keyCode, UInt32(kVK_ANSI_0))
@@ -185,13 +168,12 @@ final class HotkeySpecTests: XCTestCase {
         XCTAssertEqual(try HotkeySpec.parse("cmd+`").keyCode, UInt32(kVK_ANSI_Grave))
     }
 
-    // Tests normalized omits modifier prefix when no modifiers present by arranging representative inputs and asserting the expected result.
     func testNormalizedWithNoModifiers() {
         let spec = HotkeySpec(key: "a", modifiers: [])
         XCTAssertEqual(spec.normalized, "a")
     }
 
-    // Tests parse with "+" (all separators, no keys) hits guard !tokens.isEmpty else throw at line 40.
+    // Tests parse with "+" (all separators, no keys) hits guard !tokens.isEmpty else throw.
     func testParseAllSeparatorsThrowsEmptyHotkey() {
         // "+" is normalized to " " (all separators replaced), split yields empty tokens array.
         XCTAssertThrowsError(try HotkeySpec.parse("+")) { error in XCTAssertEqual(error.localizedDescription, "Hotkey cannot be empty") }

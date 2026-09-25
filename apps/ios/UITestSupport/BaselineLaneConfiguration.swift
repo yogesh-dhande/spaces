@@ -3,12 +3,10 @@ import Foundation
 /// Config for one scenario x profile UI test run of the iOS performance baseline lane
 /// (`SpacesMobileBaselineUITests`), written by `apps/macos/Tests/e2e_mobile_baseline.sh` per
 /// `xcodebuild ... test-without-building -only-testing:` invocation and read from
-/// `SPACES_MOBILE_BASELINE_CONFIG_PATH`. This mirrors exactly how `SPACES_MOBILE_UI_TEST_CONFIG_PATH`
-/// reaches `SpacesMobileUITests` (see `UITestConfiguration.load` there and the runner's `run_ui_test` in
-/// `e2e_mobile.sh`): the variable is exported in the shell before invoking `xcodebuild`, and `xcodebuild`
-/// carries a shell environment variable set before the invocation through to the XCTest process it
-/// launches inside the simulator's runner app, so no extra plumbing on the `xcodebuild` command line
-/// itself is needed to get the path to the test process.
+/// `SPACES_MOBILE_BASELINE_CONFIG_PATH`. The variable is exported in the shell before invoking
+/// `xcodebuild`, and `xcodebuild` carries a shell environment variable set before the invocation
+/// through to the XCTest process it launches inside the simulator's runner app, so no extra plumbing
+/// on the `xcodebuild` command line itself is needed to get the path to the test process.
 struct BaselineLaneConfiguration: Decodable {
     static let defaultConfigPath = "/tmp/spaces-mobile-baseline-config.json"
 
@@ -19,7 +17,6 @@ struct BaselineLaneConfiguration: Decodable {
     /// One of the nine scenario names (`cold-open`, `back-and-forth`, ...), matching the XCTest method
     /// the runner selected with `-only-testing:`. Carried through to stamp lane markers.
     let scenario: String
-    /// The fixture terminal session this run's scenario operates on.
     let sessionID: String
     /// `<run root>/device-perf.jsonl`: the shared performance log this test appends `lane_marker` lines
     /// into, alongside the app's own performance events (`SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH`,

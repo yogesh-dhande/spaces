@@ -70,9 +70,9 @@ public final class TerminalClientHeartbeatGenerationGate: @unchecked Sendable {
 }
 
 /// Per-core serial background executor for a terminal session core's durable SQLite writes, shared by the
-/// macOS embedded core and the Linux headless core. Every mutation the engine used to perform synchronously
-/// on its critical path — per-request client lease touches, the runtime-state timer's persist, stale-client
-/// expiry detaches, the final terminated payload — is enqueued here instead. SQLite runs in WAL mode with a
+/// macOS embedded core and the Linux headless core. Every mutation on the engine's critical path — per-request
+/// client lease touches, the runtime-state timer's persist, stale-client expiry detaches, the final
+/// terminated payload — is enqueued here rather than run inline. SQLite runs in WAL mode with a
 /// 5s busy timeout: a competing writer (e.g. an agent hook's `spaces agent signal` burst) makes any WRITE
 /// block on the write lock up to that timeout, which on the engine executor froze all terminal I/O; WAL
 /// READS never block on a writer, so reads stay inline on the engine. Writes commit in enqueue order (serial

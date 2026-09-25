@@ -15,11 +15,10 @@ import Foundation
     public enum CaddyService {
         public static let executableEnvironmentVariable = "SPACES_CADDY_EXECUTABLE"
 
-        /// Path to the generated Caddy config for the active profile.
         public static func configFilePath() throws -> String { try (runtimeDirectory() as NSString).appendingPathComponent("caddy.json") }
 
-        /// Unix socket the Caddy admin API listens on for the active profile. Callers must embed this
-        /// in the generated config (admin.listen) so it matches the address used for reloads.
+        /// Callers must embed this in the generated config (admin.listen) so it matches the address
+        /// used for reloads.
         ///
         /// Lives under the shared `SpacesSocketPaths.secureSocketRoot()` rather than the profile
         /// runtime directory (see that type for why). The filename is a stable hash of the runtime
@@ -53,7 +52,7 @@ import Foundation
         /// Either way the failure is diagnosable: `CaddyServiceError.reloadFailed`'s description carries
         /// the reload's exit status and a bounded stderr tail (preferring validate's stderr when it is
         /// more specific about what's wrong with the config). Only a fresh start that itself fails to
-        /// come up still throws, unchanged from before.
+        /// come up still throws.
         @discardableResult public static func ensureRunning(configJSON: Data, timeout: TimeInterval = 5) throws -> Bool {
             let configPath = try configFilePath()
             let socketPath = try adminSocketPath()
@@ -98,7 +97,6 @@ import Foundation
             throw CaddyServiceError.startupTimedOut(executableURL.path)
         }
 
-        /// Gracefully stops the Caddy process for the active profile.
         public static func stop(timeout: TimeInterval = 5) {
             guard let socketPath = try? adminSocketPath() else { return }
             if let executableURL = try? resolveExecutableURL() {
@@ -127,16 +125,14 @@ import Foundation
 
         /// Confirms whether `configPath` is a config Caddy would accept, independent of any running
         /// instance. Used to gate `ensureRunning`'s recovery: only a config validate confirms good may
-        /// justify stopping a live router (see that function's doc comment).
+        /// justify stopping a live router.
         private static func runValidate(configPath: String, timeout: TimeInterval) -> CaddyProcessResult {
             guard let executableURL = try? resolveExecutableURL() else { return CaddyProcessResult(exitStatus: nil, stderr: "") }
             return runCaddy(executableURL: executableURL, arguments: ["validate", "--config", configPath], timeout: timeout)
         }
 
         /// Writes the recovered-from reload failure to stderr so the daemon log carries why Caddy
-        /// refused the new config, even though `ensureRunning` does not throw for this case (see its
-        /// doc comment). Reuses `CaddyServiceError.reloadFailed`'s description instead of formatting the
-        /// exit status and stderr text a second time.
+        /// refused the new config, even though `ensureRunning` does not throw for this case.
         private static func logReloadFailureRecovery(configPath: String, result: CaddyProcessResult) {
             let error = CaddyServiceError.reloadFailed(configPath: configPath, exitStatus: result.exitStatus, stderr: result.stderr)
             FileHandle.standardError.write(Data("caddy: \(error.localizedDescription); restarting to recover routes.\n".utf8))
@@ -283,8 +279,8 @@ import Foundation
         case startupTimedOut(String)
         /// A `caddy reload` invocation against a confirmed-live Caddy failed. `exitStatus` is nil when
         /// the child never launched or was killed for outliving its timeout. `ensureRunning` recovers
-        /// from this itself (see its doc comment) rather than throwing it, so in practice this case is
-        /// constructed only to format the recovery's diagnostic log line.
+        /// from this itself rather than throwing it, so in practice this case is constructed only to
+        /// format the recovery's diagnostic log line.
         case reloadFailed(configPath: String, exitStatus: Int32?, stderr: String)
 
         public var errorDescription: String? {

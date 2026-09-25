@@ -4,7 +4,6 @@ import spacesterminalcore
 import workspacecore
 
 extension AppKitController {
-    /// Reads the persisted app-wide appearance mode and applies it to the running app.
     /// Called once at launch and again whenever the General settings picker changes it.
     /// A missing or unreadable setting resolves to the dark default.
     func applyStoredAppAppearance() {

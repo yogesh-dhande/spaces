@@ -453,8 +453,6 @@ public enum SpacesDeviceAPIControlClient {
     /// relaunch and a relaunch must never be aimed at a daemon with live sessions. This waits instead: it
     /// polls the bootstrap until the listener answers, bounded by `timeout`, and relaunches nothing — so
     /// the live-session gate has nothing to protect and a starting daemon is a wait rather than a failure.
-    /// Used by the client's local-endpoint recovery, which reaches here exactly when the daemon it needs
-    /// may have just been launched underneath it.
     public static func bootstrapLocalClientAwaitingDeviceAPI(
         clientApp: SpacesDeviceClientApp, presentedToken: String? = nil, timeout: TimeInterval = 5
     ) throws -> SpacesDeviceAPIControlResponse {
