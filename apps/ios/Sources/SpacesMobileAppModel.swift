@@ -2674,15 +2674,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         await performWorkspaceMutation { try await bridgeClient.restartWorkspace(workspaceID: workspace.id, commandChannel: commandChannel) }
     }
 
-    /// Sets one workspace's visibility. Hiding stops the workspace first when it is running — matching the
-    /// Mac, which never leaves a hidden workspace running with no row left to stop it from. Unhiding
-    /// starts nothing: a hidden workspace was already stopped on the way in, so recovery is purely a
-    /// visibility change back to normal.
-    ///
-    /// The stop is decided from a freshly fetched overview rather than the polled snapshot this app is
-    /// showing, so a workspace someone started since the last poll is still stopped before it is hidden.
-    /// The caller's confirmation is decided from the cached state (that is all a prompt can read), so the
-    /// two can disagree in the seconds between; the fresh read is what governs what actually happens.
+    /// Sets one workspace's visibility: a single hidden-flag mutation, hide and unhide alike. Hide changes
+    /// only the hidden flag, never run state, so a running workspace keeps running hidden and stays one
+    /// unhide away in the Workspaces sheet.
     func setWorkspaceHidden(workspaceID: String, isHidden: Bool) async {
         // Hiding a workspace whose delete is still unresolved would act on a row that is already leaving.
         // `performWorkspaceMutation` below still gates on `isMutating`, since this rides the shared
@@ -2692,53 +2686,20 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // on its way out.
         guard !isWorkspacePendingDeletion(workspaceID) else { return }
         await performWorkspaceMutation {
-            if isHidden {
-                let currentOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
-                guard let currentWorkspace = currentOverview.workspaces.first(where: { $0.id == workspaceID }) else {
-                    throw SpacesDeviceAPIClientError.requestFailed("This workspace is no longer available.")
-                }
-                // The home project's workspace is never stopped on the way in: it has no lifecycle, so its
-                // daemon refuses a stop, and it reads as running only because a terminal is open in it.
-                // Hiding it takes the band off the list and leaves those terminals running.
-                if currentWorkspace.isRunning, currentWorkspace.projectKind != .home {
-                    _ = try await bridgeClient.stopWorkspace(workspaceID: workspaceID, commandChannel: commandChannel)
-                }
-            }
-            return try await bridgeClient.setWorkspaceHidden(workspaceID: workspaceID, isHidden: isHidden, commandChannel: commandChannel)
+            try await bridgeClient.setWorkspaceHidden(workspaceID: workspaceID, isHidden: isHidden, commandChannel: commandChannel)
         }
     }
 
-    /// Sets a project's visibility, stopping every running workspace under it before hiding it, for the
-    /// same reason a workspace hide stops the workspace.
+    /// Sets a project's visibility: a single hidden-flag mutation, hide and unhide alike. Hide changes only
+    /// the hidden flag, never run state, so the project's running workspaces keep running hidden.
     ///
     /// The project flag is independent of each workspace's, so this never writes a child's flag: unhiding
     /// the project brings back exactly the workspaces that were shown before it was hidden.
     func setProjectHidden(projectID: String, isHidden: Bool) async {
         await performWorkspaceMutation {
-            if isHidden {
-                let currentOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
-                for workspace in currentOverview.workspaces where workspace.projectID == projectID && workspace.isRunning {
-                    // A workspace that will not stop leaves the project visible: hiding it now would
-                    // strand that workspace out of view still running.
-                    _ = try await bridgeClient.stopWorkspace(workspaceID: workspace.id, commandChannel: commandChannel)
-                }
-            }
-            return try await bridgeClient.setProjectHidden(projectID: projectID, isHidden: isHidden, commandChannel: commandChannel)
+            try await bridgeClient.setProjectHidden(projectID: projectID, isHidden: isHidden, commandChannel: commandChannel)
         }
     }
-
-    /// Names of the running workspaces a project hide would stop, from the currently published overview —
-    /// what the confirmation prompt names.
-    func runningWorkspaceNames(inProjectID projectID: String) -> [String] {
-        (overview?.workspaces ?? []).filter { $0.projectID == projectID && $0.isRunning }.map(\.displayName)
-    }
-
-    /// The full workspace summary for `workspaceID`, from the currently published overview. Nil once the
-    /// overview no longer carries that workspace (e.g. it was deleted, or hidden by another client,
-    /// before this client's next refresh cleared any state that still names it).
-    func workspace(id workspaceID: String) -> SpacesDeviceWorkspaceSummary? { overview?.workspaces.first(where: { $0.id == workspaceID }) }
-
-    func isWorkspaceRunning(workspaceID: String) -> Bool { workspace(id: workspaceID)?.isRunning == true }
 
     /// Reconciliation attempts after an indeterminate `archiveWorkspace` failure (see `deleteWorkspace`
     /// and `isIndeterminateDeleteOutcome`). The daemon

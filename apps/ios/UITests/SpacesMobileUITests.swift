@@ -286,7 +286,6 @@ final class SpacesMobileUITests: XCTestCase {
             return
         }
 
-        let confirmedAt: Date
         switch action {
         case .delete:
             // Identifier-only: the swipe action behind the sheet also reads "Delete", and a label match
@@ -296,30 +295,23 @@ final class SpacesMobileUITests: XCTestCase {
                 XCTFail("The delete confirmation sheet never offered a confirm button")
                 return
             }
-            confirmedAt = Date()
         case .hide:
-            // The hide dialog's confirm label depends on whether the workspace is running.
-            let confirmed =
-                tapButton(in: app, identifier: "Stop and Hide", fallbackLabel: "Stop and Hide", timeout: 6)
-                || tapButton(in: app, identifier: "Hide", fallbackLabel: "Hide", timeout: 6)
-            guard confirmed else {
-                captureScreenshot(app, name: "workspace-hide-confirm-missing", filePath: configuration.immediateScreenshotPath)
-                XCTFail("The hide confirmation dialog never offered a confirm button")
-                return
-            }
-            confirmedAt = Date()
+            // Hide has no confirmation: tapping the band's Hide above already issued it.
+            break
         }
+        let issuedAt = Date()
 
-        // Scroll continuously across the whole mutation window. The removal publishes somewhere inside it,
-        // so the diff always lands while the collection view is mid-scroll.
-        let scrollDeadline = confirmedAt.addingTimeInterval(configuration.removalScrollSeconds)
+        // Scroll continuously across the whole mutation window. A delete's removal publishes somewhere
+        // inside it, so that diff lands while the collection view is mid-scroll; a hide's publishes with the
+        // hide's own quick response, near the start of the window.
+        let scrollDeadline = issuedAt.addingTimeInterval(configuration.removalScrollSeconds)
         var inverted = false
         var connectionErrorAlerts = 0
         while Date() < scrollDeadline {
             guard app.state == .runningForeground else {
                 XCTFail(
                     "The app stopped running while scrolling during the workspace \(action.rawValue). "
-                        + "state=\(app.state.rawValue) elapsed=\(Date().timeIntervalSince(confirmedAt))s")
+                        + "state=\(app.state.rawValue) elapsed=\(Date().timeIntervalSince(issuedAt))s")
                 return
             }
             if dismissConnectionErrorAlertIfPresent(in: app) { connectionErrorAlerts += 1 }

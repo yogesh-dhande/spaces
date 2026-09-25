@@ -48,12 +48,10 @@
     /// A home-project workspace fixture: the daemon's one workspace of `projectKind == .home`, rooted at a
     /// stand-in home directory. Kept separate from `makeWorkspace`, whose fixed "Project"/"project-1"
     /// identity and forced `isRunning: true` do not fit a workspace no configured process ever runs in.
-    /// `isRunning` defaults to `false` (no lifecycle of its own); pass `true` to model the one way it
-    /// turns true anyway, an open ad hoc terminal.
-    func makeHomeWorkspace(dir: String = "/Users/someone", isRunning: Bool = false) -> SpacesDeviceWorkspaceSummary {
+    func makeHomeWorkspace(dir: String = "/Users/someone") -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
             id: "workspace-home", projectID: "project-home", projectName: ProjectKind.homeProjectName, projectKind: .home, branch: nil,
-            baseBranch: nil, dir: dir, isRunning: isRunning, isHidden: false, isDefault: true, hasTrackedRuntimeIndicators: isRunning)
+            baseBranch: nil, dir: dir, isRunning: false, isHidden: false, isDefault: true, hasTrackedRuntimeIndicators: false)
     }
 
     func makeAgentRow(

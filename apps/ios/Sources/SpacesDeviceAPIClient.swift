@@ -305,8 +305,7 @@ struct SpacesDeviceAPIClient: Sendable {
     }
 
     /// Hides or unhides a project. `isHidden` is daemon-owned project state, mirroring
-    /// `setWorkspaceHidden` above — the same flag the Mac sidebar's project-level Hide toggles. iOS never
-    /// calls this with `isHidden: true`: hiding a project is Mac-only, iOS only recovers one.
+    /// `setWorkspaceHidden` above: the same flag the Mac Workspaces dialog's project checkbox toggles.
     func setProjectHidden(projectID: String, isHidden: Bool, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
         -> SpacesDeviceAPIResponse
     {

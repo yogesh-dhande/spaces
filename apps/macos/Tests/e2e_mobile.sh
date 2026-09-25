@@ -4015,9 +4015,10 @@ PY
 
 # Regression lane for removing a workspace while the Spaces list is being scrolled: its rows are diffed
 # out from under a moving collection view, which must stay a consistent batch update. Populates the
-# project with extra workspaces so the list is long enough to scroll, starts the target so the daemon's
-# stop-then-remove takes real time, then drives the swipe -> Delete/Hide -> confirm -> keep scrolling
-# flow from the simulator and verifies the workspace really was removed or hidden.
+# project with extra workspaces so the list is long enough to scroll and starts the target, then drives
+# swipe -> Delete -> confirm -> keep scrolling (or swipe -> Hide -> keep scrolling, since Hide has no
+# confirmation) from the simulator and verifies the workspace really was removed, or hidden and still
+# running.
 run_workspace_removal_scroll_scenario() {
   local scenario="$1"
   local action="delete"
@@ -4050,8 +4051,9 @@ run_workspace_removal_scroll_scenario() {
   [[ -n "$target_workspace_id" ]] || fail "No removal-scroll workspace was available to remove."
   printf 'Removal target workspace: %s\n' "$target_workspace_id" >>"$SCENARIO_LOG"
 
-  # A running workspace makes the daemon's stop-then-remove path take seconds, so the removal lands
-  # well inside the scroll window rather than before the list has started moving.
+  # A running workspace makes the daemon's stop-then-remove path take seconds, so a delete lands well
+  # inside the scroll window rather than before the list has started moving. A hide stops nothing, so
+  # for it the running target is what the post-hide check proves is still running.
   demo_env "$SPACES_CLI_BIN" workspace start --workspace "$target_workspace_id" >>"$SCENARIO_LOG" 2>&1 \
     || fail "Failed to start removal-scroll workspace $target_workspace_id."
 
@@ -4085,18 +4087,25 @@ for line in open(sys.argv[1], encoding="utf-8").read().splitlines():
         raise SystemExit(f"Workspace {workspace_id} still exists after the delete.")
 PY
   else
-    python3 - "$DB_PATH" "$target_workspace_id" <<'PY' || fail "Workspace $target_workspace_id is not hidden after the hide."
+    python3 - "$DB_PATH" "$target_workspace_id" <<'PY' || fail "Workspace $target_workspace_id is not hidden and still running after the hide."
 import sqlite3
 import sys
 
 db_path, workspace_id = sys.argv[1:3]
 with sqlite3.connect(db_path) as db:
-    row = db.execute("SELECT is_hidden FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
+    row = db.execute("SELECT is_hidden, is_running FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
 if row is None:
     raise SystemExit(f"Workspace {workspace_id} not found after the hide.")
 if row[0] != 1:
     raise SystemExit(f"Workspace {workspace_id} is not hidden after the hide (is_hidden={row[0]}).")
+# Hiding changes only the hidden flag, never run state.
+if row[1] != 1:
+    raise SystemExit(f"Workspace {workspace_id} stopped on the hide (is_running={row[1]}).")
 PY
+    # The hide left the target running; stop it so repeated runs do not pile up hidden running
+    # workspaces in the demo profile.
+    demo_env "$SPACES_CLI_BIN" workspace stop --workspace "$target_workspace_id" >>"$SCENARIO_LOG" 2>&1 \
+      || fail "Failed to stop hidden removal-scroll workspace $target_workspace_id."
   fi
   printf 'Mobile scenario passed: %s\n' "$scenario"
 }

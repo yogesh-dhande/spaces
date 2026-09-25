@@ -43,47 +43,4 @@
             XCTAssertEqual(home.displayName, "~")
         }
     }
-
-    /// The Hide-workspace confirmation dialog copy (`HideWorkspaceConfirmation`), shared by `SpacesTabView`'s
-    /// per-row Hide and `WorkspaceVisibilitySheet`'s bulk hide. Both dialogs delegate their button title and
-    /// message to this enum rather than deciding their own wording, so these cases stand in for both;
-    /// `WorkspaceVisibilitySheet.PendingHide` is `private` to its own file and not constructible from a
-    /// test target, but it carries no logic of its own left to test separately.
-    @MainActor final class HideWorkspaceConfirmationTests: XCTestCase {
-        /// The home project has no lifecycle and is never stopped on hide, so it needs no confirmation at
-        /// all: both surfaces hide it directly instead of presenting a dialog, and `copy(for:)` says so by
-        /// returning `nil` even when an open terminal makes `isRunning` true.
-        func testRunningHomeWorkspaceYieldsNoConfirmation() {
-            let home = makeHomeWorkspace(isRunning: true)
-
-            XCTAssertNil(HideWorkspaceConfirmation.copy(for: home))
-        }
-
-        /// An ordinary running workspace still gets the stop warning, unchanged by the home-project carve
-        /// out above.
-        func testRunningOrdinaryWorkspaceGetsStopAndHideWording() {
-            let running = SpacesDeviceWorkspaceSummary(
-                id: "workspace-feature", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/repo/feature",
-                isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true)
-
-            let copy = HideWorkspaceConfirmation.copy(for: running)
-
-            XCTAssertEqual(copy?.buttonTitle, "Stop and Hide")
-            XCTAssertTrue(copy?.message.contains("stops its processes and coding agents") ?? false)
-        }
-
-        /// A stopped ordinary workspace gets the plain "Hide" wording, distinguishing it from the home
-        /// project's `nil` above: both read as a bare hide, but only the home project skips the dialog
-        /// entirely.
-        func testStoppedOrdinaryWorkspaceGetsPlainHideWording() {
-            let stopped = SpacesDeviceWorkspaceSummary(
-                id: "workspace-feature", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/repo/feature",
-                isRunning: false, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false)
-
-            let copy = HideWorkspaceConfirmation.copy(for: stopped)
-
-            XCTAssertEqual(copy?.buttonTitle, "Hide")
-            XCTAssertTrue(copy?.message.contains("leaves this list") ?? false)
-        }
-    }
 #endif
