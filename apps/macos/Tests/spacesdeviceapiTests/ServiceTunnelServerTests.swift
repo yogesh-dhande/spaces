@@ -203,29 +203,83 @@
             return Data(bytes)
         }
 
-        /// Binds an ephemeral loopback port and closes it immediately, yielding a port with no listener
-        /// so a dial gets a deterministic, prompt connection refusal.
+        /// Picks a loopback port below the kernel's ephemeral range (`net.inet.ip.portrange.first`) so a
+        /// concurrent process's `bind(0)` can never be handed the same number back before this test seeds
+        /// it, and confirms the port is free on both 127.0.0.1 and ::1 at the moment of the check, because
+        /// `SpacesDeviceServiceTunnelDialer.dialLoopback` falls back to an IPv6 dial when the IPv4 dial
+        /// fails and would otherwise connect straight through to an IPv6-only listener on the same port.
         private func reservedFreePort() throws -> Int {
-            let socketFD = socket(AF_INET, SOCK_STREAM, 0)
-            guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-            defer { close(socketFD) }
-            var address = sockaddr_in()
-            address.sin_family = sa_family_t(AF_INET)
-            address.sin_port = 0
-            address.sin_addr = in_addr(s_addr: INADDR_LOOPBACK.bigEndian)
-            let bindResult = withUnsafePointer(to: &address) { pointer in
-                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
-                    Darwin.bind(socketFD, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size))
+            var ephemeralFloor: UInt32 = 0
+            var floorSize = MemoryLayout<UInt32>.size
+            guard sysctlbyname("net.inet.ip.portrange.first", &ephemeralFloor, &floorSize, nil, 0) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+
+            let probeRangeLowerBound = 30000
+            let probeRangeUpperBound = 40000
+            guard UInt32(probeRangeUpperBound) < ephemeralFloor else { throw POSIXError(.EINVAL) }
+
+            let maxAttempts = 200
+            var candidate = Int.random(in: probeRangeLowerBound..<probeRangeUpperBound)
+            for _ in 0..<maxAttempts {
+                if let ipv4FD = try bindLoopbackProbe(addressFamily: AF_INET, port: candidate) {
+                    if let ipv6FD = try bindLoopbackProbe(addressFamily: AF_INET6, port: candidate) {
+                        close(ipv4FD)
+                        close(ipv6FD)
+                        return candidate
+                    }
+                    close(ipv4FD)
                 }
+                candidate += 1
+                if candidate >= probeRangeUpperBound { candidate = probeRangeLowerBound }
             }
-            guard bindResult == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-            var boundAddress = sockaddr_in()
-            var length = socklen_t(MemoryLayout<sockaddr_in>.size)
-            let nameResult = withUnsafeMutablePointer(to: &boundAddress) { pointer in
-                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in getsockname(socketFD, sockaddrPointer, &length) }
+            throw POSIXError(.EADDRINUSE)
+        }
+
+        /// Binds (without listening) an `addressFamily` loopback probe socket to `port`, then leaves it
+        /// open for the caller to close once both families have been confirmed together. Returns nil on
+        /// EADDRINUSE so the caller can try the next candidate; any other errno throws.
+        private func bindLoopbackProbe(addressFamily: Int32, port: Int) throws -> Int32? {
+            let socketFD = socket(addressFamily, SOCK_STREAM, 0)
+            guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            do {
+                let bindResult: Int32
+                if addressFamily == AF_INET6 {
+                    var onlyIPv6: Int32 = 1
+                    guard setsockopt(socketFD, IPPROTO_IPV6, IPV6_V6ONLY, &onlyIPv6, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+                        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                    }
+                    var address = sockaddr_in6()
+                    address.sin6_family = sa_family_t(AF_INET6)
+                    address.sin6_port = in_port_t(UInt16(port).bigEndian)
+                    guard inet_pton(AF_INET6, "::1", &address.sin6_addr) == 1 else { throw POSIXError(.EADDRNOTAVAIL) }
+                    bindResult = withUnsafePointer(to: &address) { pointer in
+                        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                            Darwin.bind(socketFD, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in6>.size))
+                        }
+                    }
+                } else {
+                    var address = sockaddr_in()
+                    address.sin_family = sa_family_t(AF_INET)
+                    address.sin_port = in_port_t(UInt16(port).bigEndian)
+                    address.sin_addr = in_addr(s_addr: INADDR_LOOPBACK.bigEndian)
+                    bindResult = withUnsafePointer(to: &address) { pointer in
+                        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                            Darwin.bind(socketFD, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size))
+                        }
+                    }
+                }
+                guard bindResult == 0 else {
+                    let bindErrno = errno
+                    guard bindErrno == EADDRINUSE else { throw POSIXError(POSIXErrorCode(rawValue: bindErrno) ?? .EIO) }
+                    close(socketFD)
+                    return nil
+                }
+                return socketFD
+            } catch {
+                close(socketFD)
+                throw error
             }
-            guard nameResult == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-            return Int(UInt16(bigEndian: boundAddress.sin_port))
         }
 
         private func withTemporaryProfile(_ body: (URL) throws -> Void) throws {
