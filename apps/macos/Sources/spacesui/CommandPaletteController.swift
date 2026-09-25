@@ -138,7 +138,9 @@ final class CommandPalettePanel: NSPanel {
 
     func completePendingCommandPalettePresentationIfNeeded() {
         guard let pending = pendingCommandPalettePresentation, let panel = commandPalettePanel else { return }
-        guard WindowFocusController.commandPalettePresentationIsComplete(panelIsVisible: panel.isVisible, panelIsKey: panel.isKeyWindow) else { return }
+        guard WindowFocusController.commandPalettePresentationIsComplete(panelIsVisible: panel.isVisible, panelIsKey: panel.isKeyWindow) else {
+            return
+        }
         pendingCommandPalettePresentation = nil
         commandPaletteMainWindowVisibility = pending.mainWindowWasVisible
         host.logHotkeyDebug("present_palette end \(host.hotkeyWindowStateSummary())")
@@ -639,8 +641,10 @@ final class CommandPalettePanel: NSPanel {
 
     /// Presents the palette in session-picker mode for filling a pane split. The items
     /// and their choice mapping are built by the host from the scope's overviews.
+    /// `returnFocus` is the pane the picker was opened from; every dismissal, picked or
+    /// cancelled, restores focus to it (see `SessionPickerReturnFocus`).
     func presentSessionPicker(
-        scope: PanelScope, newTerminalWorkspaceID: String, items: [CommandPaletteItem],
+        scope: PanelScope, newTerminalWorkspaceID: String, returnFocus: SessionPickerReturnFocus?, items: [CommandPaletteItem],
         choicesByItemID: [String: AppKitController.SessionPickerChoice], completion: @escaping (AppKitController.SessionPickerChoice?) -> Void
     ) {
         guard pendingSelectionExecution == nil else {
@@ -657,8 +661,19 @@ final class CommandPalettePanel: NSPanel {
         let panel = ensureCommandPalettePanel()
         commandPaletteItems = items
         commandPaletteContextWorkspaceID = newTerminalWorkspaceID
-        commandPaletteReturnTerminalSessionID = nil
-        commandPaletteReturnCodePaneID = nil
+        // The picker always opens from a pane inside Spaces, so the pane it was opened from is the
+        // return target and there is no other application to return to.
+        switch returnFocus {
+        case .terminalSession(let sessionID)?:
+            commandPaletteReturnTerminalSessionID = sessionID
+            commandPaletteReturnCodePaneID = nil
+        case .codePane(let paneID)?:
+            commandPaletteReturnTerminalSessionID = nil
+            commandPaletteReturnCodePaneID = paneID
+        case nil:
+            commandPaletteReturnTerminalSessionID = nil
+            commandPaletteReturnCodePaneID = nil
+        }
         commandPaletteReturnApplicationProcessID = nil
         setCommandPaletteLoading(false)
         panel.center()

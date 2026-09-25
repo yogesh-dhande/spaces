@@ -1304,10 +1304,11 @@ import spacesterminalcore
     }
 
     private func beginSplit(scope: PanelScope, paneID: String, direction: PaneSplitDirection) {
+        let sourcePane = PanelLayoutEngine.pane(withID: paneID, in: layout(for: scope))
         // "New terminal session" targets the split pane's own workspace (which is the
         // panel's workspace for a workspace scope, and the source pane's for global).
         let sourceWorkspaceID: String?
-        switch PanelLayoutEngine.pane(withID: paneID, in: layout(for: scope))?.content {
+        switch sourcePane?.content {
         case .terminalSession(_, let sessionID): sourceWorkspaceID = contentControllers[sessionID]?.workspaceID
         case .codePane(_, let workspaceID): sourceWorkspaceID = workspaceID
         case nil: sourceWorkspaceID = nil
@@ -1319,12 +1320,33 @@ import spacesterminalcore
             guard let sourceWorkspaceID else { return }
             newTerminalWorkspaceID = sourceWorkspaceID
         }
-        host.presentPaneSessionPicker(scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID) { [weak self] result in
+        // The picker returns focus to the pane being split, named here rather than read from the first
+        // responder (the split button's click may have moved it). With no captured pane the palette's
+        // dismissal reveals the main window, and a full-screen global window (the Editor) sits on its own
+        // Space, so that reveal would switch Spaces away from the window the user is splitting.
+        let returnFocus = sourcePane.map(Self.sessionPickerReturnFocus(returningTo:))
+        host.presentPaneSessionPicker(scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID, returnFocus: returnFocus) { [weak self] result in
             guard let self, let result else { return }
             switch result {
             case .terminal(let request): self.fillSplit(scope: scope, paneID: paneID, direction: direction, request: request)
             }
         }
+    }
+
+    /// Where a session picker opened for `pane` returns focus: a terminal pane by its session id, a code
+    /// pane (which has no session) by its pane id.
+    nonisolated static func sessionPickerReturnFocus(returningTo pane: Pane) -> SessionPickerReturnFocus {
+        switch pane.content {
+        case .terminalSession(_, let sessionID): return .terminalSession(sessionID: sessionID)
+        case .codePane: return .codePane(paneID: pane.id)
+        }
+    }
+
+    /// Where a session picker opened over a whole panel (⌘T, the tab strip's "+") returns focus: the
+    /// panel's focused pane, which is always in its selected tab. Nil for a panel with no panes.
+    nonisolated static func sessionPickerReturnFocus(forFocusedPaneIn layout: PanelLayout) -> SessionPickerReturnFocus? {
+        guard let focusedPaneID = layout.focusedPaneID, let pane = PanelLayoutEngine.pane(withID: focusedPaneID, in: layout) else { return nil }
+        return sessionPickerReturnFocus(returningTo: pane)
     }
 
     private func fillSplit(scope: PanelScope, paneID: String, direction: PaneSplitDirection, request: AppKitController.DeviceTerminalOpenRequest) {

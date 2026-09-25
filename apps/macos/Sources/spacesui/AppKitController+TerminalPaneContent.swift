@@ -17,7 +17,11 @@ extension AppKitController {
     /// (panel-window restore, IPC) focuses its existing pane instead of duplicating it.
     func presentNewTabSessionPicker(scope: PanelScope) {
         guard case .workspace(_, let workspaceID) = scope else { return }
-        presentPaneSessionPicker(scope: scope, newTerminalWorkspaceID: workspaceID) { [weak self] result in
+        // Returns focus to the pane the user was in, like the split picker returns to the pane it splits.
+        // An empty panel has none; its workspace scope lives in the main window, so the palette's
+        // main-window reveal is the right return there.
+        let returnFocus = PanelCoordinator.sessionPickerReturnFocus(forFocusedPaneIn: panelCoordinator.layout(for: scope))
+        presentPaneSessionPicker(scope: scope, newTerminalWorkspaceID: workspaceID, returnFocus: returnFocus) { [weak self] result in
             guard let self, let result else { return }
             switch result {
             case .terminal(let request): self.panelCoordinator.openOrFocusTerminalPane(request, openIntent: .focused)
@@ -371,11 +375,16 @@ extension AppKitController {
 
     /// Presents the command palette in session-picker mode for filling a pane split or
     /// opening a new tab, and delivers the resulting choice (creating a fresh session when
-    /// "New terminal session" is chosen), or nil when dismissed.
-    func presentPaneSessionPicker(scope: PanelScope, newTerminalWorkspaceID: String, completion: @escaping (PaneSessionPickerResult?) -> Void) {
+    /// "New terminal session" is chosen), or nil when dismissed. Dismissal, picked or cancelled,
+    /// returns focus to `returnFocus`, the pane the picker was opened from.
+    func presentPaneSessionPicker(
+        scope: PanelScope, newTerminalWorkspaceID: String, returnFocus: SessionPickerReturnFocus?,
+        completion: @escaping (PaneSessionPickerResult?) -> Void
+    ) {
         let presentation = sessionPickerPresentation(scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID)
         commandPalette.presentSessionPicker(
-            scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID, items: presentation.items, choicesByItemID: presentation.choices
+            scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID, returnFocus: returnFocus, items: presentation.items,
+            choicesByItemID: presentation.choices
         ) { [weak self] choice in
             switch choice {
             case nil: completion(nil)

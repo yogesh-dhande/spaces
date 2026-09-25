@@ -86,7 +86,8 @@ extension ProcessProfileEnvironmentSuites {
             #expect(
                 TerminalPaneService.terminalPaneOpenAction(hasExistingPane: false, hasReplaceablePane: false, focusIntent: .focus) == .openFocusedTab)
             #expect(
-                TerminalPaneService.terminalPaneOpenAction(hasExistingPane: true, hasReplaceablePane: false, focusIntent: .focus) == .focusExistingPane)
+                TerminalPaneService.terminalPaneOpenAction(hasExistingPane: true, hasReplaceablePane: false, focusIntent: .focus)
+                    == .focusExistingPane)
         }
 
         /// A restart's replacement takes over the pane its predecessor held rather than arriving at the end
@@ -127,7 +128,8 @@ extension ProcessProfileEnvironmentSuites {
         /// window to click into the sidebar or another pane, so a programmatic launch's late completion
         /// must not take the caret.
         @Test func programmaticOpenStillDoesNotMoveFocusWhenItsPreparationFinishes() {
-            #expect(TerminalPaneService.terminalPanePreparationFocusAction(focusIntent: .withoutFocus, preparedPaneHoldsKeyboardFocus: false) == .none)
+            #expect(
+                TerminalPaneService.terminalPanePreparationFocusAction(focusIntent: .withoutFocus, preparedPaneHoldsKeyboardFocus: false) == .none)
             #expect(
                 TerminalPaneService.terminalPanePreparationFocusAction(focusIntent: .focus, preparedPaneHoldsKeyboardFocus: false)
                     == .activatePanelFocusedPane)
@@ -213,10 +215,14 @@ extension ProcessProfileEnvironmentSuites {
         }
 
         @Test func targetedHotkeyRevealPrefersLightweightFocusForVisibleWindow() {
-            #expect(WindowFocusController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: true, windowIsVisible: true, windowIsMiniaturized: false))
-            #expect(!WindowFocusController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: false, windowIsVisible: true, windowIsMiniaturized: false))
-            #expect(!WindowFocusController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: true, windowIsVisible: false, windowIsMiniaturized: false))
-            #expect(!WindowFocusController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: true, windowIsVisible: true, windowIsMiniaturized: true))
+            #expect(
+                WindowFocusController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: true, windowIsVisible: true, windowIsMiniaturized: false))
+            #expect(
+                !WindowFocusController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: false, windowIsVisible: true, windowIsMiniaturized: false))
+            #expect(
+                !WindowFocusController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: true, windowIsVisible: false, windowIsMiniaturized: false))
+            #expect(
+                !WindowFocusController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: true, windowIsVisible: true, windowIsMiniaturized: true))
         }
 
         @Test func commandPalettePresentationActivatesAppWhenInactive() {
@@ -258,6 +264,35 @@ extension ProcessProfileEnvironmentSuites {
                 "a captured code pane beats falling back to the return application")
         }
 
+        /// The split picker returns focus to the pane being split: a terminal pane through its session, a
+        /// code pane (the Editor, which has no session) through its own pane id. Either one is a captured
+        /// pane, so dismissing the picker never falls through to revealing the main window.
+        @Test func splitSessionPickerReturnsFocusToThePaneBeingSplit() {
+            #expect(
+                PanelCoordinator.sessionPickerReturnFocus(
+                    returningTo: Pane(id: "pane-1", content: .terminalSession(deviceID: "device-1", sessionID: "session-1")))
+                    == .terminalSession(sessionID: "session-1"))
+            #expect(
+                PanelCoordinator.sessionPickerReturnFocus(
+                    returningTo: Pane(id: "editor-pane", content: .codePane(deviceID: "device-1", workspaceID: "workspace-1")))
+                    == .codePane(paneID: "editor-pane"))
+        }
+
+        /// The new-tab picker (⌘T, the tab strip's "+") returns focus to the panel's focused pane, in
+        /// whichever tab is selected; an empty panel has no pane to return to.
+        @Test func newTabSessionPickerReturnsFocusToThePanelsFocusedPane() {
+            var layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: "device-1", sessionID: "session-a")), to: PanelLayout())
+            layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-2", pane: Pane(id: "b", content: .terminalSession(deviceID: "device-1", sessionID: "session-b")), to: layout)
+            #expect(PanelCoordinator.sessionPickerReturnFocus(forFocusedPaneIn: layout) == .terminalSession(sessionID: "session-b"))
+
+            layout = PanelLayoutEngine.selectTab(tabID: "tab-1", in: layout)
+            #expect(PanelCoordinator.sessionPickerReturnFocus(forFocusedPaneIn: layout) == .terminalSession(sessionID: "session-a"))
+
+            #expect(PanelCoordinator.sessionPickerReturnFocus(forFocusedPaneIn: PanelLayout()) == nil)
+        }
+
         @Test func toggleHotkeyHidesOnlyWhenMainWindowIsFocused() {
             #expect(WindowFocusController.shouldHideMainWindowForToggle(appIsHidden: false, mainWindowIsFocused: true))
             #expect(!WindowFocusController.shouldHideMainWindowForToggle(appIsHidden: true, mainWindowIsFocused: true))
@@ -268,8 +303,8 @@ extension ProcessProfileEnvironmentSuites {
             let cases: [(Bool, Bool, Bool)] = [(true, true, false), (true, false, false), (false, true, true), (false, false, false)]
             for (appIsHidden, mainWindowIsFocused, expectedHide) in cases {
                 #expect(
-                    WindowFocusController.shouldHideMainWindowForToggle(appIsHidden: appIsHidden, mainWindowIsFocused: mainWindowIsFocused) == expectedHide
-                )
+                    WindowFocusController.shouldHideMainWindowForToggle(appIsHidden: appIsHidden, mainWindowIsFocused: mainWindowIsFocused)
+                        == expectedHide)
             }
         }
 
@@ -349,18 +384,20 @@ extension ProcessProfileEnvironmentSuites {
         // at a bare prompt are the daemon's to answer, so these cases cover the ask itself.
         @MainActor @Test func ownerPaneCloseAsksTheDaemonToStopTheSession() {
             #expect(
-                TerminalPaneService.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: false))
+                TerminalPaneService.shouldRequestAdHocBareShellStopOnPaneClose(
+                    closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: false))
         }
 
         @MainActor @Test func viewerPaneCloseNeverAsksTheDaemonToStopTheSession() {
             #expect(
-                !TerminalPaneService.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: false, isAppTerminatingAndKeepingSessions: false)
-            )
+                !TerminalPaneService.shouldRequestAdHocBareShellStopOnPaneClose(
+                    closedPaneOwnedOrEnded: false, isAppTerminatingAndKeepingSessions: false))
         }
 
         @MainActor @Test func paneCloseDuringQuitThatKeepsSessionsAsksNothing() {
             #expect(
-                !TerminalPaneService.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: true))
+                !TerminalPaneService.shouldRequestAdHocBareShellStopOnPaneClose(
+                    closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: true))
         }
     }
 }
