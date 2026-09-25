@@ -14,17 +14,17 @@
     // member-over-global lookup keeps distinct from the module-level functions below.
 
     func makeOverview(
-        workspaces: [SpacesDeviceWorkspaceSummary]? = nil, projectIsHidden: Bool = false,
-        codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [], processRows: [SpacesDeviceWorkspaceProcessRow] = [],
-        terminalRows: [SpacesDeviceWorkspaceTerminalRow] = [], sessions: [SpacesDeviceTerminalSessionSummary] = []
+        workspaces: [SpacesDeviceWorkspaceSummary]? = nil, projectIsHidden: Bool = false, codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [],
+        processRows: [SpacesDeviceWorkspaceProcessRow] = [], terminalRows: [SpacesDeviceWorkspaceTerminalRow] = [],
+        sessions: [SpacesDeviceTerminalSessionSummary] = []
     ) -> SpacesDeviceOverviewPayload {
         let project = SpacesDeviceProjectSummary(
             id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main", isHidden: projectIsHidden)
         let resolvedWorkspaces =
             workspaces ?? [
                 makeWorkspace(
-                    id: "workspace-feature", branch: "feature", codingAgentRows: codingAgentRows, processRows: processRows,
-                    terminalRows: terminalRows)
+                    id: "workspace-feature", branch: "feature", codingAgentRows: codingAgentRows, processRows: processRows, terminalRows: terminalRows
+                )
             ]
         return SpacesDeviceOverviewPayload(
             projects: [project], workspaces: resolvedWorkspaces, sessions: sessions,
@@ -39,8 +39,21 @@
     ) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
             id: id, projectID: "project-1", projectName: "Project", branch: branch, baseBranch: "main", dir: "/repo/\(id)", isRunning: true,
-            isHidden: isHidden, isDefault: false, sessionCount: 0, processRows: processRows, codingAgentRows: codingAgentRows,
+            isHidden: isHidden, isDefault: false,
+            hasTrackedRuntimeIndicators: processRows.contains { $0.runState == .running } || codingAgentRows.contains { $0.runState == .running }
+                || terminalRows.contains { $0.runState == .running }, processRows: processRows, codingAgentRows: codingAgentRows,
             terminalRows: terminalRows)
+    }
+
+    /// A home-project workspace fixture: the daemon's one workspace of `projectKind == .home`, rooted at a
+    /// stand-in home directory. Kept separate from `makeWorkspace`, whose fixed "Project"/"project-1"
+    /// identity and forced `isRunning: true` do not fit a workspace no configured process ever runs in.
+    /// `isRunning` defaults to `false` (no lifecycle of its own); pass `true` to model the one way it
+    /// turns true anyway, an open ad hoc terminal.
+    func makeHomeWorkspace(dir: String = "/Users/someone", isRunning: Bool = false) -> SpacesDeviceWorkspaceSummary {
+        SpacesDeviceWorkspaceSummary(
+            id: "workspace-home", projectID: "project-home", projectName: ProjectKind.homeProjectName, projectKind: .home, branch: nil,
+            baseBranch: nil, dir: dir, isRunning: isRunning, isHidden: false, isDefault: true, hasTrackedRuntimeIndicators: isRunning)
     }
 
     func makeAgentRow(

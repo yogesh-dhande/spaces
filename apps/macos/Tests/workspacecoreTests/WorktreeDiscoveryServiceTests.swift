@@ -64,7 +64,7 @@ import Testing
         let databaseDirectory = try makeTempDirectory()
         let databasePath = databaseDirectory.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: databasePath)
-        try store.upsert(project: ProjectRecord(id: "p1", name: "repo", dir: repo.path, isGitRepo: true, defaultBranch: "main"))
+        try store.upsert(project: ProjectRecord(id: "p1", name: "repo", dir: repo.path, isGitRepo: true, defaultBranch: "main", kind: .standard))
 
         // Wall clock can't tell a captive main actor from ordinary scheduler starvation:
         // Swift Testing runs many sibling @MainActor suites concurrently in one process,
@@ -258,7 +258,9 @@ import Testing
         let projectCount = 4
         for index in 0..<projectCount {
             let repo = try makeTempGitRepo(name: "repo-\(index)")
-            try store.upsert(project: ProjectRecord(id: "p\(index)", name: "repo-\(index)", dir: repo.path, isGitRepo: true, defaultBranch: "main"))
+            try store.upsert(
+                project: ProjectRecord(
+                    id: "p\(index)", name: "repo-\(index)", dir: repo.path, isGitRepo: true, defaultBranch: "main", kind: .standard))
         }
 
         let counter = WatcherCounter()
@@ -364,9 +366,11 @@ import Testing
         let databaseDirectory = try makeTempDirectory()
         let databasePath = databaseDirectory.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: databasePath)
-        try store.upsert(project: ProjectRecord(id: "healthy", name: "healthy", dir: healthyRepo.path, isGitRepo: true, defaultBranch: "main"))
         try store.upsert(
-            project: ProjectRecord(id: "unwatchable", name: "unwatchable", dir: unwatchableRepo.path, isGitRepo: true, defaultBranch: "main"))
+            project: ProjectRecord(id: "healthy", name: "healthy", dir: healthyRepo.path, isGitRepo: true, defaultBranch: "main", kind: .standard))
+        try store.upsert(
+            project: ProjectRecord(
+                id: "unwatchable", name: "unwatchable", dir: unwatchableRepo.path, isGitRepo: true, defaultBranch: "main", kind: .standard))
 
         let healthyCounter = WatcherCounter()
         let unwatchableCounter = WatcherCounter()
@@ -412,7 +416,7 @@ import Testing
         let databaseDirectory = try makeTempDirectory()
         let databasePath = databaseDirectory.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: databasePath)
-        try store.upsert(project: ProjectRecord(id: "p1", name: "repo", dir: repo.path, isGitRepo: true, defaultBranch: "main"))
+        try store.upsert(project: ProjectRecord(id: "p1", name: "repo", dir: repo.path, isGitRepo: true, defaultBranch: "main", kind: .standard))
         try FileManager.default.removeItem(at: repo)
 
         let counter = WatcherCounter()

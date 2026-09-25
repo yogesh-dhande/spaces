@@ -46,7 +46,8 @@ public enum SpacesDevicePlanner {
     {
         let workingPath = workspace.dir
         let slug = SpacesProfile.workspaceHostSlug(
-            branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
+            branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, isHomeProject: project.kind == .home,
+            workspaceID: workspace.id)
         var environment = ["SPACES_WORKSPACE_ID": workspace.id, "SPACES_PROJECT_ID": project.id, "SPACES_WORKSPACE_SLUG": slug]
         for mapping in namedPorts {
             environment[ServiceName.portEnvVar(for: mapping.name)] = String(mapping.port)

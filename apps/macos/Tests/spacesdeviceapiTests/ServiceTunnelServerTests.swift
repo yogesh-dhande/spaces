@@ -172,7 +172,8 @@
 
         private func seedWorkspaceService(workspaceID: String, serviceName: String, port: Int) throws {
             let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-            try store.upsert(project: ProjectRecord(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: false, defaultBranch: nil))
+            try store.upsert(
+                project: ProjectRecord(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: false, defaultBranch: nil, kind: .standard))
             try store.upsert(
                 workspace: WorkspaceRecord(
                     id: workspaceID, projectID: "project-1", dir: "/tmp/project/\(workspaceID)", dirname: workspaceID, branch: "main",

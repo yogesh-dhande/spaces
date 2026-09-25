@@ -137,8 +137,8 @@ extension ProcessProfileEnvironmentSuites {
                 workspaces: [
                     SpacesDeviceWorkspaceSummary(
                         id: Self.workspaceID, projectID: Self.projectID, projectName: "Project", branch: "feature", baseBranch: "main",
-                        dir: "/tmp/project-feature", isRunning: true, isHidden: false, isDefault: false, sessionCount: 0, codingAgentRows: [],
-                        terminalRows: [])
+                        dir: "/tmp/project-feature", isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false,
+                        codingAgentRows: [], terminalRows: [])
                 ], sessions: [])
             let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: deviceID, projectCollapseStates: [Self.projectID: isCollapsed])
             return AppKitController.DeviceSection(

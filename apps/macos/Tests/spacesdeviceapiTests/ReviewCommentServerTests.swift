@@ -56,9 +56,8 @@
                 let createResponse = try client.send(
                     SpacesDeviceAPIRequest(
                         command: .workspaceReviewCommentUpsert(
-                            .init(
-                                workspaceID: "workspace-1", filePath: "a.swift", side: .new, lineNumber: 10, lineText: "let x = 1",
-                                body: "why?")), authToken: token, clientApp: clientApp))
+                            .init(workspaceID: "workspace-1", filePath: "a.swift", side: .new, lineNumber: 10, lineText: "let x = 1", body: "why?")),
+                        authToken: token, clientApp: clientApp))
                 XCTAssertTrue(createResponse.ok, createResponse.message)
                 let created = try XCTUnwrap(createResponse.workspaceReviewCommentUpsert?.comment)
                 XCTAssertEqual(created.filePath, "a.swift")
@@ -68,8 +67,8 @@
                     SpacesDeviceAPIRequest(
                         command: .workspaceReviewCommentUpsert(
                             .init(
-                                workspaceID: "workspace-1", id: created.id, filePath: "a.swift", side: .new, lineNumber: 10,
-                                lineText: "let x = 1", body: "actually, why not?")), authToken: token, clientApp: clientApp))
+                                workspaceID: "workspace-1", id: created.id, filePath: "a.swift", side: .new, lineNumber: 10, lineText: "let x = 1",
+                                body: "actually, why not?")), authToken: token, clientApp: clientApp))
                 XCTAssertTrue(updateResponse.ok, updateResponse.message)
                 let updated = try XCTUnwrap(updateResponse.workspaceReviewCommentUpsert?.comment)
                 XCTAssertEqual(updated.id, created.id)
@@ -172,8 +171,8 @@
                     SpacesDeviceAPIRequest(
                         command: .workspaceReviewCommentUpsert(
                             .init(
-                                workspaceID: "workspace-1", id: "does-not-exist", filePath: "a.swift", side: .new, lineNumber: 1,
-                                lineText: "x", body: "note")), authToken: token, clientApp: clientApp))
+                                workspaceID: "workspace-1", id: "does-not-exist", filePath: "a.swift", side: .new, lineNumber: 1, lineText: "x",
+                                body: "note")), authToken: token, clientApp: clientApp))
 
                 XCTAssertFalse(response.ok)
                 XCTAssertEqual(response.errorCode, .notFound)
@@ -319,8 +318,8 @@
                     SpacesDeviceAPIRequest(
                         command: .workspaceReviewCommentsSend(
                             .init(
-                                workspaceID: "workspace-1", sessionID: "agent-session", text: "hi",
-                                comments: sendEntries(["comment-1", "comment-2"]))), authToken: token, clientApp: clientApp))
+                                workspaceID: "workspace-1", sessionID: "agent-session", text: "hi", comments: sendEntries(["comment-1", "comment-2"]))
+                        ), authToken: token, clientApp: clientApp))
 
                 XCTAssertFalse(response.ok)
                 XCTAssertEqual(response.errorCode, .invalidArgument)
@@ -410,8 +409,8 @@
                     SpacesDeviceAPIRequest(
                         command: .workspaceReviewCommentsSend(
                             .init(
-                                workspaceID: "workspace-1", sessionID: "agent-session", text: "please fix these",
-                                comments: sendEntries(["comment-1"]))), authToken: token, clientApp: clientApp))
+                                workspaceID: "workspace-1", sessionID: "agent-session", text: "please fix these", comments: sendEntries(["comment-1"])
+                            )), authToken: token, clientApp: clientApp))
 
                 XCTAssertFalse(response.ok)
                 XCTAssertEqual(response.errorCode, .invalidArgument)
@@ -455,8 +454,7 @@
                         command: .workspaceReviewCommentsSend(
                             .init(
                                 workspaceID: "workspace-1", sessionID: "agent-session", text: "please fix these",
-                                comments: [.init(id: "comment-1", revision: 41)])), authToken: token,
-                        clientApp: clientApp))
+                                comments: [.init(id: "comment-1", revision: 41)])), authToken: token, clientApp: clientApp))
 
                 XCTAssertFalse(response.ok)
                 XCTAssertEqual(response.errorCode, .conflict)
@@ -576,13 +574,10 @@
 
                 let sendRequest = SpacesDeviceAPIRequest(
                     command: .workspaceReviewCommentsSend(
-                        .init(
-                            workspaceID: "workspace-1", sessionID: "agent-session", text: "please fix these",
-                            comments: sendEntries(["comment-1"]))), authToken: token, clientApp: clientApp)
+                        .init(workspaceID: "workspace-1", sessionID: "agent-session", text: "please fix these", comments: sendEntries(["comment-1"]))),
+                    authToken: token, clientApp: clientApp)
                 let sendResultBox = ReviewCommentAsyncResultBox<SpacesDeviceAPIResponse>()
-                DispatchQueue.global(qos: .userInitiated).async {
-                    sendResultBox.set(Result { try sendClient.send(sendRequest) })
-                }
+                DispatchQueue.global(qos: .userInitiated).async { sendResultBox.set(Result { try sendClient.send(sendRequest) }) }
 
                 // Wait until the send handler has validated `revision` and reached the terminal-control
                 // write — proof it is holding `reviewCommentQueue` for the rest of its body, not just for
@@ -592,12 +587,10 @@
                 let upsertRequest = SpacesDeviceAPIRequest(
                     command: .workspaceReviewCommentUpsert(
                         .init(
-                            workspaceID: "workspace-1", id: "comment-1", filePath: "a.swift", side: .new, lineNumber: 1,
-                            lineText: "let x = 1", body: "raced edit")), authToken: token, clientApp: clientApp)
+                            workspaceID: "workspace-1", id: "comment-1", filePath: "a.swift", side: .new, lineNumber: 1, lineText: "let x = 1",
+                            body: "raced edit")), authToken: token, clientApp: clientApp)
                 let upsertResultBox = ReviewCommentAsyncResultBox<SpacesDeviceAPIResponse>()
-                DispatchQueue.global(qos: .userInitiated).async {
-                    upsertResultBox.set(Result { try upsertClient.send(upsertRequest) })
-                }
+                DispatchQueue.global(qos: .userInitiated).async { upsertResultBox.set(Result { try upsertClient.send(upsertRequest) }) }
 
                 // Give the upsert ample time to race in if `reviewCommentQueue` were not actually serializing
                 // the two handlers; it must still be blocked because the send has not released the queue yet.
@@ -683,25 +676,20 @@
 
                 let sendRequest = SpacesDeviceAPIRequest(
                     command: .workspaceReviewCommentsSend(
-                        .init(
-                            workspaceID: "workspace-1", sessionID: "agent-session", text: "please fix these",
-                            comments: sendEntries(["comment-1"]))), authToken: token, clientApp: clientApp)
+                        .init(workspaceID: "workspace-1", sessionID: "agent-session", text: "please fix these", comments: sendEntries(["comment-1"]))),
+                    authToken: token, clientApp: clientApp)
                 let sendResultBox = ReviewCommentAsyncResultBox<SpacesDeviceAPIResponse>()
-                DispatchQueue.global(qos: .userInitiated).async {
-                    sendResultBox.set(Result { try sendClient.send(sendRequest) })
-                }
+                DispatchQueue.global(qos: .userInitiated).async { sendResultBox.set(Result { try sendClient.send(sendRequest) }) }
 
                 XCTAssertEqual(sendEnteredSocket.wait(timeout: .now() + 5), .success, "send never reached the terminal-control write")
 
                 let upsertRequest = SpacesDeviceAPIRequest(
                     command: .workspaceReviewCommentUpsert(
                         .init(
-                            workspaceID: "workspace-1", id: "comment-1", filePath: "a.swift", side: .new, lineNumber: 1,
-                            lineText: "let x = 1", body: "raced edit")), authToken: token, clientApp: clientApp)
+                            workspaceID: "workspace-1", id: "comment-1", filePath: "a.swift", side: .new, lineNumber: 1, lineText: "let x = 1",
+                            body: "raced edit")), authToken: token, clientApp: clientApp)
                 let upsertResultBox = ReviewCommentAsyncResultBox<SpacesDeviceAPIResponse>()
-                DispatchQueue.global(qos: .userInitiated).async {
-                    upsertResultBox.set(Result { try upsertClient.send(upsertRequest) })
-                }
+                DispatchQueue.global(qos: .userInitiated).async { upsertResultBox.set(Result { try upsertClient.send(upsertRequest) }) }
 
                 // Give the upsert time to queue behind the send on `reviewCommentQueue` before probing: the
                 // point of the ping below is that it resolves despite both of these still being blocked.
@@ -740,8 +728,8 @@
             if try store.project(id: projectID) == nil {
                 try store.upsert(
                     project: ProjectRecord(
-                        id: projectID, name: "Spaces", dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil,
-                        ports: [], processes: [], browserSessions: []))
+                        id: projectID, name: "Spaces", dir: dir, isGitRepo: false, defaultBranch: nil, kind: .standard, setupScript: nil,
+                        stopScript: nil, ports: [], processes: [], browserSessions: []))
             }
             // `branch` is unique per project, so two workspaces seeded under the same project (several
             // tests here seed "workspace-1" and "workspace-2" under the default "project-1") need
@@ -752,9 +740,9 @@
                     lastLaunchedAt: nil))
         }
 
-        @discardableResult private func seedDraftComment(
-            id: String, workspaceID: String, filePath: String, sentAt: String? = nil
-        ) throws -> WorkspaceReviewCommentRecord {
+        @discardableResult private func seedDraftComment(id: String, workspaceID: String, filePath: String, sentAt: String? = nil) throws
+            -> WorkspaceReviewCommentRecord
+        {
             let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
             let record = WorkspaceReviewCommentRecord(
                 id: id, workspaceID: workspaceID, filePath: filePath, side: .new, lineNumber: 1, lineText: "let x = 1", body: "draft body",
@@ -770,16 +758,15 @@
             ids.map { SpacesDeviceReviewCommentSendEntry(id: $0, revision: revision) }
         }
 
-        private func seedTerminalSession(
-            sessionID: String, workspaceID: String, state: TerminalSessionState, agentStatus: AgentWindowStatus = .idle
-        ) throws {
+        private func seedTerminalSession(sessionID: String, workspaceID: String, state: TerminalSessionState, agentStatus: AgentWindowStatus = .idle)
+            throws
+        {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             try paths.ensureDirectories()
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 TerminalSessionLaunchConfiguration(
                     sessionID: sessionID, title: "Agent", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
-                    createdAt: "2026-08-20T09:00:00Z", workspaceID: workspaceID, kind: .agent),
-                paths: paths)
+                    createdAt: "2026-08-20T09:00:00Z", workspaceID: workspaceID, kind: .agent), paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 TerminalSessionRuntimeState(sessionID: sessionID, servicePID: 1, childPID: 1, state: state, updatedAt: "2026-08-20T09:00:00Z"),
                 paths: paths)
@@ -787,8 +774,7 @@
             try store.upsertAgentWindow(
                 AgentWindowRecord(
                     id: "agent-\(sessionID)", workspaceID: workspaceID, provider: .spaces, label: "Codex", terminalTrackingID: sessionID,
-                    sessionKey: nil, status: agentStatus,
-                    createdAt: "2026-08-20T09:00:00Z", updatedAt: "2026-08-20T09:00:00Z"))
+                    sessionKey: nil, status: agentStatus, createdAt: "2026-08-20T09:00:00Z", updatedAt: "2026-08-20T09:00:00Z"))
         }
 
         private func makeServerAndClient() throws -> (
@@ -802,8 +788,8 @@
                 resolver: SpacesDeviceEndpointResolver(
                     hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint))
             let clientApp = SpacesDeviceClientApp(
-                installationID: "review-comment-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
-                deviceName: "Mac", appVersion: "1.0")
+                installationID: "review-comment-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos", deviceName: "Mac",
+                appVersion: "1.0")
             return (server, client, clientApp, pairingStore.authToken)
         }
 

@@ -1055,7 +1055,7 @@
         private func makeWorkspace(id: String, branch: String?) -> SpacesDeviceWorkspaceSummary {
             SpacesDeviceWorkspaceSummary(
                 id: id, projectID: "project-1", projectName: "Project", branch: branch, baseBranch: nil, dir: "/tmp/\(id)", isRunning: false,
-                isHidden: false, isDefault: false, sessionCount: 0)
+                isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false)
         }
 
         private func makeAgentSummary(

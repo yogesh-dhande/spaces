@@ -117,8 +117,8 @@ import spacesterminalcore
     @Test func aFailedReadKeepsACustomChord() throws {
         let custom = HotkeySpec(key: "j", modifiers: [.ctrl, .shift])
         #expect(
-            ShortcutsController.resolvedShortcutSpec(failingResolver(), setting: .guiSidebarNextShortcut, current: custom, leaderModifiers: Self.leader)
-                == custom)
+            ShortcutsController.resolvedShortcutSpec(
+                failingResolver(), setting: .guiSidebarNextShortcut, current: custom, leaderModifiers: Self.leader) == custom)
     }
 
     /// The launch pass has no chord in effect yet, so a read that fails then must still install a
@@ -192,7 +192,7 @@ extension ProcessProfileEnvironmentSuites {
                 workspaces: [
                     SpacesDeviceWorkspaceSummary(
                         id: Self.workspaceID, projectID: Self.projectID, projectName: "Project", branch: "feature", baseBranch: "main",
-                        dir: "/tmp/project-feature", isRunning: true, isHidden: workspaceHidden, isDefault: false, sessionCount: 1,
+                        dir: "/tmp/project-feature", isRunning: true, isHidden: workspaceHidden, isDefault: false, hasTrackedRuntimeIndicators: false,
                         codingAgentRows: [], terminalRows: [])
                 ], sessions: [])
             let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: deviceID)
@@ -216,7 +216,8 @@ extension ProcessProfileEnvironmentSuites {
         private func showWorkspacePane(_ controller: AppKitController) {
             controller.deviceModel.deviceSections = [populatedSection(deviceID: controller.deviceModel.localDeviceID)]
             controller.rebuildFlatSidebarData()
-            controller.presentDetailPane(.workspace(id: Self.workspaceID, deviceID: controller.deviceModel.localDeviceID), presentation: .userNavigation)
+            controller.presentDetailPane(
+                .workspace(id: Self.workspaceID, deviceID: controller.deviceModel.localDeviceID), presentation: .userNavigation)
             controller.selectedProjectID = Self.projectID
             controller.selectedWorkspaceID = Self.workspaceID
         }
@@ -232,7 +233,9 @@ extension ProcessProfileEnvironmentSuites {
             let controller = makeController()
             showWorkspacePane(controller)
 
-            applyReload(controller, section: emptySection(deviceID: controller.deviceModel.localDeviceID, loadState: .offline("unreachable"), compatibility: nil))
+            applyReload(
+                controller,
+                section: emptySection(deviceID: controller.deviceModel.localDeviceID, loadState: .offline("unreachable"), compatibility: nil))
 
             #expect(controller.detailPane == .workspace(id: Self.workspaceID, deviceID: controller.deviceModel.localDeviceID))
             #expect(controller.selectedWorkspaceID == Self.workspaceID, "the selection is what restores the pane when the daemon returns")
@@ -244,7 +247,8 @@ extension ProcessProfileEnvironmentSuites {
             let controller = makeController()
             showWorkspacePane(controller)
 
-            applyReload(controller, section: emptySection(deviceID: controller.deviceModel.localDeviceID, loadState: .loaded, compatibility: .compatible))
+            applyReload(
+                controller, section: emptySection(deviceID: controller.deviceModel.localDeviceID, loadState: .loaded, compatibility: .compatible))
 
             #expect(controller.detailPane == DetailPane.none)
             #expect(controller.selectedWorkspaceID == nil, "a selection nothing lists would re-enter this branch on every later reload")
@@ -291,7 +295,9 @@ extension ProcessProfileEnvironmentSuites {
         @Test func summonWithNoFocusedWorkspaceNeverChangesThePane() {
             let controller = makeController()
             showWorkspacePane(controller)
-            controller.deviceModel.deviceSections = [emptySection(deviceID: controller.deviceModel.localDeviceID, loadState: .loaded, compatibility: .compatible)]
+            controller.deviceModel.deviceSections = [
+                emptySection(deviceID: controller.deviceModel.localDeviceID, loadState: .loaded, compatibility: .compatible)
+            ]
             controller.rebuildFlatSidebarData()
 
             controller.windowFocus.refreshWorkspaceSelectionForActivation(focusedWorkspaceID: nil)

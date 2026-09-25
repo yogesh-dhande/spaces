@@ -180,7 +180,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: nil, baseBranch: nil, dir: "/repo", isRunning: true,
-                    isHidden: false, isDefault: false, sessionCount: 1)
+                    isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false)
             ], sessions: [session],
             daemonStatus: TerminalServiceDaemonStatus(version: "1.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 1))
 
@@ -277,9 +277,10 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             authToken: "SECRET")
         let response = SpacesDeviceAPIResponse(
             ok: true, message: "Read workspace revision file.",
-            result: .workspaceRevisionFileRead(.init(
-                worktreeFile: .init(base64Data: "d29ya3RyZWU=", sha256: "worktree-sha", size: 8, isBinaryGuess: false),
-                isWorktreeEquivalentToRevision: true, comparisonOldBase64Data: "aGVsbG8=")))
+            result: .workspaceRevisionFileRead(
+                .init(
+                    worktreeFile: .init(base64Data: "d29ya3RyZWU=", sha256: "worktree-sha", size: 8, isBinaryGuess: false),
+                    isWorktreeEquivalentToRevision: true, comparisonOldBase64Data: "aGVsbG8=")))
 
         XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
         let decodedResponse = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))
@@ -471,7 +472,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: nil, baseBranch: nil, dir: "/repo", isRunning: true,
-                    isHidden: false, isDefault: false, sessionCount: 1, processRows: [processRow], codingAgentRows: [agentRow],
+                    isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true, processRows: [processRow], codingAgentRows: [agentRow],
                     terminalRows: [terminalRow])
             ], sessions: [session])
 
@@ -646,7 +647,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: nil, baseBranch: nil, dir: "/repo", isRunning: true,
-                    isHidden: false, isDefault: false, sessionCount: 1, terminalRows: [row])
+                    isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true, terminalRows: [row])
             ], sessions: [])
 
         let decoded = try SpacesDeviceAPICodec.decodeResponse(

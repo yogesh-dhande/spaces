@@ -1325,8 +1325,8 @@ final class StoreTests: XCTestCase {
         XCTAssertThrowsError(
             try store.upsert(
                 project: ProjectRecord(
-                    id: project.id, name: project.name, dir: project.dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil,
-                    ports: [ServiceDefinition(name: " ")], processes: [], browserSessions: [])))
+                    id: project.id, name: project.name, dir: project.dir, isGitRepo: false, defaultBranch: nil, kind: .standard, setupScript: nil,
+                    stopScript: nil, ports: [ServiceDefinition(name: " ")], processes: [], browserSessions: [])))
         XCTAssertThrowsError(try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: [ServiceDefinition(name: "\n")]))
         XCTAssertThrowsError(try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["\t"]))
     }
@@ -1341,8 +1341,8 @@ final class StoreTests: XCTestCase {
         XCTAssertThrowsError(
             try store.upsert(
                 project: ProjectRecord(
-                    id: project.id, name: project.name, dir: project.dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil,
-                    ports: [ServiceDefinition(name: "api"), ServiceDefinition(name: "api")], processes: [], browserSessions: [])))
+                    id: project.id, name: project.name, dir: project.dir, isGitRepo: false, defaultBranch: nil, kind: .standard, setupScript: nil,
+                    stopScript: nil, ports: [ServiceDefinition(name: "api"), ServiceDefinition(name: "api")], processes: [], browserSessions: [])))
         XCTAssertThrowsError(
             try store.setWorkspaceServiceDefinitions(
                 workspaceID: workspace.id, definitions: [ServiceDefinition(name: "api"), ServiceDefinition(name: "api")]))
@@ -1762,8 +1762,8 @@ final class StoreTests: XCTestCase {
         let store = try makeTemporaryStore()
         let aDir = try makeTempDirectory().path
         let zDir = try makeTempDirectory().path
-        let aProject = ProjectRecord(id: "a", name: "A Project", dir: aDir, isGitRepo: false, defaultBranch: nil)
-        let zProject = ProjectRecord(id: "z", name: "Z Project", dir: zDir, isGitRepo: true, defaultBranch: "main")
+        let aProject = ProjectRecord(id: "a", name: "A Project", dir: aDir, isGitRepo: false, defaultBranch: nil, kind: .standard)
+        let zProject = ProjectRecord(id: "z", name: "Z Project", dir: zDir, isGitRepo: true, defaultBranch: "main", kind: .standard)
         try store.upsert(project: zProject)
         try store.upsert(project: aProject)
 
@@ -1814,8 +1814,8 @@ final class StoreTests: XCTestCase {
         let store = try makeTemporaryStore()
         let dir = try makeTempDirectory().path
         let project = ProjectRecord(
-            id: dir, name: "myproject", dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: "echo setup", stopScript: "echo stop",
-            ports: [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")],
+            id: dir, name: "myproject", dir: dir, isGitRepo: false, defaultBranch: nil, kind: .standard, setupScript: "echo setup",
+            stopScript: "echo stop", ports: [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")],
             processes: [ProcessTemplate(name: "api", command: "npm run api"), ProcessTemplate(command: "npm run worker")],
             browserSessions: [BrowserSession(name: "frontend", url: "https://localhost:3000")])
 
@@ -1841,7 +1841,7 @@ final class StoreTests: XCTestCase {
         let store = try makeTemporaryStore()
         let dir = try makeTempDirectory().path
         var project = ProjectRecord(
-            id: dir, name: "project", dir: dir, isGitRepo: false, defaultBranch: nil, ports: [ServiceDefinition(name: "oldport")])
+            id: dir, name: "project", dir: dir, isGitRepo: false, defaultBranch: nil, kind: .standard, ports: [ServiceDefinition(name: "oldport")])
         try store.upsert(project: project)
 
         project.ports = [ServiceDefinition(name: "newport"), ServiceDefinition(name: "extra")]
@@ -1859,7 +1859,7 @@ final class StoreTests: XCTestCase {
         let store = try makeTemporaryStore()
         let dir = try makeTempDirectory().path
         let project = ProjectRecord(
-            id: dir, name: "project", dir: dir, isGitRepo: false, defaultBranch: nil, ports: [ServiceDefinition(name: "port")],
+            id: dir, name: "project", dir: dir, isGitRepo: false, defaultBranch: nil, kind: .standard, ports: [ServiceDefinition(name: "port")],
             processes: [ProcessTemplate(command: "echo run")])
         try store.upsert(project: project)
 
@@ -1873,8 +1873,10 @@ final class StoreTests: XCTestCase {
         let store = try makeTemporaryStore()
         let dir1 = try makeTempDirectory().path
         let dir2 = try makeTempDirectory().path
-        let p1 = ProjectRecord(id: dir1, name: "alpha", dir: dir1, isGitRepo: false, defaultBranch: nil, ports: [ServiceDefinition(name: "port1")])
-        let p2 = ProjectRecord(id: dir2, name: "beta", dir: dir2, isGitRepo: false, defaultBranch: nil, processes: [ProcessTemplate(command: "run")])
+        let p1 = ProjectRecord(
+            id: dir1, name: "alpha", dir: dir1, isGitRepo: false, defaultBranch: nil, kind: .standard, ports: [ServiceDefinition(name: "port1")])
+        let p2 = ProjectRecord(
+            id: dir2, name: "beta", dir: dir2, isGitRepo: false, defaultBranch: nil, kind: .standard, processes: [ProcessTemplate(command: "run")])
         try store.upsert(project: p1)
         try store.upsert(project: p2)
 
@@ -2325,8 +2327,8 @@ final class StoreTests: XCTestCase {
         var renamedProject = try XCTUnwrap(try store.project(id: "project-a"))
         renamedProject = ProjectRecord(
             id: renamedProject.id, name: "Renamed", dir: renamedProject.dir, isGitRepo: renamedProject.isGitRepo,
-            defaultBranch: renamedProject.defaultBranch, setupScript: renamedProject.setupScript, stopScript: renamedProject.stopScript, ports: [],
-            processes: [], browserSessions: [])
+            defaultBranch: renamedProject.defaultBranch, kind: .standard, setupScript: renamedProject.setupScript,
+            stopScript: renamedProject.stopScript, ports: [], processes: [], browserSessions: [])
         try store.upsert(project: renamedProject)
 
         XCTAssertEqual(try store.projects().map(\.id).sorted(), ["project-a", "project-b"])

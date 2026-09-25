@@ -337,12 +337,11 @@ import spacesterminalcore
         }
     }
 
-    /// Closes any workspace-scoped code pane owned by `deviceID` whose workspace dropped out of that
-    /// device's overview workspace list — the code-pane counterpart of `pruneOpenPanes`. A hidden
-    /// workspace remains in the overview with `isHidden` set rather than being omitted, so an id's
-    /// absence from `liveWorkspaceIDs` means the workspace record itself was deleted, not merely
-    /// hidden. Call only with a successfully received overview for `deviceID`; see `pruneOpenPanes`'s
-    /// contract.
+    /// Closes any workspace-scoped code pane owned by `deviceID` whose workspace is absent from
+    /// `liveWorkspaceIDs`, the code-pane counterpart of `pruneOpenPanes`. Every caller builds that set
+    /// with `OpenPanePruning.editorEligibleWorkspaceIDs`, which owns what "live" means for a code pane
+    /// (the workspace record still exists and its project can host the Editor). Call only with a
+    /// successfully received overview for `deviceID`; see `pruneOpenPanes`'s contract.
     ///
     /// A `.globalWindow` pane is never closed here — the Editor is a singleton the user opens
     /// explicitly, so losing its workspace must not take the window down with it. When the pane this

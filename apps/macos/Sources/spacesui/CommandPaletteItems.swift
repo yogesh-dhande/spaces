@@ -215,8 +215,7 @@ extension CommandPaletteController {
     }
 
     nonisolated private static func commandPaletteKind(
-        focusRequest: AppKitController.WindowFocusRequest?, fallbackIcon: String, processStatus: RunningProcessState?,
-        agentStatus: AgentWindowStatus?
+        focusRequest: AppKitController.WindowFocusRequest?, fallbackIcon: String, processStatus: RunningProcessState?, agentStatus: AgentWindowStatus?
     ) -> AppKitController.WorkspaceRunShortcutTarget.Kind {
         switch focusRequest {
         case .workspaceBrowserSession: return .browser
@@ -278,8 +277,8 @@ extension CommandPaletteController {
     /// item construction) that don't need alert-aware status; production palette loads always pass the
     /// live values so an acknowledged process exit reads as idle here the same way it does in the sidebar.
     nonisolated static func deviceCommandPaletteWorkspaceItems(
-        from overview: SpacesDeviceOverviewPayload, deviceID: String = SpacesDeviceRecord.localDeviceID, alertsGroups: [AppKitController.AlertsGroup] = [],
-        dismissedAttentionItemIDs: Set<String> = []
+        from overview: SpacesDeviceOverviewPayload, deviceID: String = SpacesDeviceRecord.localDeviceID,
+        alertsGroups: [AppKitController.AlertsGroup] = [], dismissedAttentionItemIDs: Set<String> = []
     ) -> [CommandPaletteItem] {
         let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: deviceID)
         var items: [CommandPaletteItem] = []
@@ -380,11 +379,17 @@ extension CommandPaletteController {
                 // code pane gets (`iconSymbol`'s `.window` case falls back to the code-brackets glyph
                 // when `detail` isn't a URL), since this row is not itself a runtime target with an
                 // index in `WorkspaceRunShortcutTarget.Kind`'s numbered-shortcut vocabulary.
-                items.append(
-                    CommandPaletteItem(
-                        id: "\(workspace.id)::editor", source: .editorAction, alertsAttentionID: nil, workspaceID: workspace.id,
-                        workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name, kind: .window,
-                        label: "Open in Editor", detail: nil, status: .none, focusRequest: nil, recentFocusIdentity: "editor:\(workspace.id)"))
+                //
+                // The home project has no Editor row: `AppKitController.openWorkspaceEditor` refuses
+                // it (its directory has no ignore rules to bound a file list), so the palette does not
+                // offer an action that would only fail.
+                if project.kind != .home {
+                    items.append(
+                        CommandPaletteItem(
+                            id: "\(workspace.id)::editor", source: .editorAction, alertsAttentionID: nil, workspaceID: workspace.id,
+                            workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name, kind: .window,
+                            label: "Open in Editor", detail: nil, status: .none, focusRequest: nil, recentFocusIdentity: "editor:\(workspace.id)"))
+                }
             }
         }
 
@@ -392,12 +397,13 @@ extension CommandPaletteController {
     }
 
     func loadCommandPaletteItemsSnapshot() async -> Result<[CommandPaletteItem], Error> {
-        await Self.commandPaletteItemsSnapshot(alertsGroups: deviceModel.alertsGroups, dismissedAttentionItemIDs: alerts.dismissedAlertsAttentionItemIDs)
+        await Self.commandPaletteItemsSnapshot(
+            alertsGroups: deviceModel.alertsGroups, dismissedAttentionItemIDs: alerts.dismissedAlertsAttentionItemIDs)
     }
 
-    nonisolated private static func commandPaletteItemsSnapshot(alertsGroups: [AppKitController.AlertsGroup], dismissedAttentionItemIDs: Set<String>) async -> Result<
-        [CommandPaletteItem], Error
-    > {
+    nonisolated private static func commandPaletteItemsSnapshot(alertsGroups: [AppKitController.AlertsGroup], dismissedAttentionItemIDs: Set<String>)
+        async -> Result<[CommandPaletteItem], Error>
+    {
         await Task.detached(priority: .userInitiated) {
             do {
                 let localOverview = try SpacesDeviceClient.localOverview(

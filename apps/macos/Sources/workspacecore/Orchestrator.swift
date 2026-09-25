@@ -494,10 +494,13 @@ public final class WorkspaceOrchestrator {
 
     public func listWorkspaces(projectID: String) throws -> [WorkspaceSummary] {
         let records = try store.workspaces(projectID: projectID)
+        // The owning project's kind rides along on every summary: it decides the workspace's display name
+        // and which controls apply to it, and the surfaces that read a summary hold no project.
+        let kind = try store.project(id: projectID)?.kind ?? .standard
         return records.map {
             WorkspaceSummary(
-                id: $0.id, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning, isHidden: $0.isHidden,
-                isDefault: $0.isDefault, notes: $0.notes)
+                id: $0.id, branch: kind.maskedBranch($0.branch), baseBranch: kind.maskedBranch($0.baseBranch), dir: $0.dir, isRunning: $0.isRunning,
+                isHidden: $0.isHidden, isDefault: $0.isDefault, notes: $0.notes, projectKind: kind)
         }
     }
 
@@ -537,10 +540,14 @@ public final class WorkspaceOrchestrator {
     }
 
     public func updateWorkspaceSettings(workspaceID: String, update: (inout WorkspaceSettings) -> Void) throws {
+        try assertWorkspaceIsConfigurable(workspaceID: workspaceID)
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try updateWorkspaceSettingsUnlocked(workspaceID: workspaceID, update: update) }
     }
 
-    private func updateWorkspaceSettingsUnlocked(workspaceID: String, update: (inout WorkspaceSettings) -> Void) throws {
+    /// Internal rather than private so `ensureHomeProject` can clear an adopted workspace's settings
+    /// through the very write every other settings edit takes (normalization, port sync, and all),
+    /// which the public entry point refuses for a home workspace.
+    func updateWorkspaceSettingsUnlocked(workspaceID: String, update: (inout WorkspaceSettings) -> Void) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard var existing = try loadWorkspaceSettings(project: project, workspace: workspace) else {
             throw WorkspaceError.missingProject(dir: project.dir)
@@ -565,6 +572,7 @@ public final class WorkspaceOrchestrator {
     }
 
     public func updateWorkspaceNotes(workspaceID: String, notes: String?) throws {
+        try assertWorkspaceIsConfigurable(workspaceID: workspaceID)
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
             let (_, workspace) = try resolveWorkspace(id: workspaceID)
             try store.updateWorkspaceNotes(id: workspace.id, notes: notes)
@@ -628,6 +636,11 @@ public final class WorkspaceOrchestrator {
         }
 
         if let notes {
+            // `updateWorkspaceMetadataUnlocked` already holds the workspace's lifecycle lock (claimed by
+            // `withProjectAndWorkspaceLifecycleLocks`), so it cannot route through the locked
+            // `updateWorkspaceNotes` above without deadlocking on that same key; it asserts the same rule
+            // directly instead, off the `project` this function already resolved.
+            try assertProjectIsConfigurable(project)
             if notes != workspace.notes {
                 updatedNotes = notes
                 didChange = true
@@ -727,6 +740,16 @@ public final class WorkspaceOrchestrator {
         allowExistingBranchReuse: Bool, replaceExistingManagedDirectory: Bool
     ) throws -> CreatedWorkspace {
         guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        // The home project already owns its one workspace and can never hold a second (see
+        // `ProjectKind.home`'s doc comment). Refused here, at the single spot every `createWorkspace`
+        // caller funnels through (the Device API's `handleCreateWorkspaceRequest`, `createWorkspaceOnDevice`,
+        // and any future caller), rather than only in a client-facing options list: a direct Device API
+        // request naming the home project id would otherwise fall into the non-git "return the existing
+        // workspace" branch below and read back as a successful create, which then runs background setup
+        // against a workspace that has no setup surface.
+        guard project.kind != .home else {
+            throw WorkspaceError.invalidArgument(message: "The home project already owns its one workspace; it cannot create another.")
+        }
         let trimmedDirectoryName = directoryName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let replacesExplicitManagedDirectory = replaceExistingManagedDirectory && trimmedDirectoryName?.isEmpty == false
         let trimmedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1158,6 +1181,7 @@ public final class WorkspaceOrchestrator {
     public func launchWorkspace(workspaceID: String) throws { try upWorkspace(workspaceID: workspaceID, restartIfRunning: false) }
 
     public func restartWorkspace(workspaceID: String) throws {
+        try assertWorkspaceHasLifecycle(workspaceID: workspaceID)
         // Reject a quiescing daemon before recording any automation cancellation. The inner stop repeats
         // this guard at its destructive-row boundary to cover a handoff that begins during teardown.
         guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
@@ -1182,6 +1206,7 @@ public final class WorkspaceOrchestrator {
     }
 
     public func upWorkspace(workspaceID: String, restartIfRunning: Bool = false, background: Bool = false) throws {
+        try assertWorkspaceHasLifecycle(workspaceID: workspaceID)
         if restartIfRunning {
             guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
             try coordinateAutomationCancellationDuringWorkspaceStop(workspaceID: workspaceID) { [self] in
@@ -1313,6 +1338,7 @@ public final class WorkspaceOrchestrator {
     }
 
     @discardableResult public func stopWorkspace(workspaceID: String) throws -> WorkspaceStopOutcome {
+        try assertWorkspaceHasLifecycle(workspaceID: workspaceID)
         let outcome = LockedBox<WorkspaceStopOutcome?>(nil)
         // See `restartWorkspace`: this guard and the gate claim must happen before queue-owned run state
         // is changed, so a handoff or busy rejection preserves both automation execution and history.
@@ -1502,20 +1528,93 @@ public final class WorkspaceOrchestrator {
         return notices.joined(separator: " ")
     }
 
-    private func hasTrackedRuntimeIndicators(workspaceID: String) throws -> Bool {
-        let trackedProcesses = try store.runningProcesses(workspaceID: workspaceID)
-        let trackedWindows = try store.windows(workspaceID: workspaceID)
+    private func hasTrackedRuntimeIndicators(workspaceID: String) throws -> Bool { try trackedRuntimeIndicators(workspaceID: workspaceID).hasAny }
+
+    /// The same verdict over rows the caller already holds, so the device overview can publish it per
+    /// workspace from its one batched read of every workspace's rows. Clients read that answer instead of
+    /// deriving a second rule from the rows they were sent: the payload cannot tell an ended pane's kept
+    /// row from live runtime, and only the daemon can read a session's persisted end state.
+    ///
+    /// `endedSessions` carries those persisted end states, read once for however many workspaces the
+    /// caller is about to classify (`endedTerminalSessions`), so this call itself touches no database.
+    public func hasTrackedRuntimeIndicators(
+        runningProcesses: [RunningProcessRecord], agentWindows: [AgentWindowRecord], windows: [WindowRecord], endedSessions: EndedTerminalSessions
+    ) -> Bool {
+        !runningProcesses.isEmpty || agentWindows.contains { agentIsLiveRuntimeIndicator($0, endedSessions: endedSessions) }
+            || windows.contains { windowIsLiveRuntimeIndicator($0, endedSessions: endedSessions) }
+    }
+
+    /// The persisted end state of every built-in terminal session these rows name, read in one query.
+    ///
+    /// The candidates are exactly the rows the two predicates below classify, so the rule for which rows
+    /// hold a session whose end Spaces can read lives in one place: `builtInTerminalSessionID` decides it
+    /// here and there alike.
+    public func endedTerminalSessions(agentWindows: [AgentWindowRecord], windows: [WindowRecord]) throws -> EndedTerminalSessions {
+        var sessionIDs = Set<String>()
+        for agent in agentWindows { if let sessionID = builtInTerminalSessionID(for: agent) { sessionIDs.insert(sessionID) } }
+        for window in windows { if let sessionID = builtInTerminalSessionID(for: window) { sessionIDs.insert(sessionID) } }
+        return EndedTerminalSessions(lifecycles: try TerminalSessionPersistence.sessionLifecycleStates(sessionIDs: sessionIDs))
+    }
+
+    /// The runtime rows a workspace holds right now, paired with the single verdict on whether any of them
+    /// still stands for live runtime. `workspaceRuntimeStatus` needs the rows themselves for its counts and
+    /// its browser-target comparison, so it takes both from here instead of deciding the same question a
+    /// second time over its own copy of the rows, where the two answers could drift apart.
+    private func trackedRuntimeIndicators(workspaceID: String) throws -> (
+        runningProcesses: [RunningProcessRecord], windows: [WindowRecord], agentWindows: [AgentWindowRecord], hasAny: Bool
+    ) {
+        let runningProcesses = try store.runningProcesses(workspaceID: workspaceID)
+        let windows = try store.windows(workspaceID: workspaceID)
         let agentWindows = try store.agentWindows(workspaceID: workspaceID)
-        return !trackedProcesses.isEmpty || !trackedWindows.isEmpty || !agentWindows.isEmpty
+        let endedSessions = try endedTerminalSessions(agentWindows: agentWindows, windows: windows)
+        let hasAny = hasTrackedRuntimeIndicators(
+            runningProcesses: runningProcesses, agentWindows: agentWindows, windows: windows, endedSessions: endedSessions)
+        return (runningProcesses, windows, agentWindows, hasAny)
+    }
+
+    /// Whether `agent` still stands for live runtime, under the same ended-is-not-runtime rule
+    /// `windowIsLiveRuntimeIndicator` applies to a pane: an agent row bound to a terminal session Spaces
+    /// hosts stops counting the moment that session ends.
+    ///
+    /// The row outlives its terminal on purpose (it is kept until a reconciler pass finalizes it and
+    /// retention garbage collection ages it out), and a kept row that still counted would hold its
+    /// workspace at Running with nothing alive in it, indefinitely on a workspace that has no Stop to
+    /// clear it by hand (the home workspace refuses Start, Stop, and Restart alike).
+    ///
+    /// The session's ended state is the source of truth here, not the row's own status. A row goes
+    /// `.exited` while its terminal is still open as a bare shell, which is live runtime, and a row whose
+    /// terminal has ended can still read `.waiting` or `.done` until a pass reaches it, so reading status
+    /// would answer the wrong question in both directions. An agent row from another provider carries no
+    /// Spaces session whose end could be read, so it keeps counting.
+    private func agentIsLiveRuntimeIndicator(_ agent: AgentWindowRecord, endedSessions: EndedTerminalSessions) -> Bool {
+        guard let sessionID = builtInTerminalSessionID(for: agent) else { return true }
+        return !endedSessions.sessionHasEnded(sessionID)
+    }
+
+    /// Whether `window` still stands for live runtime.
+    ///
+    /// A terminal pane Spaces hosts stops counting the moment its session ends. Its `runtime_targets` row
+    /// is deliberately kept after the exit so the ended pane stays listed and reopenable until retention
+    /// garbage collection ages it out, and a kept row that still counted would hold its workspace at
+    /// Running with nothing alive in it, indefinitely on a workspace that has no Stop to clear it by hand
+    /// (the home workspace refuses Start, Stop, and Restart alike).
+    ///
+    /// Everything else keeps counting exactly as before: a browser target is a window the workspace is
+    /// configured to have open and has no session of its own, and a terminal hosted by another app is one
+    /// whose lifetime Spaces does not track.
+    private func windowIsLiveRuntimeIndicator(_ window: WindowRecord, endedSessions: EndedTerminalSessions) -> Bool {
+        guard let sessionID = builtInTerminalSessionID(for: window) else { return true }
+        return !endedSessions.sessionHasEnded(sessionID)
     }
 
     public func workspaceRuntimeStatus(workspaceID: String) throws -> WorkspaceRuntimeStatus {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let lifecycleState = WorkspaceLifecycleState(isRunning: workspace.isRunning)
-        let runningProcesses = try store.runningProcesses(workspaceID: workspaceID)
-        let trackedWindows = try store.windows(workspaceID: workspaceID)
-        let agentWindows = try store.agentWindows(workspaceID: workspaceID)
-        let hasTrackedRuntimeIndicators = !runningProcesses.isEmpty || !trackedWindows.isEmpty || !agentWindows.isEmpty
+        let indicators = try trackedRuntimeIndicators(workspaceID: workspaceID)
+        let runningProcesses = indicators.runningProcesses
+        let trackedWindows = indicators.windows
+        let agentWindows = indicators.agentWindows
+        let hasTrackedRuntimeIndicators = indicators.hasAny
 
         let runningProcessCount = runningProcesses.filter { $0.status == .running }.count
         let exitedProcessCount = runningProcesses.filter { $0.status == .exited }.count
@@ -1574,6 +1673,14 @@ public final class WorkspaceOrchestrator {
     func withWorkspaceLifecycleLock<T>(workspaceID: String, operation: () throws -> T) throws -> T {
         try Self.workspaceLifecycleGate.withKey(
             workspaceID, busyError: { WorkspaceError.invalidArgument(message: Self.workspaceLifecycleBusyMessage) }, operation: operation)
+    }
+
+    /// Takes the workspace lifecycle gate, blocking the calling thread until it is free rather than
+    /// rejecting a contended one. For the reconcile a request never retries, where reporting busy would
+    /// drop the work: the gate's other holders do not all recompute what the reconcile writes. Callers
+    /// must be on a thread that can block for the length of one lifecycle operation.
+    func withWorkspaceLifecycleLockWaiting<T>(workspaceID: String, operation: () throws -> T) throws -> T {
+        try Self.workspaceLifecycleGate.withKeyWaiting(workspaceID, operation: operation)
     }
 
     /// Runs `operation` holding every listed workspace's lifecycle gate, claiming them all before any work
@@ -1923,7 +2030,12 @@ public final class WorkspaceOrchestrator {
         if let explicitWorkspaceID = explicitWorkspaceID?.trimmingCharacters(in: .whitespacesAndNewlines), !explicitWorkspaceID.isEmpty {
             return explicitWorkspaceID
         }
-        let workspaces = try store.projects().flatMap { project in try store.workspaces(projectID: project.id) }
+        // The home project's workspace is never resolved by proximity. Its directory is the account's
+        // home, so it contains most directories a user can be standing in, and matching it would make a
+        // bare `spaces terminal` or `spaces workspace stop` run from an unregistered directory act on the
+        // home row instead of reporting that the directory belongs to no workspace. Leaving it out keeps
+        // that report, which is what the user needs to see.
+        let workspaces = try store.projects().filter { $0.kind != .home }.flatMap { project in try store.workspaces(projectID: project.id) }
         guard
             let matched = workspaces.filter({ isPath(cwd, inside: $0.dir, allowEqual: true) }).max(by: {
                 normalizePath($0.dir).count < normalizePath($1.dir).count
@@ -2376,7 +2488,7 @@ public final class WorkspaceOrchestrator {
         let isGit = git.isRepo(path: dir)
         let branch = isGit ? git.defaultBranch(path: dir) : nil
         let name = URL(fileURLWithPath: dir).lastPathComponent
-        return ProjectRecord(id: id, name: name, dir: dir, isGitRepo: isGit, defaultBranch: branch)
+        return ProjectRecord(id: id, name: name, dir: dir, isGitRepo: isGit, defaultBranch: branch, kind: .standard)
     }
 
     func ensureDefaultWorkspace(for project: ProjectRecord) throws {
@@ -2398,6 +2510,11 @@ public final class WorkspaceOrchestrator {
     }
 
     private func spacesYAMLConfigURL(project: ProjectRecord) throws -> URL {
+        // The single resolution point for every `spaces.yaml` read and write, so refusing here covers
+        // load, import, and export at once. A home project has no configuration to round-trip, and its
+        // directory is the account's home: writing a `spaces.yaml` there would drop a Spaces file into a
+        // directory Spaces does not own.
+        try assertProjectIsConfigurable(project)
         let directory: String
         if let defaultWorkspace = try defaultWorkspace(projectID: project.id) {
             directory = defaultWorkspace.dir
@@ -2513,7 +2630,8 @@ public final class WorkspaceOrchestrator {
         // `AppConfig.defaultRouterPort` yields a stable client-facing identity the client rewrites to
         // its own live Caddy port before navigation.
         let slug = SpacesProfile.workspaceHostSlug(
-            branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
+            branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, isHomeProject: project.kind == .home,
+            workspaceID: workspace.id)
         let routerPort = (try? store.appConfig().routerPort) ?? AppConfig.defaultRouterPort
         for namedPort in namedPorts {
             let name = namedPort.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2690,7 +2808,8 @@ public final class WorkspaceOrchestrator {
         let projectDirname = managedProjectStorageDirectoryName(seed: storageHash, preferredName: projectName)
         let destination = repositoriesRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
         let normalizedDestination = normalizePathPreservingLeaf(destination.path)
-        let project = ProjectRecord(id: UUID().uuidString, name: projectName, dir: normalizedDestination, isGitRepo: true, defaultBranch: nil)
+        let project = ProjectRecord(
+            id: UUID().uuidString, name: projectName, dir: normalizedDestination, isGitRepo: true, defaultBranch: nil, kind: .standard)
         return GitProjectImportPlan(gitURL: trimmedURL, project: project, destination: destination)
     }
 
@@ -3037,6 +3156,32 @@ public final class WorkspaceOrchestrator {
     func clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: String) throws {
         guard try !hasTrackedRuntimeIndicators(workspaceID: workspaceID), let workspace = try store.workspace(id: workspaceID) else { return }
         try markWorkspaceStopped(workspace)
+    }
+
+    /// Recomputes the running flag of each of `workspaceIDs`, under the workspace lifecycle gate the stop
+    /// paths take, waiting for a contended one.
+    ///
+    /// Both callers reach workspaces that lose their last live runtime indicator with no stop path running
+    /// and no natural-exit reconcile to follow: the foreground reconciler pass finalizing the agent row of
+    /// a session that ended while the daemon was down, and startup's stale-session recovery, which sweeps
+    /// every workspace whose stored running flag is set. Neither end produces the closed-core callback
+    /// `clearWorkspaceRunningAfterTerminalSessionExit` rides on, so this is the only pass those workspaces
+    /// get.
+    ///
+    /// Waits for a contended gate rather than giving the workspace up, for the reason that reconcile gives:
+    /// plenty of gate holders leave the running flag alone (hiding a workspace, editing its settings), so a
+    /// dropped reconcile is a flag that stays true with nothing alive behind it, and on the home workspace
+    /// no later action repairs it. Every holder is one bounded lifecycle operation, and the indicators are
+    /// recomputed once the gate is granted, so a holder that starts something live while this waits leaves
+    /// an indicator this then respects. Callers run where blocking is allowed: the reconciler pass on its
+    /// own queue, off the request path and off the main actor, and startup recovery before any listener
+    /// opens or device-runtime service starts, where no other party in the process can hold a gate at all.
+    func reconcileWorkspaceRunning(workspaceIDs: Set<String>) throws {
+        for workspaceID in workspaceIDs.sorted() {
+            try withWorkspaceLifecycleLockWaiting(workspaceID: workspaceID) {
+                try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
+            }
+        }
     }
 
     func markWorkspaceStopped(_ workspace: WorkspaceRecord) throws {

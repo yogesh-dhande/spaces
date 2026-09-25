@@ -282,12 +282,18 @@ extension AppKitController {
         let loadedDeviceIDs = Set(readySections.map(\.deviceID))
         let retainedSessionIDs = OpenPanePruning.restorationKeepSet(
             overviews: readySections.map(\.overview), heldOpenSessionIDs: panelCoordinator.sessionIDsHeldOpen)
-        // Hidden workspaces stay listed in their device's overview with `isHidden` set, so this is a
-        // deletion-only keep-set exactly like the live overview-driven code-pane prune
-        // (`PanelCoordinator.pruneOpenCodePanes`).
+        // The same keep-set rule the live overview-driven code-pane prune applies
+        // (`OpenPanePruning.editorEligibleWorkspaceIDs`, used by `PanelCoordinator.pruneOpenCodePanes`),
+        // keyed per device: a persisted Editor pane pointed at a workspace it drops is retargeted or
+        // discarded below by the same `panelWindowRestoreDecision` rules that already handle a workspace
+        // deleted while the app was closed.
         let retainedWorkspaceKeys = Set(
             readySections.flatMap { section in
-                (section.overview?.workspaces ?? []).map { PanelLayoutEngine.WorkspaceKey(deviceID: section.deviceID, workspaceID: $0.id) }
+                section.overview.map { overview in
+                    OpenPanePruning.editorEligibleWorkspaceIDs(overview: overview).map {
+                        PanelLayoutEngine.WorkspaceKey(deviceID: section.deviceID, workspaceID: $0)
+                    }
+                } ?? []
             })
         let orphanedEditorFallback = globalEditorFallbackWorkspaceID(excluding: nil, allowedWorkspaceKeys: retainedWorkspaceKeys).map {
             PanelLayoutEngine.WorkspaceKey(deviceID: $0.deviceID, workspaceID: $0.workspaceID)
@@ -383,7 +389,7 @@ extension AppKitController {
                     completion(nil)
                     return
                 }
-                self.terminalPanes.createTerminalSessionForPane(workspaceID: workspaceID) { [weak self] request in
+                self.terminalPanes.createTerminalSessionForPane(workspaceID: workspaceID, route: .paneSessionPicker) { [weak self] request in
                     guard let self else { return }
                     defer { self.finishNewTerminalSessionCreation(workspaceID: workspaceID) }
                     completion(request.map { .terminal($0) })

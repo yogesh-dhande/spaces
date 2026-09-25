@@ -42,7 +42,10 @@ import spacestestsupport
     ) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
             id: id, projectID: "project", projectName: "project", branch: nil, baseBranch: nil, dir: "/tmp/\(id)", isRunning: true, isHidden: false,
-            isDefault: false, sessionCount: 0, processRows: processRows, codingAgentRows: codingAgentRows, terminalRows: terminalRows)
+            isDefault: false,
+            hasTrackedRuntimeIndicators: processRows.contains { $0.runState == .running } || codingAgentRows.contains { $0.runState == .running }
+                || terminalRows.contains { $0.runState == .running }, processRows: processRows, codingAgentRows: codingAgentRows,
+            terminalRows: terminalRows)
     }
 
     private func overview(_ workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary] = [])

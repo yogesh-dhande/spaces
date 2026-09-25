@@ -77,11 +77,18 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
     }
 
     func testProjectActionsDoNotDependOnDeviceLocation() {
-        XCTAssertEqual(SpacesDeviceProjectActions(isGitRepo: true), .init(isGitRepo: true))
-        XCTAssertTrue(SpacesDeviceProjectActions(isGitRepo: true).showsSettings)
-        XCTAssertTrue(SpacesDeviceProjectActions(isGitRepo: true).showsAddWorkspace)
-        XCTAssertTrue(SpacesDeviceProjectActions(isGitRepo: false).showsSettings)
-        XCTAssertFalse(SpacesDeviceProjectActions(isGitRepo: false).showsAddWorkspace)
+        XCTAssertEqual(SpacesDeviceProjectActions(isGitRepo: true, kind: .standard), .init(isGitRepo: true, kind: .standard))
+        XCTAssertTrue(SpacesDeviceProjectActions(isGitRepo: true, kind: .standard).showsSettings)
+        XCTAssertTrue(SpacesDeviceProjectActions(isGitRepo: true, kind: .standard).showsAddWorkspace)
+        XCTAssertTrue(SpacesDeviceProjectActions(isGitRepo: false, kind: .standard).showsSettings)
+        XCTAssertFalse(SpacesDeviceProjectActions(isGitRepo: false, kind: .standard).showsAddWorkspace)
+    }
+
+    /// The home project has no configuration to open a dialog onto and can never hold a second workspace.
+    func testHomeProjectOffersNeitherSettingsNorNewWorkspace() {
+        let actions = SpacesDeviceProjectActions(isGitRepo: false, kind: .home)
+        XCTAssertFalse(actions.showsSettings)
+        XCTAssertFalse(actions.showsAddWorkspace)
     }
 
     func testOverviewViewModelPreservesWorkspaceRowsAndRuntimeIndicators() {
@@ -90,7 +97,8 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-visible", projectID: "project-1", projectName: "Project", branch: "feature/visible", baseBranch: "main",
-                    dir: "/device/project-visible", isRunning: true, isHidden: false, isDefault: false, notes: "Visible notes", sessionCount: 2,
+                    dir: "/device/project-visible", isRunning: true, isHidden: false, isDefault: false, notes: "Visible notes",
+                    hasTrackedRuntimeIndicators: true,
                     processRows: [
                         SpacesDeviceWorkspaceProcessRow(
                             id: "process-web", workspaceID: "workspace-visible", name: "web", command: "npm run dev", processID: "running-web",
@@ -108,7 +116,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
                     ]),
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-hidden", projectID: "project-1", projectName: "Project", branch: "feature/hidden", baseBranch: "main",
-                    dir: "/device/project-hidden", isRunning: false, isHidden: true, isDefault: false, sessionCount: 0),
+                    dir: "/device/project-hidden", isRunning: false, isHidden: true, isDefault: false, hasTrackedRuntimeIndicators: false),
             ], sessions: [], daemonStatus: Self.status())
 
         let model = SpacesDeviceOverviewViewModel(overview: overview)
@@ -128,6 +136,31 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
         XCTAssertEqual(runtime?.missingConfiguredProcessCount, 0, "every process row here is already running")
     }
 
+    /// A workspace whose last terminal exits on its own reads `Stopped` while its ended pane stays listed
+    /// so its output can still be read. The kept row is not a runtime leftover, so the client reports the
+    /// daemon's one tracked-runtime verdict instead of inferring runtime from rows and session counts that
+    /// outlive their sessions on purpose.
+    func testOverviewViewModelReportsNoTrackedRuntimeForAStoppedWorkspaceWhoseOnlyTerminalEnded() {
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-ended", projectID: "project-1", projectName: "Project", branch: "feature/ended", baseBranch: "main",
+                    dir: "/device/project-ended", isRunning: false, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false,
+                    terminalRows: [
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-shell", workspaceID: "workspace-ended", title: "shell", workingDirectory: "/device/project-ended",
+                            sessionID: "session-shell", runState: .exited, canOpenTerminal: true, canStop: false)
+                    ])
+            ], sessions: [], daemonStatus: Self.status())
+
+        let runtime = SpacesDeviceOverviewViewModel(overview: overview).workspaceRuntimeStatusByID["workspace-ended"]
+
+        XCTAssertEqual(runtime?.lifecycleState, .stopped)
+        XCTAssertEqual(runtime?.hasTrackedRuntimeIndicators, false)
+        XCTAssertEqual(runtime?.exitedProcessCount, 1, "the ended pane stays listed and counted")
+    }
+
     /// Codex round 5 (P1) on issue #438: `isRunning` turns true the moment an ad hoc terminal or agent
     /// session starts (`markWorkspaceRunningIfNeeded`), independent of whether any configured process is
     /// running. `missingConfiguredProcessCount` is what lets a client tell that apart, so it must count
@@ -140,7 +173,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-ad-hoc-only", projectID: "project-1", projectName: "Project", branch: "feature/adhoc", baseBranch: "main",
-                    dir: "/device/project-adhoc", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
+                    dir: "/device/project-adhoc", isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true,
                     processRows: [
                         SpacesDeviceWorkspaceProcessRow(
                             id: "process-web", workspaceID: "workspace-ad-hoc-only", name: "web", command: "npm run dev", processID: nil,
@@ -215,7 +248,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
     private func fullWorkspaceSummary(dir: String) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
             id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: dir, isRunning: true,
-            isHidden: false, isDefault: false, notes: "Workspace notes", sessionCount: 3,
+            isHidden: false, isDefault: false, notes: "Workspace notes", hasTrackedRuntimeIndicators: true,
             assignedPorts: [SpacesDeviceAssignedPort(name: "WEB", port: 3000)],
             setupState: SpacesDeviceWorkspaceSetupState(
                 status: .failed, errorMessage: "setup failed", startedAt: "2026-06-18T00:00:00Z", finishedAt: "2026-06-18T00:00:05Z"),

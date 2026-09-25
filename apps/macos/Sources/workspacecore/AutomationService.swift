@@ -1,4 +1,5 @@
 import Foundation
+import spacesdevicecore
 import spacesterminalcore
 
 #if canImport(Darwin)
@@ -344,8 +345,18 @@ public final class AutomationService: @unchecked Sendable {
         return try requireAutomation(id: automation.id)
     }
 
+    /// The one door every automation create and update reaches, so the workspace an automation targets is
+    /// checked here rather than at each transport. The home workspace is refused with the same rule the
+    /// orchestrator's `assertWorkspaceIsConfigurable` applies to settings and notes: the home project
+    /// supports terminals and nothing else, and an automation on it would be one the row offers no Stop,
+    /// settings, or editing surface for.
     private func validateWorkspaceTarget(_ workspaceID: String) throws {
-        guard try store.workspace(id: workspaceID) != nil else { throw AutomationValidationError("Workspace not found: \(workspaceID).") }
+        guard let workspace = try store.workspace(id: workspaceID), let project = try store.project(id: workspace.projectID) else {
+            throw AutomationValidationError("Workspace not found: \(workspaceID).")
+        }
+        guard project.kind.isAutomationTargetEligible else {
+            throw AutomationValidationError("The home project has no automations; choose a workspace in a project.")
+        }
     }
 
     public func listAutomations() throws -> [Automation] { try queue.sync { try store.automations() } }

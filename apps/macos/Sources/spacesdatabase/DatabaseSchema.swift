@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 23
+    public static let currentVersion = 24
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -829,6 +829,33 @@ public enum DatabaseSchema {
                 try migrationExecuteBatch(handle, sql: "ALTER TABLE restorable_sessions ADD COLUMN automation_id TEXT;")
             }
         },
+        // Records what a project *is*: `standard` for every project a user adds, `home` for the one
+        // daemon-owned project rooted at the account's home directory. Existing rows carry `standard`,
+        // which is exactly right: every project already in a profile was added by the user. The daemon's
+        // start-up ensure step is what mints or adopts the single `home` row afterwards, so this step
+        // moves no data of its own.
+        //
+        // The frozen pre-v24 shape is created first for the reason every altering step in this file writes
+        // one out: no migration step before v15 → v16 ever created `projects`, and the ALTER needs a table
+        // to alter; on a database that already has the table the CREATE is a no-op and its rows keep every
+        // value they hold.
+        DatabaseMigrationStep(fromVersion: 23, toVersion: 24, description: "Record the project kind", requiresBackup: true) { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS projects (
+                      id TEXT PRIMARY KEY,
+                      name TEXT NOT NULL,
+                      dir TEXT NOT NULL UNIQUE,
+                      is_git INTEGER NOT NULL,
+                      default_branch TEXT,
+                      setup_script TEXT,
+                      stop_script TEXT,
+                      is_hidden INTEGER NOT NULL DEFAULT 0
+                    );
+                    ALTER TABLE projects ADD COLUMN kind TEXT NOT NULL DEFAULT 'standard';
+                    """)
+        },
     ]
 
     /// The persisted final-render state of a session, one row per session. `has_final_render` stores
@@ -1005,7 +1032,8 @@ public enum DatabaseSchema {
               default_branch TEXT,
               setup_script TEXT,
               stop_script TEXT,
-              is_hidden INTEGER NOT NULL DEFAULT 0
+              is_hidden INTEGER NOT NULL DEFAULT 0,
+              kind TEXT NOT NULL DEFAULT 'standard'
             );
 
             CREATE TABLE IF NOT EXISTS project_services (

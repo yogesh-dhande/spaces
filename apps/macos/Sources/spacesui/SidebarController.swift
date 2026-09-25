@@ -591,12 +591,11 @@ private struct DeviceSyncState {
             // stale skips the prune, and it never gets retried — the next identical overview
             // early-returns above before pruning could run again, unlike the terminal prune's
             // self-heal (a fresher overview follows the epoch-bumping activity). The keep-set is
-            // workspace ids from this just-installed authoritative overview, which no pane-replacement
-            // race can invalidate: a workspace absent from `overview.workspaces` was deleted, not
-            // merely hidden (a hidden workspace stays listed with `isHidden` set).
+            // `OpenPanePruning.editorEligibleWorkspaceIDs` of this just-installed authoritative overview,
+            // which no pane-replacement race can invalidate.
             if let orphan = host.panelCoordinator.pruneOpenCodePanes(
-                deviceID: snapshot.localDeviceID, liveWorkspaceIDs: Set(snapshot.localDeviceOverview.workspaces.map(\.id)))
-            {
+                deviceID: snapshot.localDeviceID, liveWorkspaceIDs: OpenPanePruning.editorEligibleWorkspaceIDs(overview: snapshot.localDeviceOverview)
+            ) {
                 host.resolveOrphanedGlobalEditorPane(excluding: orphan.workspaceID)
             }
             // Same just-installed overview carries this device's agent rows too, so a code pane's
@@ -1437,7 +1436,7 @@ private struct DeviceSyncState {
             // remote workspace deletion that arrives mid-race go unpruned indefinitely — the next
             // identical overview early-returns above before it could retry.
             if let orphan = host.panelCoordinator.pruneOpenCodePanes(
-                deviceID: deviceID, liveWorkspaceIDs: Set(overview.overview.workspaces.map(\.id)))
+                deviceID: deviceID, liveWorkspaceIDs: OpenPanePruning.editorEligibleWorkspaceIDs(overview: overview.overview))
             {
                 host.resolveOrphanedGlobalEditorPane(excluding: orphan.workspaceID)
             }
@@ -1816,13 +1815,22 @@ private struct DeviceSyncState {
     }
 
     func navigateSidebarSelection(direction: Int) -> Bool {
+        // Built from the same per-device `deviceProjects(deviceID:)` partition the outline uses (it
+        // hoists each device's home row to the front), one device section at a time in the outline's own
+        // section order, rather than from `host.deviceModel.projects` directly: that raw list keeps the
+        // daemon's name order, where `~` sorts last, so arrow navigation would land on a different row
+        // than the outline shows for the same keystroke.
+        let visibleWorkspaceIDsByProject = host.deviceModel.deviceSections.flatMap { section in
+            deviceProjects(deviceID: section.deviceID).map { project in
+                let visibleWorkspaceIDs = project.isCollapsed ? [] : visibleWorkspaces(projectID: project.id).map(\.id)
+                return (project.id, visibleWorkspaceIDs)
+            }
+        }
         guard
             let target = AppKitController.sidebarArrowSelectionTarget(
-                visibleWorkspaceIDsByProject: host.deviceModel.projects.map { project in
-                    let visibleWorkspaceIDs = project.isCollapsed ? [] : visibleWorkspaces(projectID: project.id).map(\.id)
-                    return (project.id, visibleWorkspaceIDs)
-                }, hiddenWorkspaceIDs: [], selectedProjectID: host.selectedProjectID, selectedWorkspaceID: host.selectedWorkspaceID,
-                showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations, direction: direction)
+                visibleWorkspaceIDsByProject: visibleWorkspaceIDsByProject, hiddenWorkspaceIDs: [], selectedProjectID: host.selectedProjectID,
+                selectedWorkspaceID: host.selectedWorkspaceID, showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations,
+                direction: direction)
         else { return false }
         switch target {
         case .alerts: host.alerts.showAlertsDetail(presentation: .userNavigation)
@@ -2198,7 +2206,11 @@ private struct DeviceSyncState {
                 leadingIcon.toolTip = "Git repository"
             } else {
                 let attentionStatus = standInAttentionStatus ?? .inactive
-                leadingIcon.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: sidebarAttentionDescription(attentionStatus))
+                // The house marks the row as the device's own home directory rather than a project the
+                // user added; it wears the same run-state tint as the folder glyph below because it
+                // stands in for its single workspace exactly the way a non-git project row does.
+                let symbolName = project.kind == .home ? "house.fill" : "folder.fill"
+                leadingIcon.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: sidebarAttentionDescription(attentionStatus))
                 leadingIcon.contentTintColor = sidebarAttentionColor(attentionStatus)
                 leadingIcon.toolTip = sidebarAttentionDescription(attentionStatus)
             }
@@ -2209,6 +2221,19 @@ private struct DeviceSyncState {
         leadingIndicator.heightAnchor.constraint(equalToConstant: 13).isActive = true
         leadingStack.addArrangedSubview(leadingIndicator)
         leadingStack.addArrangedSubview(titleLabel)
+
+        // Every other project row's title already names its folder (its own name, or the branch); `~`
+        // does not say which directory it is, so the home row alone trails its title with the path.
+        if project.kind == .home {
+            let detailLabel = NSTextField(labelWithString: project.dir)
+            detailLabel.font = Typography.rowDetail
+            detailLabel.textColor = .secondaryLabelColor
+            detailLabel.lineBreakMode = .byTruncatingTail
+            detailLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            detailLabel.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
+            detailLabel.setAccessibilityIdentifier("sidebar-project-detail-\(project.id)")
+            leadingStack.addArrangedSubview(detailLabel)
+        }
 
         let accessoryStack = NSStackView()
         accessoryStack.orientation = .horizontal
@@ -2226,7 +2251,7 @@ private struct DeviceSyncState {
             symbol: "gearshape", tooltip: "Project settings for \(project.name)", action: #selector(AppKitController.showProjectSettings(_:)))
         settingsButton.identifier = NSUserInterfaceItemIdentifier(project.id)
         settingsButton.setAccessibilityIdentifier("sidebar-project-settings-\(project.id)")
-        let projectActions = AppKitController.sidebarProjectActions(isGitRepo: project.isGitRepo)
+        let projectActions = AppKitController.sidebarProjectActions(isGitRepo: project.isGitRepo, kind: project.kind)
         // A marked row carries no controls, like the workspace row it stands in for: opening settings for
         // a project whose sole workspace is being removed is an interaction the row refuses. (Add
         // Workspace belongs to git projects only, whose rows stand in for nothing and are never marked.)
@@ -2590,6 +2615,12 @@ private struct DeviceSyncState {
         // so those decisions are the menu's own rather than AppKit's responder-chain guess.
         menu.autoenablesItems = false
         let daemonActionsEnabled = host.deviceAcceptsDaemonActions(forWorkspaceID: workspace.id)
+        // The home workspace has no lifecycle of its own: it is marked running by whatever ad hoc
+        // terminal a user opens against it and stops again when the last one exits, so Start/Restart/Stop
+        // would control nothing. It also has no Editor (its directory is the whole home tree, with no
+        // ignore rules to bound a file list) and no Delete (it is not a project the user added, and
+        // removing it is not on offer). Hide is the one way it leaves the sidebar.
+        let isHomeWorkspace = workspace.projectKind == .home
         func addItem(
             _ title: String, symbol: String, target: AnyObject, action: Selector, identifier: String, representedObject: Any? = nil,
             isEnabled: Bool = true
@@ -2602,34 +2633,36 @@ private struct DeviceSyncState {
             item.isEnabled = isEnabled
             menu.addItem(item)
         }
-        // `isRunning` alone hides Start exactly when ad hoc or agent runtime made it true but a configured
-        // process is still missing (see `workspaceLifecycleControlsOfferStart`); Start is offered
-        // alongside Restart/Stop in that state instead of being replaced by them.
-        let missingConfiguredProcessCount = host.deviceModel.workspaceRuntimeStatusByID[workspace.id]?.missingConfiguredProcessCount ?? 0
-        if AppKitController.workspaceLifecycleControlsOfferStart(
-            isRunning: workspace.isRunning, missingConfiguredProcessCount: missingConfiguredProcessCount)
-        {
+        if !isHomeWorkspace {
+            // `isRunning` alone hides Start exactly when ad hoc or agent runtime made it true but a configured
+            // process is still missing (see `workspaceLifecycleControlsOfferStart`); Start is offered
+            // alongside Restart/Stop in that state instead of being replaced by them.
+            let missingConfiguredProcessCount = host.deviceModel.workspaceRuntimeStatusByID[workspace.id]?.missingConfiguredProcessCount ?? 0
+            if AppKitController.workspaceLifecycleControlsOfferStart(
+                projectKind: workspace.projectKind, isRunning: workspace.isRunning, missingConfiguredProcessCount: missingConfiguredProcessCount)
+            {
+                addItem(
+                    "Start", symbol: "play", target: self, action: #selector(startWorkspaceMenuItem(_:)), identifier: workspace.id,
+                    isEnabled: daemonActionsEnabled)
+            }
+            if workspace.isRunning {
+                addItem(
+                    "Restart", symbol: "arrow.clockwise", target: self, action: #selector(restartWorkspaceMenuItem(_:)), identifier: workspace.id,
+                    isEnabled: daemonActionsEnabled)
+                addItem(
+                    "Stop", symbol: "stop", target: self, action: #selector(stopWorkspaceMenuItem(_:)), identifier: workspace.id,
+                    isEnabled: daemonActionsEnabled)
+            }
+            menu.addItem(.separator())
+            // Not gated on `daemonActionsEnabled`: routes through the same editor-preference dispatch as
+            // every other "open editor" action (⌘⌥E, the workspace detail's editor button), which for the
+            // built-in default opens/focuses/retargets the singleton Editor window unconditionally, with no
+            // session or process to start on the workspace's daemon.
             addItem(
-                "Start", symbol: "play", target: self, action: #selector(startWorkspaceMenuItem(_:)), identifier: workspace.id,
-                isEnabled: daemonActionsEnabled)
+                "Open in Editor", symbol: "macwindow.badge.plus", target: self, action: #selector(openWorkspaceInEditorMenuItem(_:)),
+                identifier: workspace.id)
+            menu.addItem(.separator())
         }
-        if workspace.isRunning {
-            addItem(
-                "Restart", symbol: "arrow.clockwise", target: self, action: #selector(restartWorkspaceMenuItem(_:)), identifier: workspace.id,
-                isEnabled: daemonActionsEnabled)
-            addItem(
-                "Stop", symbol: "stop", target: self, action: #selector(stopWorkspaceMenuItem(_:)), identifier: workspace.id,
-                isEnabled: daemonActionsEnabled)
-        }
-        menu.addItem(.separator())
-        // Not gated on `daemonActionsEnabled`: routes through the same editor-preference dispatch as
-        // every other "open editor" action (⌘⌥E, the workspace detail's editor button), which for the
-        // built-in default opens/focuses/retargets the singleton Editor window unconditionally, with no
-        // session or process to start on the workspace's daemon.
-        addItem(
-            "Open in Editor", symbol: "macwindow.badge.plus", target: self, action: #selector(openWorkspaceInEditorMenuItem(_:)),
-            identifier: workspace.id)
-        menu.addItem(.separator())
         addItem("Copy path", symbol: "doc.on.doc", target: host, action: #selector(AppKitController.copyDirectoryPath(_:)), identifier: workspace.dir)
         // Reveal in Finder needs a path on this Mac, so it is offered only for local-device workspaces.
         if host.isLocalWorkspace(workspace) {
@@ -2643,11 +2676,13 @@ private struct DeviceSyncState {
         addItem(
             "Hide", symbol: "eye.slash", target: self, action: #selector(hideWorkspaceMenuItem(_:)), identifier: workspace.id,
             isEnabled: daemonActionsEnabled)
-        // Delete is destructive (it removes the git worktree and the workspace), so it sits last, below the separator, and
-        // routes through the same confirmation the detail ⋯ overflow menu uses.
-        addItem(
-            "Delete…", symbol: "trash", target: self, action: #selector(deleteWorkspaceMenuItem(_:)), identifier: workspace.id,
-            isEnabled: daemonActionsEnabled)
+        if !isHomeWorkspace {
+            // Delete is destructive (it removes the git worktree and the workspace), so it sits last, below the separator, and
+            // routes through the same confirmation the detail ⋯ overflow menu uses.
+            addItem(
+                "Delete…", symbol: "trash", target: self, action: #selector(deleteWorkspaceMenuItem(_:)), identifier: workspace.id,
+                isEnabled: daemonActionsEnabled)
+        }
         return menu
     }
 
@@ -3237,7 +3272,7 @@ private struct DeviceSyncState {
         let project = host.deviceModel.projects[index]
         host.deviceModel.projects[index] = ProjectSummary(
             id: project.id, name: project.name, dir: project.dir, isGitRepo: project.isGitRepo, defaultBranch: project.defaultBranch,
-            isHidden: project.isHidden, isCollapsed: isCollapsed, deviceID: project.deviceID)
+            kind: project.kind, isHidden: project.isHidden, isCollapsed: isCollapsed, deviceID: project.deviceID)
     }
 
     /// Update the Alerts sidebar row badge with the current attention item count.

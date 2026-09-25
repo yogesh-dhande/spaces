@@ -41,12 +41,28 @@ final class SpacesCommandTests: XCTestCase {
     func testWorkspaceListRowRendersColumnsFromLocalAndDeviceSummaries() {
         let local = TerminalServiceProfileWorkspaceRecord(
             id: "workspace-1", projectID: "project-1", dir: "/repos/spaces/ws", dirname: nil, branch: "feature", baseBranch: "main", isDefault: false,
-            isHidden: false, isRunning: true, lastLaunchedAt: nil, notes: nil)
+            isHidden: false, isRunning: true, lastLaunchedAt: nil, notes: nil, displayName: "feature")
         let remote = SpacesDeviceWorkspaceSummary(
             id: "workspace-1", projectID: "project-1", projectName: "Spaces", branch: "feature", baseBranch: "main", dir: "/repos/spaces/ws",
-            isRunning: true, isHidden: false, isDefault: false, sessionCount: 0)
+            isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false)
 
         let expected = "workspace-1\tproject=project-1\tbranch=feature\trunning=true\tname=feature"
+        XCTAssertEqual(workspaceListRow(local), expected)
+        XCTAssertEqual(workspaceListRow(remote), expected)
+    }
+
+    /// The home project's workspace is named `~` in both listings. The local record carries the name the
+    /// daemon gave it rather than deriving one from the directory, which would print the account folder.
+    func testWorkspaceListRowNamesTheHomeWorkspaceWithATildeFromLocalAndDeviceSummaries() {
+        let local = TerminalServiceProfileWorkspaceRecord(
+            id: "workspace-home", projectID: "project-home", dir: "/Users/person", dirname: nil, branch: nil, baseBranch: nil, isDefault: true,
+            isHidden: false, isRunning: false, lastLaunchedAt: nil, notes: nil,
+            displayName: ProjectKind.home.workspaceDisplayName(branch: nil, dir: "/Users/person"))
+        let remote = SpacesDeviceWorkspaceSummary(
+            id: "workspace-home", projectID: "project-home", projectName: "~", projectKind: .home, branch: nil, baseBranch: nil, dir: "/Users/person",
+            isRunning: false, isHidden: false, isDefault: true, hasTrackedRuntimeIndicators: false)
+
+        let expected = "workspace-home\tproject=project-home\tbranch=-\trunning=false\tname=~"
         XCTAssertEqual(workspaceListRow(local), expected)
         XCTAssertEqual(workspaceListRow(remote), expected)
     }
@@ -54,7 +70,7 @@ final class SpacesCommandTests: XCTestCase {
     func testWorkspaceListRowRendersFolderNameAndDashForNonGitWorkspace() {
         let remote = SpacesDeviceWorkspaceSummary(
             id: "workspace-2", projectID: "project-2", projectName: "Tools", branch: nil, baseBranch: nil, dir: "/repos/tools", isRunning: false,
-            isHidden: false, isDefault: true, sessionCount: 0)
+            isHidden: false, isDefault: true, hasTrackedRuntimeIndicators: false)
 
         XCTAssertEqual(workspaceListRow(remote), "workspace-2\tproject=project-2\tbranch=-\trunning=false\tname=tools")
     }

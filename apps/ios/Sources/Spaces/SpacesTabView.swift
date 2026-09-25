@@ -45,17 +45,17 @@ struct SpacesTabView: View {
         }.confirmationDialog(
             "Hide this workspace?", isPresented: hideWorkspaceDialogBinding, titleVisibility: .visible, presenting: pendingHideWorkspace
         ) { workspace in
-            // Hiding stops the workspace first, so a running one loses its processes and agents — the
-            // confirm button says so rather than hiding that behind a bare "Hide".
-            Button(workspace.isRunning ? "Stop and Hide" : "Hide", role: .destructive) {
-                Task { await model.setWorkspaceHidden(workspaceID: workspace.id, isHidden: true) }
+            // `pendingHideWorkspace` is only ever set for a non-home workspace (the home row hides
+            // directly, see the band's `onHide`), so `copy(for:)` always resolves here; the `if let` keeps
+            // that invariant at the type rather than force-unwrapping it.
+            if let copy = HideWorkspaceConfirmation.copy(for: workspace) {
+                // Hiding stops the workspace first, so a running one loses its processes and agents; the
+                // confirm button says so rather than hiding that behind a bare "Hide".
+                Button(copy.buttonTitle, role: .destructive) { Task { await model.setWorkspaceHidden(workspaceID: workspace.id, isHidden: true) } }
             }
             Button("Cancel", role: .cancel) {}
         } message: { workspace in
-            Text(
-                workspace.isRunning
-                    ? "\"\(workspace.displayName)\" is running. Hiding it stops its processes and coding agents. Bring it back from Workspaces."
-                    : "\"\(workspace.displayName)\" leaves this list. Bring it back from Workspaces.")
+            Text(HideWorkspaceConfirmation.copy(for: workspace)?.message ?? "")
         }.confirmationDialog(pendingStop?.title ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible, presenting: pendingStop) {
             stop in
             Button("Stop", role: .destructive) { Task { await performPendingStop(stop) } }
@@ -192,7 +192,8 @@ struct SpacesTabView: View {
                 sections.append(["empty@\(SpacesListRowID.empty)"])
             } else {
                 for projectGroup in projectGroups {
-                    sections.append(["projectCaption@\(SpacesListRowID.projectCaption(projectGroup.id))"])
+                    // Mirrors `projectSection`: the home project renders no caption section at all.
+                    if projectGroup.projectKind != .home { sections.append(["projectCaption@\(SpacesListRowID.projectCaption(projectGroup.id))"]) }
                     for group in projectGroup.workspaceGroups {
                         var workspaceSection = ["band@\(SpacesListRowID.workspaceBand(group.id))"]
                         if !model.collapsedWorkspaceIDs.contains(group.id) {
@@ -291,20 +292,24 @@ struct SpacesTabView: View {
 
     // MARK: - Project / workspace sections
 
+    /// One `ProjectGroup` per project, in the order its workspaces first appear in
+    /// `model.homeFirstWorkspaceGroups`, which stably moves the device's home project's group to the
+    /// front. The home project owns exactly one workspace, so hoisting that one group is what hoists the
+    /// whole project here.
     private var projectGroups: [ProjectGroup] {
-        var dict: [String: (name: String, groups: [SpacesMobileWorkspaceGroup])] = [:]
+        var dict: [String: (name: String, kind: ProjectKind, groups: [SpacesMobileWorkspaceGroup])] = [:]
         var order: [String] = []
-        for group in model.workspaceGroups {
+        for group in model.homeFirstWorkspaceGroups {
             let projectID = group.workspace.projectID
             if dict[projectID] == nil {
-                dict[projectID] = (group.workspace.projectName, [])
+                dict[projectID] = (group.workspace.projectName, group.workspace.projectKind, [])
                 order.append(projectID)
             }
             dict[projectID]?.groups.append(group)
         }
         return order.compactMap { projectID in
             guard let entry = dict[projectID] else { return nil }
-            return ProjectGroup(projectID: projectID, projectName: entry.name, workspaceGroups: entry.groups)
+            return ProjectGroup(projectID: projectID, projectName: entry.name, projectKind: entry.kind, workspaceGroups: entry.groups)
         }
     }
 
@@ -315,16 +320,24 @@ struct SpacesTabView: View {
     /// and bands look exactly as they did when the whole tab was a single section. Every workspace being
     /// its own section means adding or removing one is an insert or delete of a whole section instead of a
     /// run of rows inside a 49-row section, which is the update the collection view was miscounting.
+    ///
+    /// The home project carries no caption section at all: its caption would read "~" directly above a
+    /// band already titled "~", so the band is left to be the whole row.
     @ViewBuilder private func projectSection(_ projectGroup: ProjectGroup) -> some View {
-        Section {
-            Text(projectGroup.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
-                .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.top, 14).bandListRow().id(
+        let isHomeProject = projectGroup.projectKind == .home
+        if !isHomeProject {
+            Section {
+                Text(projectGroup.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(
+                    0.4
+                ).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.top, 14).bandListRow().id(
                     SpacesListRowID.projectCaption(projectGroup.id))
+            }
         }
         ForEach(Array(projectGroup.workspaceGroups.enumerated()), id: \.element.id) { index, group in
             // The project caption already separates the first workspace from what is above it, so only
-            // the workspaces after it carry the full band lead-in gap.
-            Section { workspaceSection(group, topGap: index == 0 ? 8 : 14) }
+            // the workspaces after it carry the full band lead-in gap. The home project has no caption to
+            // do that separating, so its first (and only) band carries the full gap instead.
+            Section { workspaceSection(group, topGap: index == 0 ? (isHomeProject ? 14 : 8) : 14) }
         }
     }
 
@@ -346,7 +359,7 @@ struct SpacesTabView: View {
             withAnimation(.easeInOut(duration: 0.2)) { model.toggleWorkspaceCollapsed(group.id) }
         } label: {
             HeaderBand {
-                WorkspaceBandLabel(isGitWorkspace: group.workspace.isGitWorkspace, displayName: group.workspace.displayName)
+                WorkspaceBandLabel(glyph: .from(group.workspace), displayName: group.workspace.displayName)
                 Spacer(minLength: 0)
                 // The spinner takes the collapse chevron's place, so a deleting band reads as busy rather
                 // than merely collapsed.
@@ -361,8 +374,17 @@ struct SpacesTabView: View {
             isDeleting ? "Deleting" : ""
         ).bandListHeaderRow(topGap: topGap).modifier(
             WorkspaceBandActions(
-                model: model, workspace: group.workspace, onHide: { pendingHideWorkspace = group.workspace },
-                onDelete: { pendingDeleteWorkspace = group.workspace })
+                model: model, workspace: group.workspace,
+                onHide: {
+                    // The home row has no lifecycle to stop and needs no confirmation (see
+                    // `HideWorkspaceConfirmation`), so it hides directly rather than opening the dialog
+                    // every other workspace's Hide opens.
+                    if group.workspace.projectKind == .home {
+                        Task { await model.setWorkspaceHidden(workspaceID: group.workspace.id, isHidden: true) }
+                    } else {
+                        pendingHideWorkspace = group.workspace
+                    }
+                }, onDelete: { pendingDeleteWorkspace = group.workspace })
         ).id(SpacesListRowID.workspaceBand(group.id))
         if !isCollapsed {
             // Dimmed and inert with the band while the delete runs: the rows stay listed (removing them is
@@ -564,7 +586,7 @@ struct SpacesTabView: View {
         let isDeleting = model.isWorkspacePendingDeletion(group.workspaceID)
         Section {
             HeaderBand {
-                WorkspaceBandLabel(isGitWorkspace: workspace?.isGitWorkspace ?? false, displayName: group.workspaceTitle)
+                WorkspaceBandLabel(glyph: workspace.map(WorkspaceBandGlyph.from) ?? .directory, displayName: group.workspaceTitle)
                 Spacer(minLength: 0)
                 Text(group.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
                     .lineLimit(1)
@@ -616,6 +638,31 @@ private enum PendingStop {
     }
 }
 
+/// The Hide-workspace confirmation dialog's button title and message, decided from the workspace's run
+/// state. Factored out from `SpacesTabView`'s body so it is testable without hosting the view: see
+/// `HideWorkspaceConfirmationTests`.
+///
+/// The home project has no lifecycle and is never stopped on hide (see
+/// `SpacesMobileAppModel.setWorkspaceHidden`), so it needs no confirmation at all: both `SpacesTabView` and
+/// `WorkspaceVisibilitySheet` call `setWorkspaceHidden` directly for it rather than presenting a dialog.
+/// `copy(for:)` returns `nil` for a home workspace so that rule lives on the model, not on each call site.
+enum HideWorkspaceConfirmation {
+    struct Copy {
+        let buttonTitle: String
+        let message: String
+    }
+
+    static func copy(for workspace: SpacesDeviceWorkspaceSummary) -> Copy? {
+        guard workspace.projectKind != .home else { return nil }
+        if workspace.isRunning {
+            return Copy(
+                buttonTitle: "Stop and Hide",
+                message: "\"\(workspace.displayName)\" is running. Hiding it stops its processes and coding agents. Bring it back from Workspaces.")
+        }
+        return Copy(buttonTitle: "Hide", message: "\"\(workspace.displayName)\" leaves this list. Bring it back from Workspaces.")
+    }
+}
+
 /// The identity of every row in the Spaces list.
 ///
 /// Each row states its own identity with `.id(…)` rather than leaving SwiftUI to infer one from where the
@@ -654,9 +701,12 @@ private struct WorkspaceBandActions: ViewModifier {
     let onHide: () -> Void
     let onDelete: () -> Void
 
-    /// The daemon refuses to delete a default workspace — a project's own directory goes when the project
-    /// does — so the action is hidden rather than offered and rejected.
-    private var canDelete: Bool { !workspace.isDefault }
+    /// The daemon refuses to delete a default workspace (a project's own directory goes when the project
+    /// does), so the action is hidden rather than offered and rejected. No workspace of the home project
+    /// is deletable either: its own workspace is the default one, and a project adopted at the home path
+    /// can carry further workspace records that are no longer a git project's worktrees to remove, so
+    /// this reads `projectKind` rather than leaning on `isDefault` to cover both.
+    private var canDelete: Bool { !workspace.isDefault && workspace.projectKind != .home }
 
     func body(content: Content) -> some View {
         // Suppressed, not disabled, for both cases — the Demo Mode backend cannot serve these, and a
@@ -734,6 +784,7 @@ private struct WorkspaceBandActions: ViewModifier {
 private struct ProjectGroup: Identifiable {
     let projectID: String
     let projectName: String
+    let projectKind: ProjectKind
     let workspaceGroups: [SpacesMobileWorkspaceGroup]
     var id: String { projectID }
 }

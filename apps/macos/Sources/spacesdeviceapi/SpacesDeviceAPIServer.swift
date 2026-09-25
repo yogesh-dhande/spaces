@@ -2510,11 +2510,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     private func assertWorkspaceDiffScopeIsGitRepository(scope: WorkspaceDiffScope) throws {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        guard let workspace = try store.workspace(id: scope.workspaceID) else {
-            throw NSError(
-                domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(scope.workspaceID)' was not found."])
-        }
-        try SpacesDeviceWorkspaceDiffEngine.assertIsGitRepository(workspaceDir: workspace.dir, gitClient: workspaceGitClient)
+        let workspaceDir = try Self.resolveEditableWorkspace(workspaceID: scope.workspaceID, store: store).dir
+        try SpacesDeviceWorkspaceDiffEngine.assertIsGitRepository(workspaceDir: workspaceDir, gitClient: workspaceGitClient)
     }
 
     /// Identifies one `subscribeWorkspaceFileSignature` subscription's target: a single workspace-relative
@@ -2747,11 +2744,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// reportable state — see `WorkspaceFileSignatureFrame.missing` — not a subscribe-time refusal).
     private func assertWorkspaceFileScopeIsValid(scope: WorkspaceFileScope) throws {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        guard let workspace = try store.workspace(id: scope.workspaceID) else {
-            throw NSError(
-                domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(scope.workspaceID)' was not found."])
-        }
-        do { _ = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: scope.path, workspaceDir: workspace.dir) } catch {
+        let workspaceDir = try Self.resolveEditableWorkspace(workspaceID: scope.workspaceID, store: store).dir
+        do { _ = try SpacesDeviceWorkspacePathResolver.resolveContainedPath(relativePath: scope.path, workspaceDir: workspaceDir) } catch {
             // Rethrown as the same typed, `errorCode(for:)`-mapped shape `handleWorkspaceFileReadRequest`
             // uses for this identical failure, rather than letting the raw `PathError.escapesWorkspace`
             // propagate — that generic error has no domain/code mapping and would fall through to
@@ -3043,12 +3037,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return "filesystem:\(SpacesDeviceWorkspaceFileListSignature.value(for: result))"
     }
 
-    private func assertWorkspaceExistsForFileListSignature(workspaceID: String) throws {
+    /// Subscribe-time preflight for the file-list signature stream, resolved through the same gate as the
+    /// file list, read, and write handlers. Existence alone is not enough: a subscription arms a
+    /// `WorkspaceWatch` rooted at the workspace directory, so accepting one for a home workspace would
+    /// watch the account's entire home tree to compute a listing the daemon refuses to serve.
+    private func assertWorkspaceAcceptsFileListSignature(workspaceID: String) throws {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        guard try store.workspace(id: workspaceID) != nil else {
-            throw NSError(
-                domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Workspace '\(workspaceID)' was not found."])
-        }
+        _ = try Self.resolveEditableWorkspace(workspaceID: workspaceID, store: store)
     }
 
     /// Stops accepting and tears the transport down on the Device API queue. Uses `performOnQueue` rather
@@ -4290,20 +4285,30 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let windowsByWorkspace = try store.windowsByWorkspace()
         let portsByWorkspace = try store.workspacePortsNamedByWorkspace()
         let setupStateByWorkspace = try store.workspaceSetupStateByWorkspace()
+        // One query for the whole build: the tracked-runtime rule classifies a session per retained pane
+        // and coding-agent row, and asking per row put a round trip per row on the profile database's
+        // serialized lane, growing with every pane a device keeps.
+        let endedSessions = try orchestrator.endedTerminalSessions(
+            agentWindows: agentWindowsByWorkspace.values.flatMap { $0 }, windows: windowsByWorkspace.values.flatMap { $0 })
         let workspaces = try projects.flatMap { project in
             try store.workspaces(projectID: project.id).map { workspace in
                 let slug = SpacesProfile.workspaceHostSlug(
-                    branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
+                    branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, isHomeProject: project.kind == .home,
+                    workspaceID: workspace.id)
                 // `resolvedWorkspaceBrowserSessions` and `workspaceSettings` stay per-workspace on
                 // purpose: they rebuild the workspace's env/runtime plan internally rather than reading a
                 // single table, so batching them would require restructuring orchestrator env
                 // construction (out of scope for this N+1 pass).
                 let resolvedBrowserSessions = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)
                 let namedPorts = portsByWorkspace[workspace.id] ?? []
+                let runningProcesses = runningProcessesByWorkspace[workspace.id] ?? []
+                let agentWindows = agentWindowsByWorkspace[workspace.id] ?? []
+                let windows = windowsByWorkspace[workspace.id] ?? []
                 return SpacesDeviceOverviewBuilder.WorkspaceDescriptor(
                     project: project, workspace: workspace, settings: try? orchestrator.workspaceSettings(workspaceID: workspace.id),
-                    runningProcesses: runningProcessesByWorkspace[workspace.id] ?? [], agentWindows: agentWindowsByWorkspace[workspace.id] ?? [],
-                    windows: windowsByWorkspace[workspace.id] ?? [],
+                    runningProcesses: runningProcesses, agentWindows: agentWindows, windows: windows,
+                    hasTrackedRuntimeIndicators: orchestrator.hasTrackedRuntimeIndicators(
+                        runningProcesses: runningProcesses, agentWindows: agentWindows, windows: windows, endedSessions: endedSessions),
                     assignedPorts: namedPorts.map {
                         SpacesDeviceAssignedPort(name: $0.name, port: $0.port, url: "http://\($0.name).\(slug).localhost:\(routerPort)")
                     },
@@ -4627,9 +4632,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // Hidden projects are not offered for workspace creation: a workspace created under one would
         // be invisible on every browsing surface the moment it exists. The Workspaces dialog is where
         // a hidden project comes back; creation under it becomes available again once it is unhidden.
-        let projects = try store.projects().filter { !$0.isHidden }.map {
+        //
+        // The home project is not offered either. It owns exactly one workspace, the home directory
+        // itself, and can never hold a second, so picking it would be a choice that does nothing.
+        let projects = try store.projects().filter { !$0.isHidden && $0.kind != .home }.map {
             SpacesDeviceProjectSummary(
-                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isHidden: $0.isHidden)
+                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, kind: $0.kind, isHidden: $0.isHidden)
         }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         // Resolve the requested selection against the offered list, so a stale client request naming a
         // hidden (or deleted) project falls back to a visible default instead of pre-selecting a
@@ -4906,8 +4914,25 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// "SpacesDeviceAPIServer", code: 404)` the rest of this file uses for a not-found target (mapped to
     /// `.notFound` by `errorCode(for:)`).
     private func resolveWorkspaceDirectory(workspaceID: String, context: RequestContext) throws -> String {
-        guard let workspace = try context.store().workspace(id: workspaceID) else { throw Self.workspaceNotFoundError(workspaceID: workspaceID) }
-        return workspace.dir
+        try Self.resolveEditableWorkspace(workspaceID: workspaceID, store: context.store()).dir
+    }
+
+    /// The workspace every file, diff, ref, and review-comment surface works in, refusing a workspace whose
+    /// project has no file surface at all.
+    ///
+    /// The home project's directory is the account's home. Listing it would walk everything the user owns
+    /// with no ignore rules to bound it, and watching it would arm a file watcher over the same tree, so
+    /// the daemon refuses rather than serving a listing nothing can usefully render. The refusal lives here
+    /// because this is the one point every such handler resolves its workspace through, which is also why
+    /// it is a `static` taking a store: the request handlers resolve through their `RequestContext`, while
+    /// the signature subscriptions open a store of their own.
+    static func resolveEditableWorkspace(workspaceID: String, store: SQLiteStore) throws -> WorkspaceRecord {
+        guard let workspace = try store.workspace(id: workspaceID) else { throw workspaceNotFoundError(workspaceID: workspaceID) }
+        guard try store.project(id: workspace.projectID)?.kind != .home else {
+            throw NSError(
+                domain: "SpacesDeviceAPIServer", code: 400, userInfo: [NSLocalizedDescriptionKey: "The home project has no file list or editor."])
+        }
+        return workspace
     }
 
     /// Reads a bounded regular checkout file. The revision-read endpoint shares this exact path so
@@ -5413,9 +5438,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         -> SpacesDeviceAPIResponse
     {
         let deadlineStart = Date()
-        guard let workspace = try context.store().workspace(id: request.workspaceID) else {
-            throw Self.workspaceNotFoundError(workspaceID: request.workspaceID)
-        }
+        // Resolved through the same gate as every other file and diff request, so the home project is
+        // refused here too rather than answering with the empty ref list a non-git workspace legitimately
+        // has.
+        let workspace = try Self.resolveEditableWorkspace(workspaceID: request.workspaceID, store: try context.store())
         let result = try SpacesDeviceWorkspaceRefListEngine.listRefs(
             workspaceDir: workspace.dir, baseBranch: workspace.baseBranch, gitClient: workspaceGitClient, deadlineStart: deadlineStart)
         return SpacesDeviceAPIResponse(ok: true, message: "Listed workspace refs.", result: .workspaceRefList(result))
@@ -6222,9 +6248,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         guard !request.body.isEmpty else { return SpacesDeviceAPIResponse(ok: false, message: "body is required.", errorCode: .invalidArgument) }
         return try reviewCommentQueue.sync {
             let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-            guard try store.workspace(id: request.workspaceID) != nil else {
-                return SpacesDeviceAPIResponse(ok: false, message: "Workspace '\(request.workspaceID)' was not found.", errorCode: .notFound)
-            }
+            // Same gate every other file/diff/review-comment surface resolves through: a home workspace
+            // has no editor, so a draft can never be filed against it.
+            _ = try Self.resolveEditableWorkspace(workspaceID: request.workspaceID, store: store)
             // Accepted risk (round-12): no revision check on this read-modify-write, so a concurrent
             // upsert of the same draft from another pane is last-write-wins — see the request struct's
             // doc comment in SpacesDeviceAPIProtocol.swift. Only `reviewCommentsSend` enforces a revision.
@@ -6291,9 +6317,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     {
         return try reviewCommentQueue.sync {
             let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-            guard try store.workspace(id: request.workspaceID) != nil else {
-                return SpacesDeviceAPIResponse(ok: false, message: "Workspace '\(request.workspaceID)' was not found.", errorCode: .notFound)
-            }
+            // Same gate every other file/diff/review-comment surface resolves through: a home workspace
+            // has no editor, so it can own no draft to delete.
+            _ = try Self.resolveEditableWorkspace(workspaceID: request.workspaceID, store: store)
             guard let existing = try store.reviewComment(id: request.id), existing.workspaceID == request.workspaceID else {
                 return SpacesDeviceAPIResponse(ok: false, message: "Comment '\(request.id)' was not found.", errorCode: .notFound)
             }
@@ -6349,9 +6375,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         return try reviewCommentQueue.sync {
             let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-            guard try store.workspace(id: request.workspaceID) != nil else {
-                return SpacesDeviceAPIResponse(ok: false, message: "Workspace '\(request.workspaceID)' was not found.", errorCode: .notFound)
-            }
+            // Same gate every other file/diff/review-comment surface resolves through: a home workspace
+            // has no editor, so it can own no drafts to send.
+            _ = try Self.resolveEditableWorkspace(workspaceID: request.workspaceID, store: store)
             for entry in request.comments {
                 guard let comment = try store.reviewComment(id: entry.id), comment.workspaceID == request.workspaceID, comment.sentAt == nil else {
                     return SpacesDeviceAPIResponse(
@@ -7159,7 +7185,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             if let workspaceID = request.command.workspaceFileListSignatureWorkspaceID {
                 let socketPath: String
                 do {
-                    try assertWorkspaceExistsForFileListSignature(workspaceID: workspaceID)
+                    try assertWorkspaceAcceptsFileListSignature(workspaceID: workspaceID)
                     socketPath = try addWorkspaceFileListSignatureSubscriber(workspaceID: workspaceID)
                 } catch { return .response(SpacesDeviceAPIServer.failureResponse(for: error)) }
                 return .relay(
@@ -7571,7 +7597,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
 
         private func relayWorkspaceFileListSignatureSubscription(connection: NWConnection, workspaceID: String, installationID: String) throws {
-            try assertWorkspaceExistsForFileListSignature(workspaceID: workspaceID)
+            try assertWorkspaceAcceptsFileListSignature(workspaceID: workspaceID)
             let socketPath = try addWorkspaceFileListSignatureSubscriber(workspaceID: workspaceID)
             do {
                 let relaySocketFD = try connectUnixSocket(path: socketPath)

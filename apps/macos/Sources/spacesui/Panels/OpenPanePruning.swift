@@ -61,6 +61,21 @@ enum OpenPanePruning {
         return referenced
     }
 
+    /// The keep-set every code-pane prune site passes as `liveWorkspaceIDs`: the ids of the workspaces
+    /// this overview lists that an Editor can be pointed at.
+    ///
+    /// Two rules combine, and every path that installs an authoritative overview (local snapshot, remote
+    /// overview, mutation response) applies both through this one function so they cannot disagree about
+    /// whether a pane's workspace is still live. A workspace absent from `overview.workspaces` was
+    /// deleted, not merely hidden (a hidden workspace stays listed with `isHidden` set). A workspace
+    /// still listed under an editor-ineligible project (`ProjectKind.isEditorEligible`: the home
+    /// project, whose file APIs the daemon rejects) counts as gone for the Editor even though its row
+    /// survives, because adopting an existing project rooted at the home directory as the home project
+    /// preserves the workspace id.
+    static func editorEligibleWorkspaceIDs(overview: SpacesDeviceOverviewPayload) -> Set<String> {
+        Set(overview.workspaces.filter { $0.projectKind.isEditorEligible }.map(\.id))
+    }
+
     /// The keep-set startup restore prunes persisted layouts against, from one device's overview.
     ///
     /// Restore must apply the same contract as live pruning: keep a pane only while the owning

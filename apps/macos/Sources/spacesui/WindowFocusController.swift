@@ -1288,10 +1288,15 @@ import workspacecore
     /// identically. Only two leaves depend on where the workspace's daemon runs: browser
     /// URLs may need remote-service routing before local Chrome focus, and terminal
     /// windows use native sessions locally vs Device API mirrors remotely.
+    /// - Parameter route: Why the focus was asked for, carried to the terminal leaf so an open nobody asked
+    ///   for reports its failure to the log instead of to the user (`AppKitController.terminalOpenFailureIsShown`)
+    ///   and stops short of presenting its workspace once the user has moved on
+    ///   (`AppKitController.terminalOpenMayPresentWorkspace`). Every caller but the home row's auto-open is
+    ///   a user action, and takes the default.
     @discardableResult func executeWindowFocusResolution(
         _ resolution: AppKitController.DeviceWindowShortcutResolution, requestID: String? = nil,
         preferredTarget: AppKitController.WorkspaceRunShortcutTarget? = nil, preferredDetail: SpacesDeviceWorkspaceDetailViewModel? = nil,
-        preserveWindowCycleSession: Bool = false
+        preserveWindowCycleSession: Bool = false, route: AppKitController.WorkspaceTerminalOpenRoute = .button
     ) async -> Bool {
         switch resolution {
         case .openURL(let workspaceID, let targetURL):
@@ -1368,7 +1373,7 @@ import workspacecore
                 preserveWindowCycleSession: preserveWindowCycleSession)
             return true
         case .openTerminal(let request):
-            guard await openOrFocusTerminalTarget(request, requestID: requestID) else { return false }
+            guard await openOrFocusTerminalTarget(request, requestID: requestID, route: route) else { return false }
             // A pane in the workspace's main-window panel is already selected by the panel show
             // itself (`showPanelScope`'s `.workspace` case). This only changes anything for a pane
             // the user detached into its own window (`PanelScope.globalWindow`), where fronting the
@@ -1400,9 +1405,11 @@ import workspacecore
         }
     }
 
-    @discardableResult private func openOrFocusTerminalTarget(_ request: AppKitController.DeviceTerminalOpenRequest, requestID: String? = nil) async
-        -> Bool
-    {
+    /// - Parameter route: See `executeWindowFocusResolution`. Decides whether a refusal is shown or logged,
+    ///   and whether an open that resumes after the sidebar selection moved still presents its workspace.
+    @discardableResult private func openOrFocusTerminalTarget(
+        _ request: AppKitController.DeviceTerminalOpenRequest, requestID: String? = nil, route: AppKitController.WorkspaceTerminalOpenRoute = .button
+    ) async -> Bool {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         var requestResolveMS = 0
@@ -1431,10 +1438,22 @@ import workspacecore
         // once the workspace's persisted layout has been adopted; the resolutions that create a
         // session are gated at their own mutations.
         guard host.deviceID(forWorkspaceID: request.workspaceID) != nil else {
-            host.showDeviceNotLoadedError()
+            if AppKitController.terminalOpenFailureIsShown(route: route) { host.showDeviceNotLoadedError() }
             logTerminalPaneFocus(success: false, reason: "device_not_loaded")
             return false
         }
+        // Everything from here on presents the request's workspace: the active-workspace preference
+        // write below, the pane open, which selects the row and fronts its panel (`showPanelScope`), and
+        // the landing this reports, which the caller turns into a sidebar selection
+        // (`executeWindowFocusResolution`'s `.openTerminal` case). An open nobody asked for may only do
+        // that while its row is still the selected one, so the rule is re-read after each suspension this
+        // path takes rather than once at the top.
+        func abandonImplicitOpenIfSelectionMovedOn() -> Bool {
+            guard !host.terminalOpenMayPresentWorkspace(workspaceID: request.workspaceID, route: route) else { return false }
+            logTerminalPaneFocus(success: false, reason: "selection_moved_on")
+            return true
+        }
+        if abandonImplicitOpenIfSelectionMovedOn() { return false }
         AppKitController.setClientActiveWorkspaceID(request.workspaceID)
         // A row-built resolution can predate the session's overview entry and lack the
         // real shell/command. Only recover that metadata when opening a new pane: an
@@ -1459,11 +1478,26 @@ import workspacecore
         // or incompatible device (which already showed its own modal, since this focusing entry point is
         // always a focusing intent) or a content-construction failure. Retrying either would only repeat
         // the same refusal and its modal a second time.
+        // An open the user did not ask for is abandoned here when its device stopped accepting daemon
+        // actions while it was in flight, because the install's own refusal of exactly that case
+        // (`mayActOnTerminalPane`) reports itself with a modal. The same rule is read, not a second one,
+        // so the two can never disagree about which opens are admissible.
+        guard
+            AppKitController.terminalOpenFailureIsShown(route: route)
+                || TerminalPaneService.canOpenOrFocusTerminalPane(
+                    hasExistingPane: host.panelCoordinator.placement(forSessionID: openRequest.sessionID) != nil,
+                    deviceAcceptsDaemonActions: host.deviceAcceptsDaemonActions(forTerminalOpenRequest: openRequest))
+        else {
+            logTerminalPaneFocus(success: false, reason: "device_unavailable")
+            return false
+        }
+        if abandonImplicitOpenIfSelectionMovedOn() { return false }
         var openedPane = host.panelCoordinator.openOrFocusTerminalPane(openRequest, openIntent: .focused) != nil
         if !openedPane, host.panelCoordinator.workspaceScope(forWorkspaceID: openRequest.workspaceID) == nil {
             retriedAfterReload = true
             await host.sidebar.reloadAwaitingFreshSnapshot()
             if needsColdResolution { openRequest = await host.resolveTerminalSessionPaneOpenRequest(sessionID: request.sessionID) ?? openRequest }
+            if abandonImplicitOpenIfSelectionMovedOn() { return false }
             openedPane = host.panelCoordinator.openOrFocusTerminalPane(openRequest, openIntent: .focused) != nil
         }
         guard openedPane else {
@@ -1493,6 +1527,9 @@ import workspacecore
         await Task.yield()
         focusObserved = host.panelCoordinator.focusedSessionID() == openRequest.sessionID
         focusObservationMS = host.windowShortcutElapsedMS(since: focusObservationStartedAt)
+        // The pane is open, but the landing reported below is a presentation of its own, so the rule is
+        // read once more after this path's last suspension.
+        if abandonImplicitOpenIfSelectionMovedOn() { return false }
         logTerminalPaneFocus(success: true)
         if let requestID, !requestID.isEmpty {
             host.logPerfMetric(

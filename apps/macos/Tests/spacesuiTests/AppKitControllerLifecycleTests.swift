@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Testing
+import spacesdevicecore
 import workspacecore
 
 @testable import spacesterminalcore
@@ -49,15 +50,38 @@ import workspacecore
         let selection = try AppKitController.stopAllQuitWorkspaceSelection(runningWorkspaces: [runningWorkspace], liveSessions: sessions) {
             sessionID in
             switch sessionID {
-            case "session-owned-a": stoppedWorkspaceWithSession
-            case "session-owned-b": runningWorkspace
-            case "session-owned-c": secondStoppedWorkspaceWithSession
-            default: nil
+            case "session-owned-a": .workspaceStop(stoppedWorkspaceWithSession)
+            case "session-owned-b": .workspaceStop(runningWorkspace)
+            case "session-owned-c": .workspaceStop(secondStoppedWorkspaceWithSession)
+            default: .unowned
             }
         }
 
         #expect(selection.workspaceIDs == ["workspace-running", "workspace-session", "workspace-session-b"])
         #expect(selection.associatedLiveSessionIDs == ["session-owned-a", "session-owned-b", "session-owned-c"])
+        #expect(selection.homeSessionIDs.isEmpty)
+    }
+
+    /// The home project has no workspace Stop, so its terminals are neither claimed by a workspace nor
+    /// left to the raw pass: they are collected on their own, for the per-session stop.
+    @Test func stopAllQuitSelectionCollectsHomeSessionsSeparatelyFromWorkspacesAndUnownedSessions() throws {
+        let workspace = Self.workspaceRecord(id: "workspace-owned", isRunning: false)
+        let sessions = [
+            Self.terminalSessionSummary(id: "session-owned"), Self.terminalSessionSummary(id: "session-home"),
+            Self.terminalSessionSummary(id: "session-unowned"),
+        ]
+
+        let selection = try AppKitController.stopAllQuitWorkspaceSelection(runningWorkspaces: [], liveSessions: sessions) { sessionID in
+            switch sessionID {
+            case "session-owned": .workspaceStop(workspace)
+            case "session-home": .homeTerminalStop
+            default: .unowned
+            }
+        }
+
+        #expect(selection.workspaceIDs == ["workspace-owned"])
+        #expect(selection.associatedLiveSessionIDs == ["session-owned"])
+        #expect(selection.homeSessionIDs == ["session-home"])
     }
 
     @Test func stopAllQuitRoutesWorkspaceStopThroughDaemonProfileCommand() throws {
@@ -77,7 +101,7 @@ import workspacecore
 
         let result = AppKitController.performStopAllQuitCleanup(
             liveSessions: liveSessions, parkAgentSessionsForRestore: { nil }, runningWorkspaces: { [] },
-            workspaceForLiveSession: { _ in throw NSError(domain: "Mapping", code: 1) }, stopWorkspace: { _ in },
+            ownershipForLiveSession: { _ in throw NSError(domain: "Mapping", code: 1) }, stopWorkspace: { _ in }, stopHomeTerminalSession: { _ in },
             terminateSession: { sessionID in terminatedSessionIDs.append(sessionID) }, listLiveSessions: { liveSessions },
             browserSessionTargetURLs: { _ in [] }, closeBrowserSessions: { _, _ in })
 
@@ -96,8 +120,9 @@ import workspacecore
 
         let result = AppKitController.performStopAllQuitCleanup(
             liveSessions: liveSessions, parkAgentSessionsForRestore: { nil }, runningWorkspaces: { [] },
-            workspaceForLiveSession: { sessionID in sessionID == "session-owned" ? Self.workspaceRecord(id: "workspace-owned", isRunning: false) : nil
-            }, stopWorkspace: { workspaceID in stoppedWorkspaceIDs.append(workspaceID) },
+            ownershipForLiveSession: { sessionID in
+                sessionID == "session-owned" ? .workspaceStop(Self.workspaceRecord(id: "workspace-owned", isRunning: false)) : .unowned
+            }, stopWorkspace: { workspaceID in stoppedWorkspaceIDs.append(workspaceID) }, stopHomeTerminalSession: { _ in },
             terminateSession: { sessionID in terminatedSessionIDs.append(sessionID) },
             listLiveSessions: {
                 listCalls += 1
@@ -112,6 +137,125 @@ import workspacecore
         #expect(result.remainingSessionIDs == ["session-owned"])
     }
 
+    /// A terminal open in the home project is torn down one session at a time, through the daemon's
+    /// per-session terminal stop, because no workspace Stop covers it. The raw pass stays for the sessions
+    /// no workspace owns at all.
+    @Test func stopAllQuitCleanupStopsHomeSessionsPerSessionAndRawTerminatesOnlyUnownedOnes() {
+        let liveSessions = [
+            Self.terminalSessionSummary(id: "session-owned"), Self.terminalSessionSummary(id: "session-home"),
+            Self.terminalSessionSummary(id: "session-unowned"),
+        ]
+        var stoppedWorkspaceIDs: [String] = []
+        var homeStoppedSessionIDs: [String] = []
+        var terminatedSessionIDs: [String] = []
+
+        let result = AppKitController.performStopAllQuitCleanup(
+            liveSessions: liveSessions, parkAgentSessionsForRestore: { nil }, runningWorkspaces: { [] },
+            ownershipForLiveSession: { sessionID in
+                switch sessionID {
+                case "session-owned": .workspaceStop(Self.workspaceRecord(id: "workspace-owned", isRunning: false))
+                case "session-home": .homeTerminalStop
+                default: .unowned
+                }
+            }, stopWorkspace: { workspaceID in stoppedWorkspaceIDs.append(workspaceID) },
+            stopHomeTerminalSession: { sessionID in homeStoppedSessionIDs.append(sessionID) },
+            terminateSession: { sessionID in terminatedSessionIDs.append(sessionID) }, listLiveSessions: { liveSessions },
+            browserSessionTargetURLs: { _ in [] }, closeBrowserSessions: { _, _ in })
+
+        #expect(stoppedWorkspaceIDs == ["workspace-owned"])
+        #expect(homeStoppedSessionIDs == ["session-home"])
+        #expect(result.homeStoppedSessionIDs == ["session-home"])
+        #expect(terminatedSessionIDs == ["session-unowned"], "a home terminal must not be raw-terminated behind the daemon's back")
+        #expect(result.rawTerminatedSessionIDs == ["session-unowned"])
+    }
+
+    /// A home terminal the daemon could not stop is a failure the quit has to report, not a session the
+    /// cleanup silently terminates instead.
+    @Test func stopAllQuitCleanupReportsAHomeSessionTheDaemonCouldNotStop() {
+        let liveSessions = [Self.terminalSessionSummary(id: "session-home")]
+        var terminatedSessionIDs: [String] = []
+
+        let result = AppKitController.performStopAllQuitCleanup(
+            liveSessions: liveSessions, parkAgentSessionsForRestore: { nil }, runningWorkspaces: { [] },
+            ownershipForLiveSession: { _ in .homeTerminalStop }, stopWorkspace: { _ in },
+            stopHomeTerminalSession: { _ in throw NSError(domain: "TerminalStop", code: 1) },
+            terminateSession: { sessionID in terminatedSessionIDs.append(sessionID) }, listLiveSessions: { liveSessions },
+            browserSessionTargetURLs: { _ in [] }, closeBrowserSessions: { _, _ in })
+
+        #expect(!result.succeeded)
+        #expect(result.homeStopFailures.map(\.sessionID) == ["session-home"])
+        #expect(result.homeStoppedSessionIDs.isEmpty)
+        #expect(terminatedSessionIDs.isEmpty)
+        #expect(result.remainingSessionIDs == ["session-home"])
+    }
+
+    /// A home shell that exits on its own between the post-workspace-stop listing and the home pass
+    /// reaching it makes the daemon's `.terminalStop` fail with "already ended". That is cleanup, not a
+    /// failure: the pass re-checks liveness and counts the session as stopped rather than reporting the
+    /// quit as failed.
+    @Test func stopAllQuitCleanupTreatsAHomeSessionThatEndedOnItsOwnAsStopped() {
+        let liveSessions = [Self.terminalSessionSummary(id: "session-home")]
+        var terminatedSessionIDs: [String] = []
+        var listCalls = 0
+
+        let result = AppKitController.performStopAllQuitCleanup(
+            liveSessions: liveSessions, parkAgentSessionsForRestore: { nil }, runningWorkspaces: { [] },
+            ownershipForLiveSession: { _ in .homeTerminalStop }, stopWorkspace: { _ in },
+            stopHomeTerminalSession: { _ in throw NSError(domain: "TerminalStop", code: 1) },
+            terminateSession: { sessionID in terminatedSessionIDs.append(sessionID) },
+            listLiveSessions: {
+                listCalls += 1
+                // The first listing, right after the workspace-stop pass, still shows the session live;
+                // it is gone by the time the stop fails and the pass re-checks.
+                return listCalls == 1 ? liveSessions : []
+            }, browserSessionTargetURLs: { _ in [] }, closeBrowserSessions: { _, _ in })
+
+        #expect(result.succeeded)
+        #expect(result.homeStoppedSessionIDs == ["session-home"])
+        #expect(result.homeStopFailures.isEmpty)
+        #expect(terminatedSessionIDs.isEmpty)
+        #expect(result.remainingSessionIDs.isEmpty)
+    }
+
+    @Test func stopAllQuitRoutesHomeTerminalStopThroughDaemonProfileCommand() throws {
+        var sent: TerminalServiceProfileCommand?
+
+        try AppKitController.stopHomeTerminalForStopAllQuit(sessionID: "session-home") { command in
+            sent = command
+            return TerminalServiceProfileCommandResponse(message: "Stopped terminal session session-home.")
+        }
+
+        #expect(sent == .terminalStop(sessionID: "session-home"))
+    }
+
+    /// The kind is read from the local daemon store, which is the only thing that tells a home terminal
+    /// apart from a workspace one: a home session takes the per-session stop, an ordinary workspace's
+    /// session is covered by that workspace's Stop, and a session no workspace owns stays unowned. The
+    /// home workspace is also kept out of the workspace selection, since Stop All cannot stop it.
+    @Test func stopAllQuitSessionOwnershipReadsTheProjectKindFromTheLocalStore() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("stop-all-quit-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
+        let homeWorkspace = try Self.seedProjectWithTerminalSession(
+            store: store, projectID: "project-home", kind: .home, dir: root.appendingPathComponent("home").path, isRunning: true,
+            sessionID: "session-home")
+        let standardWorkspace = try Self.seedProjectWithTerminalSession(
+            store: store, projectID: "project-standard", kind: .standard, dir: root.appendingPathComponent("standard").path, isRunning: true,
+            sessionID: "session-standard")
+
+        let home = try AppKitController.stopAllQuitSessionOwnership(sessionID: "session-home", store: store)
+        let standard = try AppKitController.stopAllQuitSessionOwnership(sessionID: "session-standard", store: store)
+        let untracked = try AppKitController.stopAllQuitSessionOwnership(sessionID: "session-untracked", store: store)
+
+        #expect(Self.isHomeTerminalStop(home))
+        #expect(Self.workspaceID(of: standard) == standardWorkspace.id)
+        #expect(Self.isUnowned(untracked))
+        let selectable = try AppKitController.runningLocalWorkspacesForStopAllQuit(store: store).map(\.id)
+        #expect(selectable == [standardWorkspace.id])
+        #expect(!selectable.contains(homeWorkspace.id))
+    }
+
     @Test func stopAllQuitCleanupLoadsBrowserTargetsBeforeStoppingWorkspace() {
         let liveSessions = [Self.terminalSessionSummary(id: "session-owned")]
         var events: [String] = []
@@ -119,8 +263,9 @@ import workspacecore
 
         let result = AppKitController.performStopAllQuitCleanup(
             liveSessions: liveSessions, parkAgentSessionsForRestore: { nil }, runningWorkspaces: { [] },
-            workspaceForLiveSession: { _ in Self.workspaceRecord(id: "workspace-owned", isRunning: false) },
-            stopWorkspace: { workspaceID in events.append("stop:\(workspaceID)") }, terminateSession: { _ in }, listLiveSessions: { [] },
+            ownershipForLiveSession: { _ in .workspaceStop(Self.workspaceRecord(id: "workspace-owned", isRunning: false)) },
+            stopWorkspace: { workspaceID in events.append("stop:\(workspaceID)") }, stopHomeTerminalSession: { _ in }, terminateSession: { _ in },
+            listLiveSessions: { [] },
             browserSessionTargetURLs: { workspaceID in
                 events.append("targets:\(workspaceID)")
                 return ["http://127.0.0.1:3000", "http://127.0.0.1:3000/admin"]
@@ -140,8 +285,8 @@ import workspacecore
 
         let result = AppKitController.performStopAllQuitCleanup(
             liveSessions: liveSessions, parkAgentSessionsForRestore: { nil }, runningWorkspaces: { [] },
-            workspaceForLiveSession: { _ in Self.workspaceRecord(id: "workspace-owned", isRunning: false) },
-            stopWorkspace: { workspaceID in stoppedWorkspaceIDs.append(workspaceID) },
+            ownershipForLiveSession: { _ in .workspaceStop(Self.workspaceRecord(id: "workspace-owned", isRunning: false)) },
+            stopWorkspace: { workspaceID in stoppedWorkspaceIDs.append(workspaceID) }, stopHomeTerminalSession: { _ in },
             terminateSession: { sessionID in terminatedSessionIDs.append(sessionID) }, listLiveSessions: { liveSessions },
             browserSessionTargetURLs: { _ in throw NSError(domain: "BrowserTargets", code: 1) },
             closeBrowserSessions: { workspaceID, _ in browserCleanupWorkspaceIDs.append(workspaceID) })
@@ -165,12 +310,14 @@ import workspacecore
         var events: [String] = []
 
         let result = AppKitController.performStopAllQuitCleanup(
-            liveSessions: liveSessions, parkAgentSessionsForRestore: {
+            liveSessions: liveSessions,
+            parkAgentSessionsForRestore: {
                 events.append("park")
                 return "generation-1"
             }, runningWorkspaces: { [] },
-            workspaceForLiveSession: { _ in Self.workspaceRecord(id: "workspace-owned", isRunning: false) },
-            stopWorkspace: { workspaceID in events.append("stop:\(workspaceID)") }, terminateSession: { _ in }, listLiveSessions: { [] },
+            ownershipForLiveSession: { _ in .workspaceStop(Self.workspaceRecord(id: "workspace-owned", isRunning: false)) },
+            stopWorkspace: { workspaceID in events.append("stop:\(workspaceID)") }, stopHomeTerminalSession: { _ in }, terminateSession: { _ in },
+            listLiveSessions: { [] },
             browserSessionTargetURLs: { workspaceID in
                 events.append("targets:\(workspaceID)")
                 return []
@@ -188,20 +335,22 @@ import workspacecore
         var parkCount = 0
 
         let mappingFailure = AppKitController.performStopAllQuitCleanup(
-            liveSessions: liveSessions, parkAgentSessionsForRestore: {
+            liveSessions: liveSessions,
+            parkAgentSessionsForRestore: {
                 parkCount += 1
                 return nil
-            }, runningWorkspaces: { [] },
-            workspaceForLiveSession: { _ in throw NSError(domain: "Mapping", code: 1) }, stopWorkspace: { _ in }, terminateSession: { _ in },
-            listLiveSessions: { liveSessions }, browserSessionTargetURLs: { _ in [] }, closeBrowserSessions: { _, _ in })
+            }, runningWorkspaces: { [] }, ownershipForLiveSession: { _ in throw NSError(domain: "Mapping", code: 1) }, stopWorkspace: { _ in },
+            stopHomeTerminalSession: { _ in }, terminateSession: { _ in }, listLiveSessions: { liveSessions }, browserSessionTargetURLs: { _ in [] },
+            closeBrowserSessions: { _, _ in })
 
         let browserTargetFailure = AppKitController.performStopAllQuitCleanup(
-            liveSessions: liveSessions, parkAgentSessionsForRestore: {
+            liveSessions: liveSessions,
+            parkAgentSessionsForRestore: {
                 parkCount += 1
                 return nil
             }, runningWorkspaces: { [] },
-            workspaceForLiveSession: { _ in Self.workspaceRecord(id: "workspace-owned", isRunning: false) }, stopWorkspace: { _ in },
-            terminateSession: { _ in }, listLiveSessions: { liveSessions },
+            ownershipForLiveSession: { _ in .workspaceStop(Self.workspaceRecord(id: "workspace-owned", isRunning: false)) }, stopWorkspace: { _ in },
+            stopHomeTerminalSession: { _ in }, terminateSession: { _ in }, listLiveSessions: { liveSessions },
             browserSessionTargetURLs: { _ in throw NSError(domain: "BrowserTargets", code: 1) }, closeBrowserSessions: { _, _ in })
 
         #expect(mappingFailure.preparationError != nil)
@@ -267,8 +416,8 @@ import workspacecore
         var reconciledAfterFailedForce: [String] = []
         let failedForce = AppKitController.stopAllQuitFailureTerminateReply(
             result: stuck, choice: .forceQuit, parkAgentSessionsForRestore: { nil },
-            terminateSession: { _ in throw NSError(domain: "Terminate", code: 1) },
-            closeBrowserSessions: { _, _ in }, reconcileParkedAgentSessions: { generation in reconciledAfterFailedForce.append(generation) })
+            terminateSession: { _ in throw NSError(domain: "Terminate", code: 1) }, closeBrowserSessions: { _, _ in },
+            reconcileParkedAgentSessions: { generation in reconciledAfterFailedForce.append(generation) })
 
         var reconciledAfterForce: [String] = []
         let force = AppKitController.stopAllQuitFailureTerminateReply(
@@ -326,8 +475,10 @@ import workspacecore
     /// Quitting with sessions kept running must leave every session alone, including the ad hoc terminal
     /// whose pane the app tears down on the way out.
     @Test func adHocSessionStopIsNotRequestedWhenQuitKeepsSessionsRunning() {
-        #expect(TerminalPaneService.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: false))
-        #expect(!TerminalPaneService.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: true))
+        #expect(
+            TerminalPaneService.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: false))
+        #expect(
+            !TerminalPaneService.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: true))
     }
 
     @Test func appBuiltInTerminalLauncherUsesServiceCreateSessionPath() throws {
@@ -356,6 +507,38 @@ import workspacecore
             servicePID: 123, childPID: 456, controlSocketPath: "/tmp/\(id).sock", outputPath: "/tmp/\(id).log")
     }
 
+    /// Seeds a project, its single workspace, and the runtime-target row that binds a live terminal
+    /// session to that workspace, which is what `stopAllQuitSessionOwnership` resolves a session through.
+    @discardableResult private static func seedProjectWithTerminalSession(
+        store: SQLiteStore, projectID: String, kind: ProjectKind, dir: String, isRunning: Bool, sessionID: String
+    ) throws -> WorkspaceRecord {
+        try store.upsert(project: ProjectRecord(id: projectID, name: projectID, dir: dir, isGitRepo: false, defaultBranch: nil, kind: kind))
+        let workspace = WorkspaceRecord(
+            id: "workspace-\(projectID)", projectID: projectID, dir: dir, dirname: nil, branch: nil, isDefault: true, isRunning: isRunning,
+            lastLaunchedAt: isRunning ? "2026-07-01T00:00:00Z" : nil)
+        try store.upsert(workspace: workspace)
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-\(sessionID)", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: sessionID, detail: nil, targetURL: nil,
+                terminalTrackingID: sessionID, role: "terminal", orderIndex: 100, lastSeenAt: "2026-07-01T00:00:00Z"))
+        return workspace
+    }
+
+    private static func isHomeTerminalStop(_ ownership: AppKitController.StopAllQuitSessionOwnership) -> Bool {
+        if case .homeTerminalStop = ownership { return true }
+        return false
+    }
+
+    private static func isUnowned(_ ownership: AppKitController.StopAllQuitSessionOwnership) -> Bool {
+        if case .unowned = ownership { return true }
+        return false
+    }
+
+    private static func workspaceID(of ownership: AppKitController.StopAllQuitSessionOwnership) -> String? {
+        if case .workspaceStop(let workspace) = ownership { return workspace.id }
+        return nil
+    }
+
     private static func workspaceRecord(id: String, isRunning: Bool) -> WorkspaceRecord {
         WorkspaceRecord(
             id: id, projectID: "project-\(id)", dir: "/tmp/\(id)", dirname: nil, branch: nil, isDefault: false, isRunning: isRunning,
@@ -368,7 +551,7 @@ import workspacecore
         AppKitController.StopAllQuitCleanupResult(
             workspaceIDs: workspaceIDs, stoppedWorkspaceIDs: [], associatedLiveSessionIDs: [],
             browserSessionTargetURLsByWorkspaceID: Dictionary(uniqueKeysWithValues: workspaceIDs.map { ($0, ["http://127.0.0.1:3000"]) }),
-            stopFailures: [], rawTerminatedSessionIDs: [], rawTerminationFailures: [], remainingSessionIDs: remainingSessionIDs,
-            preparationError: preparationError, parkedRestoreGeneration: parkedRestoreGeneration)
+            stopFailures: [], homeStoppedSessionIDs: [], homeStopFailures: [], rawTerminatedSessionIDs: [], rawTerminationFailures: [],
+            remainingSessionIDs: remainingSessionIDs, preparationError: preparationError, parkedRestoreGeneration: parkedRestoreGeneration)
     }
 }

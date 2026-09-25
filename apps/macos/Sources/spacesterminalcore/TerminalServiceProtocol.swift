@@ -294,10 +294,15 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
     public let isRunning: Bool
     public let lastLaunchedAt: String?
     public let notes: String?
+    /// The name shown to users, carried rather than derived here: the rule depends on the owning
+    /// project's kind (`ProjectKind.workspaceDisplayName`), which lives a module above this protocol
+    /// type. The daemon names the workspace and the CLI prints what it was given, so the local listing
+    /// and the `--device` listing cannot drift: the home project's workspace reads `~` in both.
+    public let displayName: String
 
     public init(
         id: String, projectID: String, dir: String, dirname: String?, branch: String?, baseBranch: String?, isDefault: Bool, isHidden: Bool,
-        isRunning: Bool, lastLaunchedAt: String?, notes: String?
+        isRunning: Bool, lastLaunchedAt: String?, notes: String?, displayName: String
     ) {
         self.id = id
         self.projectID = projectID
@@ -310,12 +315,7 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
         self.isRunning = isRunning
         self.lastLaunchedAt = lastLaunchedAt
         self.notes = notes
-    }
-
-    /// Name shown to users. Git workspaces show their branch; non-git workspaces show the folder name.
-    public var displayName: String {
-        if let branch, !branch.isEmpty { return branch }
-        return (dir as NSString).lastPathComponent
+        self.displayName = displayName
     }
 }
 
@@ -455,8 +455,7 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         return TerminalServiceProfileCommandResponse(
             message: message, projects: projects, workspaces: workspaces, workspace: workspace, terminalSessions: terminalSessions,
             terminalSession: terminalSession, terminalOutput: terminalOutput, agentSessions: agentSessions, agentSpawn: agentSpawn,
-            pendingAgentEvents: events, automations: automations, automationRuns: automationRuns,
-            parkedRestoreGeneration: parkedRestoreGeneration)
+            pendingAgentEvents: events, automations: automations, automationRuns: automationRuns, parkedRestoreGeneration: parkedRestoreGeneration)
     }
 }
 
@@ -798,9 +797,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
 
     /// Consumes one element of a status array without reading it, so a row this build cannot decode can be
     /// stepped over rather than failing the handshake.
-    private struct SkippedStatusRow: Decodable {
-        init(from decoder: any Decoder) throws {}
-    }
+    private struct SkippedStatusRow: Decodable { init(from decoder: any Decoder) throws {} }
 
     /// The OS of the process building this status (the daemon's own host).
     public static var currentOperatingSystem: String {

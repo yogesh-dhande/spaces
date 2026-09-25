@@ -1,4 +1,5 @@
 import Foundation
+import spacesdevicecore
 import spacesterminalcore
 import workspacecore
 
@@ -429,6 +430,20 @@ enum AutomationsViewModel {
         let workspaceID: String
         let label: String
     }
+
+    /// The workspaces the editor's Agent form offers, in the sidebar's project order: the visible
+    /// workspaces of every project whose kind can host an automation. The home project is left out, because
+    /// the daemon refuses its workspace as an automation target
+    /// (`AutomationService.validateWorkspaceTarget`), so offering it could only produce a save that fails.
+    static func visibleWorkspaceChoices(projects: [ProjectSummary], visibleWorkspaces: (String) -> [WorkspaceSummary]) -> [WorkspaceChoice] {
+        projects.filter(\.kind.isAutomationTargetEligible).flatMap { project in
+            visibleWorkspaces(project.id).map { WorkspaceChoice(workspaceID: $0.id, label: workspaceChoiceLabel(project: project, workspace: $0)) }
+        }
+    }
+
+    /// "`<project name> / <workspace display name>`", so the same branch name across projects stays
+    /// distinguishable.
+    static func workspaceChoiceLabel(project: ProjectSummary, workspace: WorkspaceSummary) -> String { "\(project.name) / \(workspace.displayName)" }
 
     /// Merges the editor's visible workspace choices with the automation's stored target so editing an
     /// automation whose workspace has since been hidden (or archived) never silently retargets it: the stored

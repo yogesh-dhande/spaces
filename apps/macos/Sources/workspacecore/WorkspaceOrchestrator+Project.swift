@@ -5,7 +5,8 @@ import systembridge
 extension WorkspaceOrchestrator {
     public func listProjects() throws -> [ProjectSummary] {
         return try store.projects().map {
-            ProjectSummary(id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isHidden: $0.isHidden)
+            ProjectSummary(
+                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, kind: $0.kind, isHidden: $0.isHidden)
         }
     }
 
@@ -85,7 +86,7 @@ extension WorkspaceOrchestrator {
         do {
             let defaultBranch = try importedRepositoryDefaultBranch(path: plan.destination.path)
             let baseRecord = ProjectRecord(
-                id: plan.project.id, name: plan.project.name, dir: plan.project.dir, isGitRepo: true, defaultBranch: defaultBranch)
+                id: plan.project.id, name: plan.project.name, dir: plan.project.dir, isGitRepo: true, defaultBranch: defaultBranch, kind: .standard)
             var record = try configuredProjectRecord(baseRecord: baseRecord) { _ in }
             let defaultWorkspace = try createImportedGitDefaultWorkspaceOnDisk(project: record, branch: defaultBranch)
             let worktreeURL = URL(fileURLWithPath: defaultWorkspace.dir, isDirectory: true)
@@ -114,7 +115,7 @@ extension WorkspaceOrchestrator {
         let file = try git.readRemoteDefaultBranchFile(gitURL: plan.gitURL, path: SpacesYAMLService.fileName)
         let importedDocument = try file.contents.map { try SpacesYAMLService.decode($0) }
         let baseRecord = ProjectRecord(
-            id: plan.project.id, name: plan.project.name, dir: plan.project.dir, isGitRepo: true, defaultBranch: file.defaultBranch)
+            id: plan.project.id, name: plan.project.name, dir: plan.project.dir, isGitRepo: true, defaultBranch: file.defaultBranch, kind: .standard)
         let record = try configuredProjectRecord(baseRecord: baseRecord) { project in importedDocument?.applying(to: &project) }
         return GitProjectPreview(project: record, replacementCandidates: replacementCandidates, spacesYAMLFound: importedDocument != nil)
     }
@@ -176,9 +177,20 @@ extension WorkspaceOrchestrator {
 
     /// Moves the project's hidden flag. Takes the project key for the same reason `updateProjectConfig`
     /// does: the read that resolves the record and the write that follows must not straddle a delete.
+    ///
+    /// Refuses a home project regardless of `isHidden`: the home row reads as a non-git project on every
+    /// surface, so its visibility checkbox already drives its single workspace's flag, never the
+    /// project's (see `WorkspaceVisibilityTree.Toggle`), and every field the Device API's
+    /// `updateProjectMetadata` supports funnels through here. Leaving a project-level write open for the
+    /// home kind would let a caller that bypasses the Workspaces dialog (a direct Device API call, or a
+    /// bug in a client that expects the ordinary project-level toggle) set a flag the dialog has no
+    /// control that can clear, stranding the row hidden with no UI path back. `ensureHomeProject`
+    /// normalizes away any such flag a database still carries from before this refusal existed (see
+    /// `moveAdoptedHiddenFlagToWorkspace`).
     public func updateProjectHidden(projectID: String, isHidden: Bool) throws {
         try withProjectLifecycleLock(projectID: projectID) {
             guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+            guard project.kind != .home else { throw WorkspaceError.invalidArgument(message: "The home project is hidden through its workspace.") }
             guard project.isHidden != isHidden else { return }
             try store.updateProjectHidden(id: project.id, isHidden: isHidden)
         }
@@ -202,6 +214,7 @@ extension WorkspaceOrchestrator {
         -> ProjectRecord
     {
         guard let originalProject = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        try assertProjectIsConfigurable(originalProject)
         let updatedProject = try configuredProjectRecord(baseRecord: originalProject, update: update)
         guard updateAllWorkspaces else {
             try store.upsert(project: updatedProject)
@@ -249,6 +262,11 @@ extension WorkspaceOrchestrator {
     /// agent start, or terminal open from stranding runtime in a workspace being removed. Both are
     /// claimed before any destructive work, so a conflict rejects the delete instead of half-doing it.
     private func removeProject(_ project: ProjectRecord) throws {
+        // The one chokepoint both public entry points funnel through, so the home project is refused
+        // however it is reached. A daemon's home project is not the user's to remove: it is recreated on
+        // the next start, and deleting it would take the terminals living in it with it. Hiding it, which
+        // goes through the ordinary single-workspace hide path, is the way to take the row off the list.
+        guard project.kind != .home else { throw WorkspaceError.invalidArgument(message: "The home project cannot be deleted.") }
         try withProjectLifecycleLock(projectID: project.id) {
             // Both reads happen under the project gate, never before it. A workspace list read outside the
             // gate can miss a `createWorkspace` that lands between the read and the claim: its record would
@@ -300,7 +318,7 @@ extension WorkspaceOrchestrator {
         // configuration update must not be able to un-hide a project as a side effect of saving settings.
         record = ProjectRecord(
             id: baseRecord.id, name: baseRecord.name, dir: baseRecord.dir, isGitRepo: baseRecord.isGitRepo, defaultBranch: baseRecord.defaultBranch,
-            isHidden: baseRecord.isHidden, setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports,
+            kind: baseRecord.kind, isHidden: baseRecord.isHidden, setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports,
             processes: record.processes, browserSessions: record.browserSessions)
         record.ports = normalizeServiceDefinitionIDs(previous: previousPorts, updated: record.ports)
         record.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: record.processes)

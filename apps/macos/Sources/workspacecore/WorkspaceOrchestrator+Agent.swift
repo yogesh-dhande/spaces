@@ -1,4 +1,5 @@
 import Foundation
+import spacesdevicecore
 import spacesterminalcore
 import systembridge
 
@@ -11,6 +12,13 @@ extension WorkspaceOrchestrator {
         // decide session B's own owner, and no pass ever makes one session the owner of another's row.
         let ownershipIndex = try builtInTerminalOwnershipIndex()
         var didMutate = false
+        // The workspaces this pass finalizes an agent row for. Their running flag is reconciled once the
+        // pass is done, through `reconcileWorkspaceRunning`: an agent row bound to an ended terminal
+        // session already stops counting as a runtime indicator, but removing the row can be the moment
+        // the workspace loses its last one, and no later pass revisits a finalized row. This covers the
+        // exit the natural-exit reconcile never saw, where the session ended while the daemon was down and
+        // its closed core posted no callback on the way back up.
+        var workspaceIDsWithFinalizedAgentRows: Set<String> = []
         for session in liveSessions where session.launchConfiguration.backend == .ghosttyEmbedded {
             let sessionID = session.sessionID
             // Runs for EVERY live session, ahead of the configured-owner skip below, because this pass is
@@ -77,6 +85,7 @@ extension WorkspaceOrchestrator {
                 // state either way.
                 if isAdHocDetectedForegroundAgent(existingRow), foregroundHasRevertedToPlainShell(session) {
                     try finalizeAgentRow(existingRow, reason: .exited(eventType: "exit", eventSource: "foreground_reconciler", environmentKeys: nil))
+                    workspaceIDsWithFinalizedAgentRows.insert(existingRow.workspaceID)
                     didMutate = true
                 }
                 continue
@@ -86,7 +95,10 @@ extension WorkspaceOrchestrator {
                 didMutate = true
             }
         }
-        if try reconcileExitedSessionBackedAgentRows(index: ownershipIndex, excludingLiveSessionIDs: liveSessionIDs) { didMutate = true }
+        let finalizedByEndedSessionSweep = try reconcileExitedSessionBackedAgentRows(index: ownershipIndex, excludingLiveSessionIDs: liveSessionIDs)
+        workspaceIDsWithFinalizedAgentRows.formUnion(finalizedByEndedSessionSweep)
+        if !finalizedByEndedSessionSweep.isEmpty { didMutate = true }
+        try reconcileWorkspaceRunning(workspaceIDs: workspaceIDsWithFinalizedAgentRows)
         return didMutate
     }
 
@@ -278,10 +290,12 @@ extension WorkspaceOrchestrator {
     /// agent sitting `.done` between turns has no exit event yet, so it is not treated as finalized — but
     /// the liveness check below leaves it untouched while its session is alive; only once its terminal has
     /// ended does this sweep finalize it and deliver the notice.
+    /// Returns the workspaces whose agent rows it finalized, so the caller can recompute their running
+    /// flag: a finalized row stops being a runtime indicator, and no later pass revisits it.
     @discardableResult func reconcileExitedSessionBackedAgentRows(
         index: BuiltInTerminalOwnershipIndex, excludingLiveSessionIDs liveSessionIDs: Set<String>
-    ) throws -> Bool {
-        var didMutate = false
+    ) throws -> Set<String> {
+        var finalizedWorkspaceIDs: Set<String> = []
         for workspaceID in index.workspaceIDs {
             for agent in index.agentWindows(workspaceID: workspaceID) where agent.provider == .spaces {
                 // Skip only rows already finalized (their exit delivered — `.exited`, or an exit event
@@ -305,10 +319,10 @@ extension WorkspaceOrchestrator {
                     let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive
                 else { continue }
                 try finalizeAgentRow(agent, reason: .exited(eventType: "exit", eventSource: "foreground_reconciler", environmentKeys: nil))
-                didMutate = true
+                finalizedWorkspaceIDs.insert(agent.workspaceID)
             }
         }
-        return didMutate
+        return finalizedWorkspaceIDs
     }
 
     @discardableResult func updateAdHocAgentRuntimeTargetDetail(_ agent: AgentWindowRecord, displayCommand: String?) throws -> Bool {
@@ -418,9 +432,7 @@ extension WorkspaceOrchestrator {
         // session is exempt from this rejection: that session exists for the one agent it was launched to
         // run, so `handleAgentExit` never silently demotes its row, and a watcher may subscribe before the
         // agent's first hook signal.
-        if isAdHocDetectedForegroundAgent(target), try !agentRowHasRecordedHookSignal(target),
-            !builtInAgentSessionWasLaunchedAsAgent(target)
-        {
+        if isAdHocDetectedForegroundAgent(target), try !agentRowHasRecordedHookSignal(target), !builtInAgentSessionWasLaunchedAsAgent(target) {
             throw WorkspaceError.invalidArgument(
                 message: "Agent session \(agentSessionID) has not emitted its first hook signal yet; retry the subscribe after it starts working.")
         }
@@ -1053,7 +1065,8 @@ extension WorkspaceOrchestrator {
                             id: agent.id, terminalSessionID: terminalSessionID, agent: detectedKind,
                             label: trimmedOrNilAgentField(agent.effectiveLabel), status: agent.status.rawValue,
                             note: trimmedOrNilAgentField(agent.note), projectID: project.id, projectName: project.name, workspaceID: workspace.id,
-                            workspaceName: workspace.displayName, workspaceDir: workspace.dir, branch: trimmedOrNilAgentField(workspace.branch),
+                            workspaceName: project.kind.workspaceDisplayName(branch: workspace.branch, dir: workspace.dir),
+                            workspaceDir: workspace.dir, branch: trimmedOrNilAgentField(project.kind.maskedBranch(workspace.branch)),
                             updatedAt: agent.updatedAt, lastSignalAt: try store.lastAgentSignalAt(agentSessionID: agent.id)))
                 }
             }

@@ -154,6 +154,46 @@ final class AgentNotificationEngineTests: XCTestCase {
             ])
     }
 
+    /// The home project's record keeps whatever branch a pre-existing git repository at the home path was
+    /// on when it was adopted (`ProjectKind`'s doc comment), but a home workspace has no git lifecycle of
+    /// its own. A locally watched agent running there must render with the `branch` line masked away, the
+    /// same masking `agentSessionRows` already applies on the remote agent-list path, or the notification
+    /// would misleadingly claim the home row is on a branch.
+    func testImmediateInjectionMasksBranchForAHomeProjectWorkspace() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let project = ProjectRecord(
+            id: UUID().uuidString, name: ProjectKind.homeProjectName, dir: dir, isGitRepo: false, defaultBranch: nil, kind: .home, isHidden: false)
+        try store.upsert(project: project)
+        // Forced non-git per `ProjectKind`'s contract, but the record still carries the branch the adopted
+        // git repository was on, exactly as `ensureHomeProject` leaves it.
+        let workspace = WorkspaceRecord(
+            id: UUID().uuidString, projectID: project.id, dir: dir, dirname: nil, branch: "main", isDefault: true, isRunning: false,
+            lastLaunchedAt: nil)
+        try store.upsert(workspace: workspace)
+        let recorder = DeliveryRecorder()
+        let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
+
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "child-session", status: .waiting)
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: child.id, createdAt: "t")
+
+        try engine.childDidTransition(agent: child, transition: .blocked)
+
+        XCTAssertEqual(
+            recorder.delivered.map(\.line),
+            [
+                """
+                [spaces] Claude Code CLI (claude) is blocked
+                  project: ~
+                  workspace: \(workspace.dir)
+                  session: child-session
+                  link: spaces://terminal/child-session
+                """
+            ], "no branch line for a home workspace, even though the record still carries one")
+    }
+
     /// Mirrors the daemon chokepoint exactly: the engine receives the record RETURNED by
     /// `updateAgentWindowStatus`, not a fresh store load, so that record must carry the stored note. A
     /// status transition after an annotate must still render the note in the injected line.

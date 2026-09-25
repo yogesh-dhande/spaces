@@ -116,7 +116,7 @@ import workspacecore
     private func deviceWorkspaceSummary(id: String) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
             id: id, projectID: "proj", projectName: "Project", branch: id, baseBranch: "main", dir: "/project-\(id)", isRunning: false,
-            isHidden: false, isDefault: false, sessionCount: 0)
+            isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false)
     }
 
     /// One project with the workspace being deleted and a sibling that must survive, plus the runtime
@@ -401,6 +401,6 @@ import workspacecore
     private func workspaceSummary(id: String) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
             id: id, projectID: "proj", projectName: "Project", branch: "doomed", baseBranch: "main", dir: "/project-\(id)", isRunning: false,
-            isHidden: false, isDefault: false, sessionCount: 0)
+            isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false)
     }
 }

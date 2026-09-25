@@ -61,7 +61,7 @@ import workspacecore
     private func workspace(id: String) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
             id: id, projectID: "project", projectName: "Project", branch: id, baseBranch: "main", dir: "/tmp/\(id)", isRunning: true, isHidden: false,
-            isDefault: false, sessionCount: 0,
+            isDefault: false, hasTrackedRuntimeIndicators: false,
             config: SpacesDeviceWorkspaceConfig(resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "docs", url: sharedURL)]),
             codingAgentRows: [], terminalRows: [])
     }

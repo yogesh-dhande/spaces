@@ -407,9 +407,9 @@ extension SpacesDeviceWorkspaceSummary {
         let running = processRows.contains { $0.runState == .running } || codingAgentRows.contains { $0.runState == .running }
         return SpacesDeviceWorkspaceSummary(
             id: id, projectID: projectID, projectName: projectName, branch: branch, baseBranch: baseBranch, dir: dir, isRunning: running,
-            isHidden: isHidden, isDefault: isDefault, notes: notes, sessionCount: sessionCount, assignedPorts: assignedPorts,
-            environment: environment, setupState: setupState, config: config, processRows: processRows, codingAgentRows: codingAgentRows,
-            terminalRows: terminalRows)
+            isHidden: isHidden, isDefault: isDefault, notes: notes, hasTrackedRuntimeIndicators: hasTrackedRuntimeIndicators,
+            assignedPorts: assignedPorts, environment: environment, setupState: setupState, config: config, processRows: processRows,
+            codingAgentRows: codingAgentRows, terminalRows: terminalRows)
     }
 }
 

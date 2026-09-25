@@ -906,6 +906,19 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
+    /// `workspaceGroups`, stably partitioned so the device's home project's group (if visible) leads the
+    /// list. The daemon orders projects by name and `~` sorts after every letter, but the home row's place
+    /// at the top of the device's list is a presentation rule this client owns, not a fact about the
+    /// account's projects the daemon needs to encode, so the reorder happens here rather than in the
+    /// overview payload. A stable filter-and-concatenate rather than a sort: every other group keeps
+    /// whatever order `workspaceGroups` (or a search) already gave it, home group(s) simply move first.
+    var homeFirstWorkspaceGroups: [SpacesMobileWorkspaceGroup] {
+        let groups = workspaceGroups
+        let home = groups.filter { $0.workspace.projectKind == .home }
+        guard !home.isEmpty else { return groups }
+        return home + groups.filter { $0.workspace.projectKind != .home }
+    }
+
     var terminalGroups: [SpacesMobileTerminalWorkspaceGroup] {
         let workspaces = visibleWorkspaces
         let workspaceByID = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
@@ -2684,7 +2697,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 guard let currentWorkspace = currentOverview.workspaces.first(where: { $0.id == workspaceID }) else {
                     throw SpacesDeviceAPIClientError.requestFailed("This workspace is no longer available.")
                 }
-                if currentWorkspace.isRunning { _ = try await bridgeClient.stopWorkspace(workspaceID: workspaceID, commandChannel: commandChannel) }
+                // The home project's workspace is never stopped on the way in: it has no lifecycle, so its
+                // daemon refuses a stop, and it reads as running only because a terminal is open in it.
+                // Hiding it takes the band off the list and leaves those terminals running.
+                if currentWorkspace.isRunning, currentWorkspace.projectKind != .home {
+                    _ = try await bridgeClient.stopWorkspace(workspaceID: workspaceID, commandChannel: commandChannel)
+                }
             }
             return try await bridgeClient.setWorkspaceHidden(workspaceID: workspaceID, isHidden: isHidden, commandChannel: commandChannel)
         }
@@ -2715,7 +2733,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
         (overview?.workspaces ?? []).filter { $0.projectID == projectID && $0.isRunning }.map(\.displayName)
     }
 
-    func isWorkspaceRunning(workspaceID: String) -> Bool { overview?.workspaces.first(where: { $0.id == workspaceID })?.isRunning == true }
+    /// The full workspace summary for `workspaceID`, from the currently published overview. Nil once the
+    /// overview no longer carries that workspace (e.g. it was deleted, or hidden by another client,
+    /// before this client's next refresh cleared any state that still names it).
+    func workspace(id workspaceID: String) -> SpacesDeviceWorkspaceSummary? { overview?.workspaces.first(where: { $0.id == workspaceID }) }
+
+    func isWorkspaceRunning(workspaceID: String) -> Bool { workspace(id: workspaceID)?.isRunning == true }
 
     /// Reconciliation attempts after an indeterminate `archiveWorkspace` failure (see `deleteWorkspace`
     /// and `isIndeterminateDeleteOutcome`). The daemon

@@ -19,6 +19,7 @@ extension WorkspaceOrchestrator {
     }
 
     public func runWorkspaceSetup(workspaceID: String) throws {
+        try assertWorkspaceIsConfigurable(workspaceID: workspaceID)
         try withWorkspaceSetupLock(workspaceID: workspaceID) {
             let (project, workspace) = try resolveWorkspace(id: workspaceID)
             try runWorkspaceSetup(project: project, workspace: workspace)

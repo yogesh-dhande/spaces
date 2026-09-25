@@ -56,6 +56,7 @@
           "id" : "FE29EB3D-E048-4A65-AF4E-75C06E416534",
           "isGitRepo" : true,
           "isHidden" : false,
+          "kind" : "standard",
           "name" : "atlas-docs"
         },
         {
@@ -91,6 +92,7 @@
           "id" : "1E681C50-3A50-4E23-9094-3587051DD116",
           "isGitRepo" : true,
           "isHidden" : false,
+          "kind" : "standard",
           "name" : "harbor-web"
         },
         {
@@ -126,6 +128,7 @@
           "id" : "30A8B015-755A-44CF-B2AE-F83FE42B3BFB",
           "isGitRepo" : true,
           "isHidden" : false,
+          "kind" : "standard",
           "name" : "lantern-api"
         }
       ],
@@ -340,6 +343,7 @@
             "stopScript" : "bash -lc 'for port in \"$SPACES_APP_PORT\" \"$SPACES_API_PORT\"; do if [ -n \"$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"$pid\" ] && pids+=(\"$pid\"); done < <(lsof -tiTCP:\"$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"${pids[@]}\"; do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"${pids[@]}\"; do kill -0 \"$pid\" >/dev/null 2>&1 && kill -9 \"$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"project-stop:%s\\n\" \"${SPACES_WORKSPACE_DIR}\" >> \"${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}\"'"
           },
           "dir" : "/Users/lighthouse/Projects/atlas-docs",
+          "hasTrackedRuntimeIndicators" : false,
           "id" : "743C3026-4782-438B-B8E5-858035261E27",
           "isDefault" : true,
           "isHidden" : false,
@@ -369,8 +373,8 @@
             }
           ],
           "projectID" : "FE29EB3D-E048-4A65-AF4E-75C06E416534",
+          "projectKind" : "standard",
           "projectName" : "atlas-docs",
-          "sessionCount" : 0,
           "setupState" : {
             "status" : "succeeded"
           },
@@ -423,6 +427,7 @@
             "stopScript" : "bash -lc 'for port in \"$SPACES_APP_PORT\" \"$SPACES_API_PORT\"; do if [ -n \"$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"$pid\" ] && pids+=(\"$pid\"); done < <(lsof -tiTCP:\"$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"${pids[@]}\"; do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"${pids[@]}\"; do kill -0 \"$pid\" >/dev/null 2>&1 && kill -9 \"$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"project-stop:%s\\n\" \"${SPACES_WORKSPACE_DIR}\" >> \"${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}\"'"
           },
           "dir" : "/Users/lighthouse/Projects/harbor-web",
+          "hasTrackedRuntimeIndicators" : true,
           "id" : "4F037C9C-B1AD-43F1-A238-3860D731CF78",
           "isDefault" : true,
           "isHidden" : false,
@@ -456,8 +461,8 @@
             }
           ],
           "projectID" : "1E681C50-3A50-4E23-9094-3587051DD116",
+          "projectKind" : "standard",
           "projectName" : "harbor-web",
-          "sessionCount" : 3,
           "setupState" : {
             "status" : "succeeded"
           },
@@ -499,6 +504,7 @@
             "stopScript" : "bash -lc 'for port in \"$SPACES_APP_PORT\" \"$SPACES_API_PORT\"; do if [ -n \"$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"$pid\" ] && pids+=(\"$pid\"); done < <(lsof -tiTCP:\"$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"${pids[@]}\"; do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"${pids[@]}\"; do kill -0 \"$pid\" >/dev/null 2>&1 && kill -9 \"$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"project-stop:%s\\n\" \"${SPACES_WORKSPACE_DIR}\" >> \"${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}\"'"
           },
           "dir" : "/Users/lighthouse/Projects/lantern-api",
+          "hasTrackedRuntimeIndicators" : true,
           "id" : "55ED3F5F-847A-46E0-ABF8-2FA2ED2A65A9",
           "isDefault" : true,
           "isHidden" : false,
@@ -533,8 +539,8 @@
             }
           ],
           "projectID" : "30A8B015-755A-44CF-B2AE-F83FE42B3BFB",
+          "projectKind" : "standard",
           "projectName" : "lantern-api",
-          "sessionCount" : 2,
           "setupState" : {
             "status" : "succeeded"
           },

@@ -74,7 +74,7 @@ extension OrchestratorTests {
 
         let project = ProjectRecord(
             id: "12345678-1234-1234-1234-123456789ABC", name: "sample-repo",
-            dir: reposRoot.appendingPathComponent(managedDirname, isDirectory: true).path, isGitRepo: true, defaultBranch: "main")
+            dir: reposRoot.appendingPathComponent(managedDirname, isDirectory: true).path, isGitRepo: true, defaultBranch: "main", kind: .standard)
         let projectDir = project.dir
         let workspaceRoot = workspacesRoot.appendingPathComponent(managedDirname, isDirectory: true).path
         let workspaceDir = URL(fileURLWithPath: workspaceRoot).appendingPathComponent("main", isDirectory: true).path
@@ -1933,7 +1933,7 @@ extension OrchestratorTests {
         let repo = try makeTempGitRepo(name: "no-main-or-master", initialBranch: "develop")
         let store = try makeTemporaryStore()
         // Insert the project directly with defaultBranch = nil to force the main/master branch check
-        let projectRecord = ProjectRecord(id: repo.path, name: "test", dir: repo.path, isGitRepo: true, defaultBranch: nil)
+        let projectRecord = ProjectRecord(id: repo.path, name: "test", dir: repo.path, isGitRepo: true, defaultBranch: nil, kind: .standard)
         try store.upsert(project: projectRecord)
 
         let orchestrator = makeTestOrchestrator(store: store)

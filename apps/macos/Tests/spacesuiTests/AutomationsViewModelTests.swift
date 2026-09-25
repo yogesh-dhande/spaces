@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import spacesdevicecore
 import spacesterminalcore
 import workspacecore
 
@@ -571,6 +572,43 @@ struct AutomationsViewModelTests {
     @Test func workspaceChoicesLeaveVisibleUnchangedForNilStoredID() {
         let visible = [WorkspaceChoice(workspaceID: "ws-1", label: "P / A")]
         #expect(AutomationsViewModel.workspaceChoices(visible: visible, preservingWorkspaceID: nil) { _ in "unused" } == visible)
+    }
+
+    // MARK: - Workspace choices offered by the picker
+
+    /// The editor's picker lists every visible workspace of every project it can target, labeled
+    /// "<project> / <workspace>".
+    @Test func visibleWorkspaceChoicesListEveryTargetableWorkspaceLabeledByProject() {
+        let projects = [makeProjectSummary(id: "p-1", name: "Spaces"), makeProjectSummary(id: "p-2", name: "Docs")]
+        let workspaces = [
+            "p-1": [makeWorkspaceSummary(id: "ws-1", branch: "main"), makeWorkspaceSummary(id: "ws-2", branch: "feature")],
+            "p-2": [makeWorkspaceSummary(id: "ws-3", branch: "main")],
+        ]
+        let result = AutomationsViewModel.visibleWorkspaceChoices(projects: projects) { workspaces[$0] ?? [] }
+        #expect(
+            result == [
+                WorkspaceChoice(workspaceID: "ws-1", label: "Spaces / main"), WorkspaceChoice(workspaceID: "ws-2", label: "Spaces / feature"),
+                WorkspaceChoice(workspaceID: "ws-3", label: "Docs / main"),
+            ])
+    }
+
+    /// The home row is never offered: the daemon refuses `~` as an automation target, so picking it could
+    /// only produce a save that fails.
+    @Test func visibleWorkspaceChoicesOmitTheHomeWorkspace() {
+        let projects = [makeProjectSummary(id: "home", name: "~", kind: .home), makeProjectSummary(id: "p-1", name: "Spaces")]
+        let workspaces = [
+            "home": [makeWorkspaceSummary(id: "ws-home", branch: nil, projectKind: .home)], "p-1": [makeWorkspaceSummary(id: "ws-1", branch: "main")],
+        ]
+        let result = AutomationsViewModel.visibleWorkspaceChoices(projects: projects) { workspaces[$0] ?? [] }
+        #expect(result == [WorkspaceChoice(workspaceID: "ws-1", label: "Spaces / main")])
+    }
+
+    private func makeProjectSummary(id: String, name: String, kind: ProjectKind = .standard) -> ProjectSummary {
+        ProjectSummary(id: id, name: name, dir: "/tmp/\(id)", isGitRepo: kind != .home, defaultBranch: nil, kind: kind)
+    }
+
+    private func makeWorkspaceSummary(id: String, branch: String?, projectKind: ProjectKind = .standard) -> WorkspaceSummary {
+        WorkspaceSummary(id: id, branch: branch, dir: "/tmp/\(id)", isRunning: false, isDefault: branch == nil, projectKind: projectKind)
     }
 
     // MARK: - Schedule preview zone

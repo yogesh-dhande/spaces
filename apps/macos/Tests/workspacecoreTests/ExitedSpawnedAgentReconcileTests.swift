@@ -30,10 +30,10 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         // A plain-shell subscriber terminal with no agent row of its own counts as idle: it receives now.
         try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: agent.id, createdAt: "t")
 
-        let didMutate = try orchestrator.reconcileExitedSessionBackedAgentRows(
+        let finalizedWorkspaceIDs = try orchestrator.reconcileExitedSessionBackedAgentRows(
             index: orchestrator.builtInTerminalOwnershipIndex(), excludingLiveSessionIDs: [])
 
-        XCTAssertTrue(didMutate)
+        XCTAssertFalse(finalizedWorkspaceIDs.isEmpty)
         XCTAssertNil(try store.agentWindow(id: agent.id), "the spawned agent row is deleted by handleAgentExit")
         XCTAssertEqual(recorder.delivered.map(\.sessionID), ["orchestrator-session"])
         XCTAssertTrue(
@@ -56,10 +56,10 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: agent.id, createdAt: "t")
 
         // A live session's id appears in the excluded live set the caller computes, so the sweep skips it.
-        let didMutate = try orchestrator.reconcileExitedSessionBackedAgentRows(
+        let finalizedWorkspaceIDs = try orchestrator.reconcileExitedSessionBackedAgentRows(
             index: orchestrator.builtInTerminalOwnershipIndex(), excludingLiveSessionIDs: [sessionID])
 
-        XCTAssertFalse(didMutate)
+        XCTAssertTrue(finalizedWorkspaceIDs.isEmpty)
         XCTAssertEqual(try store.agentWindow(id: agent.id)?.status, .spinning)
         XCTAssertTrue(recorder.delivered.isEmpty, "a live agent must not trigger an exited notification")
     }
@@ -88,10 +88,10 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
             workspaceID: workspace.id, provider: .spaces, label: "Other CLI", terminalTrackingID: "other-child", status: .waiting)
         try store.insertAgentSubscription(subscriberTerminalSessionID: sessionID, agentSessionID: otherChild.id, createdAt: "t")
 
-        let didMutate = try orchestrator.reconcileExitedSessionBackedAgentRows(
+        let finalizedWorkspaceIDs = try orchestrator.reconcileExitedSessionBackedAgentRows(
             index: orchestrator.builtInTerminalOwnershipIndex(), excludingLiveSessionIDs: [])
 
-        XCTAssertTrue(didMutate)
+        XCTAssertFalse(finalizedWorkspaceIDs.isEmpty)
         XCTAssertNil(try store.agentWindow(id: agent.id), "the dead ad-hoc shell agent row is deleted by handleAgentExit, not marked .done")
         XCTAssertEqual(recorder.delivered.map(\.sessionID), ["orchestrator-session"])
         XCTAssertTrue(
@@ -102,9 +102,9 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
             "the closed shell terminal's own outgoing watch edge must be torn down")
 
         // A second pass finds no live-status row for the deleted session, so it re-notifies nothing.
-        let secondPassMutated = try orchestrator.reconcileExitedSessionBackedAgentRows(
+        let secondPassFinalized = try orchestrator.reconcileExitedSessionBackedAgentRows(
             index: orchestrator.builtInTerminalOwnershipIndex(), excludingLiveSessionIDs: [])
-        XCTAssertFalse(secondPassMutated)
+        XCTAssertTrue(secondPassFinalized.isEmpty)
         XCTAssertEqual(recorder.delivered.count, 1, "the idempotent sweep must not re-deliver an exited notice on a later pass")
     }
 
@@ -131,10 +131,10 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         // A plain-shell subscriber terminal with no agent row of its own counts as idle: it receives now.
         try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: agent.id, createdAt: "t")
 
-        let didMutate = try orchestrator.reconcileExitedSessionBackedAgentRows(
+        let finalizedWorkspaceIDs = try orchestrator.reconcileExitedSessionBackedAgentRows(
             index: orchestrator.builtInTerminalOwnershipIndex(), excludingLiveSessionIDs: [])
 
-        XCTAssertTrue(didMutate)
+        XCTAssertFalse(finalizedWorkspaceIDs.isEmpty)
         XCTAssertNil(try store.agentWindow(id: agent.id), "the dead hookless .done row is finalized (deleted) by handleAgentExit")
         XCTAssertEqual(recorder.delivered.map(\.sessionID), ["orchestrator-session"])
         XCTAssertTrue(
@@ -143,9 +143,9 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         XCTAssertTrue(try store.agentSubscriptions(agentSessionID: agent.id).isEmpty, "the dead row's inbound edge is dropped")
 
         // A second pass finds no live-status row for the deleted session, so it re-notifies nothing.
-        let secondPassMutated = try orchestrator.reconcileExitedSessionBackedAgentRows(
+        let secondPassFinalized = try orchestrator.reconcileExitedSessionBackedAgentRows(
             index: orchestrator.builtInTerminalOwnershipIndex(), excludingLiveSessionIDs: [])
-        XCTAssertFalse(secondPassMutated)
+        XCTAssertTrue(secondPassFinalized.isEmpty)
         XCTAssertEqual(recorder.delivered.count, 1, "the idempotent sweep must not re-deliver an exited notice on a later pass")
     }
 
@@ -180,10 +180,10 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         XCTAssertEqual(reincarnated.id, agent.id, "the restart-reuse init reuses the same row id")
         try writeEndedTerminalSession(sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .agent)
 
-        let didMutate = try orchestrator.reconcileExitedSessionBackedAgentRows(
+        let finalizedWorkspaceIDs = try orchestrator.reconcileExitedSessionBackedAgentRows(
             index: orchestrator.builtInTerminalOwnershipIndex(), excludingLiveSessionIDs: [])
 
-        XCTAssertTrue(didMutate, "the reincarnated row is sweepable again — the old life's exit event no longer blocks it")
+        XCTAssertFalse(finalizedWorkspaceIDs.isEmpty, "the reincarnated row is sweepable again: the old life's exit event no longer blocks it")
         XCTAssertEqual(recorder.delivered.map(\.sessionID), ["orchestrator-session", "orchestrator-session"])
         XCTAssertTrue(
             recorder.delivered.last?.line.contains("is exited") == true,
@@ -191,9 +191,9 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
 
         // The new life's terminal had already ended, so the sweep deleted the row; a further pass finds
         // nothing left to finalize and re-notifies nothing.
-        let thirdPassMutated = try orchestrator.reconcileExitedSessionBackedAgentRows(
+        let thirdPassFinalized = try orchestrator.reconcileExitedSessionBackedAgentRows(
             index: orchestrator.builtInTerminalOwnershipIndex(), excludingLiveSessionIDs: [])
-        XCTAssertFalse(thirdPassMutated)
+        XCTAssertTrue(thirdPassFinalized.isEmpty)
         XCTAssertEqual(recorder.delivered.count, 2, "exactly one notice per life, none re-delivered")
     }
 
@@ -254,9 +254,8 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
 
         let sessionID = UUID().uuidString
         try writeLiveTerminalSession(
-            sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .agent,
-            foregroundDetectedAgentKind: .claude, foregroundExecutableName: "claude", foregroundArgv: ["claude"],
-            foregroundDisplayLabel: "Claude Code", foregroundDisplayCommand: "claude")
+            sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .agent, foregroundDetectedAgentKind: .claude,
+            foregroundExecutableName: "claude", foregroundArgv: ["claude"], foregroundDisplayLabel: "Claude Code", foregroundDisplayCommand: "claude")
 
         XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
 
@@ -276,15 +275,14 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
 
         let sessionID = UUID().uuidString
         try writeLiveTerminalSession(
-            sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .agent,
-            foregroundDetectedAgentKind: .claude, foregroundExecutableName: "claude", foregroundArgv: ["claude"],
-            foregroundDisplayLabel: "Claude Code", foregroundDisplayCommand: "claude")
+            sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .agent, foregroundDetectedAgentKind: .claude,
+            foregroundExecutableName: "claude", foregroundArgv: ["claude"], foregroundDisplayLabel: "Claude Code", foregroundDisplayCommand: "claude")
         XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
         let detected = try XCTUnwrap(try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID))
 
         let adopted = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Claude Code", terminalTrackingID: sessionID, status: .spinning,
-            eventType: "init", eventSource: "spaces_agent_signal")
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code", terminalTrackingID: sessionID, status: .spinning, eventType: "init",
+            eventSource: "spaces_agent_signal")
 
         XCTAssertEqual(adopted.id, detected.id, "the hook init reuses the detection row's id rather than minting a second row")
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
@@ -303,9 +301,8 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
 
         let sessionID = UUID().uuidString
         try writeLiveTerminalSession(
-            sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .agent,
-            foregroundDetectedAgentKind: .claude, foregroundExecutableName: "claude", foregroundArgv: ["claude"],
-            foregroundDisplayLabel: "Claude Code", foregroundDisplayCommand: "claude")
+            sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .agent, foregroundDetectedAgentKind: .claude,
+            foregroundExecutableName: "claude", foregroundArgv: ["claude"], foregroundDisplayLabel: "Claude Code", foregroundDisplayCommand: "claude")
         XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
         let detected = try XCTUnwrap(try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID))
 
@@ -355,8 +352,8 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
     /// prompt.
     private func writeLiveTerminalSession(
         sessionID: String, workspaceID: String, workspaceDir: String, kind: TerminalSessionKind,
-        foregroundDetectedAgentKind: TerminalDetectedAgentKind? = nil, foregroundExecutableName: String? = nil,
-        foregroundArgv: [String]? = nil, foregroundDisplayLabel: String? = nil, foregroundDisplayCommand: String? = nil
+        foregroundDetectedAgentKind: TerminalDetectedAgentKind? = nil, foregroundExecutableName: String? = nil, foregroundArgv: [String]? = nil,
+        foregroundDisplayLabel: String? = nil, foregroundDisplayCommand: String? = nil
     ) throws {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         try TerminalSessionPersistence.writeLaunchConfiguration(

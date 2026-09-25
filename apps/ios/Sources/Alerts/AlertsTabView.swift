@@ -74,7 +74,7 @@ struct AlertsTabView: View {
 
     @ViewBuilder private func alertGroupSection(_ group: SpacesMobileAttentionGroup) -> some View {
         HeaderBand {
-            WorkspaceBandLabel(isGitWorkspace: group.isGitWorkspace, displayName: group.workspaceDisplayName)
+            WorkspaceBandLabel(glyph: group.bandGlyph, displayName: group.workspaceDisplayName)
             Spacer(minLength: 0)
             Text(group.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
                 .lineLimit(1)

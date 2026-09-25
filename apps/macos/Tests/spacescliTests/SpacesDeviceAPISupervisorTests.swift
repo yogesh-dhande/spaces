@@ -564,7 +564,8 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             let workspaceDir = projectDir.appendingPathComponent("workspace", isDirectory: true)
             try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
 
-            let project = ProjectRecord(id: "project-dead-service", name: "Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
+            let project = ProjectRecord(
+                id: "project-dead-service", name: "Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main", kind: .standard)
             let workspace = WorkspaceRecord(
                 id: "workspace-dead-service", projectID: project.id, dir: workspaceDir.path, dirname: nil, branch: "main", isDefault: false,
                 isRunning: true, lastLaunchedAt: nil)
@@ -606,7 +607,6 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             XCTAssertTrue(response.ok)
             let overview = try XCTUnwrap(response.overview)
             XCTAssertFalse(overview.sessions.contains { $0.id == sessionID })
-            XCTAssertEqual(overview.workspaces.first(where: { $0.id == workspace.id })?.sessionCount, 0)
         }
     }
 
@@ -637,7 +637,8 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
 
             let response = try await Task.detached {
                 try Self.sendDeviceAPIRequest(
-                    SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID, includesRenderUpdate: true)), authToken: authToken, clientApp: clientApp),
+                    SpacesDeviceAPIRequest(
+                        command: .state(.init(sessionID: sessionID, includesRenderUpdate: true)), authToken: authToken, clientApp: clientApp),
                     port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             }.value
 
@@ -850,7 +851,8 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
 
             let response = try await Task.detached {
                 try Self.sendDeviceAPIRequest(
-                    SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID, includesRenderUpdate: true)), authToken: authToken, clientApp: clientApp),
+                    SpacesDeviceAPIRequest(
+                        command: .state(.init(sessionID: sessionID, includesRenderUpdate: true)), authToken: authToken, clientApp: clientApp),
                     port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             }.value
 

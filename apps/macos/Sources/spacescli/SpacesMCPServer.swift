@@ -220,8 +220,7 @@ final class SpacesMCPStdioServer {
                     return .profile(TerminalServiceProfileCommandResponse(message: "Read terminal output.", terminalOutput: output))
                 }
                 return .profile(
-                    try TerminalService.sendProfileCommand(
-                        .terminalTail(.init(sessionID: args.session, lineCount: args.lines)), timeout: 5))
+                    try TerminalService.sendProfileCommand(.terminalTail(.init(sessionID: args.session, lineCount: args.lines)), timeout: 5))
             },
             MCPToolDescriptor(
                 name: "spaces_terminal_send",
@@ -352,8 +351,8 @@ final class SpacesMCPStdioServer {
                         throw MCPError.invalidArguments("workspace is required with device: a remote spawn cannot infer the workspace.")
                     }
                     result = try performRemoteAgentSpawn(
-                        device: device, workspace: workspace, command: args.command, title: args.title,
-                        timeoutSeconds: args.timeout ?? 90, subscriberSessionID: subscriberSessionID)
+                        device: device, workspace: workspace, command: args.command, title: args.title, timeoutSeconds: args.timeout ?? 90,
+                        subscriberSessionID: subscriberSessionID)
                 } else {
                     // The MCP server itself inherits SPACES_AUTOMATION_RUN_ID whenever a script automation
                     // launches an MCP-capable orchestrator, exactly like the `agent spawn` CLI path (see
@@ -361,9 +360,8 @@ final class SpacesMCPStdioServer {
                     // spawned agent is attributed to the run and stays reachable through Cancel, End agents,
                     // and retention cleanup.
                     result = try performAgentSpawn(
-                        cwd: FileManager.default.currentDirectoryPath, workspace: args.workspace, command: args.command,
-                        title: args.title, timeoutSeconds: args.timeout ?? 90,
-                        subscriberSessionID: subscriberSessionID, automationRunID: resolvedAutomationRunID())
+                        cwd: FileManager.default.currentDirectoryPath, workspace: args.workspace, command: args.command, title: args.title,
+                        timeoutSeconds: args.timeout ?? 90, subscriberSessionID: subscriberSessionID, automationRunID: resolvedAutomationRunID())
                 }
                 let deviceNote = result.deviceID.map { " on device \($0)" } ?? ""
                 return .profile(
@@ -605,11 +603,13 @@ final class SpacesMCPStdioServer {
     /// Maps a paired-device workspace summary to the profile record shape so remote and local
     /// `spaces_workspace_list` results share one JSON shape. `dirname` and `lastLaunchedAt` are not
     /// carried by the overview and render as null; the fields the listing surfaces (id, project, branch,
-    /// run state, name) are all present.
+    /// run state, name) are all present, the name taken from the summary so the remote listing reports
+    /// exactly what that device's daemon called the workspace.
     private static func profileWorkspaceRecord(_ summary: SpacesDeviceWorkspaceSummary) -> TerminalServiceProfileWorkspaceRecord {
         TerminalServiceProfileWorkspaceRecord(
             id: summary.id, projectID: summary.projectID, dir: summary.dir, dirname: nil, branch: summary.branch, baseBranch: summary.baseBranch,
-            isDefault: summary.isDefault, isHidden: summary.isHidden, isRunning: summary.isRunning, lastLaunchedAt: nil, notes: summary.notes)
+            isDefault: summary.isDefault, isHidden: summary.isHidden, isRunning: summary.isRunning, lastLaunchedAt: nil, notes: summary.notes,
+            displayName: summary.displayName)
     }
 
     /// Resolves the agent's terminal session id for `status`/`annotate`, defaulting to the current

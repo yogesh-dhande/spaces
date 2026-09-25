@@ -396,14 +396,21 @@ import workspacecore
             targetURL: targetURL, targetURLs: ["http://localhost:3000", "http://localhost:3000/admin", "http://localhost:3000/admin"])
 
         #expect(siblingTargetURLs == ["http://localhost:3000/admin"])
-        #expect(BrowserSessionCoordinator.browserTabURL("http://localhost:3000/", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
-        #expect(BrowserSessionCoordinator.browserTabURL("http://localhost:3000/docs", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
         #expect(
-            !BrowserSessionCoordinator.browserTabURL("http://localhost:3000/admin", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
+            BrowserSessionCoordinator.browserTabURL("http://localhost:3000/", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs)
+        )
+        #expect(
+            BrowserSessionCoordinator.browserTabURL(
+                "http://localhost:3000/docs", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
+        #expect(
+            !BrowserSessionCoordinator.browserTabURL(
+                "http://localhost:3000/admin", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
         #expect(
             !BrowserSessionCoordinator.browserTabURL(
                 "http://localhost:3000/admin/users", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
-        #expect(BrowserSessionCoordinator.browserTabURL("http://localhost:3000/admin", matchesBrowserSessionTargetURL: siblingTargetURLs[0], excluding: []))
+        #expect(
+            BrowserSessionCoordinator.browserTabURL(
+                "http://localhost:3000/admin", matchesBrowserSessionTargetURL: siblingTargetURLs[0], excluding: []))
     }
 
     @Test func rootBrowserSessionDoesNotMatchOnlyOpenAdminSiblingTab() {
@@ -415,8 +422,10 @@ import workspacecore
         let rootSiblings = BrowserSessionCoordinator.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: configuredTargetURLs)
         let adminSiblings = BrowserSessionCoordinator.browserSessionSiblingTargetURLs(targetURL: adminURL, targetURLs: configuredTargetURLs)
 
-        #expect(!openTabURLs.contains { BrowserSessionCoordinator.browserTabURL($0, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings) })
-        #expect(openTabURLs.contains { BrowserSessionCoordinator.browserTabURL($0, matchesBrowserSessionTargetURL: adminURL, excluding: adminSiblings) })
+        #expect(
+            !openTabURLs.contains { BrowserSessionCoordinator.browserTabURL($0, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings) })
+        #expect(
+            openTabURLs.contains { BrowserSessionCoordinator.browserTabURL($0, matchesBrowserSessionTargetURL: adminURL, excluding: adminSiblings) })
     }
 
     @Test func focusRequestsUseConfiguredBrowserSessionSiblingsForPrefixExclusion() {
@@ -424,7 +433,7 @@ import workspacecore
         let adminURL = "http://localhost:3000/admin"
         let workspace = SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/project-feature",
-            isRunning: true, isHidden: false, isDefault: false, sessionCount: 0,
+            isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false,
             config: SpacesDeviceWorkspaceConfig(resolvedBrowserSessions: [
                 SpacesDeviceBrowserSession(name: "root", url: rootURL), SpacesDeviceBrowserSession(name: "admin", url: adminURL),
             ]))
@@ -506,7 +515,7 @@ import workspacecore
             ], resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "docs", url: "http://localhost:3000")])
         return SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/project-feature",
-            isRunning: true, isHidden: false, isDefault: false, sessionCount: 3, config: config,
+            isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true, config: config,
             processRows: [
                 SpacesDeviceWorkspaceProcessRow(
                     id: "row-web", workspaceID: "workspace", name: "web", command: "npm run dev", templateID: "tpl-web", processID: "process-web",

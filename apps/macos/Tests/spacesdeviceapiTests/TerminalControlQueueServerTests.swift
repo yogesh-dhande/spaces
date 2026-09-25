@@ -118,8 +118,8 @@
                 DispatchQueue.global().async {
                     _ = try? stateClient.send(
                         SpacesDeviceAPIRequest(
-                            command: .state(SpacesDeviceTerminalSessionRequest(sessionID: sessionID, includesRenderUpdate: true)), authToken: pairingStore.authToken,
-                            clientApp: clientApp))
+                            command: .state(SpacesDeviceTerminalSessionRequest(sessionID: sessionID, includesRenderUpdate: true)),
+                            authToken: pairingStore.authToken, clientApp: clientApp))
                     stateFinished.fulfill()
                 }
                 XCTAssertEqual(stateRequestArrived.wait(timeout: .now() + 5), .success, "The state read must reach the stalled live core.")
@@ -824,7 +824,7 @@
             try store.upsert(
                 project: ProjectRecord(
                     id: "project-\(workspaceID)", name: "Lifecycle Setup", dir: projectDir.path, isGitRepo: false, defaultBranch: nil,
-                    setupScript: "read line < '\(fifoPath)'", stopScript: nil, ports: [], processes: [], browserSessions: []))
+                    kind: .standard, setupScript: "read line < '\(fifoPath)'", stopScript: nil, ports: [], processes: [], browserSessions: []))
             try store.upsert(
                 workspace: WorkspaceRecord(
                     id: workspaceID, projectID: "project-\(workspaceID)", dir: workspaceDir.path, dirname: nil, branch: "feature", isDefault: true,
@@ -857,7 +857,7 @@
             let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
             try store.upsert(
                 project: ProjectRecord(
-                    id: "project-\(workspaceID)", name: "Lifecycle Stop", dir: projectDir.path, isGitRepo: false, defaultBranch: nil,
+                    id: "project-\(workspaceID)", name: "Lifecycle Stop", dir: projectDir.path, isGitRepo: false, defaultBranch: nil, kind: .standard,
                     setupScript: nil, stopScript: "touch '\(markerPath)' && read line < '\(fifoPath)'", ports: [], processes: [], browserSessions: [])
             )
             try store.upsert(
@@ -882,8 +882,8 @@
             let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
             try store.upsert(
                 project: ProjectRecord(
-                    id: "project-\(workspaceID)", name: "Archivable", dir: projectDir.path, isGitRepo: false, defaultBranch: nil, setupScript: nil,
-                    stopScript: nil, ports: [], processes: [], browserSessions: []))
+                    id: "project-\(workspaceID)", name: "Archivable", dir: projectDir.path, isGitRepo: false, defaultBranch: nil, kind: .standard,
+                    setupScript: nil, stopScript: nil, ports: [], processes: [], browserSessions: []))
             try store.upsert(
                 workspace: WorkspaceRecord(
                     id: workspaceID, projectID: "project-\(workspaceID)", dir: workspaceDir.path, dirname: nil, branch: "feature", isDefault: false,

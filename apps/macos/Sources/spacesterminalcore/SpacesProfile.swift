@@ -45,10 +45,20 @@ public struct SpacesProfile: Sendable, Equatable {
     public let developmentContext: SpacesDevelopmentContext?
     public let branchSlug: String?
     public let worktreeHash: String?
+    /// The home this profile resolved against: an overridden `HOME` when `resolve` was given one,
+    /// otherwise the account's own home (see `currentHomeDirectoryURL`). A daemon reads this rather than
+    /// `NSHomeDirectory()` wherever it needs the effective home of the account it is serving, because
+    /// `NSHomeDirectory()` ignores an overridden `HOME` and would answer with the real account's home even
+    /// while this profile is rooted under a test or e2e harness's isolated one (see `ensureHomeProject`).
+    ///
+    /// Defaulted only so the many hand-built `SpacesProfile` values in tests that do not care about the
+    /// home directory keep compiling; every profile `resolve` actually produces passes this explicitly.
+    public let homeDirectoryURL: URL
 
     public init(
         source: SpacesProfileSource, databasePath: String, rootDirectory: String, isInstalledProfile: Bool, runtimeDirectory: String,
-        ipcNotificationObject: String, developmentContext: SpacesDevelopmentContext?, branchSlug: String?, worktreeHash: String?
+        ipcNotificationObject: String, developmentContext: SpacesDevelopmentContext?, branchSlug: String?, worktreeHash: String?,
+        homeDirectoryURL: URL = SpacesBinaryLayout.defaultHomeDirectoryURL()
     ) {
         self.source = source
         self.databasePath = databasePath
@@ -59,6 +69,7 @@ public struct SpacesProfile: Sendable, Equatable {
         self.developmentContext = developmentContext
         self.branchSlug = branchSlug
         self.worktreeHash = worktreeHash
+        self.homeDirectoryURL = homeDirectoryURL
     }
 
     /// The process's resolved profile, cached behind a fingerprint of every input that can change
@@ -268,7 +279,7 @@ public struct SpacesProfile: Sendable, Equatable {
             source: source, databasePath: databasePath, rootDirectory: profileRoot.path,
             isInstalledProfile: canonicalPath(profileRoot.path) == canonicalPath(installedRootDirectory(homeDirectoryURL: homeDirectoryURL).path),
             runtimeDirectory: runtimeDirectory.path, ipcNotificationObject: ipcObject(profileRoot: profileRoot.path),
-            developmentContext: developmentContext, branchSlug: branchSlug, worktreeHash: worktreeHash)
+            developmentContext: developmentContext, branchSlug: branchSlug, worktreeHash: worktreeHash, homeDirectoryURL: homeDirectoryURL)
     }
 
     public static func installedDatabasePath(homeDirectoryURL: URL, fileManager: FileManager = .default) throws -> String {
@@ -397,15 +408,31 @@ public struct SpacesProfile: Sendable, Equatable {
         return slug.isEmpty ? "detached-head" : slug
     }
 
+    /// The readable label the home project's workspace slug uses in place of the project name. The home
+    /// project is named `~`, which sanitizes to nothing DNS-safe, and the home folder's own name is the
+    /// account's user name, which is not what the slug should say.
+    public static let homeWorkspaceSlugLabel = "home"
+
     /// DNS-safe per-workspace host slug used as the middle label in `<service>.<slug>.localhost`.
     /// Combines a human-readable workspace label with a short stable hash of the workspace id so two
-    /// workspaces with the same label get distinct hosts. Git workspaces use the branch label; non-git
-    /// workspaces use the project label. Derived deterministically from label + id (never persisted).
-    public static func workspaceHostSlug(branch: String?, projectName: String, isGitRepo: Bool, workspaceID: String) -> String {
+    /// workspaces with the same label get distinct hosts. The home project's workspace uses the fixed
+    /// `home` label; every other git workspace uses its branch label, and every other non-git workspace
+    /// uses the project label. Derived deterministically from label + id (never persisted).
+    public static func workspaceHostSlug(branch: String?, projectName: String, isGitRepo: Bool, isHomeProject: Bool = false, workspaceID: String)
+        -> String
+    {
         let suffix = shortStableHash(workspaceID)
         let maxBaseLength = max(1, DNSLabel.maxLength - suffix.count - 1)
         let trimmedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let label = trimmedBranch.flatMap { $0.isEmpty ? nil : $0 }.map(slugifyBranchName) ?? (isGitRepo ? slugifyBranchName("") : projectName)
+        // The home label is decided before the branch is even looked at. The home project is stored
+        // non-git, but a workspace record adopted from a git project keeps the branch it was checked out
+        // on, and reading that branch first would label the home row's host `main-…`.
+        let label: String
+        if isHomeProject {
+            label = homeWorkspaceSlugLabel
+        } else {
+            label = trimmedBranch.flatMap { $0.isEmpty ? nil : $0 }.map(slugifyBranchName) ?? (isGitRepo ? slugifyBranchName("") : projectName)
+        }
         let base = DNSLabel.sanitize(label, maxLength: maxBaseLength)
         return "\(base)-\(suffix)"
     }

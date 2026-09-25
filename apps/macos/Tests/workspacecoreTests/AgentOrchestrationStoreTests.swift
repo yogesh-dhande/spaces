@@ -333,6 +333,42 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         XCTAssertEqual(afterSignal.lastSignalAt, "2026-07-14T10:00:00Z")
     }
 
+    /// An agent row's `workspaceName` is derived through the project's kind, like every other workspace
+    /// name surface: the home workspace names `~` even though its stored `WorkspaceRecord.displayName`
+    /// would read the directory name (or, for an adopted git home, the retained branch).
+    func testAgentSessionRowInTheHomeWorkspaceNamesTilde() throws {
+        let home = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let project = try XCTUnwrap(orchestrator.ensureHomeProject(homeDirectory: home.path))
+        let workspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first)
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "home-agent-session", status: .idle)
+
+        let row = try XCTUnwrap(orchestrator.agentSessionRows(sessionID: "home-agent-session").first)
+
+        XCTAssertEqual(row.workspaceName, "~")
+    }
+
+    /// An agent row's `branch` is masked the same way `workspaceName` is: adopting a git repository at the
+    /// home path keeps the branch on the workspace record, but the row must not report it, or `spaces
+    /// agent list`/`status` and the device agent APIs would put a `branch=main` reading on the `~` row.
+    func testAgentSessionRowInTheHomeWorkspaceMasksAnAdoptedBranch() throws {
+        let home = try makeTempGitRepo(name: "dotfiles-with-a-branch")
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        _ = try orchestrator.addProject(dir: home.path)
+        let project = try XCTUnwrap(orchestrator.ensureHomeProject(homeDirectory: home.path))
+        let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
+        XCTAssertNotNil(workspace.branch, "precondition: adoption keeps the workspace record's branch")
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "home-branch-agent-session", status: .idle)
+
+        let row = try XCTUnwrap(orchestrator.agentSessionRows(sessionID: "home-branch-agent-session").first)
+
+        XCTAssertNil(row.branch, "the home row has no git lifecycle of its own")
+    }
+
     /// An orchestration row separates the machine-readable detected kind (`agent:`) from the human-facing
     /// launch title (`label:`). A `.agent`-launch session titled "Reviewer" whose foreground the daemon
     /// detected as claude must report `agent == "claude"` and `label == "Reviewer"` — not both "Reviewer",

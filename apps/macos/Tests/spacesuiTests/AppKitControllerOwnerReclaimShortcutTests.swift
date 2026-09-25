@@ -64,23 +64,24 @@ extension ProcessProfileEnvironmentSuites {
             try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
             let workspace = SpacesDeviceWorkspaceSummary(
                 id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/workspace-1",
-                isRunning: true, isHidden: false, isDefault: false, sessionCount: 1, processRows: [])
+                isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true, processRows: [])
             let overview = SpacesDeviceOverviewPayload(
                 projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
                 workspaces: [workspace],
                 sessions: [
                     SpacesDeviceTerminalSessionSummary(
-                        id: "session-1", title: "session-1", workingDirectory: "/tmp/workspace-1", shell: "/bin/zsh", command: nil,
-                        state: .running, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 1234, childPID: 5678,
-                        workspaceID: "workspace-1", workspaceTitle: "feature", projectID: "project-1", projectName: "Project",
-                        createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", isControlAvailable: true, isSubscriptionAvailable: true,
-                        attachmentSnapshot: .init(), rowKind: .liveSession)
+                        id: "session-1", title: "session-1", workingDirectory: "/tmp/workspace-1", shell: "/bin/zsh", command: nil, state: .running,
+                        backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 1234, childPID: 5678, workspaceID: "workspace-1",
+                        workspaceTitle: "feature", projectID: "project-1", projectName: "Project", createdAt: "2026-01-01T00:00:00Z",
+                        updatedAt: "2026-01-01T00:00:00Z", isControlAvailable: true, isSubscriptionAvailable: true, attachmentSnapshot: .init(),
+                        rowKind: .liveSession)
                 ], retainedTerminalSessionIDs: ["session-1"])
             let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: deviceID)
             controller.deviceModel.deviceSections = [
                 AppKitController.DeviceSection(
                     deviceID: deviceID, deviceName: "This Mac", isLocal: true, loadState: .loaded, device: nil, projects: mapped.projects,
-                    workspacesByProject: mapped.workspacesByProject, workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, overview: overview)
+                    workspacesByProject: mapped.workspacesByProject, workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, overview: overview
+                )
             ]
             controller.rebuildFlatSidebarData()
             let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")

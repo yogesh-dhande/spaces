@@ -59,7 +59,7 @@ extension ProcessProfileEnvironmentSuites {
         private func overview(liveTitle: String?) -> SpacesDeviceOverviewPayload {
             let workspace = SpacesDeviceWorkspaceSummary(
                 id: Self.workspaceID, projectID: Self.projectID, projectName: "Project", branch: "feature", baseBranch: "main",
-                dir: "/tmp/project-feature", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
+                dir: "/tmp/project-feature", isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true,
                 terminalRows: [
                     SpacesDeviceWorkspaceTerminalRow(
                         id: "terminal-1", workspaceID: Self.workspaceID, title: "shell", workingDirectory: "/tmp/project-feature",
@@ -74,12 +74,11 @@ extension ProcessProfileEnvironmentSuites {
         private func overview(_ base: SpacesDeviceOverviewPayload, addingWorkspaceID workspaceID: String) -> SpacesDeviceOverviewPayload {
             let workspace = SpacesDeviceWorkspaceSummary(
                 id: workspaceID, projectID: Self.projectID, projectName: "Project", branch: "created", baseBranch: "main",
-                dir: "/tmp/project-created", isRunning: true, isHidden: false, isDefault: false, sessionCount: 0)
+                dir: "/tmp/project-created", isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false)
             return SpacesDeviceOverviewPayload(
                 projects: base.projects, workspaces: base.workspaces + [workspace], sessions: base.sessions,
-                retainedTerminalSessionIDs: base.retainedTerminalSessionIDs,
-                workspaceIDsWithTeardownInFlight: base.workspaceIDsWithTeardownInFlight, daemonStatus: base.daemonStatus,
-                automations: base.automations, automationRuns: base.automationRuns)
+                retainedTerminalSessionIDs: base.retainedTerminalSessionIDs, workspaceIDsWithTeardownInFlight: base.workspaceIDsWithTeardownInFlight,
+                daemonStatus: base.daemonStatus, automations: base.automations, automationRuns: base.automationRuns)
         }
 
         private func section(overview: SpacesDeviceOverviewPayload) -> AppKitController.DeviceSection {
@@ -159,16 +158,12 @@ extension ProcessProfileEnvironmentSuites {
             let createdWorkspaceID = "workspace-created"
             let storageKey = ClientCodePaneWorkspaceStateStorage.storageKey(deviceID: SpacesPairedDeviceRecord.localDeviceID)
             CodePaneWorkspaceStateCache.store(
-                CodePaneWorkspaceState(mode: .editor, editorState: nil, pendingReviewComments: nil),
-                storageKey: storageKey, workspaceID: createdWorkspaceID)
+                CodePaneWorkspaceState(mode: .editor, editorState: nil, pendingReviewComments: nil), storageKey: storageKey,
+                workspaceID: createdWorkspaceID)
             defer { CodePaneWorkspaceStateCache.remove(storageKey: storageKey, workspaceID: createdWorkspaceID) }
 
             var releaseSnapshot: CheckedContinuation<Result<AppKitController.SidebarDataSnapshot, any Error>, Never>?
-            controller.sidebar.loadSnapshotOverrideForTesting = {
-                await withCheckedContinuation { continuation in
-                    releaseSnapshot = continuation
-                }
-            }
+            controller.sidebar.loadSnapshotOverrideForTesting = { await withCheckedContinuation { continuation in releaseSnapshot = continuation } }
             controller.sidebar.requestSidebarReload()
             while releaseSnapshot == nil { await Task.yield() }
 
@@ -176,8 +171,7 @@ extension ProcessProfileEnvironmentSuites {
             // sidebar read is still in flight. Releasing that read afterward reproduces the stale
             // `liveWorkspaceIDs`/`previousLocalSection` ordering that used to delete valid state.
             let currentOverview = overview(staleOverview, addingWorkspaceID: createdWorkspaceID)
-            let response = SpacesDeviceAPIResponse(
-                ok: true, message: "ok", result: .mutation(SpacesDeviceMutationResult(overview: currentOverview)))
+            let response = SpacesDeviceAPIResponse(ok: true, message: "ok", result: .mutation(SpacesDeviceMutationResult(overview: currentOverview)))
             controller.applyDeviceMutationResponse(
                 response, deviceID: SpacesPairedDeviceRecord.localDeviceID, epoch: controller.panelCoordinator.paneReplacementEpoch)
             #expect(controller.deviceWorkspaceSummary(workspaceID: createdWorkspaceID) != nil)

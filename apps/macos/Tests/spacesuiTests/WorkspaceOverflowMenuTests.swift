@@ -6,7 +6,7 @@ import Testing
 @MainActor @Suite struct WorkspaceOverflowMenuTests {
     @Test func menuIncludesCopyPathAndRevealItems() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
-            workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true)
+            workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false)
         let titles = menu.items.map { $0.title }
         #expect(titles.contains("Copy path"))
         #expect(titles.contains("Reveal in Finder"))
@@ -14,7 +14,7 @@ import Testing
 
     @Test func remoteWorkspaceMenuOmitsRevealButKeepsCopyPath() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
-            workspaceID: "ws-1", path: "/remote/ws-1", target: nil, isLocalDevice: false, daemonActionsEnabled: true)
+            workspaceID: "ws-1", path: "/remote/ws-1", target: nil, isLocalDevice: false, daemonActionsEnabled: true, isHomeWorkspace: false)
         let titles = menu.items.map { $0.title }
         #expect(titles.contains("Copy path"))
         #expect(!titles.contains("Reveal in Finder"))
@@ -22,7 +22,7 @@ import Testing
 
     @Test func copyPathItemCarriesPathWithoutShortcut() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
-            workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true)
+            workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false)
         guard let copy = menu.items.first(where: { $0.title == "Copy path" }) else {
             Issue.record("Copy path menu item missing")
             return
@@ -34,7 +34,7 @@ import Testing
 
     @Test func revealItemCarriesPathWorkspaceContextAndCmdShiftF() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
-            workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true)
+            workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false)
         guard let reveal = menu.items.first(where: { $0.title == "Reveal in Finder" }) else {
             Issue.record("Reveal in Finder menu item missing")
             return
@@ -55,7 +55,7 @@ import Testing
         // Reveal in Finder — neither of which needs the daemon — keep working. Archive does need it, so
         // it is disabled rather than removed, which would reshuffle the menu mid-outage.
         let menu = AppKitController.makeWorkspaceOverflowMenu(
-            workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: false)
+            workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: false, isHomeWorkspace: false)
         #expect(!menu.autoenablesItems)
         let titles = menu.items.map { $0.title }
         #expect(titles.contains("Copy path"))
@@ -68,19 +68,31 @@ import Testing
 
     @Test func reachableDeviceEnablesTheDaemonBackedItem() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
-            workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true)
+            workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false)
         #expect(menu.items.first { $0.title == "Delete…" }?.isEnabled == true)
+    }
+
+    /// The home row is the daemon's own, not a project the user added, so its overflow menu keeps the two
+    /// path actions and offers no Delete. Hide, on the sidebar row's context menu, is how it leaves the list.
+    @Test func homeWorkspaceMenuKeepsPathActionsAndOmitsDelete() {
+        let menu = AppKitController.makeWorkspaceOverflowMenu(
+            workspaceID: "ws-home", path: "/Users/someone", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: true)
+        let titles = menu.items.map { $0.title }
+        #expect(titles.contains("Copy path"))
+        #expect(titles.contains("Reveal in Finder"))
+        #expect(!titles.contains("Delete…"))
+        #expect(menu.items.last?.isSeparatorItem == false, "no trailing separator is left behind where Delete was")
     }
 
     @Test func menuItemsHaveSymbolImages() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
-            workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true)
+            workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false)
         for item in menu.items where !item.isSeparatorItem { #expect(item.image != nil) }
     }
 
     @Test func menuItemActionsTargetCopyAndReveal() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
-            workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true)
+            workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false)
         let copy = menu.items.first { $0.title == "Copy path" }
         let reveal = menu.items.first { $0.title == "Reveal in Finder" }
         #expect(copy?.action == #selector(AppKitController.copyDirectoryPath(_:)))

@@ -224,14 +224,24 @@ public struct AgentNotificationEngine {
     /// longer exists (deleted out from under a still-running agent) falls back to the id string for that
     /// field rather than failing delivery — a single clean path with no layered fallbacks. The `workspace`
     /// field is the workspace's full directory path (`dir`) so an orchestrator can locate the worktree.
+    ///
+    /// The branch is masked through `project.kind.maskedBranch` the same way `agentSessionRows` masks it
+    /// for the remote agent-list path: the home project's record keeps whatever branch a pre-existing git
+    /// repository at the home path was on when it was adopted, and a locally watched agent running there
+    /// must not emit a `branch:` line for a git lifecycle the home row has no part of.
     func renderLine(agent: AgentWindowRecord, transition: ChildTransition) throws -> String {
         let workspace = try store.workspace(id: agent.workspaceID)
         let project = try workspace.flatMap { try store.project(id: $0.projectID) }
         let kind = resolveAgentKind(agent) ?? "coding agent"
+        // `?? workspace?.branch` would wrongly restore the raw branch when the project IS resolved and its
+        // kind legitimately masks it to nil (`maskedBranch` returning nil for a home project is not "no
+        // answer", it is the answer): only a missing project record falls back to the unmasked branch.
+        let branch: String?
+        if let project { branch = project.kind.maskedBranch(workspace?.branch) } else { branch = workspace?.branch }
         return renderBlock(
             label: agent.effectiveLabel ?? kind, kind: kind, transition: transition,
-            project: project?.name ?? workspace?.projectID ?? agent.workspaceID, workspace: workspace?.dir ?? agent.workspaceID,
-            branch: workspace?.branch, sessionID: agent.terminalTrackingID ?? agent.id, note: agent.note, deviceID: nil)
+            project: project?.name ?? workspace?.projectID ?? agent.workspaceID, workspace: workspace?.dir ?? agent.workspaceID, branch: branch,
+            sessionID: agent.terminalTrackingID ?? agent.id, note: agent.note, deviceID: nil)
     }
 
     /// The single injected block for a watched agent on a paired device. Reuses the shared format; the

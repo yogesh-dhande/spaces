@@ -17,7 +17,7 @@ import workspacecore
             resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "App", url: "http://localhost:3000")])
         let summary = SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,
-            isHidden: false, isDefault: false, sessionCount: 3, config: config,
+            isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true, config: config,
             processRows: [
                 SpacesDeviceWorkspaceProcessRow(
                     id: "row-web", workspaceID: "workspace", name: "web", command: "npm run dev", templateID: "tpl-web", processID: "proc-web",
@@ -121,7 +121,7 @@ import workspacecore
 
         let summary = SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,
-            isHidden: false, isDefault: false, sessionCount: 2,
+            isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true,
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
                     id: "agent:agent-1", workspaceID: "workspace", name: "claude", command: "claude", agentID: "agent-1", sessionID: "sess-agent",
@@ -170,7 +170,7 @@ import workspacecore
         let config = SpacesDeviceWorkspaceConfig(processes: [SpacesDeviceProcessTemplate(id: "tpl-web", name: "web", command: "npm run dev")])
         let summary = SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,
-            isHidden: false, isDefault: false, sessionCount: 3, config: config,
+            isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true, config: config,
             processRows: [
                 SpacesDeviceWorkspaceProcessRow(
                     id: "row-web", workspaceID: "workspace", name: "web", command: "npm run dev", templateID: "tpl-web", processID: "proc-web",
@@ -297,7 +297,7 @@ import workspacecore
         }
         let summary = SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,
-            isHidden: false, isDefault: false, sessionCount: terminalRows.count, terminalRows: terminalRows)
+            isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: !terminalRows.isEmpty, terminalRows: terminalRows)
         let items = AppKitController.sidebarRuntimeTargetItems(detail: SpacesDeviceWorkspaceDetailViewModel(workspace: summary), browserSessions: [])
         #expect(items.count == 12)
         #expect(items[9].shortcutIndex == 10)
