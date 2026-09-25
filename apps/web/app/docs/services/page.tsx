@@ -1,89 +1,99 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import { CodeBlock, InlineCode } from "../components/code-block";
 import { DocsShell } from "../components/docs-shell";
+import { DocLink } from "../components/doc-link";
 import { Prose, Section } from "../components/section";
 
 export const metadata: Metadata = {
-  title: "Services",
-  description: "Named services, stable per-workspace URLs, and the bundled Caddy proxy.",
+  title: "Services and URLs",
+  description:
+    "Named services get a port per workspace and a stable URL that stays the same across restarts.",
 };
 
 export default function ServicesDocsPage() {
   return (
     <DocsShell
-      title="Services"
-      description="A service is a named endpoint your project exposes — like web or api. Spaces gives every workspace its own port for that service and routes it to a stable, predictable URL."
+      title="Services and URLs"
+      description="A service is a named endpoint your project exposes, like web or api. Spaces gives every workspace its own port for that service and a stable, predictable URL."
       pagePath="/docs/services"
     >
-      <Section title="What Is a Service?">
+      <Section title="What a service is">
         <Prose>
-          You configure services on the project, the same way you configure processes and browser sessions. Each service is a unique DNS-safe name — lowercase letters, digits, and hyphens, starting and ending with a letter or digit, up to 63 characters — such as <code>web</code>, <code>api</code>, or <code>admin-ui</code>.
-        </Prose>
-        <Prose>
-          Every workspace gets its own dynamically assigned local port for each service. Two workspaces of the same project never share a port, so you can run several branches of the same app at once without hand-assigning ports or editing <code>.env</code> files.
-        </Prose>
-      </Section>
-
-      <Section title="Stable URLs Through Caddy">
-        <Prose>
-          A bundled Caddy reverse proxy runs on your Mac and routes each service to a predictable URL:
-        </Prose>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-sm border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
-          <code>{`http://<service>.<workspace-slug>.localhost:7391`}</code>
-        </pre>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• The router port is <code>7391</code>. There is no user-facing setting to change it.</li>
-          <li>• Routing is plain HTTP on that shared port and listens only on loopback addresses — no TLS, certificate, or admin setup, since Chrome and Safari treat <code>*.localhost</code> as a secure context.</li>
-          <li>• Chrome is the supported browser. Firefox does not resolve arbitrary <code>*.localhost</code> names by default.</li>
-          <li>• Caddy routes every service host whether or not it has a browser session attached.</li>
-        </ul>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Because each workspace routes through its own hostname rather than a shared <code>localhost</code> port, browser cookies and local storage never bleed between workspaces — logging in on one branch does not log you into another.
-        </p>
-      </Section>
-
-      <Section title="Environment Variables">
-        <Prose>
-          Every process, setup script, and stop script in the workspace runs with these variables for each service — <code><ServiceToken>web</ServiceToken></code> becomes <code><ServiceToken>WEB</ServiceToken></code>, <code>admin-ui</code> becomes <code>ADMIN_UI</code>:
-        </Prose>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-sm border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
-          <code>
-            {"SPACES_"}<ServiceToken>WEB</ServiceToken>{"_PORT   # assigned local port, e.g. 51234\n"}
-            {"SPACES_"}<ServiceToken>WEB</ServiceToken>{"_HOST   # routed hostname, no scheme or port\n"}
-            {"SPACES_"}<ServiceToken>WEB</ServiceToken>{"_URL    # routed URL, e.g. http://"}<ServiceToken>web</ServiceToken>{".my-branch.localhost:7391"}
-          </code>
-        </pre>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Bind your dev server to <code>$SPACES_WEB_PORT</code> and reference <code>$SPACES_WEB_URL</code> directly instead of composing a URL by hand — see{" "}
-          <Link href="/docs/processes" className="text-accent hover:underline">
-            Processes
-          </Link>{" "}
-          for how these variables reach a running command.
-        </p>
-      </Section>
-
-      <Section title="Remote & Linux Workspaces">
-        <Prose>
-          Remote and Linux daemons do not run the Caddy router themselves. When the Mac app observes a running remote workspace with named services, it opens one SSH local-forward per assigned service port and registers Caddy routes on your Mac to those forwards — so the same stable URL works whether the workspace is local or remote.
-        </Prose>
-        <Prose>
-          Remote and Linux workspace processes still receive <code>SPACES_&lt;SERVICE&gt;_URL</code>, so app servers can allowlist the browser-facing host or origin for CORS and framework host checks.
+          You declare services on the project, the same way you declare processes and browser
+          sessions. Each service name is a DNS label: lowercase letters, digits, and hyphens,
+          starting and ending with a letter or digit, up to 63 characters, such as{" "}
+          <InlineCode>web</InlineCode>, <InlineCode>api</InlineCode>, or{" "}
+          <InlineCode>admin-ui</InlineCode>. Every workspace gets its own port for each service, so
+          two workspaces of the same project never share one.
         </Prose>
       </Section>
 
-      <Section title="Adding & Removing Services">
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Adding a service reserves its port immediately — you don&apos;t need to relaunch the workspace to use it.</li>
-          <li>• A service&apos;s port stays assigned to its workspace until that workspace is deleted, even while the workspace is stopped.</li>
-          <li>• While a workspace is running, its assigned ports are not placeholder-reserved on your machine; if another local process claims one first, resolve the conflict manually before your server binds it.</li>
-        </ul>
+      <Section id="ports" title="Ports">
+        <Prose>
+          Ports are assigned from 20000 to 30000, for example <InlineCode>24817</InlineCode>. A
+          service&apos;s port stays assigned to its workspace for the workspace&apos;s life,
+          including while it is stopped, and is released only when the workspace is deleted. Adding
+          a service reserves its port right away, so you do not need to relaunch the workspace to
+          use it.
+        </Prose>
+        <Prose>
+          Your process reads its port from <InlineCode>SPACES_&lt;SERVICE&gt;_PORT</InlineCode>,
+          see{" "}
+          <DocLink href="/docs/environment-variables#service-variables">
+            Environment variables
+          </DocLink>
+          . While a workspace is running, its assigned ports are not held open; if another process
+          on the device that runs the workspace (this Mac, or the paired Mac or Linux machine that
+          owns it) claims one before your server binds it, resolve the conflict on that device.
+        </Prose>
+      </Section>
+
+      <Section id="stable-urls" title="Stable URLs">
+        <Prose>Each service routes to a predictable URL:</Prose>
+        <CodeBlock>{`http://<service>.<workspace-slug>.localhost:7391`}</CodeBlock>
+        <Prose>
+          The port is <InlineCode>7391</InlineCode>, with no setting to change it. Routing is plain
+          HTTP on that port and listens only on your Mac, since Chrome treats{" "}
+          <InlineCode>*.localhost</InlineCode> as a secure loopback address and needs no certificate
+          or setup for it.
+        </Prose>
+        <Prose>
+          The workspace slug is built from the branch name for a Git workspace (for example{" "}
+          <InlineCode>login-fix-a3f9c2d1847b</InlineCode>) or the project name for a folder project,
+          followed by a hash of the workspace&apos;s id; the home workspace (<InlineCode>~</InlineCode>)
+          uses that same form, for example <InlineCode>home-1a2b3c4d5e6f</InlineCode>. Because each
+          workspace gets its own hostname, cookies and local storage never carry over between
+          workspaces: logging in on one branch does not log you into another.
+        </Prose>
+      </Section>
+
+      <Section id="browsers" title="Browsers">
+        <Prose>
+          Chrome is the supported browser: it resolves <InlineCode>*.localhost</InlineCode> names
+          without configuration. Firefox does not resolve arbitrary{" "}
+          <InlineCode>*.localhost</InlineCode> names by default. A{" "}
+          <DocLink href="/docs/browser-sessions">browser session</DocLink> opens a service URL in
+          Chrome when you focus it.
+        </Prose>
+      </Section>
+
+      <Section id="remote-devices" title="Services on a remote device">
+        <Prose>
+          A remote Mac or Linux machine does not route service URLs itself. When you focus a
+          browser session for a service running on a remote workspace, your Mac forwards that
+          service&apos;s port to itself over SSH and routes it at the same stable URL, so the URL
+          works the same whether the workspace is local or remote. Remote workspace processes still
+          receive <InlineCode>SPACES_&lt;SERVICE&gt;_URL</InlineCode>, so a server can allowlist the
+          browser-facing host for CORS or framework host checks.
+        </Prose>
+      </Section>
+
+      <Section title="Adding and removing services">
+        <Prose>
+          Add or remove services in project or workspace settings, or in{" "}
+          <DocLink href="/docs/spaces-yaml">spaces.yaml</DocLink>.
+        </Prose>
       </Section>
     </DocsShell>
   );
-}
-
-// Highlights the service name inside a variable or URL so its every
-// occurrence reads as the same token, e.g. SPACES_WEB_URL vs web.my-branch.localhost.
-function ServiceToken({ children }: { children: string }) {
-  return <span className="text-accent-2">{children}</span>;
 }

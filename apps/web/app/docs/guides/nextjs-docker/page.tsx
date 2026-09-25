@@ -1,94 +1,91 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { CodeBlock, InlineCode } from "../../components/code-block";
 import { DocsShell } from "../../components/docs-shell";
-import { list, code } from "../../components/guide-styles";
-import { Prose, Section } from "../../components/section";
+import { Prose, Section, SubHeading } from "../../components/section";
 
 export const metadata: Metadata = {
-  title: "Guide: Next.js (Docker Compose)",
+  title: "Next.js (Docker Compose)",
   description:
-    "Cookbook guide for running a single Next.js service in Docker Compose with Spaces settings.",
+    "Recipe for running a single Next.js service in Docker Compose with Spaces settings.",
 };
 
 export default function NextjsDockerGuidePage() {
   return (
     <DocsShell
-      title="Guide: Next.js (Docker Compose)"
-      description="Use this when your app runs in containers and you want workspace-isolated host ports with clear container health visibility."
-      pagePath="/docs/guides"
+      title="Next.js (Docker Compose)"
+      description="Use this when your app runs in containers and you want workspace-isolated host ports with clear container visibility."
+      pagePath="/docs/guides/nextjs-docker"
     >
-      <Section title="Use Case">
+      <Section title="Use case">
         <Prose>
-          Your Next.js service runs via Compose. You need branch-isolated environments
-          and deterministic port mapping per workspace.
+          Your Next.js service runs through Compose. You need branch-isolated environments and a
+          predictable port mapping per workspace.
         </Prose>
       </Section>
 
-      <Section title="Project Settings Explained">
-
-        <h3 className="mt-4 text-sm font-semibold text-foreground">Services</h3>
-        <pre className={code}>
-          <code>{`frontend`}</code>
-        </pre>
+      <Section title="Project settings explained">
+        <SubHeading>Services</SubHeading>
+        <CodeBlock>{`frontend`}</CodeBlock>
         <Prose>
-          Spaces assigns each service its own host port per workspace. Compose maps host <code>$SPACES_FRONTEND_PORT</code> to container port <code>3000</code>.
+          Spaces assigns each service its own host port per workspace. Compose maps host{" "}
+          <InlineCode>$SPACES_FRONTEND_PORT</InlineCode> to container port{" "}
+          <InlineCode>3000</InlineCode>.
         </Prose>
-        <h4 className="mt-4 text-sm font-semibold text-foreground">docker-compose.yml example</h4>
-        <pre className={code}>
-          <code>{`services:
+        <SubHeading>docker-compose.yml example</SubHeading>
+        <CodeBlock>{`services:
   web:
     build: .
     ports:
       - "\${SPACES_FRONTEND_PORT}:3000"
     environment:
-      - PORT=3000`}</code>
-        </pre>
+      - PORT=3000`}</CodeBlock>
 
-        <h3 className="mt-4 text-sm font-semibold text-foreground">Setup Script</h3>
-        <pre className={code}>
-          <code>{`cp .env.example .env`}</code>
-        </pre>
+        <SubHeading>Setup script</SubHeading>
+        <CodeBlock>{`cp .env.example .env`}</CodeBlock>
         <Prose>
-          Copying <code>.env</code> gives each workspace an isolated env file.
-          Symlink can reduce duplication, but one edit impacts all linked workspaces.
-          Point <code>cp</code> at whatever seed file your repo keeps — Spaces does not provide a built-in shared env file.
+          Copying <InlineCode>.env</InlineCode> gives each workspace its own env file; a symlink
+          would reduce duplication, but one edit would then affect every linked workspace. Point{" "}
+          <InlineCode>cp</InlineCode> at whatever seed file your repo keeps, Spaces has no built-in
+          shared env file.
         </Prose>
 
-        <h3 className="mt-4 text-sm font-semibold text-foreground">Processes</h3>
-        <pre className={code}>
-          <code>{`SPACES_FRONTEND_PORT=$SPACES_FRONTEND_PORT docker compose up --build`}</code>
-        </pre>
+        <SubHeading>Processes</SubHeading>
+        <CodeBlock>{`SPACES_FRONTEND_PORT=$SPACES_FRONTEND_PORT docker compose up --build`}</CodeBlock>
         <Prose>
-          The process keeps Compose attached in one terminal, which is useful for live logs and interactive shutdown.
+          Keeping Compose attached in one terminal is useful for live logs and an interactive
+          shutdown.
         </Prose>
 
-        <h3 className="mt-4 text-sm font-semibold text-foreground">Browser Sessions</h3>
-        <pre className={code}>
-          <code>{`$SPACES_FRONTEND_URL`}</code>
-        </pre>
+        <SubHeading>Browser sessions</SubHeading>
+        <CodeBlock>{`$SPACES_FRONTEND_URL`}</CodeBlock>
         <Prose>
-          This targets the workspace-specific service mapping. Without named services, one workspace can accidentally open another workspace&apos;s frontend.
+          This targets the workspace-specific service mapping. Without a named service, one
+          workspace could open another workspace&apos;s frontend by accident.
         </Prose>
 
-        <h3 className="mt-4 text-sm font-semibold text-foreground">Stop Script: stop vs down</h3>
-        <pre className={code}>
-          <code>{`docker compose stop
+        <SubHeading>Stop script: stop vs down</SubHeading>
+        <CodeBlock>{`docker compose stop
 # or
-docker compose down`}</code>
-        </pre>
-        <ul className={list}>
-          <li>• <code>docker compose stop</code>: stop containers but keep networks/volumes/containers for faster resume.</li>
-          <li>• <code>docker compose down</code>: remove containers and network; cleaner reset, slower next startup.</li>
-          <li>• Use <code>stop</code> for day-to-day pause/resume; use <code>down</code> when you need a clean teardown.</li>
+docker compose down`}</CodeBlock>
+        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
+          <li>
+            <InlineCode>docker compose stop</InlineCode>: stops containers, keeps networks,
+            volumes, and containers for a faster resume.
+          </li>
+          <li>
+            <InlineCode>docker compose down</InlineCode>: removes containers and the network, a
+            cleaner reset with a slower next startup.
+          </li>
+          <li>Use <InlineCode>stop</InlineCode> for day-to-day pause and resume, and <InlineCode>down</InlineCode> when you need a clean teardown.</li>
         </ul>
-
       </Section>
 
       <Link
         href="/docs/guides"
         className="mt-4 inline-flex items-center gap-1.5 text-sm font-semibold text-accent transition-colors hover:opacity-80"
       >
-        ← Back to Cookbook Guides
+        ← All recipes
       </Link>
     </DocsShell>
   );

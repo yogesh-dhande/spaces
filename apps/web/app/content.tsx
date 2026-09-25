@@ -6,7 +6,7 @@ import { Key } from "./components/key";
 
 export const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
 
-// Scope strip under the hero headline — the surfaces Spaces puts under one roof.
+// Scope strip under the hero headline: the surfaces Spaces puts under one roof.
 export const heroScope = [
   "projects",
   "worktrees",
@@ -25,7 +25,7 @@ export type Pillar = {
   hrefLabel?: string;
 };
 
-// The six things Spaces manages for you — the centerpiece of the page.
+// The six things Spaces manages for you, the centerpiece of the page.
 export const pillars: Pillar[] = [
   {
     title: "Agents",
@@ -46,7 +46,7 @@ export const pillars: Pillar[] = [
   {
     title: "Worktrees",
     description:
-      "Every feature, branch, or experiment gets an isolated git worktree — or a separate clone — with its own directory, env, ports, and processes. Parallel work never collides.",
+      "Every feature, branch, or experiment gets its own git worktree on its own branch, with its own directory, env, ports, and processes. Parallel work never collides.",
     icon: (
       <svg viewBox="0 0 20 20" fill="none" aria-hidden className="h-5 w-5">
         <circle cx="5" cy="4.5" r="2" stroke="currentColor" strokeWidth="1.5" />
@@ -82,7 +82,7 @@ export const pillars: Pillar[] = [
   {
     title: "Windows & focus",
     description:
-      "Spaces tracks every window a workspace opens and jumps you back with a keystroke. Cycle within a workspace, hide the rest, and keep your attention on one task at a time.",
+      "Spaces tracks every window a workspace opens and jumps you back with a keystroke. Cycle through one workspace, your alerts, or your agents, and keep your attention on one task at a time.",
     icon: (
       <svg viewBox="0 0 20 20" fill="none" aria-hidden className="h-5 w-5">
         <rect x="2.5" y="4" width="10" height="8" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
@@ -93,7 +93,7 @@ export const pillars: Pillar[] = [
   {
     title: "Remote machines",
     description:
-      "Pair a remote Mac or a cloud Linux box and drive them all from one Mac — every device in its own sidebar section, projects and sessions in reach.",
+      "Pair a remote Mac or a cloud Linux box and drive them all from one Mac. Each device gets its own sidebar section, with its projects and sessions in reach.",
     href: "#remote",
     hrefLabel: "See how it works",
     icon: (
@@ -107,7 +107,7 @@ export const pillars: Pillar[] = [
   {
     title: "Mac & iPhone",
     description:
-      "Two full clients, not an app and an accessory. Each one pairs straight to the machines it drives — your iPhone talks directly to a Mac or a cloud Linux box, with nothing in the middle to leave running.",
+      "Two full clients, not an app and an accessory. Each one pairs straight to the machines it drives: your iPhone talks directly to a Mac or a cloud Linux box, with nothing in the middle to leave running.",
     href: "#mobile",
     hrefLabel: "See both clients",
     icon: (
@@ -131,12 +131,12 @@ export const keyFeatures: Feature[] = [
   {
     title: "Track agents across workspaces",
     description:
-      "Every coding agent reports its state — working, waiting on you, or done — in one Alerts view. See at a glance which ones need input next, and jump to any of them with a keyboard shortcut.",
+      "Every coding agent reports its state (working, waiting on you, or done) in one Alerts view. See at a glance which ones need input next, and jump to any of them with a keyboard shortcut.",
   },
   {
-    title: "Manage Git worktrees or separate clones",
+    title: "A worktree per branch",
     description:
-      "Spin up isolated workspaces for every branch using Git worktrees — so parallel feature work never collides. Not a worktrees person? Spaces works with separate clones just as well.",
+      "Every workspace in a Git project is a git worktree on its own branch, sharing the project's one clone, so parallel feature work never collides. Every device also has a home workspace, `~`, for terminals that belong to no project.",
   },
   {
     title: "Organize work into logical workspaces",
@@ -146,52 +146,52 @@ export const keyFeatures: Feature[] = [
   {
     title: "Stable per-workspace URLs",
     description:
-      "Declare named services and reach each one at a stable, predictable URL like http://web.my-branch.localhost:7391, served by a bundled reverse proxy. Run three instances of your app side by side — isolated, no port conflicts, no `.env` edits.",
+      "Declare named services and reach each one at a stable, predictable URL like http://web.my-branch.localhost:7391, served by a bundled reverse proxy. Run three instances of your app side by side, isolated, no port conflicts, no `.env` edits.",
   },
   {
     title: "Run on remote machines",
     description:
-      "Pair a remote Mac or a cloud Linux box over SSH with pinned TLS. Manage its projects, workspaces, terminals, and agents from the Mac in front of you — each device in its own sidebar section.",
+      "Pair a remote Mac or a cloud Linux box over SSH. Manage its projects, workspaces, terminals, and agents from the Mac in front of you, each device in its own sidebar section.",
   },
   {
     title: "Sessions that outlive your laptop",
     description:
-      "Terminals and agents run on the daemon, not your SSH connection. Kick off a build on a remote box, close your laptop, and it keeps running — reattach later exactly where it left off.",
+      "Terminals and agents run on the Spaces service on that machine, not your SSH connection. Kick off a build on a remote box, close your laptop, and it keeps running. Reattach later exactly where it left off.",
   },
   {
     title: "Automations",
     description:
-      "Run a shell command on any paired device manually or on a schedule — even while Spaces is closed. Watch a run live, replay it later, or have it spawn a coding agent that keeps working after the run finishes.",
+      "Run a shell command on your Mac or a paired device manually or on a schedule, even while Spaces is closed. Watch a run live, replay it later, or have it spawn a coding agent that keeps working after the run finishes.",
   },
   {
     title: "Jump to any workspace",
     description:
-      "A global command palette pulls up any window instantly — choose a window and it snaps into focus right where you left it.",
+      "A global command palette pulls up any window instantly: choose a window and it snaps into focus right where you left it.",
   },
   {
-    title: "Cycle windows within a workspace",
+    title: "Cycle through what matters",
     description:
-      "When you are working in a workspace, cycle through windows of only that workspace with keyboard shortcuts so your focus isn't interrupted by other workspaces.",
+      "Step through one workspace's windows, your alerts, every agent, or every open session with one pair of shortcuts, and switch what you cycle through with another.",
   },
   {
-    title: "Workspace notes",
+    title: "Agent briefs",
     description:
-      "Coding agents can write context (what's pending, what broke, where they left off) into a per-workspace notes field, surfaced inline in the workspace detail pane.",
+      "A coding agent can keep a short brief beside its terminal: what it is doing, questions for you, and its task list. Read it on your Mac or iPhone without scrolling back through the transcript.",
   },
   {
     title: "Take any session to your iPhone",
     description:
-      "The iOS app is a full client, not a remote for your Mac. It pairs directly with any device running Spaces — your Mac, or a cloud Linux box with no Mac involved — so you can pick up the same live session, watch a build, check a coding agent, or send a command, then step back to your desk without losing your place.",
+      "The iOS app is a full client, not a remote for your Mac. It pairs directly with any device running Spaces (your Mac, or a cloud Linux box with no Mac involved), so you can pick up the same live session, watch a build, check a coding agent, or send a command, then step back to your desk without losing your place.",
   },
   {
     title: "Launch and teardown on demand",
     description:
-      "Close a workspace and Spaces shuts down its processes and closes its windows. Come back tomorrow, open it, and everything restarts exactly as it was.",
+      "Stop a workspace and Spaces shuts down its processes and closes its terminals and browser tabs. Start it again and its configured processes come back; browser sessions reopen when you focus them.",
   },
   {
     title: "Native macOS app, not Electron",
     description:
-      "Built with Swift and AppKit. The interface stays fast and stays out of your way — no web runtime, no sluggish UI, no fan spinning up just to show you a window list.",
+      "Built with Swift and AppKit, not Electron, so the interface stays fast and out of your way.",
   },
   {
     title: "Terminals built on libghostty",
@@ -206,7 +206,7 @@ export const keyFeatures: Feature[] = [
         >
           libghostty
         </a>
-        , the engine behind the Ghostty terminal — fast, GPU-accelerated
+        , the engine behind the Ghostty terminal: fast, GPU-accelerated
         rendering that keeps up with the heaviest output.
       </>
     ),
@@ -223,8 +223,8 @@ export const faqItems: FaqItem[] = [
     question: "How much does it cost?",
     answer: (
       <>
-        Spaces is free on Mac and Linux. The iOS companion app is $29.99/year,
-        with a 7-day free trial.
+        Spaces is free on Mac and Linux. The iPhone app is in an invite-only
+        TestFlight beta.
       </>
     ),
   },
@@ -241,19 +241,20 @@ export const faqItems: FaqItem[] = [
     question: "Can I use it with CLI coding agents like Claude Code, Codex, or opencode?",
     answer: (
       <>
-        Yes. Open a terminal inside any workspace with <Key>⌘⌥T</Key> and start
-        your agent as normal. The terminal window is automatically
-        attached to the workspace so you can jump back to it with keyboard
-        shortcuts at any time. To let the agent set workspace notes and
-        signal its status, add the{" "}
+        Yes. Open a terminal in any workspace with <Key>⌘⌥T</Key> and start
+        your agent as usual. It opens as a pane in that workspace, so you can
+        jump back to it with a keystroke. Spaces installs status hooks for
+        Claude Code, Codex, and opencode, so the sidebar shows whether each
+        agent is working, waiting for you, or done. Each agent can also keep
+        a brief, a short status page shown beside its terminal. See{" "}
         <Link href="/docs/coding-agents" className="text-accent hover:underline">
-          Spaces agent instructions
+          Agent status
         </Link>{" "}
-        to your project&apos;s AGENTS.md. See the{" "}
+        and the{" "}
         <Link href="/docs/guides" className="text-accent hover:underline">
-          cookbook guides
-        </Link>{" "}
-        for step-by-step setup.
+          recipes
+        </Link>
+        .
       </>
     ),
   },
@@ -261,15 +262,15 @@ export const faqItems: FaqItem[] = [
     question: "Can I use it with a Mac Mini or cloud VM?",
     answer: (
       <>
-        Yes. Pair another Mac or a Ubuntu box — including a cloud
-        VM — over SSH with pinned TLS. Each machine runs its own
-        daemon and shows up as its own section in the
-        sidebar, so you manage its projects, workspaces, terminals, and agents
-        from the Mac in front of you. Because sessions run on the daemon, a
-        remote build or agent keeps running after you disconnect or close your
-        laptop — reattach later from your Mac or your phone. See the{" "}
-        <Link href="/docs/cli" className="text-accent hover:underline">
-          CLI docs
+        Yes. Pair another Mac or an Ubuntu box, including a cloud
+        VM, over SSH. Each machine runs the Spaces service and shows up as
+        its own section in the sidebar, so you manage its projects,
+        workspaces, terminals, and agents from the Mac in front of you.
+        Sessions run on that service, so a remote build or agent keeps
+        running after you disconnect or close your laptop. Reattach later
+        from your Mac or your phone. See{" "}
+        <Link href="/docs/remote-access#pairing" className="text-accent hover:underline">
+          Remote machines
         </Link>{" "}
         for pairing.
       </>
@@ -279,7 +280,7 @@ export const faqItems: FaqItem[] = [
     question: "I only work on one project at a time. Will Spaces help me?",
     answer: (
       <>
-        You will still benefit from the the ability to manage agents, processes, and windows, and to control
+        You will still benefit from the ability to manage agents, processes, and windows, and to control
         them from your Mac or iPhone.
       </>
     ),
@@ -288,10 +289,17 @@ export const faqItems: FaqItem[] = [
     question: "Is there a mobile app?",
     answer: (
       <>
-        Coming soon! The Spaces iOS app is a full client in its own right, not a
+        Yes, in an invite-only TestFlight beta.{" "}
+        <a
+          href="https://github.com/yogesh-dhande/spaces/issues"
+          className="text-accent hover:underline"
+        >
+          Ask for an invite on GitHub
+        </a>
+        . The Spaces iOS app is a full client in its own right, not a
         remote for the desktop app. Your Mac&apos;s Devices settings shows a
-        pairing QR code for any machine it&apos;s connected to — itself, or a
-        Linux box — and scanning one pairs your phone with that machine
+        pairing QR code for any machine it&apos;s connected to (itself, or a
+        Linux box) and scanning one pairs your phone with that machine
         directly. From then on the phone talks to it on its own: browse its live
         terminal sessions, watch a coding agent&apos;s output, or start new
         sessions, with no Mac in the path. See the{" "}
@@ -307,7 +315,7 @@ export const faqItems: FaqItem[] = [
     answer: (
       <>
         No. Spaces runs entirely on your devices and does not send your data to Spaces
-        or any third party. Pairing connects only to your own devices — your
+        or any third party. Pairing connects only to your own devices: your
         iPhone or another machine you control.
       </>
     ),
@@ -316,12 +324,12 @@ export const faqItems: FaqItem[] = [
     question: "Where do I send bug reports?",
     answer: (
       <>
-        Start a GitHub discussion at{" "}
+        Open an issue at{" "}
         <a
-          href="https://github.com/yogesh-dhande/spaces/discussions"
+          href="https://github.com/yogesh-dhande/spaces/issues"
           className="text-accent hover:underline"
         >
-          https://github.com/yogesh-dhande/spaces/discussions
+          github.com/yogesh-dhande/spaces/issues
         </a>
         .
       </>
@@ -339,17 +347,17 @@ export const workflow: WorkflowStepData[] = [
   {
     n: "01",
     label: "Project",
-    body: "Point Spaces at a repo on your mac or a remote machine. Define your setup script, named services, browser URLs, and the processes you run. Do this once.",
+    body: "Point Spaces at a repo on your Mac or a remote machine. Define your setup script, named services, browser URLs, and the processes you run. Do this once.",
   },
   {
     n: "02",
     label: "Workspace",
-    body: "Create a workspace for each feature, branch, or experiment. Each one gets its own directory, services, stable per-workspace URLs, env, and processes — isolated from the rest. Create as many as you need.",
+    body: "Create a workspace for each feature, branch, or experiment. Each one gets its own directory, services, stable per-workspace URLs, env, and processes, isolated from the rest. Create as many as you need.",
   },
   {
     n: "03",
     label: "Runtime",
-    body: "With one click, start every process and open the browser URLs for a workspace. Spaces manages the windows and monitors coding agents. Jump to any window — or cycle through the current workspace — with keyboard shortcuts.",
+    body: "With one click, start every process for a workspace; its browser sessions open when you focus them. Spaces manages the windows and monitors coding agents. Jump to any window, or cycle through a workspace, your alerts, or your agents, with keyboard shortcuts.",
   },
 ];
 
@@ -400,8 +408,8 @@ export type ComparisonItem = {
 };
 
 // Left column: what plain localhost does when you run several checkouts of
-// the same app at once. Right column: how named services + the bundled
-// Caddy proxy remove both problems.
+// the same app at once. Right column: how named services and the bundled
+// reverse proxy remove both problems.
 export const localhostPains: ComparisonItem[] = [
   {
     title: "Port conflicts",
@@ -416,7 +424,7 @@ export const localhostPains: ComparisonItem[] = [
 export const spacesFixes: ComparisonItem[] = [
   {
     title: "One hostname per workspace",
-    body: "Declare a named service once and every workspace reaches it at a stable URL like web.my-branch.localhost:7391, routed by a bundled Caddy proxy — no manual port assignment, ever.",
+    body: "Declare a named service once and every workspace reaches it at a stable URL like web.my-branch.localhost:7391, routed by a bundled reverse proxy, no manual port assignment, ever.",
   },
   {
     title: "Isolated sessions by design",

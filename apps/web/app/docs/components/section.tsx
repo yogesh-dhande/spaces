@@ -1,43 +1,58 @@
 import type { ReactNode } from "react";
 import { card, prose } from "./guide-styles";
 
-// Section-heading className repeated at the top of every docs card. Kept local (rather
-// than in guide-styles.ts) since nothing needs the bare string outside this file.
 const heading = "text-2xl font-semibold tracking-tight";
 
-/** The border-topped card that wraps one section on a docs page. */
-export function Card({ children }: { children: ReactNode }) {
-  return <article className={card}>{children}</article>;
+// `scroll-mt-24` keeps the fixed site header from covering the heading when the browser
+// jumps to the card's anchor.
+export function Card({ id, children }: { id?: string; children: ReactNode }) {
+  return (
+    <article id={id} className={`${card} scroll-mt-24`}>
+      {children}
+    </article>
+  );
 }
 
-/** The `<h2>` title styling shared by every docs section. */
 export function SectionHeading({ children }: { children: ReactNode }) {
   return <h2 className={heading}>{children}</h2>;
 }
 
-/**
- * A docs section: a Card whose first child is its title as an `<h2>`, followed by
- * whatever body content the section needs. Covers the common case of a plain
- * heading-then-content section. A page whose heading sits inside custom layout
- * (e.g. next to a badge, or beside an image) composes Card + SectionHeading
- * directly instead of Section.
- */
+// A page whose heading sits inside custom layout (next to a badge or an image) composes
+// Card and SectionHeading directly instead.
 export function Section({
+  id,
   title,
   children,
 }: {
+  id?: string;
   title: ReactNode;
   children: ReactNode;
 }) {
   return (
-    <Card>
+    <Card id={id}>
       <SectionHeading>{title}</SectionHeading>
       {children}
     </Card>
   );
 }
 
-/** Shared body-copy paragraph styling used throughout docs sections. */
+export function SubHeading({
+  id,
+  children,
+}: {
+  id?: string;
+  children: ReactNode;
+}) {
+  return (
+    <h3
+      id={id}
+      className="mt-6 scroll-mt-24 text-sm font-semibold text-foreground"
+    >
+      {children}
+    </h3>
+  );
+}
+
 export function Prose({ children }: { children: ReactNode }) {
   return <p className={prose}>{children}</p>;
 }

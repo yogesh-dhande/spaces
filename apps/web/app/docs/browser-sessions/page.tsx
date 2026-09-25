@@ -1,59 +1,75 @@
 import type { Metadata } from "next";
+import { InlineCode } from "../components/code-block";
 import { DocsShell } from "../components/docs-shell";
+import { DocLink } from "../components/doc-link";
 import { Prose, Section } from "../components/section";
 
 export const metadata: Metadata = {
-  title: "Browser Sessions",
-  description: "URL-based browser session orchestration per workspace.",
+  title: "Browser sessions",
+  description:
+    "Named Chrome tabs a workspace opens on focus and closes when it stops.",
 };
 
 export default function BrowserSessionsDocsPage() {
   return (
     <DocsShell
-      title="Browser Sessions"
-      description="Browser sessions keep URL context attached to a workspace so launch, focus, and cleanup stay deterministic."
+      title="Browser sessions"
+      description="A browser session is a URL you want one focus away while a workspace is running, your local app, an admin page, a PR, a runbook."
       pagePath="/docs/browser-sessions"
     >
-      <Section title="What Is a Browser Session?">
+      <Section title="What a browser session is">
         <Prose>
-          A browser session is a URL you want one focus away while the workspace is running — your local app, an admin page, a PR, a runbook. Configure them on the project and every workspace inherits them.
+          A browser session has a name and a URL, often a service&apos;s{" "}
+          <DocLink href="/docs/services#stable-urls">stable URL</DocLink>. Configure them on the
+          project and every workspace inherits them; attach as many as a workspace needs.
         </Prose>
+      </Section>
+
+      <Section id="opening" title="Opening and focusing">
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Each session has a URL and an optional name.</li>
-          <li>• URLs can reference a service&apos;s assigned port or its Caddy URL, for example <code>http://localhost:$SPACES_WEB_PORT</code> or <code>$SPACES_WEB_URL</code>. Chrome treats <code>*.localhost</code> as a secure loopback context, so these hosts resolve without extra setup.</li>
-          <li>• For remote Linux workspaces, service browser sessions use the same Caddy URL on the Mac while Spaces forwards the daemon-local service port over SSH.</li>
-          <li>• Attach as many as you need to a workspace.</li>
+          <li>Sessions stay closed when the workspace starts, so startup stays fast even with many attached.</li>
+          <li>Focus a session by clicking its row, its number key, or the command palette, and it opens as a Chrome tab, not at Start.</li>
+          <li>Spaces reuses the tab it opened; a closed Chrome is started, and a minimized window is restored.</li>
+          <li>If you move a session&apos;s tab to another Chrome window, focusing it again finds that tab by its URL.</li>
+          <li>If you close a session&apos;s tab and focus it again, Spaces reopens it.</li>
         </ul>
       </Section>
 
-      <Section title="Opening and Focusing">
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Sessions stay closed when the workspace launches, so startup stays fast even with many URLs attached.</li>
-          <li>• Focus a session with <code>cmd+1</code>…<code>cmd+0</code> or the command palette, and Spaces opens it as a Chrome tab in the workspace&apos;s tracked Chrome window when one is available.</li>
-          <li>• If you move a session tab to another Chrome window, direct focus finds that matching URL and updates tracking.</li>
-          <li>• Next/previous window cycling includes a browser session only after its tracked Chrome tab is open.</li>
-          <li>• If you close a session&apos;s Chrome tab and then focus it again, Spaces reopens it.</li>
-          <li>• Stopping the workspace closes the session tabs Spaces opened or adopted.</li>
-        </ul>
+      <Section id="chrome-permission" title="The Chrome permission">
+        <Prose>
+          Spaces opens and focuses tabs through the macOS Automation permission, &ldquo;Spaces
+          wants to control Google Chrome&rdquo;. If Chrome is not installed or the permission was
+          denied, focusing a session shows an error naming Chrome instead of opening the URL. See{" "}
+          <DocLink href="/docs/troubleshooting#browser-sessions">Troubleshooting</DocLink> if the
+          permission prompt never appears or was denied by mistake.
+        </Prose>
       </Section>
 
-      <Section title="On iPhone">
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Browser sessions show up as rows in the iOS app too, alongside each workspace&apos;s processes, coding agents, and terminals.</li>
-          <li>• Tap one to open the dev server right inside the app, with back, forward, reload, and screenshot controls — no need to unlock your Mac or remember a URL.</li>
-          <li>• Cookies and local storage stay isolated per service, the same way they do in Chrome on the Mac.</li>
-          <li>• This works for a remote Linux workspace too, and even while the Mac is asleep, as long as your phone is paired with the device that owns the workspace.</li>
-          <li>• If the service isn&apos;t running yet, tapping the row shows a clear message instead of a blank page.</li>
-          <li>• Browser sessions work while Spaces is in the foreground; backgrounding the app closes the connection, and reopening it restores your sessions automatically.</li>
-        </ul>
+      <Section id="stopping" title="When a workspace stops">
+        <Prose>
+          Stop from the Mac closes the workspace&apos;s tabs. Today, when another device, the
+          iPhone or the CLI on another machine, stops a workspace on a paired device, this Mac
+          leaves that workspace&apos;s tabs open.
+        </Prose>
       </Section>
 
-      <Section title="Example">
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-sm border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
-          <code>{`web        $SPACES_WEB_URL
-admin      $SPACES_WEB_URL/admin
-prs  https://github.com/org/repo/pull`}</code>
-        </pre>
+      <Section id="on-iphone" title="On iPhone">
+        <Prose>
+          A browser session opens inside the app&apos;s own browser, with back, forward, reload,
+          and Screenshot controls. Screenshot captures the visible view and opens it in Markup for
+          annotation; the resulting image can then be attached from a terminal&apos;s message
+          composer. This works for a remote Linux workspace too, as long as your phone is paired
+          with the device that owns the workspace. If the service is not running yet, the row shows
+          an error naming the service instead of a blank page.
+        </Prose>
+        <Prose>
+          Cookies and local storage stay isolated per service, the same way they do in Chrome on
+          the Mac. See <InlineCode>SPACES_&lt;SERVICE&gt;_URL</InlineCode> in{" "}
+          <DocLink href="/docs/environment-variables#service-variables">
+            Environment variables
+          </DocLink>{" "}
+          for how a session&apos;s URL is built.
+        </Prose>
       </Section>
     </DocsShell>
   );

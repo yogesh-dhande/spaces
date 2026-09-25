@@ -4,122 +4,204 @@ export type DocsPageLink = {
   summary: string;
 };
 
-export const docsPageLinks: DocsPageLink[] = [
+export type DocsNavGroup = {
+  label: string;
+  pages: DocsPageLink[];
+};
+
+export const docsNavGroups: DocsNavGroup[] = [
   {
-    href: "/docs/installation",
-    title: "Installation & Setup",
-    summary:
-      "Install Spaces on your Mac or a Linux box, grant Chrome access, and pair a remote machine or cloud VM.",
+    label: "Get started",
+    pages: [
+      {
+        href: "/docs",
+        title: "Overview and concepts",
+        summary: "What Spaces is and the terms the rest of the docs use.",
+      },
+      {
+        href: "/docs/installation",
+        title: "Install on your Mac",
+        summary:
+          "Requirements, installing the Mac app and its command-line tools, updates, and uninstalling.",
+      },
+      {
+        href: "/docs/getting-started",
+        title: "Quickstart",
+        summary:
+          "Add a project, create a workspace, start it, and open a coding agent.",
+      },
+    ],
   },
   {
-    href: "/docs/remote-access",
-    title: "Remote Access",
-    summary:
-      "Keep a remote machine reachable from your Mac and iPhone as you move between Wi-Fi and cellular.",
+    label: "Workspaces",
+    pages: [
+      {
+        href: "/docs/projects",
+        title: "Projects",
+        summary:
+          "Add a folder or Git repository on your Mac or a paired device, and set how its workspaces run.",
+      },
+      {
+        href: "/docs/workspaces",
+        title: "Workspaces",
+        summary: "Create, set up, start, stop, hide, and delete workspaces.",
+      },
+      {
+        href: "/docs/terminals",
+        title: "Terminals, tabs, and panes",
+        summary:
+          "Open terminals, arrange them in tabs, split panes, and separate windows, and what happens when you close one.",
+      },
+      {
+        href: "/docs/editor",
+        title: "The Editor",
+        summary:
+          "Review a workspace's changes, edit files with previews, and send line comments to a coding agent.",
+      },
+      {
+        href: "/docs/window-management",
+        title: "Finding your way around",
+        summary:
+          "The sidebar, numbered targets, the command palette, and cycling through windows.",
+      },
+      {
+        href: "/docs/alerts",
+        title: "Alerts",
+        summary:
+          "One list of what needs you: blocked and finished agents, exited processes, bells, and failed automation runs.",
+      },
+    ],
   },
   {
-    href: "/docs/getting-started",
-    title: "Getting Started",
-    summary:
-      "Connect your first project and launch a workspace in under five minutes.",
+    label: "Run your app",
+    pages: [
+      {
+        href: "/docs/services",
+        title: "Services and URLs",
+        summary:
+          "Named services get a port per workspace and a stable URL that stays the same across restarts.",
+      },
+      {
+        href: "/docs/processes",
+        title: "Processes",
+        summary:
+          "The long-running commands a workspace starts, and what happens when one exits.",
+      },
+      {
+        href: "/docs/browser-sessions",
+        title: "Browser sessions",
+        summary:
+          "Named Chrome tabs a workspace opens on focus and closes when it stops.",
+      },
+    ],
   },
   {
-    href: "/docs/projects",
-    title: "Projects",
-    summary:
-      "Configure a codebase once so every new workspace starts with its processes running and its services reachable.",
+    label: "Coding agents",
+    pages: [
+      {
+        href: "/docs/coding-agents",
+        title: "Agent status",
+        summary:
+          "How Spaces knows whether Claude Code, Codex, or opencode is working, waiting for you, or done.",
+      },
+      {
+        href: "/docs/orchestration",
+        title: "Orchestrate agents",
+        summary:
+          "Let one agent spawn, watch, and stop other agents across your workspaces and devices.",
+      },
+      {
+        href: "/docs/automations",
+        title: "Automations",
+        summary:
+          "Run a script or an agent on any device, by hand or on a schedule, and review each run.",
+      },
+      {
+        href: "/docs/restarts",
+        title: "What survives a restart",
+        summary:
+          "What keeps running when you quit Spaces, restart your Mac, or update, and how agents come back.",
+      },
+    ],
   },
   {
-    href: "/docs/workspaces",
-    title: "Workspaces",
-    summary:
-      "Create, name, and switch between isolated streams of work, each with its own branch, windows, and processes.",
+    label: "Devices",
+    pages: [
+      {
+        href: "/docs/remote-access",
+        title: "Remote machines",
+        summary:
+          "Install Spaces on a Linux machine or another Mac, pair it, and reach it from anywhere.",
+      },
+      {
+        href: "/docs/ios",
+        title: "iPhone app",
+        summary:
+          "A full Spaces client for iPhone and iPad that connects straight to your Mac or Linux machines.",
+      },
+    ],
   },
   {
-    href: "/docs/workspace-lifecycle",
-    title: "Workspace Lifecycle",
-    summary:
-      "How a workspace moves between stopped and running, and what deleting one removes.",
+    label: "Reference",
+    pages: [
+      {
+        href: "/docs/cli",
+        title: "CLI",
+        summary: "Every `spaces` command and flag.",
+      },
+      {
+        href: "/docs/mcp",
+        title: "MCP tools",
+        summary:
+          "Connect Claude Code, Codex, or opencode to Spaces and see the tools they get.",
+      },
+      {
+        href: "/docs/spaces-yaml",
+        title: "spaces.yaml",
+        summary:
+          "The file that describes a project's setup, services, processes, and browser sessions.",
+      },
+      {
+        href: "/docs/shortcuts",
+        title: "Keyboard shortcuts",
+        summary:
+          "Spaces' shortcuts, which ones work from any app, and how to change them.",
+      },
+      {
+        href: "/docs/settings",
+        title: "Settings",
+        summary: "The Mac and iPhone settings, and where each is explained.",
+      },
+      {
+        href: "/docs/environment-variables",
+        title: "Environment variables",
+        summary:
+          "The variables Spaces sets for processes, terminals, and scripts in a workspace.",
+      },
+    ],
   },
   {
-    href: "/docs/services",
-    title: "Services",
-    summary:
-      "Give each named service a stable per-workspace URL through the bundled Caddy proxy.",
-  },
-  {
-    href: "/docs/processes",
-    title: "Processes",
-    summary:
-      "Run servers, workers, and coding agents alongside each workspace as shell commands.",
-  },
-  {
-    href: "/docs/browser-sessions",
-    title: "Browser Sessions",
-    summary:
-      "Attach Chrome URLs to a workspace and open them from the Mac app or the in-app web view on your iPhone.",
-  },
-  {
-    href: "/docs/window-management",
-    title: "Window Management",
-    summary:
-      "How Spaces tracks workspace Chrome tabs and terminal panes so shortcuts open, focus, and cycle the right windows.",
-  },
-  {
-    href: "/docs/coding-agents",
-    title: "Coding Agents",
-    summary:
-      "Track Claude Code, Codex, opencode, and other agents per workspace, and get alerted when one is blocked or done.",
-  },
-  {
-    href: "/docs/orchestration",
-    title: "Agent Orchestration",
-    summary:
-      "Let one lead agent spawn and coordinate children across worktrees, harnesses, and machines, starting from the included orchestrator prompt.",
-  },
-  {
-    href: "/docs/automations",
-    title: "Automations",
-    summary:
-      "Run a coding agent or shell command on a schedule, on your Mac or a paired Linux box, and replay the runs later.",
-  },
-  {
-    href: "/docs/shortcuts",
-    title: "Keyboard Shortcuts",
-    summary:
-      "Jump between workspaces, focus windows, and trigger common actions with configurable shortcuts.",
-  },
-  {
-    href: "/docs/troubleshooting",
-    title: "Troubleshooting",
-    summary:
-      "Fix common launch, capture, process, and focus issues with step-by-step recovery playbooks.",
-  },
-  {
-    href: "/docs/guides",
-    title: "Cookbook Guides",
-    summary:
-      "Copy-and-adapt project setup recipes for common stacks.",
-  },
-  {
-    href: "/docs/cli",
-    title: "CLI Reference",
-    summary:
-      "Drive workspaces, terminal sessions, and pairing from the spaces command line.",
-  },
-  {
-    href: "/docs/mcp",
-    title: "Model Context Protocol",
-    summary:
-      "Connect Claude Code, Codex, or opencode to the spaces MCP server to list and drive your workspaces and terminals.",
-  },
-  {
-    href: "/docs/ios",
-    title: "iOS App",
-    summary:
-      "Pair your iPhone directly with a Mac or Linux device to watch and steer sessions, or tour the app in Demo Mode first.",
+    label: "Help",
+    pages: [
+      {
+        href: "/docs/troubleshooting",
+        title: "Troubleshooting",
+        summary:
+          "Fixes for Chrome permission, setup, shortcut, device, and agent status problems.",
+      },
+      {
+        href: "/docs/guides",
+        title: "Recipes",
+        summary:
+          "Worked setups for common stacks, as a `spaces.yaml` and in project settings.",
+      },
+    ],
   },
 ];
+
+export const docsPageLinks: DocsPageLink[] = docsNavGroups.flatMap(
+  (group) => group.pages,
+);
 
 export type CookbookGuideLink = {
   href: string;

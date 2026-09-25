@@ -1,58 +1,101 @@
 import type { Metadata } from "next";
+import { Cmd, InlineCode } from "../components/code-block";
+import { DocLink } from "../components/doc-link";
 import { DocsShell } from "../components/docs-shell";
-import { InlineCode } from "../components/code-block";
 import { Prose, Section } from "../components/section";
 
 export const metadata: Metadata = {
-  title: "Getting Started",
-  description: "Install prerequisites and launch your first workspace.",
+  title: "Quickstart",
+  description: "Add a project, create a workspace, start it, and open a coding agent.",
 };
 
 export default function GettingStartedDocsPage() {
   return (
     <DocsShell
-      title="Getting Started"
-      description="Start from a project directory or a Git URL, then launch a workspace with processes, browser sessions, and named services routed through Caddy."
+      title="Quickstart"
+      description="Add a project, create a workspace, start it, and open a coding agent."
       pagePath="/docs/getting-started"
     >
-      <Section title="Requirements">
+      <Section title="Install and open Spaces">
+        <Prose>
+          See <DocLink href="/docs/installation">Install on your Mac</DocLink>.
+        </Prose>
+      </Section>
+
+      <Section id="add-a-project" title="Add a project">
+        <Prose>
+          Press &ldquo;+&rdquo; (&ldquo;New project&rdquo;) in the Projects header. Pick the device to
+          add it on, then a source: &ldquo;Existing folder&rdquo; or &ldquo;Clone a repo&rdquo;. Nothing
+          is cloned until you create the project. See{" "}
+          <DocLink href="/docs/projects#adding-a-project">Adding a project</DocLink>.
+        </Prose>
+      </Section>
+
+      <Section title="Describe how it runs">
+        <Prose>
+          In the Configure step, or in a <InlineCode>spaces.yaml</InlineCode> in the repo, declare the
+          services, processes, and browser sessions a workspace should start with. See{" "}
+          <DocLink href="/docs/spaces-yaml">spaces.yaml</DocLink>.
+        </Prose>
+      </Section>
+
+      <Section id="create-a-workspace" title="Create a workspace">
+        <Prose>
+          Press &ldquo;+&rdquo; on the project row (&ldquo;New workspace in &lt;project&gt;&rdquo;), or{" "}
+          <Cmd>⌘N</Cmd>. Choose &ldquo;Create branch&rdquo; or &ldquo;Use existing&rdquo;. See{" "}
+          <DocLink href="/docs/workspaces#creating">Creating a workspace</DocLink>. A folder that is
+          not a Git repository has no separate workspace to create: continue with its one workspace,
+          the folder itself.
+        </Prose>
+      </Section>
+
+      <Section id="start-it" title="Start it">
+        <Prose>
+          Press Start. Each configured process opens as a pane in the workspace panel; browser sessions
+          open in Chrome when you focus them; each service gets a stable URL (see{" "}
+          <DocLink href="/docs/services#stable-urls">Stable URLs</DocLink>).
+        </Prose>
+      </Section>
+
+      <Section id="open-an-agent" title="Open a terminal and start an agent">
+        <Prose>
+          Press <Cmd>⌘⌥T</Cmd> to open a terminal in the workspace, then run{" "}
+          <InlineCode>claude</InlineCode>, <InlineCode>codex</InlineCode>, or{" "}
+          <InlineCode>opencode</InlineCode>. Its status shows on its sidebar row. See{" "}
+          <DocLink href="/docs/coding-agents">Agent status</DocLink>.
+        </Prose>
+      </Section>
+
+      <Section id="move-around" title="Move around">
+        <Prose>
+          <Cmd>⌘1</Cmd> through <Cmd>⌘0</Cmd> focus the numbered targets under the selected workspace.{" "}
+          <Cmd>⌘⌥-</Cmd> opens the command palette. <Cmd>⌘⌥]</Cmd> and <Cmd>⌘⌥[</Cmd> cycle through open
+          windows. See <DocLink href="/docs/window-management">Finding your way around</DocLink>.
+        </Prose>
+      </Section>
+
+      <Section title="Stop it or leave it running">
+        <Prose>
+          Stop ends the workspace&apos;s terminals, including any agent running in one, closes its panes
+          and tracked browser tabs, and runs its stop script if it has one. Quitting Spaces asks whether
+          to keep everything running or stop it first. See{" "}
+          <DocLink href="/docs/restarts#quitting">Quitting Spaces</DocLink>.
+        </Prose>
+      </Section>
+
+      <Section title="Next">
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• macOS 14 or later.</li>
-          <li>• Google Chrome installed for browser sessions.</li>
-          <li>• Permission for Spaces to control Google Chrome (the macOS Automation permission), so Spaces can focus browser sessions.</li>
-        </ul>
-      </Section>
-
-      <Section title="First Session Flow">
-        <ol className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>1. Install the dependencies above and launch Spaces. On first launch, if the permission to control Google Chrome is missing, Spaces shows an &ldquo;Allow Spaces to control Google Chrome&rdquo; screen. Choose <strong>Grant Access</strong> to approve the macOS prompt, or open System Settings ▸ Privacy &amp; Security ▸ Automation if Spaces was previously denied. Spaces continues to the workspace UI as soon as access is granted.</li>
-          <li>2. Add a project from a local directory or a Git URL.</li>
-          <li>3. Create a workspace for the branch or task you&apos;re starting.</li>
-          <li>4. Launch the workspace. Spaces starts its processes; browser sessions open when you focus them.</li>
-          <li>5. Open or focus any of the workspace&apos;s ordered targets with <InlineCode>cmd+1</InlineCode> through <InlineCode>cmd+0</InlineCode>, or cycle through already-open windows with <InlineCode>cmd+alt+]</InlineCode> / <InlineCode>cmd+alt+[</InlineCode>.</li>
-        </ol>
-      </Section>
-
-      <Section title="Add Your First Project">
-        <Prose>
-          Point Spaces at a local directory or paste a Git URL. Spaces creates a default workspace automatically — for a Git repo it corresponds to <InlineCode>main</InlineCode> / <InlineCode>master</InlineCode>; for a plain directory it corresponds to the directory itself.
-        </Prose>
-      </Section>
-
-      <Section title="Create a Workspace">
-        <Prose>
-          Use the <InlineCode>+</InlineCode> button on a project in the sidebar, or press <InlineCode>cmd+n</InlineCode>. For a Git project, pick an existing branch or name a new one; the base branch defaults to <InlineCode>main</InlineCode> or <InlineCode>master</InlineCode>. Spaces sets up a git worktree for the branch.
-        </Prose>
-      </Section>
-
-      <Section title="Launch and Validate">
-        <Prose>
-          Launching a workspace starts its processes in Spaces terminal windows. Confirm it worked:
-        </Prose>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• The workspace shows as running in the sidebar.</li>
-          <li>• Processes start in dedicated Spaces terminal windows.</li>
-          <li>• Focusing a browser session opens its URL in Chrome.</li>
+          <li>
+            • <DocLink href="/docs/ios">The iPhone app</DocLink>: your workspaces from your pocket.
+          </li>
+          <li>
+            • <DocLink href="/docs/remote-access">Remote machines</DocLink>: pair another Mac or a Linux
+            box.
+          </li>
+          <li>
+            • <DocLink href="/docs/orchestration">Orchestrate agents</DocLink>: have one agent spawn and
+            watch others.
+          </li>
         </ul>
       </Section>
     </DocsShell>
