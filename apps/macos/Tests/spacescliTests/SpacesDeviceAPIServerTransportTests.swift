@@ -38,7 +38,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try runDeviceAPITestGit(["worktree", "add", "-b", "feature-report", worktreeDir.path], cwd: projectDir.path)
 
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
-            let project = ProjectRecord(id: "project-delete", name: "Delete Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
+            let project = ProjectRecord(
+                id: "project-delete", name: "Delete Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main", kind: .standard)
             let workspace = WorkspaceRecord(
                 id: "workspace-delete", projectID: project.id, dir: worktreeDir.path, dirname: "delete-worktree", branch: "feature-report",
                 baseBranch: "main", isDefault: false, isRunning: false, lastLaunchedAt: nil)
@@ -83,7 +84,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try runDeviceAPITestGit(["worktree", "add", "-b", "feature-quiet", worktreeDir.path], cwd: projectDir.path)
 
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
-            let project = ProjectRecord(id: "project-quiet", name: "Quiet Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
+            let project = ProjectRecord(
+                id: "project-quiet", name: "Quiet Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main", kind: .standard)
             try store.upsert(project: project)
             try store.upsert(
                 workspace: WorkspaceRecord(
@@ -141,7 +143,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try runDeviceAPITestGit(["worktree", "add", "-b", "feature-busy", worktreeDir.path], cwd: projectDir.path)
 
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
-            let project = ProjectRecord(id: "project-busy", name: "Busy Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
+            let project = ProjectRecord(
+                id: "project-busy", name: "Busy Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main", kind: .standard)
             try store.upsert(project: project)
             try store.upsert(
                 workspace: WorkspaceRecord(
@@ -223,7 +226,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try runDeviceAPITestGit(["worktree", "add", "-b", "feature-teardown", worktreeDir.path], cwd: projectDir.path)
 
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
-            let project = ProjectRecord(id: "project-teardown", name: "Teardown", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
+            let project = ProjectRecord(
+                id: "project-teardown", name: "Teardown", dir: projectDir.path, isGitRepo: true, defaultBranch: "main", kind: .standard)
             try store.upsert(project: project)
             try store.upsert(
                 workspace: WorkspaceRecord(
@@ -856,7 +860,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let projectDir = root.appendingPathComponent("restart-project", isDirectory: true)
             try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
-            let project = ProjectRecord(id: "project-restart", name: "Restart Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
+            let project = ProjectRecord(
+                id: "project-restart", name: "Restart Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil, kind: .standard)
             let workspace = WorkspaceRecord(
                 id: "workspace-restart", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isRunning: true,
                 lastLaunchedAt: "2026-06-18T12:00:00Z")
@@ -930,7 +935,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let projectDir = root.appendingPathComponent("impact-project", isDirectory: true)
             try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
-            let project = ProjectRecord(id: "project-impact", name: "Impact Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
+            let project = ProjectRecord(
+                id: "project-impact", name: "Impact Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil, kind: .standard)
             let workspace = WorkspaceRecord(
                 id: "workspace-impact", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isRunning: true,
                 lastLaunchedAt: "2026-06-18T12:00:00Z")
@@ -994,7 +1000,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let projectDir = root.appendingPathComponent("terminal-project", isDirectory: true)
             try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
-            let project = ProjectRecord(id: "project-terminal", name: "Terminal Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
+            let project = ProjectRecord(
+                id: "project-terminal", name: "Terminal Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil, kind: .standard)
             let workspace = WorkspaceRecord(
                 id: "workspace-terminal", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isRunning: false,
                 lastLaunchedAt: nil)
@@ -1051,7 +1058,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
             let project = ProjectRecord(
-                id: "project-terminal-failure", name: "Terminal Failure Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
+                id: "project-terminal-failure", name: "Terminal Failure Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil,
+                kind: .standard)
             let workspace = WorkspaceRecord(
                 id: "workspace-terminal-failure", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true,
                 isRunning: false, lastLaunchedAt: nil)
@@ -1119,7 +1127,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let projectDir = root.appendingPathComponent("process-project", isDirectory: true)
             try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
-            let project = ProjectRecord(id: "project-process", name: "Process Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
+            let project = ProjectRecord(
+                id: "project-process", name: "Process Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil, kind: .standard)
             let workspace = WorkspaceRecord(
                 id: "workspace-process", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isRunning: false,
                 lastLaunchedAt: nil)
@@ -1175,7 +1184,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
             let project = ProjectRecord(
                 id: "project-terminal-overview-failure", name: "Terminal Overview Failure Project", dir: projectDir.path, isGitRepo: false,
-                defaultBranch: nil)
+                defaultBranch: nil, kind: .standard)
             let workspace = WorkspaceRecord(
                 id: "workspace-terminal-overview-failure", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true,
                 isRunning: false, lastLaunchedAt: nil)
@@ -1768,7 +1777,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         let workspaceDir = projectDir.appendingPathComponent("workspace", isDirectory: true)
         try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
-        let project = ProjectRecord(id: "project-\(sessionID)", name: "Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
+        let project = ProjectRecord(
+            id: "project-\(sessionID)", name: "Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil, kind: .standard)
         let workspace = WorkspaceRecord(
             id: "workspace-\(sessionID)", projectID: project.id, dir: workspaceDir.path, dirname: nil, branch: nil, isDefault: true, isRunning: true,
             lastLaunchedAt: nil)

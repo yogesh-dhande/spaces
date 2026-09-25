@@ -103,6 +103,71 @@ extension WorkspaceOrchestrator {
         return true
     }
 
+    /// Reconciles the running flag of the workspace owning a terminal session that ended on its own (the
+    /// user typed `exit`, or the shell's child died), the one end-of-session path with no call site of its
+    /// own to do it.
+    ///
+    /// Every explicit stop already recomputes the flag where it removes the session's rows
+    /// (`removeAdHocBuiltInTerminalSession`, `stopRunningProcess`, the agent chokepoint). A natural exit
+    /// removes no rows at all: the pane's `runtime_targets` row is kept so the ended pane stays listed and
+    /// reopenable, and the session's ended state is the only thing that changes. That state is what
+    /// `windowIsLiveRuntimeIndicator` reads, so the caller must let the daemon's write-behind `.exited`
+    /// write commit before calling in.
+    ///
+    /// Takes the workspace lifecycle gate, as the stop paths do, and waits for a contended one rather than
+    /// giving up on it. Plenty of gate holders leave the running flag alone (hiding a workspace, editing
+    /// its settings), so a dropped reconcile is a flag that stays true with nothing alive behind it, and on
+    /// the home workspace no later action repairs it. Every holder is one bounded lifecycle operation, and
+    /// the indicators are recomputed once the gate is granted, so waiting costs only the delay: a holder
+    /// that starts something live in the meantime leaves an indicator the reconcile then respects. The
+    /// caller runs this off the engine and main actors, on a thread that can block.
+    public func clearWorkspaceRunningAfterTerminalSessionExit(sessionID: String) throws {
+        guard let sessionID = normalizedTerminalSessionID(sessionID) else { return }
+        guard let workspace = try workspaceForBuiltInTerminalSession(sessionID: sessionID) else { return }
+        try withWorkspaceLifecycleLockWaiting(workspaceID: workspace.id) {
+            try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspace.id)
+        }
+    }
+
+    /// The daemon's startup repair of the terminal sessions an unclean exit left claiming a live state,
+    /// together with the running-flag reconcile that follows it. Returns the repair pass's own result so
+    /// the daemon can log what it could not repair and capture the coding agents it stranded.
+    ///
+    /// `TerminalSessionStaleRecovery.reconcile` owns the repair matrix and rewrites each stale row to a
+    /// terminal state without building a session core, so no closed core reports these ends and
+    /// `clearWorkspaceRunningAfterTerminalSessionExit` never runs for them. The repaired session's pane
+    /// keeps its `runtime_targets` row, as every ended pane does, and that row stops counting as a runtime
+    /// indicator the moment the repair lands, so the owning workspace would keep reading Running with
+    /// nothing alive in it until a manual Stop, which the home workspace does not offer, or the retention
+    /// sweep.
+    ///
+    /// The reconcile covers every workspace whose stored running flag is set, not just the owners of the
+    /// sessions this pass repaired, so it also heals the workspace of a session that ended on its own in
+    /// the moment before the daemon stopped: that session is already in an ended state, so the repair pass
+    /// has nothing to rewrite for it, while its natural-exit reconcile can have died with the daemon that
+    /// queued it. One rule decides every one of them, the same rule every other reconcile applies: a
+    /// workspace that still holds a live runtime indicator keeps its flag
+    /// (`clearWorkspaceRunningIfNoTrackedRuntimeIndicators`), so a workspace whose sessions this pass left
+    /// live, and one whose repair write could not commit, are both left running.
+    ///
+    /// - Parameters:
+    ///   - adoptedSessionIDs: the sessions this daemon image adopted from the handoff table, which are live
+    ///     under this pid and therefore exempt from repair.
+    ///   - resumedFromHandoff: whether this daemon image consumed a handoff table at startup. Forwarded
+    ///     untouched to the repair matrix, which reads it to tell an `execv` successor's leftover rows
+    ///     (`.exited`) from rows stranded under a reissued pid by an unclean exit (`.failed`).
+    ///   - isProcessAlive: liveness probe for a row's foreign `service_pid`, injected so the daemon shares
+    ///     its own probe and a test can drive the dead-pid branch deterministically.
+    @discardableResult public func recoverStaleTerminalSessions(
+        adoptedSessionIDs: Set<String>, resumedFromHandoff: Bool, isProcessAlive: (Int32) -> Bool
+    ) throws -> TerminalSessionStaleRecovery.ReconcileResult {
+        let result = try TerminalSessionStaleRecovery.reconcile(
+            ownPID: getpid(), adoptedSessionIDs: adoptedSessionIDs, resumedFromHandoff: resumedFromHandoff, isProcessAlive: isProcessAlive)
+        let runningWorkspaceIDs = try store.projects().flatMap { try store.workspaces(projectID: $0.id) }.filter(\.isRunning).map(\.id)
+        try reconcileWorkspaceRunning(workspaceIDs: Set(runningWorkspaceIDs))
+        return result
+    }
+
     /// Stops an ad hoc built-in terminal session whose owning pane the user just closed, but only when
     /// the terminal is sitting at a bare prompt with nothing left holding it. Returns whether the session
     /// was terminated; `false` means it was kept and stays recoverable in the sidebar.
@@ -509,8 +574,7 @@ extension WorkspaceOrchestrator {
         // not a verdict on this launch; trusting it would let liveness probes tear down a live relaunch.
         if let pending = TerminalSessionPendingLaunchRegistry.shared.pendingLaunchConfiguration(sessionID: sessionID) {
             guard let createdAt = TerminalSessionTimestamp.date(from: pending.createdAt) else { return false }
-            let age = now.timeIntervalSince(createdAt)
-            return age >= -5 && age < 60
+            return BuiltInTerminalLaunchWindow.covers(createdAt: createdAt, now: now)
         }
         if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths),
             runtimeState.state != .starting && runtimeState.state != .running
@@ -520,8 +584,7 @@ extension WorkspaceOrchestrator {
         guard let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths),
             let createdAt = TerminalSessionTimestamp.date(from: launchConfiguration.createdAt)
         else { return false }
-        let age = now.timeIntervalSince(createdAt)
-        return age >= -5 && age < 60
+        return BuiltInTerminalLaunchWindow.covers(createdAt: createdAt, now: now)
     }
 
     func builtInSessionLaunchIsPendingBeforeOwnerAttachment(sessionID: String, now: Date = Date()) -> Bool {
@@ -712,6 +775,14 @@ extension WorkspaceOrchestrator {
     }
 
     func terminalSessionID(for window: WindowRecord) -> String? { normalizedTerminalSessionID(window.terminalTrackingID) }
+
+    /// The built-in terminal session a `runtime_targets` row holds, or nil when the row holds none whose
+    /// end Spaces could read: a browser target has no session at all, and a terminal hosted by another app
+    /// has one whose lifetime Spaces does not track.
+    func builtInTerminalSessionID(for window: WindowRecord) -> String? {
+        guard window.roleValue == .terminal, terminalHost(for: window.app) == .spaces else { return nil }
+        return terminalSessionID(for: window)
+    }
 
     func normalizedTerminalSessionID(_ value: String?) -> String? {
         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }

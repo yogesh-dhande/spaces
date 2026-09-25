@@ -104,7 +104,8 @@ extension ProcessProfileEnvironmentSuites {
         {
             SpacesDeviceWorkspaceSummary(
                 id: Self.workspaceID, projectID: Self.projectID, projectName: "Project", branch: "feature", baseBranch: "main",
-                dir: "/tmp/project-feature", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1, codingAgentRows: codingAgentRows,
+                dir: "/tmp/project-feature", isRunning: true, isHidden: false, isDefault: false,
+                hasTrackedRuntimeIndicators: !(codingAgentRows.isEmpty && terminalRows.isEmpty), codingAgentRows: codingAgentRows,
                 terminalRows: terminalRows)
         }
 
@@ -150,7 +151,9 @@ extension ProcessProfileEnvironmentSuites {
             let row = try #require(runtimeTargetRow(controller, key: targetKey), "the expanded workspace must list the target row")
             let before = labels(in: try #require(paintedCell(controller, row: row), "the outline must have materialized the target row's cell"))
 
-            controller.deviceModel.deviceSections = [section(deviceID: controller.deviceModel.localDeviceID, workspace: workspaceWithLiveTitle(liveTitle))]
+            controller.deviceModel.deviceSections = [
+                section(deviceID: controller.deviceModel.localDeviceID, workspace: workspaceWithLiveTitle(liveTitle))
+            ]
             controller.sidebar.applySidebarDataChange()
 
             let after = labels(in: try #require(paintedCell(controller, row: row), "the repaint must leave a cell on screen for the row"))

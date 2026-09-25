@@ -27,8 +27,8 @@ enum WorkspacePanelEmptyStateAction: Equatable {
 extension WorkspacePanelEmptyState {
     /// Start is offered only while the workspace has something to start, the same rule the sidebar row
     /// menu, the workspace footer, and the iOS control bar follow: a running workspace with every
-    /// configured process up has nothing left for Start to do, so its empty panel offers New terminal
-    /// alone rather than a control that cannot fire.
+    /// configured process up has nothing left for Start to do, and the home row has no lifecycle at all,
+    /// so either one's empty panel offers New terminal alone rather than a control that cannot fire.
     var offeredActions: [WorkspacePanelEmptyStateAction] { offersStart ? [.start, .newTerminal] : [.newTerminal] }
 
     /// Both actions write through the workspace's own daemon, so an unreachable device offers them

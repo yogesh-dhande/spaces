@@ -17,7 +17,7 @@ struct DeviceSectionContentTests {
     ) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
             id: id, projectID: projectID, projectName: "Project", branch: "feature", baseBranch: "main", dir: "/device/\(id)", isRunning: isRunning,
-            isHidden: isHidden, isDefault: false, notes: nil, sessionCount: 0, assignedPorts: [], setupState: nil,
+            isHidden: isHidden, isDefault: false, notes: nil, hasTrackedRuntimeIndicators: false, assignedPorts: [], setupState: nil,
             config: SpacesDeviceWorkspaceConfig(), processRows: processRows, terminalRows: [])
     }
 
@@ -42,8 +42,8 @@ struct DeviceSectionContentTests {
     private func failedAutomationRun() -> TerminalServiceAutomationRunSummary {
         TerminalServiceAutomationRunSummary(
             id: "run-1", automationID: "auto-1", automationName: "nightly", kind: "script", status: "failed", trigger: "schedule", skipReason: nil,
-            exitCode: 1, terminalSessionID: nil, startedAt: "2026-06-28T09:00:00Z", endedAt: "2026-06-28T09:01:00Z",
-            createdAt: "2026-06-28T09:00:00Z")
+            exitCode: 1, terminalSessionID: nil, startedAt: "2026-06-28T09:00:00Z", endedAt: "2026-06-28T09:01:00Z", createdAt: "2026-06-28T09:00:00Z"
+        )
     }
 
     /// One fixture shared by every test: two projects, a hidden workspace, a running workspace with an
@@ -56,8 +56,7 @@ struct DeviceSectionContentTests {
             workspaces: [
                 workspace(id: "ws-running", processRows: [exitedProcess(id: "p1", processID: "run-1", exitedAt: "2026-06-28T10:00:00Z")]),
                 workspace(id: "ws-hidden", projectID: "project-2", isRunning: false, isHidden: true),
-            ],
-            sessions: [session(id: "s1", workspaceID: "ws-running", title: "shell-1", bellAt: "2026-06-28T09:00:00Z")] + extraSessions,
+            ], sessions: [session(id: "s1", workspaceID: "ws-running", title: "shell-1", bellAt: "2026-06-28T09:00:00Z")] + extraSessions,
             daemonStatus: .testStatus, automationRuns: [failedAutomationRun()])
     }
 
@@ -108,8 +107,9 @@ struct DeviceSectionContentTests {
     @Test func hiddenWorkspaceAlertsGroupIsFlagged() {
         // The hidden workspace has no bell/exit of its own in the base fixture; add one via a variant
         // overview so its group actually derives and can be checked for the hidden flag.
-        let overview = fixtureOverview(
-            extraSessions: [session(id: "s2", workspaceID: "ws-hidden", title: "hidden-shell", bellAt: "2026-06-28T09:05:00Z")])
+        let overview = fixtureOverview(extraSessions: [
+            session(id: "s2", workspaceID: "ws-hidden", title: "hidden-shell", bellAt: "2026-06-28T09:05:00Z")
+        ])
         let withHiddenAlert = DeviceSectionContent.derive(from: overview, deviceID: "local", deviceName: "Local", projectCollapseStates: [:])
 
         let hiddenGroup = withHiddenAlert.alertsGroups.first { $0.workspaceID == "ws-hidden" }

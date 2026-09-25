@@ -10,13 +10,21 @@ import workspacecore
 
 @Suite struct AppKitControllerDeviceParityTests {
     @Test func sidebarProjectActionsDoNotDependOnDeviceLocation() {
-        let gitProjectActions = AppKitController.sidebarProjectActions(isGitRepo: true)
+        let gitProjectActions = AppKitController.sidebarProjectActions(isGitRepo: true, kind: .standard)
         #expect(gitProjectActions.showsSettings)
         #expect(gitProjectActions.showsAddWorkspace)
 
-        let folderProjectActions = AppKitController.sidebarProjectActions(isGitRepo: false)
+        let folderProjectActions = AppKitController.sidebarProjectActions(isGitRepo: false, kind: .standard)
         #expect(folderProjectActions.showsSettings)
         #expect(!folderProjectActions.showsAddWorkspace)
+    }
+
+    /// The home row carries neither accessory: it has no configuration a settings dialog could edit, and
+    /// it owns exactly one workspace it can never add to.
+    @Test func homeProjectRowOffersNeitherSettingsNorNewWorkspace() {
+        let homeProjectActions = AppKitController.sidebarProjectActions(isGitRepo: false, kind: .home)
+        #expect(!homeProjectActions.showsSettings)
+        #expect(!homeProjectActions.showsAddWorkspace)
     }
 
     @Test func localDeviceShowsOfflineWhenDaemonUnreachableMirroringRemote() {
@@ -348,7 +356,7 @@ import workspacecore
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
                     dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false,
-                    notes: "Remote and local use this same payload.", sessionCount: 1,
+                    notes: "Remote and local use this same payload.", hasTrackedRuntimeIndicators: true,
                     assignedPorts: [SpacesDeviceAssignedPort(name: "WEB", port: 3000)],
                     setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
                     config: SpacesDeviceWorkspaceConfig(
@@ -390,13 +398,39 @@ import workspacecore
         #expect(runtime?.waitingAgentWindowCount == 1)
     }
 
+    /// "Tracked runtime leftovers" warns about a stopped workspace that still holds live runtime. A
+    /// terminal that ended on its own is not runtime, and its row stays listed so its output can still be
+    /// read, so a workspace left holding only ended rows draws no warning. The daemon's verdict on the
+    /// payload decides that; the rows cannot tell a kept ended row from a live one.
+    @Test func deviceOverviewMappingDrawsNoRuntimeWarningForAStoppedWorkspaceWhoseOnlyTerminalEnded() {
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
+                    dir: "/device/project-feature", isRunning: false, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false,
+                    terminalRows: [
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-shell", workspaceID: "workspace-1", title: "shell-1", workingDirectory: "/device/project-feature",
+                            sessionID: "session-shell", runState: .exited, canOpenTerminal: true, canStop: false)
+                    ])
+            ], sessions: [])
+
+        let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: "remote-device")
+        let runtime = mapped.workspaceRuntimeStatusByID["workspace-1"]
+
+        #expect(runtime?.lifecycleState == .stopped)
+        #expect(runtime?.hasTrackedRuntimeIndicators == false)
+        #expect(runtime?.warningSummary == nil)
+    }
+
     @Test func deviceOverviewBuildsCommandPaletteWorkspaceActions() {
         let overview = SpacesDeviceOverviewPayload(
             projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 3,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, hasTrackedRuntimeIndicators: true,
                     assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
                     config: SpacesDeviceWorkspaceConfig(
                         processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")],
@@ -438,8 +472,9 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: false, isHidden: false, isDefault: false, notes: nil, sessionCount: 0,
-                    assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded), config: SpacesDeviceWorkspaceConfig())
+                    dir: "/device/project-feature", isRunning: false, isHidden: false, isDefault: false, notes: nil,
+                    hasTrackedRuntimeIndicators: false, assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
+                    config: SpacesDeviceWorkspaceConfig())
             ], sessions: [])
 
         let items = CommandPaletteController.deviceCommandPaletteWorkspaceItems(from: overview)
@@ -458,7 +493,7 @@ import workspacecore
         func workspace(id: String, projectID: String, isHidden: Bool) -> SpacesDeviceWorkspaceSummary {
             SpacesDeviceWorkspaceSummary(
                 id: id, projectID: projectID, projectName: "Project", branch: "feature", baseBranch: "main", dir: "/device/\(id)", isRunning: true,
-                isHidden: isHidden, isDefault: false, notes: nil, sessionCount: 1, assignedPorts: [],
+                isHidden: isHidden, isDefault: false, notes: nil, hasTrackedRuntimeIndicators: true, assignedPorts: [],
                 setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded), config: SpacesDeviceWorkspaceConfig(),
                 terminalRows: [
                     SpacesDeviceWorkspaceTerminalRow(
@@ -518,7 +553,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 2,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, hasTrackedRuntimeIndicators: true,
                     assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded), config: SpacesDeviceWorkspaceConfig(),
                     terminalRows: [
                         SpacesDeviceWorkspaceTerminalRow(
@@ -546,7 +581,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 2,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, hasTrackedRuntimeIndicators: true,
                     assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded), config: SpacesDeviceWorkspaceConfig(),
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
@@ -574,7 +609,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 2,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, hasTrackedRuntimeIndicators: true,
                     assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded), config: SpacesDeviceWorkspaceConfig(),
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
@@ -617,7 +652,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 1,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, hasTrackedRuntimeIndicators: true,
                     assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
                     config: SpacesDeviceWorkspaceConfig(processes: [
                         SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")
@@ -656,7 +691,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 1,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, hasTrackedRuntimeIndicators: true,
                     assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded), config: SpacesDeviceWorkspaceConfig(),
                     terminalRows: [
                         SpacesDeviceWorkspaceTerminalRow(
@@ -733,7 +768,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "remote-workspace", projectID: "remote-project", projectName: "Remote Project", branch: "feature", baseBranch: "main",
-                    dir: "/remote/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 2,
+                    dir: "/remote/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, hasTrackedRuntimeIndicators: true,
                     assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded), config: SpacesDeviceWorkspaceConfig(),
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
@@ -812,7 +847,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 1,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, hasTrackedRuntimeIndicators: true,
                     assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
                     config: SpacesDeviceWorkspaceConfig(processes: [
                         SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")
@@ -840,7 +875,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true,
                     config: SpacesDeviceWorkspaceConfig(processes: [
                         SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")
                     ]),
@@ -1034,7 +1069,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true,
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "agent:agent-1", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "agent-1",
@@ -1228,7 +1263,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true,
                     terminalRows: [
                         SpacesDeviceWorkspaceTerminalRow(
                             id: "terminal-shell", workspaceID: "workspace-1", title: "shell-1", workingDirectory: "/device/project-feature",
@@ -1254,7 +1289,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true,
                     config: SpacesDeviceWorkspaceConfig(processes: [
                         SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")
                     ]),
@@ -1284,7 +1319,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true,
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "agent:running-agent", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "running-agent",
@@ -1563,7 +1598,7 @@ import workspacecore
     /// here is built by the daemon's own row derivation rather than hand-assembled, since whether the
     /// session is published at all is that derivation's decision.
     @Test func coldResolveOpensAnEndedSessionHeldOnlyByItsTerminalWindowRow() async throws {
-        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main", kind: .standard)
         let workspace = WorkspaceRecord(
             id: "workspace-ended", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
             lastLaunchedAt: nil)

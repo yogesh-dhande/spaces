@@ -17,7 +17,7 @@ public struct SpacesDeviceProjectSettingsViewModel: Equatable, Sendable {
         isGitRepo = project.isGitRepo
         defaultBranch = project.defaultBranch
         config = project.config
-        actions = SpacesDeviceProjectActions(isGitRepo: project.isGitRepo)
+        actions = SpacesDeviceProjectActions(isGitRepo: project.isGitRepo, kind: project.kind)
     }
 }
 

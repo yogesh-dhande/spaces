@@ -377,7 +377,7 @@ extension ProcessProfileEnvironmentSuites {
         {
             let workspace = SpacesDeviceWorkspaceSummary(
                 id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/workspace-1",
-                isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
+                isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true,
                 processRows: [
                     SpacesDeviceWorkspaceProcessRow(
                         id: "api", workspaceID: "workspace-1", name: "api", command: "echo api", processID: "process-1", sessionID: processSessionID,

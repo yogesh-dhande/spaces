@@ -54,7 +54,8 @@ extension ProcessProfileEnvironmentSuites {
         private func section(deviceID: String, sessionIDs: [String], workspaceID: String = "workspace-1") -> AppKitController.DeviceSection {
             let workspace = SpacesDeviceWorkspaceSummary(
                 id: workspaceID, projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/\(workspaceID)",
-                isRunning: true, isHidden: false, isDefault: false, sessionCount: sessionIDs.count, processRows: [], codingAgentRows: [])
+                isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: !sessionIDs.isEmpty, processRows: [],
+                codingAgentRows: [])
             let overview = SpacesDeviceOverviewPayload(
                 projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
                 workspaces: [workspace],

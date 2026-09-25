@@ -2495,36 +2495,6 @@ end run
 APPLESCRIPT
 }
 
-ui_select_outline_row() {
-  local row_index="$1"
-  wait_for_spaces_splitter_ready
-  osascript - "$SPACES_PID" "$row_index" <<'APPLESCRIPT'
-on run argv
-  set targetPID to (item 1 of argv) as integer
-  set targetRow to (item 2 of argv) as integer
-  tell application "System Events"
-    repeat with proc in every process whose unix id is targetPID
-      repeat with targetWindow in windows of proc
-        set windowTitle to ""
-        set windowIdentifier to ""
-        try
-          set windowTitle to (name of targetWindow) as text
-        end try
-        try
-          set windowIdentifier to (value of attribute "AXIdentifier" of targetWindow) as text
-        end try
-        if windowIdentifier is "spaces-main-window" or windowTitle is "Spaces" then
-          select row targetRow of outline 1 of scroll area 1 of splitter group 1 of targetWindow
-          return
-        end if
-      end repeat
-    end repeat
-  end tell
-  error "main window not found"
-end run
-APPLESCRIPT
-}
-
 ui_show_workspace_detail() {
   local workspace_dir="$1"
   local workspace_title="$2"
@@ -2611,8 +2581,10 @@ set_workspace_stop_script_via_gui() {
 archive_workspace_via_gui() {
   local workspace_dir="$1"
   log_step "archiving workspace via GUI"
-  wait_for_spaces_frontmost_ready
-  ui_select_outline_row 2
+  # Selected by directory rather than by outline row index: the sidebar's first rows are the device
+  # section header and that device's home row, so a fixed index names a different row as the sidebar
+  # grows.
+  ui_show_workspace_detail "$workspace_dir" ""
   sleep 0.5
   ui_click_button_description "Delete"
   osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true

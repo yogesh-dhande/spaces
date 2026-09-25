@@ -1,4 +1,5 @@
 import XCTest
+import spacesdevicecore
 import spacesterminalcore
 
 @testable import workspacecore
@@ -2035,6 +2036,36 @@ import spacesterminalcore
         XCTAssertEqual(try harness.store.automation(id: automation.id)?.name, automation.name, "the rejected update must not persist")
     }
 
+    /// `~` supports terminals and nothing else, so it is not an automation target: the daemon refuses it at
+    /// the one door every client and the Device API create an automation through.
+    func testCreateRejectsAutomationTargetingTheHomeWorkspace() throws {
+        let harness = try Harness(self)
+        let homeWorkspaceID = try harness.insertHomeWorkspace()
+        let draft = AutomationDraft(
+            name: "Home target", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script, script: "true",
+            workspaceID: homeWorkspaceID, timeoutSeconds: nil, concurrencyPolicy: .queue, missedRunPolicy: .runOnce)
+
+        XCTAssertThrowsError(try harness.service.createAutomation(draft)) { error in
+            XCTAssertTrue(error is AutomationValidationError, "the home workspace is a user-facing validation error")
+        }
+        XCTAssertTrue(try harness.service.listAutomations().isEmpty, "the rejected draft must not persist")
+    }
+
+    /// The same refusal on update, so an existing automation cannot be retargeted onto `~`.
+    func testUpdateRejectsRetargetingAnAutomationOntoTheHomeWorkspace() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation()
+        let homeWorkspaceID = try harness.insertHomeWorkspace()
+        let draft = AutomationDraft(
+            name: "Retargeted home", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script, script: "true",
+            workspaceID: homeWorkspaceID, timeoutSeconds: nil, concurrencyPolicy: .queue, missedRunPolicy: .runOnce)
+
+        XCTAssertThrowsError(try harness.service.updateAutomation(id: automation.id, draft: draft)) { error in
+            XCTAssertTrue(error is AutomationValidationError, "the home workspace is a user-facing validation error")
+        }
+        XCTAssertEqual(try harness.store.automation(id: automation.id)?.workspaceID, automation.workspaceID, "the rejected update must not persist")
+    }
+
     // MARK: - Kind-change guard
 
     /// Switching an automation between Script and Agent while a run is queued or running is rejected — the
@@ -2579,6 +2610,19 @@ import spacesterminalcore
             nextFireTime: nextFireTime, createdAt: now(), updatedAt: now(), nextFireOverride: nextFireOverride)
         try store.upsertAutomation(automation)
         return automation
+    }
+
+    /// Seeds this daemon's home project and its single workspace, the shape `ensureHomeProject` leaves
+    /// behind, so a draft can name it as its target.
+    func insertHomeWorkspace() throws -> String {
+        let directory = try makeTempDirectory().appendingPathComponent("home", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let project = ProjectRecord(
+            id: UUID().uuidString, name: ProjectKind.homeProjectName, dir: directory.path, isGitRepo: false, defaultBranch: nil, kind: .home)
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: directory.path)
+        try store.upsert(workspace: workspace)
+        return workspace.id
     }
 
     func insertAgentAutomation(

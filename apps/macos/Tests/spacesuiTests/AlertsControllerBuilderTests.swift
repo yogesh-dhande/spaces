@@ -17,7 +17,7 @@ struct AlertsControllerBuilderTests {
     ) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
             id: id, projectID: projectID, projectName: "Project", branch: "feature", baseBranch: "main", dir: "/device/\(id)", isRunning: isRunning,
-            isHidden: isHidden, isDefault: false, notes: nil, sessionCount: 0, assignedPorts: [], setupState: nil,
+            isHidden: isHidden, isDefault: false, notes: nil, hasTrackedRuntimeIndicators: false, assignedPorts: [], setupState: nil,
             config: SpacesDeviceWorkspaceConfig(), processRows: processRows, codingAgentRows: codingAgentRows, terminalRows: [])
     }
 

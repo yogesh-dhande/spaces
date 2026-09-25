@@ -1,7 +1,7 @@
 import Foundation
 import workspacecore
 
-/// The rules deciding which projects and workspaces the sidebar shows.
+/// The rules deciding which projects and workspaces the sidebar shows, and the order it shows them in.
 ///
 /// Every surface that renders the sidebar's model — the outline itself, arrow navigation, the
 /// window cycle order, the automation editor's workspace picker — reads through
@@ -10,6 +10,10 @@ import workspacecore
 /// (`orderedSessionPickerWorkspaceContexts`) list the same rows in the same order and call these
 /// rules directly. Keeping the rules here (pure, host-free) is what stops "is this row shown?" from
 /// being re-answered slightly differently at each of those sites.
+///
+/// `deviceProjects` also hoists the device's home project to the front of the list it returns, ahead
+/// of every other rule reading through it: see that function for why the hoist belongs here rather
+/// than in the daemon's ordering.
 ///
 /// The Workspaces visibility dialog deliberately does not use these: it lists everything, because it
 /// is the only surface that can bring a hidden row back.
@@ -37,10 +41,20 @@ enum SidebarVisibility {
     /// that selects nothing.
     static func deviceProjects(_ projects: [ProjectSummary], deviceID: String, workspacesByProject: [String: [WorkspaceSummary]]) -> [ProjectSummary]
     {
-        projects.filter { project in
+        let visible = projects.filter { project in
             guard project.deviceID == deviceID, !project.isHidden else { return false }
             guard !project.isGitRepo else { return true }
             return (workspacesByProject[project.id] ?? []).contains { isVisibleWorkspace($0, inProject: project) }
         }
+        // The daemon orders projects by name, and `~` sorts after every letter, so passing that order
+        // straight through would put the home row last. Where the home row sits in the list is a
+        // presentation decision, not a fact about the projects, so it is made here rather than by the
+        // daemon: doing it in this one shared function is what gives the outline, arrow navigation, the
+        // command palette, the session picker, and the automation picker the same order without each
+        // one re-deciding it. A stable partition (filter, not sort) keeps every other project's
+        // relative order exactly as the daemon sent it.
+        let home = visible.filter { $0.kind == .home }
+        let rest = visible.filter { $0.kind != .home }
+        return home + rest
     }
 }

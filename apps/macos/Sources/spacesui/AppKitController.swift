@@ -77,6 +77,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// never trigger (see `MainWindowCloseBehaviorTests`'s reasoning for the same restriction). Nil in
     /// production, so this changes nothing there.
     var showPanelScopeOverrideForTesting: ((PanelScope) -> Void)?
+    /// Test-only override that replaces the Device API creation `openWorkspaceTerminal` makes, which asks
+    /// the workspace's daemon for a new session: a unit test process has no daemon to answer, and the
+    /// refusal would put up a modal. Receives the workspace the creation was asked for and the completion
+    /// that creation resolves, so a test can answer it with a session, hold it to stand in for a device
+    /// that takes its time, or leave it unanswered. Everything `openWorkspaceTerminal` does around the
+    /// creation still runs. Nil in production, so this changes nothing there.
+    var createWorkspaceTerminalSessionOverrideForTesting: ((String, @escaping (DeviceTerminalOpenRequest?) -> Void) -> Void)?
+    /// Test-only override that replaces `showError`'s modal alert: a unit test process must never run a
+    /// modal, so a path a test asserts never raises an error needs somewhere for a regression's error to
+    /// land instead of blocking the run. Nil in production, so this changes nothing there.
+    var showErrorOverrideForTesting: ((any Error) -> Void)?
     private var splitView: NSSplitView?
     let outlineView = SidebarOutlineView()
     lazy var sidebar = SidebarController(host: self)
@@ -110,6 +121,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// preserving the restore-then-follow rule (a reopened monitor stays on its persisted workspace
     /// until a real selection change).
     private var lastPresentedWorkspaceDetailID: String?
+    /// The workspace whose selection has not yet made its home-row auto-open decision. Armed by every
+    /// change of `selectedWorkspaceID` and consumed by the presentation that decides
+    /// (`showWorkspaceDetail`, which runs `autoOpenHomeTerminalIfNeeded`, and that in turn ignores every
+    /// row but `~`). Arming and deciding are separate steps because the decision reads the workspace's
+    /// running terminal sessions, which only its device's overview carries: a selection landing before
+    /// that overview shows the loading placeholder and leaves the token armed, so the presentation that
+    /// follows the overview's arrival decides instead. Being replaced on every selection change and
+    /// cleared on consumption is what keeps one selection to at most one auto-open: the overview ticks
+    /// that re-present the selected row find no token, and a selection the user has moved away from has
+    /// had its token replaced by the row they moved to.
+    private var pendingHomeAutoOpenWorkspaceID: String?
     var visibleCompatibilityBlockDeviceID: String? { detailPane.compatibilityBlockDeviceID }
     var showingAlerts: Bool { detailPane.isAlerts }
     var showingAutomations: Bool { detailPane.isAutomations }
@@ -125,11 +147,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// `applyDeviceOverview`'s preferred-workspace apply) funnels through this setter, so it is the
     /// one place Workspace mode's cycling row needs to hear about a selection change; `refreshCycleModeRow`
     /// is cheap (an in-memory rebuild, no Chrome/daemon round trip) so running it here on every actual
-    /// change costs nothing a caller-by-caller trigger would have avoided.
+    /// change costs nothing a caller-by-caller trigger would have avoided. Being that one place is also
+    /// what makes it where the home row's auto-open is armed (see `pendingHomeAutoOpenWorkspaceID`).
     var selectedWorkspaceID: String? {
         didSet {
             overlays.updateOperationProgressOverlayVisibility()
-            if oldValue != selectedWorkspaceID { sidebar.refreshCycleModeRow() }
+            guard oldValue != selectedWorkspaceID else { return }
+            // Arming off the selection itself, rather than off the detail pane's presentation history, is
+            // what makes a detour count: Alerts and Automations clear the selection without selecting
+            // another row, so coming back to the row the user left changes the selection again, which is
+            // exactly what they did.
+            pendingHomeAutoOpenWorkspaceID = selectedWorkspaceID
+            sidebar.refreshCycleModeRow()
         }
     }
     var lastSelectedRow: Int = -1
@@ -1829,14 +1858,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let model = SpacesDeviceOverviewViewModel(overview: overview)
         let projects = model.projects.map {
             ProjectSummary(
-                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isHidden: $0.isHidden,
+                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, kind: $0.kind, isHidden: $0.isHidden,
                 isCollapsed: projectCollapseStates[$0.id] ?? false, deviceID: deviceID)
         }
         let workspacesByProject = model.workspacesByProject.mapValues { workspaces in
             workspaces.map {
+                // `$0.projectKind` comes straight off the wire summary rather than a lookup into
+                // `projects` above: the daemon already denormalizes it onto every workspace row.
                 WorkspaceSummary(
                     id: $0.id, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning, isHidden: $0.isHidden,
-                    isDefault: $0.isDefault, notes: $0.notes, deviceID: deviceID)
+                    isDefault: $0.isDefault, notes: $0.notes, projectKind: $0.projectKind, deviceID: deviceID)
             }
         }
         let workspaceRuntimeStatusByID = model.workspaceRuntimeStatusByID.mapValues { runtime in
@@ -1856,8 +1887,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let showsAddWorkspace: Bool
     }
 
-    nonisolated static func sidebarProjectActions(isGitRepo: Bool) -> SidebarProjectActions {
-        let actions = SpacesDeviceProjectActions(isGitRepo: isGitRepo)
+    nonisolated static func sidebarProjectActions(isGitRepo: Bool, kind: ProjectKind) -> SidebarProjectActions {
+        let actions = SpacesDeviceProjectActions(isGitRepo: isGitRepo, kind: kind)
         return SidebarProjectActions(showsSettings: actions.showsSettings, showsAddWorkspace: actions.showsAddWorkspace)
     }
 
@@ -2005,8 +2036,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return mainWindowIsFocused || commandPaletteIsVisible
     }
 
-    /// Whether the workspace lifecycle controls (sidebar row context menu, detail footer) should offer
-    /// Start, alongside Restart/Stop when the workspace is already running.
+    /// Whether the workspace lifecycle controls (sidebar row context menu, detail footer, and the panel's
+    /// empty state) should offer Start, alongside Restart/Stop when the workspace is already running.
+    ///
+    /// A project kind without a workspace lifecycle (`ProjectKind.hasWorkspaceLifecycle`) never offers it:
+    /// the home row has no configured process to start and the daemon refuses Start for it, so the kind is
+    /// part of this one predicate rather than a separate check each surface makes for itself.
     ///
     /// `isRunning` turns true the instant an ad hoc terminal or coding-agent session starts
     /// (`markWorkspaceRunningIfNeeded`, called from `launchWorkspaceCommandSession` and
@@ -2016,9 +2051,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// this) hid it exactly in that state and left Restart, which tears down the ad hoc terminal or agent
     /// session, as the only reachable action, the opposite of Start's convergent contract, which leaves
     /// them untouched.
-    nonisolated static func workspaceLifecycleControlsOfferStart(isRunning: Bool, missingConfiguredProcessCount: Int) -> Bool {
-        !isRunning || missingConfiguredProcessCount > 0
-    }
+    nonisolated static func workspaceLifecycleControlsOfferStart(projectKind: ProjectKind, isRunning: Bool, missingConfiguredProcessCount: Int)
+        -> Bool
+    { projectKind.hasWorkspaceLifecycle && (!isRunning || missingConfiguredProcessCount > 0) }
 
     struct WorkspaceRunProcessEntry: Sendable {
         enum Kind: Sendable, Equatable {
@@ -2971,21 +3006,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// The workspaces available to an `agent`-kind automation on a device, read from the sidebar's already
     /// loaded project/workspace model (the same source the sidebar renders), so the editor adds no new fetch
-    /// path. Ordered by the sidebar's project order, visible (non-archived, non-hidden) workspaces only.
+    /// path. Ordered by the sidebar's project order, visible (non-archived, non-hidden) workspaces only, and
+    /// without the home project's (see `AutomationsViewModel.visibleWorkspaceChoices`).
     /// `preservingWorkspaceID` keeps an automation's stored target in the list even when that workspace has
     /// since been hidden (by its own flag or by its project's), so editing an unrelated field never silently
     /// retargets it (see
     /// `AutomationsViewModel.workspaceChoices`); the hidden target's real name is resolved through
     /// `findWorkspace`, which includes hidden workspaces.
     func automationWorkspaceChoices(deviceID: String, preservingWorkspaceID: String? = nil) -> [AutomationWorkspaceChoice] {
-        let visible = deviceProjects(deviceID: deviceID).flatMap { project in
-            visibleWorkspaces(projectID: project.id).map { workspace in
-                AutomationsViewModel.WorkspaceChoice(workspaceID: workspace.id, label: "\(project.name) / \(workspace.displayName)")
-            }
+        let visible = AutomationsViewModel.visibleWorkspaceChoices(projects: deviceProjects(deviceID: deviceID)) { projectID in
+            visibleWorkspaces(projectID: projectID)
         }
         let merged = AutomationsViewModel.workspaceChoices(visible: visible, preservingWorkspaceID: preservingWorkspaceID) { workspaceID in
             guard let (project, workspace) = findWorkspace(id: workspaceID) else { return nil }
-            return "\(project.name) / \(workspace.displayName)"
+            return AutomationsViewModel.workspaceChoiceLabel(project: project, workspace: workspace)
         }
         return merged.map { AutomationWorkspaceChoice(workspaceID: $0.workspaceID, label: $0.label) }
     }
@@ -3563,11 +3597,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // pane-replacement race to protect, so gating this on the same epoch would let a workspace
         // deletion this mutation response reports go unpruned indefinitely whenever it lands mid-race —
         // there is no guaranteed follow-up overview the way the terminal prune's self-heal relies on.
-        // The keep-set is workspace ids from this overview: a workspace absent from `overview.workspaces`
-        // was deleted, not merely hidden (a hidden workspace stays listed with `isHidden` set). A
-        // reported orphaned global pane (the Editor pointed at the just-deleted workspace) is retargeted
-        // or closed right after, rather than left stranded pointing at nothing.
-        if let orphan = panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: Set(overview.workspaces.map(\.id))) {
+        // The keep-set is `OpenPanePruning.editorEligibleWorkspaceIDs`, shared with the local-snapshot and
+        // remote-overview install paths. A reported orphaned global pane (the Editor pointed at a
+        // just-deleted or just-adopted-to-home workspace) is retargeted or closed right after, rather than
+        // left stranded pointing at nothing or at a workspace whose files it can never list.
+        let editorEligibleWorkspaceIDs = OpenPanePruning.editorEligibleWorkspaceIDs(overview: overview)
+        if let orphan = panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: editorEligibleWorkspaceIDs) {
             resolveOrphanedGlobalEditorPane(excluding: orphan.workspaceID)
         }
         // Same overview this device's prune just consumed carries this device's agent rows too, so a
@@ -4321,11 +4356,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // handled correctly: the first compatible selection already recorded
         // `lastPresentedWorkspaceDetailID`, so the blocked visit in between leaves it untouched and the
         // later compatible selection still retargets against it.
-        // Captured before any branch below presents `workspace.id`: every remaining branch (the
-        // loading placeholder, the setup detail, or the full panel — including its own
-        // same-workspace fast path further down) ends up presenting this workspace, so this one
-        // comparison, made once here, covers all of them instead of needing to be repeated per
-        // branch. Read from `lastPresentedWorkspaceDetailID` rather than `visibleDetailWorkspaceID`:
+        // Recorded before any branch below presents `workspace.id`: every remaining branch (the
+        // loading placeholder, the setup detail, or the full panel, including its own same-workspace
+        // fast path further down) ends up presenting this workspace, so writing the presentation
+        // history once here keeps it complete whichever branch runs. Read from
+        // `lastPresentedWorkspaceDetailID` rather than `visibleDetailWorkspaceID`:
         // the latter is derived from `detailPane`, which goes `nil` the moment the user detours
         // through Alerts or Automations, even though that detour does not change which workspace
         // they last selected — comparing against it would silently skip the retarget on an
@@ -4341,11 +4376,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             // mode, discarding whatever it held in memory for the old workspace. A code pane in
             // the workspace's own panel (below) is untouched by this — it belongs to that one
             // workspace and never retargets.
-            panelCoordinator.retargetGlobalWindowCodePanes(toDeviceID: workspaceDeviceID, workspaceID: workspace.id)
+            // Gated on `project.kind.isEditorEligible`: the home row has no Editor (its file API
+            // is refused daemon-side), so selecting it must leave an open Editor pointed at
+            // whatever workspace it already had instead of retargeting it onto a dead end.
+            if project.kind.isEditorEligible {
+                panelCoordinator.retargetGlobalWindowCodePanes(toDeviceID: workspaceDeviceID, workspaceID: workspace.id)
+            }
         }
         // This workspace's device is compatible; every branch below presents the workspace pane
         // (`prepareWorkspaceDetailContainer`), which replaces any prior device's compatibility block.
         guard let deviceWorkspaceSummary = deviceWorkspaceSummary(workspaceID: workspace.id) else {
+            // The overview this device has not sent yet is where the auto-open decision's inputs live, so
+            // this presentation leaves the selection's token armed for the presentation that follows the
+            // overview's arrival, rather than deciding against state it cannot see.
             prepareWorkspaceDetailContainer(workspaceID: workspace.id, deviceID: workspaceDeviceID, presentation: presentation)
             showWorkspaceDetailLoadingPlaceholder(workspace: workspace)
             requestSidebarReload()
@@ -4364,6 +4407,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // nothing else; workspace identity and actions live in the footer strip below.
         let scope = PanelScope.workspace(deviceID: workspaceDeviceID, workspaceID: workspace.id)
         panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .focus)
+        // Decided here, after the persisted layout is adopted, so a relaunch that restores panes into
+        // this panel reads as the arranged panel it is, and ahead of the panel view's attachment below,
+        // which the auto-open's own asynchronous open does not wait for.
+        let selectionAwaitsAutoOpenDecision = pendingHomeAutoOpenWorkspaceID == workspace.id
+        pendingHomeAutoOpenWorkspaceID = nil
+        if selectionAwaitsAutoOpenDecision { autoOpenHomeTerminalIfNeeded(project: project, workspace: workspace) }
         let panelView = panelCoordinator.panelView(for: scope)
         // Overview ticks land here every few seconds. When this workspace's panel is
         // already the visible detail, tearing it down and re-adding it would dismiss
@@ -4410,17 +4459,57 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// (`workspaceLifecycleControlsOfferStart`), reading the missing-process count from the same
     /// runtime status the footer uses: a workspace with no reported status yet has no missing
     /// configured process to report either, so the count reads zero exactly as the footer's default
-    /// status does.
+    /// status does. The home row, which has no lifecycle at all, is left with New terminal alone by that
+    /// same predicate.
     func workspacePanelEmptyState(scope: PanelScope) -> WorkspacePanelEmptyState? {
         guard case .workspace(_, let workspaceID) = scope, let (_, workspace) = findWorkspace(id: workspaceID) else { return nil }
         let missingConfiguredProcessCount = deviceModel.workspaceRuntimeStatusByID[workspaceID]?.missingConfiguredProcessCount ?? 0
         return WorkspacePanelEmptyState(
             workspaceName: workspace.displayName, directory: workspace.dir,
             offersStart: Self.workspaceLifecycleControlsOfferStart(
-                isRunning: workspace.isRunning, missingConfiguredProcessCount: missingConfiguredProcessCount),
+                projectKind: workspace.projectKind, isRunning: workspace.isRunning, missingConfiguredProcessCount: missingConfiguredProcessCount),
             deviceAcceptsDaemonActions: deviceAcceptsDaemonActions(forWorkspaceID: workspaceID),
             unreachableDeviceTooltip: unreachableDeviceTooltip(forWorkspaceID: workspaceID),
             newTerminalShortcutHint: shortcuts.footerShortcutHint(for: .guiOpenTerminalShortcut))
+    }
+
+    /// Lands the user in a terminal when the home row becomes the selected row, without ever disturbing
+    /// panes they arranged or closed. The home row is a terminal-only row: it has no processes, no
+    /// Editor, and no lifecycle, so selecting it and finding an empty panel leaves one more click
+    /// between the user and the only thing that row does.
+    ///
+    /// Runs once per selection onto the row and does exactly one of:
+    /// - No terminal session running in the workspace: start a fresh ad hoc session and open it as a tab,
+    ///   the same creation the `New terminal` shortcut runs.
+    /// - Exactly one running session, and the workspace's panel holds no pane at all: open that session's
+    ///   pane, the same open clicking its sidebar row runs.
+    /// - Anything else: nothing. A panel that already holds a pane is the arrangement the user has, and
+    ///   two or more running sessions with no pane open means they closed those panes on purpose, so
+    ///   picking one of them to reopen would be a guess.
+    ///
+    /// Both actions need the workspace's device, so both are gated on it accepting daemon actions: the
+    /// first asks the daemon to create a session, and the second is always a cold pane open (this runs
+    /// only for an empty panel), which has to attach that session on the device before it can show
+    /// anything. Selecting a row is not a request to do either, so an unreachable device leaves the panel
+    /// empty instead of raising the unavailable-device alert the explicit `New terminal` affordance and
+    /// the sidebar row click show for a click the user actually made. Both carry that same intent into the
+    /// operation itself, as `.homeRowSelection`, so a device that drops after this gate passed leaves the
+    /// failure in the log rather than in an alert that could land once the user has moved on
+    /// (`terminalOpenFailureIsShown`), and both re-read the selection where they would present the row, so
+    /// one that finishes after the user selected another row is abandoned instead of pulling them back
+    /// (`terminalOpenMayPresentWorkspace`).
+    private func autoOpenHomeTerminalIfNeeded(project: ProjectSummary, workspace: WorkspaceSummary) {
+        guard project.kind == .home else { return }
+        guard panelCoordinator.layout(for: .workspace(deviceID: project.deviceID, workspaceID: workspace.id)).isEmpty else { return }
+        guard deviceAcceptsDaemonActions(forWorkspaceID: workspace.id) else { return }
+        // The rows the `~` row expands to, so "running" means here exactly what it means in the sidebar.
+        // Each of them is terminal-backed: a home workspace has no processes and no browser sessions.
+        let runningTerminals = sidebarRuntimeTargetItems(workspaceID: workspace.id).filter { $0.runState == .running && $0.sessionID != nil }
+        switch runningTerminals.count {
+        case 0: openWorkspaceTerminal(workspaceID: workspace.id, route: .homeRowSelection)
+        case 1: focusSidebarRuntimeTarget(workspaceID: workspace.id, key: runningTerminals[0].key, route: .homeRowSelection)
+        default: break
+        }
     }
 
     /// Everything `populateWorkspaceDetailFooter` draws, so a refresh that would draw the same strip can
@@ -4438,6 +4527,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let warningSummary: String?
         let deviceAcceptsDaemonActions: Bool
         let unreachableDeviceTooltip: String?
+        // Drives whether the notes, Start, Launch/Restart, and Stop controls are drawn at all (not just
+        // their state): a home workspace has no lifecycle and no notes of its own, so the signature must
+        // repaint when this flips even though every other field above could stay the same.
+        let projectKind: ProjectKind
+    }
+
+    /// Whether the footer strip draws its branch label. A git workspace's branch is shown only when it
+    /// differs from the displayed name (which is that same branch for a standard git workspace, so the
+    /// label would just repeat it) and only for a project kind whose footer has a lifecycle/configuration
+    /// surface to attach branch metadata to. The home row's footer carries only the run-state indicator,
+    /// `~`, the directory path, the focused pane title, and the overflow button (docs/spec.md); an adopted
+    /// git home keeps its checkout's branch on the workspace record so terminals keep resolving correctly,
+    /// but that branch is deliberately not part of what the home row's footer shows.
+    nonisolated static func workspaceFooterShowsBranch(branch: String, displayName: String, projectKind: ProjectKind) -> Bool {
+        projectKind != .home && !branch.isEmpty && branch != displayName
     }
 
     /// Fills the right panel's footer strip with the selected workspace's identity and
@@ -4453,16 +4557,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 missingConfiguredProcessCount: 0, missingConfiguredBrowserSessionCount: 0)
         let isLifecycleRunning = runtimeStatus.lifecycleState == .running
         let offersStart = Self.workspaceLifecycleControlsOfferStart(
-            isRunning: workspace.isRunning, missingConfiguredProcessCount: runtimeStatus.missingConfiguredProcessCount)
+            projectKind: workspace.projectKind, isRunning: workspace.isRunning,
+            missingConfiguredProcessCount: runtimeStatus.missingConfiguredProcessCount)
         // Git workspaces are named after their branch, so a branch label matching the
         // name would just duplicate it.
         let branch = (workspace.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let notes = (workspace.notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        // A home workspace is marked running by whatever ad hoc terminal a user opens against it and
+        // stops again when the last one exits: it has no Start/Restart/Stop of its own to offer, and no
+        // notes (there is no project settings dialog to hold them for a project the user did not add).
+        let offersLifecycleControls = workspace.projectKind.hasWorkspaceLifecycle
         let signature = WorkspaceDetailFooterSignature(
             workspaceID: workspace.id, displayName: workspace.displayName, branch: branch, directory: workspace.dir, notes: notes,
             isLifecycleRunning: isLifecycleRunning, isRunning: workspace.isRunning, offersStart: offersStart,
             warningSummary: runtimeStatus.warningSummary, deviceAcceptsDaemonActions: deviceAcceptsDaemonActions(forWorkspaceID: workspace.id),
-            unreachableDeviceTooltip: unreachableDeviceTooltip(forWorkspaceID: workspace.id))
+            unreachableDeviceTooltip: unreachableDeviceTooltip(forWorkspaceID: workspace.id), projectKind: workspace.projectKind)
         // Overview ticks land here many times a second while a terminal streams, and the strip is rebuilt
         // from scratch, which destroys the button under the pointer between mouse-down and mouse-up. A
         // refresh that would draw the same strip touches no view; the focused-pane label is the one thing
@@ -4500,7 +4609,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             footer.addArrangedSubview(warningIcon)
         }
 
-        if !branch.isEmpty, branch != workspace.displayName {
+        if Self.workspaceFooterShowsBranch(branch: branch, displayName: workspace.displayName, projectKind: workspace.projectKind) {
             let branchIcon = NSImageView()
             branchIcon.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Branch")?.withSymbolConfiguration(
                 .init(pointSize: 9, weight: .regular))
@@ -4546,42 +4655,44 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // Everything below writes through the owning daemon, so an unreachable device's footer reads
         // its workspace but offers no action that would only raise an error dialog. The overflow button
         // stays enabled: its menu also carries the path actions, which need nothing from the daemon.
-        let notesButton = footerActionButton(
-            symbol: "note.text", tooltip: notes.isEmpty ? "Add notes" : notes, action: #selector(showWorkspaceNotesEditor(_:)))
-        notesButton.contentTintColor = notes.isEmpty ? .tertiaryLabelColor : accentColor
-        notesButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
-        notesButton.setAccessibilityIdentifier("workspace-detail-notes")
-        disableWhenDeviceCannotAct(notesButton, workspaceID: workspace.id)
-        footer.addArrangedSubview(notesButton)
+        if offersLifecycleControls {
+            let notesButton = footerActionButton(
+                symbol: "note.text", tooltip: notes.isEmpty ? "Add notes" : notes, action: #selector(showWorkspaceNotesEditor(_:)))
+            notesButton.contentTintColor = notes.isEmpty ? .tertiaryLabelColor : accentColor
+            notesButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+            notesButton.setAccessibilityIdentifier("workspace-detail-notes")
+            disableWhenDeviceCannotAct(notesButton, workspaceID: workspace.id)
+            footer.addArrangedSubview(notesButton)
 
-        // `isRunning` turns true the moment an ad hoc terminal or agent session starts and says nothing
-        // about whether a configured process is actually running, so the running case can still owe Start:
-        // offered here alongside Restart/Stop instead of being replaced by them, matching the sidebar row's
-        // context menu (see `workspaceLifecycleControlsOfferStart`).
-        if offersStart, workspace.isRunning {
-            let startButton = footerActionButton(symbol: "play.circle", tooltip: "Start", action: #selector(launchWorkspace(_:)))
-            startButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
-            startButton.setAccessibilityIdentifier("workspace-detail-start")
-            disableWhenDeviceCannotAct(startButton, workspaceID: workspace.id)
-            footer.addArrangedSubview(startButton)
-        }
+            // `isRunning` turns true the moment an ad hoc terminal or agent session starts and says nothing
+            // about whether a configured process is actually running, so the running case can still owe Start:
+            // offered here alongside Restart/Stop instead of being replaced by them, matching the sidebar row's
+            // context menu (see `workspaceLifecycleControlsOfferStart`).
+            if offersStart, workspace.isRunning {
+                let startButton = footerActionButton(symbol: "play.circle", tooltip: "Start", action: #selector(launchWorkspace(_:)))
+                startButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+                startButton.setAccessibilityIdentifier("workspace-detail-start")
+                disableWhenDeviceCannotAct(startButton, workspaceID: workspace.id)
+                footer.addArrangedSubview(startButton)
+            }
 
-        // Lifecycle actions follow the workspace's state, matching the sidebar row's context menu: a stopped
-        // workspace can only be started, so it offers Launch alone; a running one offers Restart and Stop.
-        let launchOrRestartButton = footerActionButton(
-            symbol: workspace.isRunning ? "arrow.clockwise.circle" : "play.circle", tooltip: workspace.isRunning ? "Restart" : "Launch",
-            action: workspace.isRunning ? #selector(restartWorkspace(_:)) : #selector(launchWorkspace(_:)))
-        launchOrRestartButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
-        launchOrRestartButton.setAccessibilityIdentifier("workspace-detail-launch-restart")
-        disableWhenDeviceCannotAct(launchOrRestartButton, workspaceID: workspace.id)
-        footer.addArrangedSubview(launchOrRestartButton)
+            // Lifecycle actions follow the workspace's state, matching the sidebar row's context menu: a stopped
+            // workspace can only be started, so it offers Launch alone; a running one offers Restart and Stop.
+            let launchOrRestartButton = footerActionButton(
+                symbol: workspace.isRunning ? "arrow.clockwise.circle" : "play.circle", tooltip: workspace.isRunning ? "Restart" : "Launch",
+                action: workspace.isRunning ? #selector(restartWorkspace(_:)) : #selector(launchWorkspace(_:)))
+            launchOrRestartButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+            launchOrRestartButton.setAccessibilityIdentifier("workspace-detail-launch-restart")
+            disableWhenDeviceCannotAct(launchOrRestartButton, workspaceID: workspace.id)
+            footer.addArrangedSubview(launchOrRestartButton)
 
-        if workspace.isRunning {
-            let stopButton = footerActionButton(symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)))
-            stopButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
-            stopButton.setAccessibilityIdentifier("workspace-detail-stop")
-            disableWhenDeviceCannotAct(stopButton, workspaceID: workspace.id)
-            footer.addArrangedSubview(stopButton)
+            if workspace.isRunning {
+                let stopButton = footerActionButton(symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)))
+                stopButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+                stopButton.setAccessibilityIdentifier("workspace-detail-stop")
+                disableWhenDeviceCannotAct(stopButton, workspaceID: workspace.id)
+                footer.addArrangedSubview(stopButton)
+            }
         }
 
         let overflowButton = footerActionButton(symbol: "ellipsis.circle", tooltip: "More actions", action: #selector(showWorkspaceOverflowMenu(_:)))
@@ -5789,9 +5900,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// menu keeps its shape — the items stay listed so the menu does not reshuffle mid-outage —
     /// and only the ones that need the daemon are disabled. Auto-enabling is off so those
     /// decisions are the menu's own rather than AppKit's responder-chain guess.
-    static func makeWorkspaceOverflowMenu(workspaceID: String, path: String, target: AnyObject?, isLocalDevice: Bool, daemonActionsEnabled: Bool)
-        -> NSMenu
-    {
+    static func makeWorkspaceOverflowMenu(
+        workspaceID: String, path: String, target: AnyObject?, isLocalDevice: Bool, daemonActionsEnabled: Bool, isHomeWorkspace: Bool
+    ) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
@@ -5819,10 +5930,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 title: "Reveal in Finder", symbol: "folder", action: #selector(AppKitController.revealDirectoryInFinder(_:)), keyEquivalent: "f",
                 modifiers: [.command, .shift], identifier: path, representedObject: WorkspacePathActionContext(workspaceID: workspaceID, path: path))
         }
-        menu.addItem(.separator())
-        addItem(
-            title: "Delete…", symbol: "trash", action: #selector(AppKitController.deleteWorkspace(_:)), keyEquivalent: "", modifiers: [],
-            identifier: workspaceID, isEnabled: daemonActionsEnabled)
+        // The home workspace is not a project the user added, so it carries no Delete: it is not
+        // removable, only hideable from the sidebar row's context menu.
+        if !isHomeWorkspace {
+            menu.addItem(.separator())
+            addItem(
+                title: "Delete…", symbol: "trash", action: #selector(AppKitController.deleteWorkspace(_:)), keyEquivalent: "", modifiers: [],
+                identifier: workspaceID, isEnabled: daemonActionsEnabled)
+        }
         return menu
     }
 
@@ -5830,12 +5945,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let workspaceID = sender.identifier?.rawValue, let workspace = deviceModel.workspaceIndex[workspaceID]?.workspace else { return }
         let menu = Self.makeWorkspaceOverflowMenu(
             workspaceID: workspaceID, path: workspace.dir, target: self, isLocalDevice: isLocalWorkspace(workspace),
-            daemonActionsEnabled: deviceAcceptsDaemonActions(forWorkspaceID: workspaceID))
+            daemonActionsEnabled: deviceAcceptsDaemonActions(forWorkspaceID: workspaceID), isHomeWorkspace: workspace.projectKind == .home)
         let origin = NSPoint(x: 0, y: sender.bounds.maxY + 4)
         menu.popUp(positioning: nil, at: origin, in: sender)
     }
 
     func showError(_ error: Error) {
+        if let showErrorOverrideForTesting {
+            showErrorOverrideForTesting(error)
+            return
+        }
         if showLocalDaemonCompatibilityBlockIfNeeded(error) { return }
         let alert = NSAlert(error: error)
         alert.runModal()
@@ -5970,6 +6089,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             guard let (project, workspace) = findWorkspace(id: workspaceID) else {
                 throw WorkspaceError.invalidArgument(message: "Workspace not found.")
             }
+            // The home directory has no ignore rules to bound a file list, so the Editor would
+            // otherwise watch the user's entire home tree. The daemon refuses the same request
+            // independently; this gate keeps the client from ever asking it to.
+            guard project.kind != .home else { throw WorkspaceError.invalidArgument(message: "The home project has no editor.") }
             let editor = try clientAppConfig().editor ?? .builtin
             if editor == .builtin {
                 // The coordinator reports false when no Editor exists and its creation door is
@@ -6089,6 +6212,47 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case button
         case shortcut
         case ipc
+        /// The home row becoming the selected row (`autoOpenHomeTerminalIfNeeded`): the creation it runs
+        /// with nothing running in the row, and the pane open it runs for the row's one running session.
+        case homeRowSelection
+        /// The `New terminal session` row of the pane-split/new-tab session picker.
+        case paneSessionPicker
+    }
+
+    /// Whether a terminal open that failed says so to the user.
+    ///
+    /// Every route but `.homeRowSelection` is a terminal the user asked for and is owed the reason it did
+    /// not come up. `.homeRowSelection` is the one open nobody asked for: it starts because `~` became the
+    /// selected row, so a device that drops while it is in flight leaves the panel empty and raises
+    /// nothing (docs/spec.md), exactly as selecting the row on an already unreachable device does, instead
+    /// of putting an alert in front of a user who may have moved to another row by then. The failure is
+    /// logged where it is swallowed, and the row's terminals stay listed to act on once the device is back.
+    ///
+    /// The rule covers the two doors the implicit open passes before a pane exists: the creation and the
+    /// device check ahead of the install. A device that drops after the pane is installed reports through
+    /// `reportTerminalPaneOpenFailure` by focus intent instead, which can show the alert for this route.
+    /// That window is the content preparation of an already installed pane, well under a second, and the
+    /// pane also shows the failure in place, so it is accepted rather than threading the route through
+    /// the pane-open intent path.
+    nonisolated static func terminalOpenFailureIsShown(route: WorkspaceTerminalOpenRoute) -> Bool { route != .homeRowSelection }
+
+    /// Whether a terminal open that has finished its asynchronous work may present the workspace it is
+    /// for: move the sidebar selection onto that workspace, write it as the active workspace, and open
+    /// the session's pane.
+    ///
+    /// Every route but `.homeRowSelection` is a terminal the user asked for, so it lands where they asked
+    /// for it however long the device took. `.homeRowSelection` is the one open nobody asked for: it
+    /// starts because `~` became the selected row, and a device that takes its time can finish it after
+    /// the user has selected another row or opened Alerts. Presenting it then would pull them back to a
+    /// row they left, so the session is left where it belongs, under `~`, and selecting that row again
+    /// opens its pane through `autoOpenHomeTerminalIfNeeded`.
+    ///
+    /// Both of that auto-open's branches read this at the point they would present the row, and a branch
+    /// that suspends more than once reads it again after each suspension, since the selection can move at
+    /// any of them.
+    func terminalOpenMayPresentWorkspace(workspaceID: String, route: WorkspaceTerminalOpenRoute) -> Bool {
+        guard route == .homeRowSelection else { return true }
+        return selectedWorkspaceID == workspaceID
     }
 
     // Not private: `ShortcutsController`'s shortcut monitor calls this from a different file in the
@@ -6099,23 +6263,39 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return
         }
         let startedAt = Date()
-        terminalPanes.createTerminalSessionForPane(workspaceID: workspaceID) { [weak self] request in
-            guard let self else { return }
-            defer {
-                self.finishNewTerminalSessionCreation(workspaceID: workspaceID)
-                completion?()
+        if let createWorkspaceTerminalSessionOverrideForTesting {
+            createWorkspaceTerminalSessionOverrideForTesting(workspaceID) { [weak self] request in
+                self?.finishWorkspaceTerminalOpen(
+                    workspaceID: workspaceID, route: route, startedAt: startedAt, request: request, completion: completion)
             }
-            guard let request else {
-                logPerfMetric(
-                    "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
-                    success: false, detail: "route=\(route.rawValue)")
-                return
-            }
-            panelCoordinator.openSessionInNewTab(request)
-            logPerfMetric(
-                "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-                detail: "route=\(route.rawValue)")
+            return
         }
+        terminalPanes.createTerminalSessionForPane(workspaceID: workspaceID, route: route) { [weak self] request in
+            self?.finishWorkspaceTerminalOpen(workspaceID: workspaceID, route: route, startedAt: startedAt, request: request, completion: completion)
+        }
+    }
+
+    /// What `openWorkspaceTerminal` does with the session its creation produced, or with the creation's
+    /// failure. Split out so the creation itself is the only thing a test stands in for.
+    private func finishWorkspaceTerminalOpen(
+        workspaceID: String, route: WorkspaceTerminalOpenRoute, startedAt: Date, request: DeviceTerminalOpenRequest?, completion: (() -> Void)?
+    ) {
+        defer {
+            finishNewTerminalSessionCreation(workspaceID: workspaceID)
+            completion?()
+        }
+        guard let request else {
+            logPerfMetric(
+                "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                success: false, detail: "route=\(route.rawValue)")
+            return
+        }
+        // The session exists either way; only bringing the user to it is conditional, because opening its
+        // pane selects its workspace and fronts the app (`showPanelScope`).
+        if terminalOpenMayPresentWorkspace(workspaceID: workspaceID, route: route) { panelCoordinator.openSessionInNewTab(request) }
+        logPerfMetric(
+            "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+            detail: "route=\(route.rawValue)")
     }
 
     private func runWorkspaceProcess(workspaceID: String, processName: String) {
@@ -6466,11 +6646,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func globalEditorFallbackWorkspaceID(excluding goneWorkspaceID: String?, allowedWorkspaceKeys: Set<PanelLayoutEngine.WorkspaceKey>?) -> (
         deviceID: String, workspaceID: String
     )? {
+        // A home workspace is never a fallback candidate, in the chain below or in the final scan: the
+        // Editor has nothing to show there (see `ProjectKind.isEditorEligible`), so retargeting an
+        // orphaned pane onto one would just trade one unusable target for another.
         func candidate(_ workspaceID: String?) -> (deviceID: String, workspaceID: String)? {
             guard let workspaceID, workspaceID != goneWorkspaceID else { return nil }
             guard
                 let section = deviceModel.deviceSections.first(where: {
-                    $0.workspacesByProject.values.contains { $0.contains { $0.id == workspaceID } }
+                    $0.workspacesByProject.values.contains { $0.contains { $0.id == workspaceID && $0.projectKind.isEditorEligible } }
                 })
             else { return nil }
             if let allowedWorkspaceKeys, !allowedWorkspaceKeys.contains(.init(deviceID: section.deviceID, workspaceID: workspaceID)) { return nil }
@@ -6482,7 +6665,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         for section in deviceModel.deviceSections {
             for workspaces in section.workspacesByProject.values {
                 if let workspace = workspaces.first(where: { workspace in
-                    workspace.id != goneWorkspaceID
+                    workspace.id != goneWorkspaceID && workspace.projectKind.isEditorEligible
                         && (allowedWorkspaceKeys?.contains(.init(deviceID: section.deviceID, workspaceID: workspace.id)) ?? true)
                 }) {
                     return (section.deviceID, workspace.id)

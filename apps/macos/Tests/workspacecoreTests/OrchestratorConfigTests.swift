@@ -1555,7 +1555,7 @@ extension OrchestratorTests {
 
         // Use symlink-resolved path so it matches what normalizePath returns internally.
         let normalizedDir = URL(fileURLWithPath: projectDir.path).resolvingSymlinksInPath().path
-        let projectRecord = ProjectRecord(id: normalizedDir, name: "test", dir: normalizedDir, isGitRepo: false, defaultBranch: nil)
+        let projectRecord = ProjectRecord(id: normalizedDir, name: "test", dir: normalizedDir, isGitRepo: false, defaultBranch: nil, kind: .standard)
         try store.upsert(project: projectRecord)
 
         // Insert a default workspace directly without going through seedWorkspaceSettings.

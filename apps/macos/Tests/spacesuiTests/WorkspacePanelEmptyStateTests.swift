@@ -1,5 +1,6 @@
 import AppKit
 import Testing
+import spacesdevicecore
 
 @testable import spacesui
 
@@ -32,22 +33,42 @@ import Testing
     /// A stopped workspace is the case the empty panel exists for: it owes a Start, and New terminal
     /// stays beside it because Start never opens an ad hoc terminal.
     @Test func stoppedWorkspaceOffersStartAndNewTerminal() {
-        let stopped = state(offersStart: AppKitController.workspaceLifecycleControlsOfferStart(isRunning: false, missingConfiguredProcessCount: 0))
+        let stopped = state(
+            offersStart: AppKitController.workspaceLifecycleControlsOfferStart(
+                projectKind: .standard, isRunning: false, missingConfiguredProcessCount: 0))
         #expect(stopped.offeredActions == [.start, .newTerminal])
     }
 
     /// A running workspace with every configured process up has nothing left to start, so the panel
     /// offers the one action that fills it.
     @Test func runningWorkspaceOffersNewTerminalAlone() {
-        let running = state(offersStart: AppKitController.workspaceLifecycleControlsOfferStart(isRunning: true, missingConfiguredProcessCount: 0))
+        let running = state(
+            offersStart: AppKitController.workspaceLifecycleControlsOfferStart(
+                projectKind: .standard, isRunning: true, missingConfiguredProcessCount: 0))
         #expect(running.offeredActions == [.newTerminal])
     }
 
     /// `isRunning` turns true on an ad hoc terminal alone, so a running workspace can still owe a
     /// Start — the empty state follows the same rule as the footer and the sidebar row's menu.
     @Test func runningWorkspaceWithAMissingProcessStillOffersStart() {
-        let running = state(offersStart: AppKitController.workspaceLifecycleControlsOfferStart(isRunning: true, missingConfiguredProcessCount: 1))
+        let running = state(
+            offersStart: AppKitController.workspaceLifecycleControlsOfferStart(
+                projectKind: .standard, isRunning: true, missingConfiguredProcessCount: 1))
         #expect(running.offeredActions == [.start, .newTerminal])
+    }
+
+    /// The home row has no lifecycle at all: the daemon refuses Start for it, so its empty panel offers
+    /// New terminal alone whatever its run state and missing-process count read, rather than a button
+    /// whose only outcome is the daemon's rejection alert.
+    @Test func homeWorkspaceOffersNewTerminalAlone() {
+        for isRunning in [false, true] {
+            for missing in [0, 1] {
+                let home = state(
+                    offersStart: AppKitController.workspaceLifecycleControlsOfferStart(
+                        projectKind: .home, isRunning: isRunning, missingConfiguredProcessCount: missing), name: "~")
+                #expect(home.offeredActions == [.newTerminal])
+            }
+        }
     }
 
     /// An unreachable device keeps the actions listed and refuses them, the same treatment the

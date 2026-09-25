@@ -63,13 +63,24 @@ extension SQLiteStore {
                   revision = workspace_review_comments.revision + 1
                 """,
             bindings: [
-                comment.id, comment.workspaceID, comment.filePath, comment.side.rawValue, String(comment.lineNumber), comment.lineText,
-                comment.body, comment.createdAt, comment.updatedAt, String(comment.revision), comment.sentAt ?? "",
+                comment.id, comment.workspaceID, comment.filePath, comment.side.rawValue, String(comment.lineNumber), comment.lineText, comment.body,
+                comment.createdAt, comment.updatedAt, String(comment.revision), comment.sentAt ?? "",
             ])
     }
 
-    public func deleteReviewComment(id: String) throws {
-        try execute(sql: "DELETE FROM workspace_review_comments WHERE id = ?", bindings: [id])
+    public func deleteReviewComment(id: String) throws { try execute(sql: "DELETE FROM workspace_review_comments WHERE id = ?", bindings: [id]) }
+
+    /// Deletes a workspace's unsent drafts only, leaving its sent archive in place: used where drafts have
+    /// to go without an editor to remove them one at a time, which today is home-project adoption clearing
+    /// a workspace that will never have an Editor to show, edit, or send them again (see
+    /// `WorkspaceOrchestrator.clearHomeWorkspaceReviewComments`). A sent comment is the workspace's record
+    /// of what was actually sent, so it survives here the same way it survives everywhere else a comment
+    /// is already archived; only a workspace's or project's own deletion removes it, through `ON DELETE
+    /// CASCADE` on `workspace_review_comments.workspace_id`. The `sent_at = ''` predicate matches
+    /// `reviewCommentDrafts`'s own draft filter above, for the same reason: an unsent comment binds an
+    /// empty string, never a true SQL NULL.
+    public func deleteReviewCommentDrafts(workspaceID: String) throws {
+        try execute(sql: "DELETE FROM workspace_review_comments WHERE workspace_id = ? AND sent_at = ''", bindings: [workspaceID])
     }
 
     /// Archives a batch of comments atomically: either every id in `ids` is marked sent or none are,
@@ -77,9 +88,7 @@ extension SQLiteStore {
     public func markReviewCommentsSent(ids: [String], sentAt: String) throws {
         guard !ids.isEmpty else { return }
         try withImmediateTransaction {
-            for id in ids {
-                try execute(sql: "UPDATE workspace_review_comments SET sent_at = ? WHERE id = ?", bindings: [sentAt, id])
-            }
+            for id in ids { try execute(sql: "UPDATE workspace_review_comments SET sent_at = ? WHERE id = ?", bindings: [sentAt, id]) }
         }
     }
 
@@ -87,7 +96,7 @@ extension SQLiteStore {
         guard row.count >= 11, let side = WorkspaceReviewCommentSide(rawValue: row[3]), let lineNumber = Int(row[4]), let revision = Int(row[9])
         else { return nil }
         return WorkspaceReviewCommentRecord(
-            id: row[0], workspaceID: row[1], filePath: row[2], side: side, lineNumber: lineNumber, lineText: row[5], body: row[6],
-            createdAt: row[7], updatedAt: row[8], revision: revision, sentAt: row[10].isEmpty ? nil : row[10])
+            id: row[0], workspaceID: row[1], filePath: row[2], side: side, lineNumber: lineNumber, lineText: row[5], body: row[6], createdAt: row[7],
+            updatedAt: row[8], revision: revision, sentAt: row[10].isEmpty ? nil : row[10])
     }
 }

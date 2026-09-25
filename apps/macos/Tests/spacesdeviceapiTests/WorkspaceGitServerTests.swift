@@ -580,6 +580,22 @@
             }
         }
 
+        /// The home project's directory is the account's home, so nothing reads it: `workspaceFileRead`
+        /// is refused rather than returning the seeded file's contents.
+        func testWorkspaceFileReadOnAHomeWorkspaceIsRefused() throws {
+            try withHomeWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileRead(SpacesDeviceWorkspaceFileReadRequest(workspaceID: workspaceID, relativePath: "seeded.txt")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.message, "The home project has no file list or editor.")
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertNil(response.workspaceFileRead, "the seeded file's contents must not come back")
+            }
+        }
+
         func testWorkspaceFileListReturnsTrackedAndUntrackedFilesSortedAscendingExcludingIgnored() throws {
             try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
                 // README.md is already tracked by the fixture's initial commit.
@@ -873,6 +889,22 @@
                 XCTAssertEqual(response.errorCode, .notFound)
                 // Mirrors `testWorkspaceFileReadOnAnUnknownWorkspaceReturnsNotFound`'s queue-registry check.
                 XCTAssertNil(server.workspaceGitQueuesByWorkspaceID["no-such-workspace"])
+            }
+        }
+
+        /// The home project's directory is the account's home, so nothing lists it: walking it would
+        /// enumerate everything the user owns with no ignore rules to bound it, so `workspaceFileList` is
+        /// refused instead of returning a listing.
+        func testWorkspaceFileListOnAHomeWorkspaceIsRefused() throws {
+            try withHomeWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileList(SpacesDeviceWorkspaceFileListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.message, "The home project has no file list or editor.")
+                XCTAssertEqual(response.errorCode, .invalidArgument)
             }
         }
 
@@ -1909,6 +1941,27 @@
             }
         }
 
+        /// The home project's directory is the account's home, so nothing writes to it: `workspaceFileWrite`
+        /// is refused, and the seeded file on disk is left exactly as it was.
+        func testWorkspaceFileWriteOnAHomeWorkspaceIsRefused() throws {
+            try withHomeWorkspaceFixture { workspaceID, dir, _, requestClient, clientApp, authToken in
+                let seededPath = dir.appendingPathComponent("seeded.txt")
+                let original = try Data(contentsOf: seededPath)
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceFileWrite(
+                            SpacesDeviceWorkspaceFileWriteRequest(
+                                workspaceID: workspaceID, relativePath: "seeded.txt", base64Data: Data("edited".utf8).base64EncodedString(),
+                                expectedSHA256: nil)), authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.message, "The home project has no file list or editor.")
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertEqual(try Data(contentsOf: seededPath), original, "a refused write must not touch the file on disk")
+            }
+        }
+
         func testWorkspaceDiffReportsUncommittedChangesOverTheWire() throws {
             try withWorkspaceFixture { workspaceID, repo, server, requestClient, clientApp, authToken in
                 try "edited content".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
@@ -2688,6 +2741,92 @@
                 XCTAssertFalse(result.branchesTruncated)
                 XCTAssertTrue(result.commits.isEmpty)
                 XCTAssertFalse(result.commitsTruncated)
+            }
+        }
+
+        /// Subscribing to the file-list signature is refused for a home workspace too. A subscription is
+        /// the one entry point that would arm a `WorkspaceWatch` over the account's whole home tree, and
+        /// it does that before any listing is asked for, so existence alone must not be enough to accept.
+        func testFileListSignatureSubscriptionOnAHomeWorkspaceIsRefused() throws {
+            try withHomeWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .subscribeWorkspaceFileListSignature(SpacesDeviceWorkspaceFileListSignatureRequest(workspaceID: workspaceID)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.message, "The home project has no file list or editor.")
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+            }
+        }
+
+        /// The ref list backs the editor's branch picker, and the home project has no editor, so the
+        /// daemon refuses it there rather than answering with the empty lists a plain directory returns.
+        func testWorkspaceRefListOnAHomeWorkspaceIsRefused() throws {
+            try withHomeWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceRefList(SpacesDeviceWorkspaceRefListRequest(workspaceID: workspaceID)), authToken: authToken,
+                        clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.message, "The home project has no file list or editor.")
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertNil(response.workspaceRefList)
+            }
+        }
+
+        /// Review comments are filed against the same file-and-line surface as the editor, so the home
+        /// project must be refused here too rather than only when a real edit is later attempted through
+        /// one of the file handlers above.
+        func testWorkspaceReviewCommentUpsertOnAHomeWorkspaceIsRefused() throws {
+            try withHomeWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .workspaceReviewCommentUpsert(
+                            SpacesDeviceWorkspaceReviewCommentUpsertRequest(
+                                workspaceID: workspaceID, filePath: "seeded.txt", side: .new, lineNumber: 1, lineText: "seeded", body: "a comment")),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.message, "The home project has no file list or editor.")
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+            }
+        }
+
+        /// A notes write is the other half of the configuration surface a home project does not have, so
+        /// `updateWorkspaceMetadata` refuses it with the same "no configuration" message the project's own
+        /// settings carry (via `WorkspaceError.invalidArgument`'s `errorDescription`, which is why the
+        /// expected message carries its "Invalid argument: " prefix; see `HomeProjectTests`'s direct
+        /// orchestrator assertions for the same convention), and leaves the stored notes untouched.
+        func testWorkspaceMetadataNotesUpdateOnAHomeWorkspaceIsRefused() throws {
+            try withHomeWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .updateWorkspaceMetadata(
+                            SpacesDeviceWorkspaceMetadataUpdateRequest(workspaceID: workspaceID, notes: "a note", updatesNotes: true)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.message, "Invalid argument: The home project has no configuration.")
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+                XCTAssertNil(try XCTUnwrap(store.workspace(id: workspaceID)).notes)
+            }
+        }
+
+        /// Hiding is the one control the home workspace keeps, so `updateWorkspaceMetadata`'s hidden path
+        /// must keep succeeding for it even though the notes path above now refuses the same command.
+        func testWorkspaceMetadataHiddenUpdateOnAHomeWorkspaceSucceeds() throws {
+            try withHomeWorkspaceFixture { workspaceID, _, _, requestClient, clientApp, authToken in
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .updateWorkspaceMetadata(
+                            SpacesDeviceWorkspaceMetadataUpdateRequest(workspaceID: workspaceID, isHidden: true, updatesHidden: true)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertEqual(response.overview?.workspaces.first(where: { $0.id == workspaceID })?.isHidden, true)
             }
         }
 
@@ -4882,7 +5021,8 @@
                 let projectID = "project-\(UUID().uuidString)"
                 let workspaceID = "workspace-\(UUID().uuidString)"
                 try store.upsert(
-                    project: ProjectRecord(id: projectID, name: "Fixture Project", dir: repo.path, isGitRepo: true, defaultBranch: "main"))
+                    project: ProjectRecord(
+                        id: projectID, name: "Fixture Project", dir: repo.path, isGitRepo: true, defaultBranch: "main", kind: .standard))
                 try store.upsert(
                     workspace: WorkspaceRecord(
                         id: workspaceID, projectID: projectID, dir: repo.path, dirname: nil, branch: "main", baseBranch: "main", isDefault: true,
@@ -4916,7 +5056,45 @@
                 let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
                 let projectID = "project-\(UUID().uuidString)"
                 let workspaceID = "workspace-\(UUID().uuidString)"
-                try store.upsert(project: ProjectRecord(id: projectID, name: "Fixture Project", dir: dir.path, isGitRepo: false, defaultBranch: nil))
+                try store.upsert(
+                    project: ProjectRecord(
+                        id: projectID, name: "Fixture Project", dir: dir.path, isGitRepo: false, defaultBranch: nil, kind: .standard))
+                try store.upsert(
+                    workspace: WorkspaceRecord(
+                        id: workspaceID, projectID: projectID, dir: dir.path, dirname: nil, branch: nil, isDefault: true, isRunning: false,
+                        lastLaunchedAt: nil))
+
+                let (server, requestClient, clientApp, authToken) = try makeServerAndClient()
+                defer {
+                    requestClient.cancel()
+                    server.stop()
+                }
+
+                try body(workspaceID, dir, server, requestClient, clientApp, authToken)
+            }
+        }
+
+        /// Stands in for the daemon's own home project: a non-git `ProjectRecord` named "~" (`kind: .home`)
+        /// whose single workspace's directory is the project directory itself, the same shape the real home
+        /// project takes. Seeds one ordinary file so a refused list, read, or write is provably a refusal,
+        /// not an empty directory with nothing to serve.
+        private func withHomeWorkspaceFixture(
+            _ body: (
+                _ workspaceID: String, _ dir: URL, _ server: SpacesDeviceAPIServer, _ requestClient: WorkspaceGitRequestClient,
+                _ clientApp: SpacesDeviceClientApp, _ authToken: String
+            ) throws -> Void
+        ) throws {
+            try withTemporaryProfile { _ in
+                let dir = FileManager.default.temporaryDirectory.appendingPathComponent(
+                    "spaces-workspace-git-server-home-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: dir) }
+                try "seeded".write(to: dir.appendingPathComponent("seeded.txt"), atomically: true, encoding: .utf8)
+
+                let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+                let projectID = "project-\(UUID().uuidString)"
+                let workspaceID = "workspace-\(UUID().uuidString)"
+                try store.upsert(project: ProjectRecord(id: projectID, name: "~", dir: dir.path, isGitRepo: false, defaultBranch: nil, kind: .home))
                 try store.upsert(
                     workspace: WorkspaceRecord(
                         id: workspaceID, projectID: projectID, dir: dir.path, dirname: nil, branch: nil, isDefault: true, isRunning: false,
@@ -4952,7 +5130,8 @@
                 let projectID = "project-\(UUID().uuidString)"
                 let workspaceID = "workspace-\(UUID().uuidString)"
                 try store.upsert(
-                    project: ProjectRecord(id: projectID, name: "Fixture Project", dir: repo.path, isGitRepo: true, defaultBranch: "main"))
+                    project: ProjectRecord(
+                        id: projectID, name: "Fixture Project", dir: repo.path, isGitRepo: true, defaultBranch: "main", kind: .standard))
                 try store.upsert(
                     workspace: WorkspaceRecord(
                         id: workspaceID, projectID: projectID, dir: repo.path, dirname: nil, branch: "main", isDefault: true, isRunning: false,

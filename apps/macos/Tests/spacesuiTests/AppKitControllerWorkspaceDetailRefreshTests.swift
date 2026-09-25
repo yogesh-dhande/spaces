@@ -1,5 +1,6 @@
 import AppKit
 import Testing
+import spacesdevicecore
 import workspacecore
 
 @testable import spacesui
@@ -65,13 +66,23 @@ import workspacecore
     /// purely on `isRunning` hides it exactly in the state where it is the right (non-destructive) action.
     @Test func workspaceLifecycleControlsOfferStartWheneverConfiguredRuntimeIsMissing() {
         // Stopped: Start is offered regardless of the missing count (matches today's behavior).
-        #expect(AppKitController.workspaceLifecycleControlsOfferStart(isRunning: false, missingConfiguredProcessCount: 0))
-        #expect(AppKitController.workspaceLifecycleControlsOfferStart(isRunning: false, missingConfiguredProcessCount: 1))
+        #expect(AppKitController.workspaceLifecycleControlsOfferStart(projectKind: .standard, isRunning: false, missingConfiguredProcessCount: 0))
+        #expect(AppKitController.workspaceLifecycleControlsOfferStart(projectKind: .standard, isRunning: false, missingConfiguredProcessCount: 1))
         // Running with every configured process up: Start stays hidden, matching today's behavior.
-        #expect(!AppKitController.workspaceLifecycleControlsOfferStart(isRunning: true, missingConfiguredProcessCount: 0))
+        #expect(!AppKitController.workspaceLifecycleControlsOfferStart(projectKind: .standard, isRunning: true, missingConfiguredProcessCount: 0))
         // Running from ad hoc/agent runtime alone, with a configured process still missing: Start must be
         // offered instead of forcing the user through the destructive Restart action.
-        #expect(AppKitController.workspaceLifecycleControlsOfferStart(isRunning: true, missingConfiguredProcessCount: 1))
+        #expect(AppKitController.workspaceLifecycleControlsOfferStart(projectKind: .standard, isRunning: true, missingConfiguredProcessCount: 1))
+    }
+
+    /// The home project has no workspace lifecycle: the daemon refuses Start for it, so the one predicate
+    /// the footer, the sidebar row menu, and the panel's empty state share refuses it too, whatever the
+    /// row's run state and missing-process count read.
+    @Test func workspaceLifecycleControlsNeverOfferStartForTheHomeProject() {
+        #expect(!AppKitController.workspaceLifecycleControlsOfferStart(projectKind: .home, isRunning: false, missingConfiguredProcessCount: 0))
+        #expect(!AppKitController.workspaceLifecycleControlsOfferStart(projectKind: .home, isRunning: false, missingConfiguredProcessCount: 1))
+        #expect(!AppKitController.workspaceLifecycleControlsOfferStart(projectKind: .home, isRunning: true, missingConfiguredProcessCount: 0))
+        #expect(!AppKitController.workspaceLifecycleControlsOfferStart(projectKind: .home, isRunning: true, missingConfiguredProcessCount: 1))
     }
 
     @Test func configuredBrowserSessionsAlsoShowForStoppedWorkspaces() {
@@ -257,12 +268,12 @@ import workspacecore
     private func footerSignature(
         workspaceID: String = "workspace-1", displayName: String = "feature", branch: String = "feature", directory: String = "/tmp/feature",
         notes: String = "", isLifecycleRunning: Bool = true, isRunning: Bool = true, offersStart: Bool = false, warningSummary: String? = nil,
-        deviceAcceptsDaemonActions: Bool = true, unreachableDeviceTooltip: String? = nil
+        deviceAcceptsDaemonActions: Bool = true, unreachableDeviceTooltip: String? = nil, projectKind: ProjectKind = .standard
     ) -> AppKitController.WorkspaceDetailFooterSignature {
         AppKitController.WorkspaceDetailFooterSignature(
             workspaceID: workspaceID, displayName: displayName, branch: branch, directory: directory, notes: notes,
             isLifecycleRunning: isLifecycleRunning, isRunning: isRunning, offersStart: offersStart, warningSummary: warningSummary,
-            deviceAcceptsDaemonActions: deviceAcceptsDaemonActions, unreachableDeviceTooltip: unreachableDeviceTooltip)
+            deviceAcceptsDaemonActions: deviceAcceptsDaemonActions, unreachableDeviceTooltip: unreachableDeviceTooltip, projectKind: projectKind)
     }
 
     @Test func anUnchangedWorkspaceLeavesTheFooterStripAlone() { #expect(footerSignature() == footerSignature()) }
@@ -278,12 +289,27 @@ import workspacecore
         #expect(footerSignature(notes: "check the flake") != rendered)
         #expect(footerSignature(isLifecycleRunning: false) != rendered, "the status dot follows the lifecycle state")
         #expect(footerSignature(isRunning: false) != rendered, "a stopped workspace offers Launch alone, with no Stop button")
+        #expect(footerSignature(projectKind: .home) != rendered, "the home row's footer draws no notes, Start, Launch/Restart, or Stop button at all")
         #expect(
             footerSignature(offersStart: true) != rendered,
             "Start becomes reachable alongside Restart/Stop when a configured process is missing (issue #438)")
         #expect(footerSignature(warningSummary: "1 process exited") != rendered)
         #expect(footerSignature(deviceAcceptsDaemonActions: false) != rendered, "an unreachable device's controls are disabled and dimmed")
         #expect(footerSignature(unreachableDeviceTooltip: "linux-box is offline") != rendered)
+    }
+
+    /// The home row's footer never shows a branch, even for an adopted git home whose workspace record
+    /// keeps the checkout's branch (docs/spec.md: the home footer carries only run-state, `~`, the
+    /// directory path, the focused pane title, and the overflow button).
+    @Test func workspaceFooterShowsBranchOnlyForNonHomeWorkspacesWithADistinctBranch() {
+        #expect(AppKitController.workspaceFooterShowsBranch(branch: "feature", displayName: "checkout-name", projectKind: .standard))
+        #expect(!AppKitController.workspaceFooterShowsBranch(branch: "", displayName: "checkout-name", projectKind: .standard), "no branch recorded")
+        #expect(
+            !AppKitController.workspaceFooterShowsBranch(branch: "feature", displayName: "feature", projectKind: .standard),
+            "the branch already is the displayed name")
+        #expect(
+            !AppKitController.workspaceFooterShowsBranch(branch: "main", displayName: "~", projectKind: .home),
+            "an adopted git home retains a branch on the record, but the home footer never shows it")
     }
 
     @Test func userNavigationToTheSamePaneKeepsFormWindows() {

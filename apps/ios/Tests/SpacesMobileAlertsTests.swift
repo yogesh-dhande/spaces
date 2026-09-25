@@ -157,7 +157,7 @@
             XCTAssertEqual(groups.first?.events.map(\.sourceID), ["agent:agent-new-late", "agent:agent-new-early"])
             XCTAssertEqual(groups.first?.workspaceDisplayName, "new")
             XCTAssertEqual(groups.first?.projectName, "Project")
-            XCTAssertEqual(groups.first?.isGitWorkspace, true)
+            XCTAssertEqual(groups.first?.bandGlyph, .git)
         }
 
         func testClearDismissesCurrentEventsAndNewStateChangeReappears() {
@@ -211,8 +211,9 @@
         /// unstarted stroke; a later exit mints a new event identity, so a fresh failure reddens it again.
         func testIsExitAcknowledgedFollowsDismissalAndResetsOnNewExit() {
             let model = makeModel()
-            model.overview = makeOverview(
-                processRows: [makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")])
+            model.overview = makeOverview(processRows: [
+                makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")
+            ])
             let row = SpacesMobileWorkspaceRuntimeRow(source: .process(model.overview!.workspaces[0].processRows[0]))
 
             XCTAssertFalse(model.isExitAcknowledged(row))
@@ -229,8 +230,9 @@
 
             // A later exit mints a new event identity (a later `exitedAt`), so the row reddens again even
             // though the earlier exit's dismissal is still on file.
-            model.overview = makeOverview(
-                processRows: [makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: "2026-01-01T00:10:00Z")])
+            model.overview = makeOverview(processRows: [
+                makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: "2026-01-01T00:10:00Z")
+            ])
             let reExitedRow = SpacesMobileWorkspaceRuntimeRow(source: .process(model.overview!.workspaces[0].processRows[0]))
 
             XCTAssertFalse(model.isExitAcknowledged(reExitedRow))
@@ -352,7 +354,8 @@
         /// a sibling row's events in the same workspace.
         func testUndismissedAlertsIsolatedPerRow() {
             let model = makeModel()
-            let processRow = makeProcessRow(id: "process-web", name: "web", sessionID: "session-a", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")
+            let processRow = makeProcessRow(
+                id: "process-web", name: "web", sessionID: "session-a", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")
             let agentRow = makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:06:00Z")
             let terminalRow = makeTerminalRow(id: "terminal-a", title: "zsh", sessionID: "session-b", runState: .exited)
             model.overview = makeOverview(
@@ -391,8 +394,7 @@
                 processRows: [processRow],
                 sessions: [
                     makeSession(
-                        id: "session-bell", title: "web", state: .running, updatedAt: "2026-01-01T00:00:00Z",
-                        bellAt: iso8601(bellRungWhileWatching))
+                        id: "session-bell", title: "web", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: iso8601(bellRungWhileWatching))
                 ])
 
             XCTAssertTrue(model.undismissedAlerts(for: row).isEmpty)

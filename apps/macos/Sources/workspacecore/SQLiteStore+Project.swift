@@ -1,12 +1,13 @@
 import Foundation
 import spacesdatabase
+import spacesdevicecore
 import spacesterminalcore
 import systembridge
 
 extension SQLiteStore {
     /// Canonical column order for a full `projects` row read; reused by every SELECT and by the
-    /// INSERT below since both list the same 8 columns in the same order.
-    private static let projectColumns = "id, name, dir, is_git, default_branch, setup_script, stop_script, is_hidden"
+    /// INSERT below since both list the same 9 columns in the same order.
+    private static let projectColumns = "id, name, dir, is_git, default_branch, setup_script, stop_script, is_hidden, kind"
 
     public func upsert(project: ProjectRecord) throws {
         let normalizedServiceDefinitions = try validatedServiceDefinitions(project.ports)
@@ -14,7 +15,7 @@ extension SQLiteStore {
             try execute(
                 sql: """
                     INSERT INTO projects(\(Self.projectColumns))
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                       name = excluded.name,
                       dir = excluded.dir,
@@ -22,11 +23,12 @@ extension SQLiteStore {
                       default_branch = excluded.default_branch,
                       setup_script = excluded.setup_script,
                       stop_script = excluded.stop_script,
-                      is_hidden = excluded.is_hidden
+                      is_hidden = excluded.is_hidden,
+                      kind = excluded.kind
                     """,
                 bindings: [
                     project.id, project.name, project.dir, project.isGitRepo ? "1" : "0", project.defaultBranch ?? "", project.setupScript ?? "",
-                    project.stopScript ?? "", project.isHidden ? "1" : "0",
+                    project.stopScript ?? "", project.isHidden ? "1" : "0", project.kind.rawValue,
                 ])
             try execute(sql: "DELETE FROM project_services WHERE project_id = ?", bindings: [project.id])
             for (index, definition) in normalizedServiceDefinitions.enumerated() {
@@ -73,6 +75,21 @@ extension SQLiteStore {
         return try decodeProjectWithTemplates(row: row)
     }
 
+    /// The daemon's single home project, when it has been created. Resolved by kind rather than by
+    /// directory because the kind is the identity: other projects are allowed to live under the home
+    /// directory, and the home project's own directory is not a second source of truth.
+    public func homeProject() throws -> ProjectRecord? {
+        guard
+            let row = try queryRow(
+                sql: """
+                    SELECT \(Self.projectColumns)
+                    FROM projects
+                    WHERE kind = ?
+                    """, bindings: [ProjectKind.home.rawValue])
+        else { return nil }
+        return try decodeProjectWithTemplates(row: row)
+    }
+
     public func projects() throws -> [ProjectRecord] {
         let rows = try queryRows(
             sql: """
@@ -100,8 +117,7 @@ extension SQLiteStore {
                 sql: "DELETE FROM workspace_service_ports WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(sql: "DELETE FROM workspace_services WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(
-                sql: "DELETE FROM workspace_review_comments WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)",
-                bindings: [id])
+                sql: "DELETE FROM workspace_review_comments WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(sql: "DELETE FROM workspaces WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM project_services WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [id])
@@ -115,7 +131,7 @@ extension SQLiteStore {
     }
 
     func decodeProjectWithTemplates(row: [String]) throws -> ProjectRecord? {
-        guard row.count >= 8 else { return nil }
+        guard row.count >= 9 else { return nil }
         let id = row[0]
         let portRows = try queryRows(sql: "SELECT id, name FROM project_services WHERE project_id = ? ORDER BY order_index", bindings: [id])
         let ports = portRows.map { row in ServiceDefinition(id: row[0].isEmpty ? UUID().uuidString : row[0], name: row[1]) }
@@ -129,9 +145,11 @@ extension SQLiteStore {
         let browserSessions = try queryRows(
             sql: "SELECT name, url FROM project_browser_sessions WHERE project_id = ? ORDER BY order_index", bindings: [id]
         ).map { row in BrowserSession(name: row[0].isEmpty ? nil : row[0], url: row[1].isEmpty ? nil : row[1]) }
+        // `kind` is `NOT NULL DEFAULT 'standard'`, so every stored row holds one of the enum's raw values
+        // and the `.standard` on the right is the column's own default read back, not a recovery path.
         return ProjectRecord(
-            id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4], isHidden: row[7] == "1",
-            setupScript: row[5].isEmpty ? nil : row[5], stopScript: row[6].isEmpty ? nil : row[6], ports: ports, processes: processes,
-            browserSessions: browserSessions)
+            id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4],
+            kind: ProjectKind(rawValue: row[8]) ?? .standard, isHidden: row[7] == "1", setupScript: row[5].isEmpty ? nil : row[5],
+            stopScript: row[6].isEmpty ? nil : row[6], ports: ports, processes: processes, browserSessions: browserSessions)
     }
 }

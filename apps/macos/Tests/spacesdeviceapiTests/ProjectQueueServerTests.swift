@@ -150,7 +150,9 @@
 
             let projectID = "project-\(UUID().uuidString)"
             let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-            try store.upsert(project: ProjectRecord(id: projectID, name: "Creatable", dir: projectDir.path, isGitRepo: true, defaultBranch: "main"))
+            try store.upsert(
+                project: ProjectRecord(
+                    id: projectID, name: "Creatable", dir: projectDir.path, isGitRepo: true, defaultBranch: "main", kind: .standard))
             return BlockingCheckoutProject(projectID: projectID, fifoPath: fifoPath, markerPath: markerPath)
         }
 

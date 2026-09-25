@@ -1280,7 +1280,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "code-pane", baseBranch: "main", dir: "/tmp/workspace",
-                    isRunning: true, isHidden: false, isDefault: false, sessionCount: 0)
+                    isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false)
             ], sessions: [])
         return SpacesDeviceAPIResponse(
             ok: true, message: "Started.",

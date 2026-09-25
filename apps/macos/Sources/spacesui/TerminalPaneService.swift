@@ -559,9 +559,16 @@ import workspacecore
 
     /// Starts a fresh ad hoc terminal session on the workspace's owning daemon and
     /// resolves the pane open request for panel entry points.
-    func createTerminalSessionForPane(workspaceID: String, completion: @escaping (DeviceTerminalOpenRequest?) -> Void) {
+    ///
+    /// `route` is why the creation was asked for, and decides both whether the finished creation may move
+    /// the sidebar selection onto the workspace (`AppKitController.terminalOpenMayPresentWorkspace`) and
+    /// whether a failed creation says so to the user (`AppKitController.terminalOpenFailureIsShown`).
+    func createTerminalSessionForPane(
+        workspaceID: String, route: AppKitController.WorkspaceTerminalOpenRoute, completion: @escaping (DeviceTerminalOpenRequest?) -> Void
+    ) {
         guard let device = host.deviceForWorkspaceMutation(workspaceID: workspaceID) else {
-            host.showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
+            Self.reportTerminalSessionCreationFailure(
+                host.deviceUnavailableError(deviceID: host.deviceID(forWorkspaceID: workspaceID)), workspaceID: workspaceID, route: route, host: host)
             completion(nil)
             return
         }
@@ -584,17 +591,34 @@ import workspacecore
             }
             switch result {
             case .success(let response):
-                host.applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: workspaceID)
+                // The response is applied either way, so the created session shows up under its own
+                // workspace; only the selection moving with it is conditional.
+                let presentedWorkspaceID = host.terminalOpenMayPresentWorkspace(workspaceID: workspaceID, route: route) ? workspaceID : nil
+                host.applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: presentedWorkspaceID)
                 guard let request = host.terminalOpenRequest(fromMutationResponse: response, workspaceID: workspaceID) else {
                     completion(nil)
                     return
                 }
                 completion(request)
             case .failure(let error):
-                host.showError(error)
+                Self.reportTerminalSessionCreationFailure(error, workspaceID: workspaceID, route: route, host: host)
                 completion(nil)
             }
         }
+    }
+
+    /// Reports a creation's failure the way its route asks for: in front of the user for a terminal they
+    /// asked for, in the log for one they did not (`AppKitController.terminalOpenFailureIsShown`). Takes
+    /// the host rather than reading it off the service, so the failure of a creation that outlived this
+    /// service still reaches the host the Task holds.
+    private static func reportTerminalSessionCreationFailure(
+        _ error: Error, workspaceID: String, route: AppKitController.WorkspaceTerminalOpenRoute, host: AppKitController
+    ) {
+        guard AppKitController.terminalOpenFailureIsShown(route: route) else {
+            fputs("spaces: terminal_open_failure_silenced route=\(route.rawValue) workspace=\(workspaceID) error=\(error)\n", stderr)
+            return
+        }
+        host.showError(error)
     }
 
     nonisolated static func deviceTerminalControlRequest(sessionID: String, controlRequest request: TerminalControlRequest) throws

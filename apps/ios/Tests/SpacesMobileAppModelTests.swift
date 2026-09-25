@@ -139,6 +139,27 @@
             XCTAssertTrue(model.workspaceGroups.isEmpty)
         }
 
+        /// The daemon orders workspaces by project name, and `~` (the home project's name) sorts after
+        /// every letter, so a home workspace naturally lands last in `workspaceGroups`.
+        /// `homeFirstWorkspaceGroups` is the client-side hoist that puts it first for display; this proves
+        /// the hoist actually reorders rather than assuming the daemon already does it.
+        func testHomeFirstWorkspaceGroupsHoistsHomeProjectToFront() {
+            let model = makeModel()
+            let project = SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+            let homeProject = SpacesDeviceProjectSummary(
+                id: "project-home", name: ProjectKind.homeProjectName, dir: "/Users/someone", isGitRepo: false, defaultBranch: nil, kind: .home)
+            let feature = makeWorkspace(id: "workspace-feature", branch: "feature")
+            let home = makeHomeWorkspace()
+            model.overview = SpacesDeviceOverviewPayload(
+                projects: [project, homeProject], workspaces: [feature, home], sessions: [],
+                daemonStatus: TerminalServiceDaemonStatus(
+                    version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+                    protocolVersion: SpacesWireProtocol.version))
+
+            XCTAssertEqual(model.workspaceGroups.map(\.workspace.id), ["workspace-feature", "workspace-home"])
+            XCTAssertEqual(model.homeFirstWorkspaceGroups.map(\.workspace.id), ["workspace-home", "workspace-feature"])
+        }
+
         /// Search is fuzzy, not substring: a few characters of a name in order find it. This is the same
         /// matcher the Workspaces sheet and the Mac's command palette use.
         func testWorkspaceGroupsSearchMatchesFuzzily() {
@@ -3453,14 +3474,19 @@
                         id: "agent:runtime-codex", workspaceID: "workspace-feature", name: "Codex", command: "codex", agentID: "runtime-codex",
                         sessionID: "session-codex", runState: .running, activityState: .spinning, canStop: true)
                 ]
+            // Mirrors the daemon's own verdict: any row still running trips the tracked-runtime flag,
+            // independent of `isRunning` (which an ad hoc terminal alone can also set).
+            let featureHasTrackedRuntimeIndicators =
+                processRows.contains { $0.runState == .running } || codingAgentRows.contains { $0.runState == .running }
+                || featureTerminalRows.contains { $0.runState == .running }
             let feature = SpacesDeviceWorkspaceSummary(
                 id: "workspace-feature", projectID: project.id, projectName: project.name, branch: "feature", baseBranch: "main",
-                dir: "/repo/feature", isRunning: featureIsRunning, isHidden: featureIsHidden, isDefault: false, sessionCount: 1,
-                assignedPorts: featureAssignedPorts, config: featureConfig, processRows: processRows, codingAgentRows: codingAgentRows,
-                terminalRows: featureTerminalRows)
+                dir: "/repo/feature", isRunning: featureIsRunning, isHidden: featureIsHidden, isDefault: false,
+                hasTrackedRuntimeIndicators: featureHasTrackedRuntimeIndicators, assignedPorts: featureAssignedPorts, config: featureConfig,
+                processRows: processRows, codingAgentRows: codingAgentRows, terminalRows: featureTerminalRows)
             let docs = SpacesDeviceWorkspaceSummary(
                 id: "workspace-docs", projectID: project.id, projectName: project.name, branch: "docs", baseBranch: "main", dir: "/repo/docs",
-                isRunning: false, isHidden: false, isDefault: false, sessionCount: 0, processRows: [], codingAgentRows: [],
+                isRunning: false, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false, processRows: [], codingAgentRows: [],
                 terminalRows: [
                     SpacesDeviceWorkspaceTerminalRow(
                         id: "terminal-shell", workspaceID: "workspace-docs", title: "shell", workingDirectory: "/repo/docs", sessionID: nil,

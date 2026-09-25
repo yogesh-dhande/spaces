@@ -28,6 +28,21 @@ final class SpacesProfileTests: XCTestCase {
         XCTAssertEqual(profile.runtimeDirectory, tempHomeURL.appendingPathComponent(".spaces/runtime").path)
     }
 
+    /// `ensureHomeProject` reads this field to name the daemon's Home row, and it must reflect an
+    /// overridden `HOME` (a test or e2e harness's isolated profile) rather than `NSHomeDirectory()`, which
+    /// ignores that override and would leak the real account's home into an isolated profile's Home row.
+    /// `tempHomeURL` stands in for that overridden home: it is never the real account's home, so a
+    /// `homeDirectoryURL` equal to it (and unequal to `NSHomeDirectory()`) demonstrates the field carries
+    /// the resolved home through rather than defaulting to the process-wide one.
+    func testResolveCarriesGivenHomeDirectoryRatherThanNSHomeDirectory() throws {
+        let profile = try SpacesProfile.resolve(
+            environment: [:], homeDirectoryURL: tempHomeURL, currentDirectoryPath: tempHomeURL.path,
+            executablePath: "/Applications/Spaces.app/Contents/MacOS/SpacesApp", gitProbe: StubGitProfileProbe(context: nil))
+
+        XCTAssertEqual(profile.homeDirectoryURL, tempHomeURL)
+        XCTAssertNotEqual(profile.homeDirectoryURL.path, NSHomeDirectory())
+    }
+
     func testResolveStopsSearchingAtFilesystemRootWhenExecutableIsOutsideRepo() throws {
         let profile = try SpacesProfile.resolve(
             environment: [:], homeDirectoryURL: tempHomeURL, currentDirectoryPath: tempHomeURL.path,

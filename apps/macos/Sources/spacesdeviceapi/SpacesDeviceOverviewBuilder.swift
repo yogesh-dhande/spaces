@@ -15,11 +15,15 @@ struct SpacesDeviceOverviewBuilder {
         let runningProcesses: [RunningProcessRecord]
         let agentWindows: [AgentWindowRecord]
         let windows: [WindowRecord]
+        /// `WorkspaceOrchestrator.hasTrackedRuntimeIndicators` over the three row lists above, decided by
+        /// the caller because only the orchestrator can read whether a row's terminal session has ended.
+        let hasTrackedRuntimeIndicators: Bool
 
         init(
             project: ProjectRecord, workspace: WorkspaceRecord, settings: WorkspaceSettings? = nil, runningProcesses: [RunningProcessRecord] = [],
-            agentWindows: [AgentWindowRecord] = [], windows: [WindowRecord] = [], assignedPorts: [SpacesDeviceAssignedPort] = [],
-            environment: [String: String] = [:], resolvedBrowserSessions: [BrowserSession] = [], setupState: WorkspaceSetupState? = nil
+            agentWindows: [AgentWindowRecord] = [], windows: [WindowRecord] = [], hasTrackedRuntimeIndicators: Bool = false,
+            assignedPorts: [SpacesDeviceAssignedPort] = [], environment: [String: String] = [:], resolvedBrowserSessions: [BrowserSession] = [],
+            setupState: WorkspaceSetupState? = nil
         ) {
             self.project = project
             self.workspace = workspace
@@ -31,6 +35,7 @@ struct SpacesDeviceOverviewBuilder {
             self.runningProcesses = runningProcesses
             self.agentWindows = agentWindows
             self.windows = windows
+            self.hasTrackedRuntimeIndicators = hasTrackedRuntimeIndicators
         }
     }
 
@@ -78,10 +83,6 @@ struct SpacesDeviceOverviewBuilder {
         let matchedWorkspaceBySessionID = Dictionary(
             uniqueKeysWithValues: adHocLiveSessions.map { session in (session.sessionID, matchedWorkspaceByLiveSessionID[session.sessionID] ?? nil) })
 
-        let sessionsByWorkspaceID = Dictionary(
-            grouping: workspaceRows.map { ($0.workspace.workspace.id, $0.entry.sessionID) }
-                + matchedWorkspaceBySessionID.compactMap { sessionID, descriptor in descriptor.map { ($0.workspace.id, sessionID) } }, by: \.0)
-
         let sessionEntriesByID = Dictionary(
             (liveSessions + workspaceRows.map(\.entry)).map { ($0.sessionID, $0) }, uniquingKeysWith: { liveSession, _ in liveSession })
         let availableSessionIDs = Set(sessionEntriesByID.keys)
@@ -98,9 +99,10 @@ struct SpacesDeviceOverviewBuilder {
             let runtimeRows = runtimeRows(for: descriptor, availableSessionIDs: availableSessionIDs, sessionsByID: sessionEntriesByID)
             return SpacesDeviceWorkspaceSummary(
                 id: descriptor.workspace.id, projectID: descriptor.project.id, projectName: descriptor.project.name,
-                branch: descriptor.workspace.branch, baseBranch: descriptor.workspace.baseBranch, dir: descriptor.workspace.dir,
+                projectKind: descriptor.project.kind, branch: descriptor.project.kind.maskedBranch(descriptor.workspace.branch),
+                baseBranch: descriptor.project.kind.maskedBranch(descriptor.workspace.baseBranch), dir: descriptor.workspace.dir,
                 isRunning: descriptor.workspace.isRunning, isHidden: descriptor.workspace.isHidden, isDefault: descriptor.workspace.isDefault,
-                notes: descriptor.workspace.notes, sessionCount: sessionsByWorkspaceID[descriptor.workspace.id]?.count ?? 0,
+                notes: descriptor.workspace.notes, hasTrackedRuntimeIndicators: descriptor.hasTrackedRuntimeIndicators,
                 assignedPorts: descriptor.assignedPorts, environment: descriptor.environment,
                 setupState: descriptor.setupState.map(deviceWorkspaceSetupState),
                 config: workspaceConfig(from: descriptor.settings, resolvedBrowserSessions: descriptor.resolvedBrowserSessions),
@@ -199,9 +201,15 @@ struct SpacesDeviceOverviewBuilder {
             shell: session.launchConfiguration.shell, command: session.launchConfiguration.command, state: session.runtimeState.state,
             backend: session.launchConfiguration.backend, lifetimePolicy: session.launchConfiguration.lifetimePolicy,
             servicePID: session.runtimeState.servicePID, childPID: session.runtimeState.childPID, workspaceID: workspaceID,
-            workspaceTitle: matchedWorkspace?.workspace.displayName, projectID: matchedWorkspace?.project.id,
-            projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt, updatedAt: session.runtimeState.updatedAt,
-            isControlAvailable: isInteractive && session.isControlAvailable,
+            // `WorkspaceRecord.displayName` does not know the owning project's kind, so it would read a
+            // home session's workspace as the home directory's basename (or a retained branch after
+            // adoption). Go through `ProjectKind.workspaceDisplayName` instead, the same helper the
+            // workspace summaries above and `WorkspaceSummary.displayName` use, so every client reading
+            // `overview.sessions` (iOS terminal search and grouping included) sees `~` for a home session,
+            // matching its workspace summary's title.
+            workspaceTitle: matchedWorkspace.map { $0.project.kind.workspaceDisplayName(branch: $0.workspace.branch, dir: $0.workspace.dir) },
+            projectID: matchedWorkspace?.project.id, projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt,
+            updatedAt: session.runtimeState.updatedAt, isControlAvailable: isInteractive && session.isControlAvailable,
             isSubscriptionAvailable: isInteractive && session.isSubscriptionAvailable, attachmentSnapshot: session.attachmentSnapshot,
             rowKind: rowKind, rowSourceID: rowSourceID, hasFinalRender: hasFinalRender,
             foregroundDetectedAgentKind: session.runtimeState.foregroundDetectedAgentKind?.rawValue,
@@ -217,7 +225,7 @@ struct SpacesDeviceOverviewBuilder {
             seen.insert(project.id)
             return SpacesDeviceProjectSummary(
                 id: project.id, name: project.name, dir: project.dir, isGitRepo: project.isGitRepo, defaultBranch: project.defaultBranch,
-                isHidden: project.isHidden, config: projectConfig(from: project))
+                kind: project.kind, isHidden: project.isHidden, config: projectConfig(from: project))
         }
     }
 

@@ -110,7 +110,7 @@ final class SpacesYAMLDocumentTests: XCTestCase {
 
     func testEncodeExportsCanonicalFieldsWithoutInternalIDs() throws {
         let project = ProjectRecord(
-            id: "project-id", name: "Project", dir: "/tmp/project", isGitRepo: false, defaultBranch: nil, setupScript: "npm install",
+            id: "project-id", name: "Project", dir: "/tmp/project", isGitRepo: false, defaultBranch: nil, kind: .standard, setupScript: "npm install",
             stopScript: "npm stop", ports: [ServiceDefinition(id: "service-id", name: "web")],
             processes: [ProcessTemplate(id: "process-id", name: "api", command: "npm run api", onExit: .notify)],
             browserSessions: [BrowserSession(name: "app", url: "http://localhost:3000")])

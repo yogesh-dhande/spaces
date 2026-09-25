@@ -199,11 +199,14 @@ public struct SpacesDeviceProjectSummary: Codable, Sendable, Equatable, Identifi
     public let dir: String
     public let isGitRepo: Bool
     public let defaultBranch: String?
+    /// Whether this is an ordinary project or the daemon's own home project. Clients read it to pick
+    /// the home row's glyph and to leave out the surfaces a home project does not have.
+    public let kind: ProjectKind
     public let isHidden: Bool
     public let config: SpacesDeviceProjectConfig
 
     public init(
-        id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, isHidden: Bool = false,
+        id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, kind: ProjectKind = .standard, isHidden: Bool = false,
         config: SpacesDeviceProjectConfig = SpacesDeviceProjectConfig()
     ) {
         self.id = id
@@ -211,6 +214,7 @@ public struct SpacesDeviceProjectSummary: Codable, Sendable, Equatable, Identifi
         self.dir = dir
         self.isGitRepo = isGitRepo
         self.defaultBranch = defaultBranch
+        self.kind = kind
         self.isHidden = isHidden
         self.config = config
     }
@@ -221,6 +225,7 @@ public struct SpacesDeviceProjectSummary: Codable, Sendable, Equatable, Identifi
         case dir
         case isGitRepo
         case defaultBranch
+        case kind
         case isHidden
         case config
     }
@@ -232,6 +237,7 @@ public struct SpacesDeviceProjectSummary: Codable, Sendable, Equatable, Identifi
         dir = try container.decode(String.self, forKey: .dir)
         isGitRepo = try container.decode(Bool.self, forKey: .isGitRepo)
         defaultBranch = try container.decodeIfPresent(String.self, forKey: .defaultBranch)
+        kind = try container.decodeIfPresent(ProjectKind.self, forKey: .kind) ?? .standard
         isHidden = try container.decodeIfPresent(Bool.self, forKey: .isHidden) ?? false
         config = try container.decodeIfPresent(SpacesDeviceProjectConfig.self, forKey: .config) ?? SpacesDeviceProjectConfig()
     }
@@ -385,6 +391,9 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
     public let id: String
     public let projectID: String
     public let projectName: String
+    /// Denormalized beside `projectName` so a list row can name and draw the workspace without
+    /// looking its project up.
+    public let projectKind: ProjectKind
     public let branch: String?
     public let baseBranch: String?
     public let dir: String
@@ -392,7 +401,11 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
     public let isHidden: Bool
     public let isDefault: Bool
     public let notes: String?
-    public let sessionCount: Int
+    /// The owning daemon's verdict on whether this workspace still holds any tracked runtime
+    /// (`WorkspaceOrchestrator.hasTrackedRuntimeIndicators`), carried per workspace so every client reads
+    /// the one answer. The rows below cannot answer it: a pane whose terminal has ended keeps its row so
+    /// its output stays readable, and only the daemon can read that session's persisted end state.
+    public let hasTrackedRuntimeIndicators: Bool
     public let assignedPorts: [SpacesDeviceAssignedPort]
     /// Environment variables the daemon injects into every process and terminal of this workspace
     /// (workspace/project identity and per-service port/host/URL vars), computed authoritatively by
@@ -405,15 +418,16 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
     public let terminalRows: [SpacesDeviceWorkspaceTerminalRow]
 
     public init(
-        id: String, projectID: String, projectName: String, branch: String?, baseBranch: String?, dir: String, isRunning: Bool, isHidden: Bool,
-        isDefault: Bool, notes: String? = nil, sessionCount: Int, assignedPorts: [SpacesDeviceAssignedPort] = [], environment: [String: String] = [:],
-        setupState: SpacesDeviceWorkspaceSetupState? = nil, config: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(),
-        processRows: [SpacesDeviceWorkspaceProcessRow] = [], codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [],
-        terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
+        id: String, projectID: String, projectName: String, projectKind: ProjectKind = .standard, branch: String?, baseBranch: String?, dir: String,
+        isRunning: Bool, isHidden: Bool, isDefault: Bool, notes: String? = nil, hasTrackedRuntimeIndicators: Bool,
+        assignedPorts: [SpacesDeviceAssignedPort] = [], environment: [String: String] = [:], setupState: SpacesDeviceWorkspaceSetupState? = nil,
+        config: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(), processRows: [SpacesDeviceWorkspaceProcessRow] = [],
+        codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [], terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
     ) {
         self.id = id
         self.projectID = projectID
         self.projectName = projectName
+        self.projectKind = projectKind
         self.branch = branch
         self.baseBranch = baseBranch
         self.dir = dir
@@ -421,7 +435,7 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         self.isHidden = isHidden
         self.isDefault = isDefault
         self.notes = notes
-        self.sessionCount = sessionCount
+        self.hasTrackedRuntimeIndicators = hasTrackedRuntimeIndicators
         self.assignedPorts = assignedPorts
         self.environment = environment
         self.setupState = setupState
@@ -435,6 +449,7 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         case id
         case projectID
         case projectName
+        case projectKind
         case branch
         case baseBranch
         case dir
@@ -442,7 +457,7 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         case isHidden
         case isDefault
         case notes
-        case sessionCount
+        case hasTrackedRuntimeIndicators
         case assignedPorts
         case environment
         case setupState
@@ -457,6 +472,7 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         id = try container.decode(String.self, forKey: .id)
         projectID = try container.decode(String.self, forKey: .projectID)
         projectName = try container.decode(String.self, forKey: .projectName)
+        projectKind = try container.decodeIfPresent(ProjectKind.self, forKey: .projectKind) ?? .standard
         branch = try container.decodeIfPresent(String.self, forKey: .branch)
         baseBranch = try container.decodeIfPresent(String.self, forKey: .baseBranch)
         dir = try container.decode(String.self, forKey: .dir)
@@ -464,7 +480,10 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         isHidden = try container.decodeIfPresent(Bool.self, forKey: .isHidden) ?? false
         isDefault = try container.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
         notes = try container.decodeIfPresent(String.self, forKey: .notes)
-        sessionCount = try container.decodeIfPresent(Int.self, forKey: .sessionCount) ?? 0
+        // Required, unlike the tolerant decodes around it: neither default is safe (false suppresses a real
+        // leftovers warning, true restores the one an ended pane used to raise), and peers negotiate the
+        // wire version in lockstep, so anything speaking this contract sends the key.
+        hasTrackedRuntimeIndicators = try container.decode(Bool.self, forKey: .hasTrackedRuntimeIndicators)
         assignedPorts = try container.decodeIfPresent([SpacesDeviceAssignedPort].self, forKey: .assignedPorts) ?? []
         environment = try container.decodeIfPresent([String: String].self, forKey: .environment) ?? [:]
         setupState = try container.decodeIfPresent(SpacesDeviceWorkspaceSetupState.self, forKey: .setupState)
@@ -474,12 +493,10 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         terminalRows = try container.decodeIfPresent([SpacesDeviceWorkspaceTerminalRow].self, forKey: .terminalRows) ?? []
     }
 
-    /// Name shown to users. Git workspaces show their branch; non-git workspaces
-    /// (whose `dir` is the project directory) show the folder name.
-    public var displayName: String {
-        if let branch, !branch.isEmpty { return branch }
-        return (dir as NSString).lastPathComponent
-    }
+    /// Name shown to users, derived by the owning project's kind so every client names a workspace the
+    /// same way: the home project's single workspace shows `~` rather than the home folder's name, which
+    /// would otherwise be the account's user name.
+    public var displayName: String { projectKind.workspaceDisplayName(branch: branch, dir: dir) }
 }
 
 public enum SpacesDeviceTerminalSessionRowKind: String, Codable, Sendable, Equatable {

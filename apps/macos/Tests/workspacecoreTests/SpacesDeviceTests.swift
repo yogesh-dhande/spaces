@@ -34,7 +34,7 @@ final class SpacesDeviceTests: XCTestCase {
     }
 
     func testPlannerBuildsRuntimeManifest() throws {
-        let project = ProjectRecord(id: "project", name: "Project", dir: "/project", isGitRepo: true, defaultBranch: "main")
+        let project = ProjectRecord(id: "project", name: "Project", dir: "/project", isGitRepo: true, defaultBranch: "main", kind: .standard)
         let workspace = WorkspaceRecord(
             id: "workspace", projectID: project.id, dir: "/project/.worktrees/feature", dirname: nil, branch: "feature", isDefault: false,
             isRunning: false, lastLaunchedAt: nil)

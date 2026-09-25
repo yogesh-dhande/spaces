@@ -170,9 +170,7 @@ extension AppKitController {
         func undismissedAttentionIDs(processID: String? = nil, agentID: String? = nil, sessionID: String? = nil) -> [String] {
             AlertsController.rowAlertsAttentionEntries(
                 in: alertsGroups, workspaceID: detail.id, processID: processID, agentID: agentID, sessionID: sessionID
-            ).filter {
-                !dismissedAttentionItemIDs.contains($0.attentionID)
-            }.map(\.attentionID)
+            ).filter { !dismissedAttentionItemIDs.contains($0.attentionID) }.map(\.attentionID)
         }
         switch target.kind {
         case .browser:
@@ -257,14 +255,22 @@ extension AppKitController {
     /// keeps key status for as long as it is visible (it is the delegate's panel, and every
     /// hand-off of key status dismisses it), so it cannot be left floating over the app this
     /// focuses. The same reasoning covers `openWorkspaceFinder`.
-    func focusSidebarRuntimeTarget(workspaceID: String, key: String) {
+    ///
+    /// - Parameter route: Why the open was asked for, which decides whether its failure is shown or only
+    ///   logged (`AppKitController.terminalOpenFailureIsShown`), and whether an open that resumes after the
+    ///   selection moved still presents its workspace (`AppKitController.terminalOpenMayPresentWorkspace`).
+    ///   A click on the row is `.button`; the home row's auto-open is the one caller that did not come from
+    ///   a click.
+    func focusSidebarRuntimeTarget(workspaceID: String, key: String, route: WorkspaceTerminalOpenRoute = .button) {
         Task { @MainActor [weak self] in
             guard let self, let context = self.windowFocus.focusableWindowContext(workspaceID: workspaceID),
                 let target = context.targets.first(where: { WindowFocusController.cycleCursorKey(for: $0, detail: context.detail) == key })
             else { return }
             let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
-            // The outcome is unused: a failed focus already showed its own error.
-            _ = await self.windowFocus.executeWindowFocusResolution(resolution, preferredTarget: target, preferredDetail: context.detail)
+            // The outcome is unused: a failed focus already showed its own error, or logged it for a route
+            // that shows none.
+            _ = await self.windowFocus.executeWindowFocusResolution(
+                resolution, preferredTarget: target, preferredDetail: context.detail, route: route)
         }
     }
 

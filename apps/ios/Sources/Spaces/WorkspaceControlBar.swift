@@ -23,13 +23,21 @@ struct WorkspaceControlBar: View {
     /// (Demo Mode), so the bar never offers a control the backend rejects.
     let onNewTerminal: (() -> Void)?
 
+    /// Whether the bar offers Start/Restart/Stop at all. The home project has no configured processes to
+    /// start and no lifecycle of its own: its one workspace is marked running by an ordinary ad hoc
+    /// terminal launch, the same as any other workspace's loose terminal, and stops again when the last
+    /// terminal ends. There is nothing a lifecycle control here would act on. Gated on `projectKind`,
+    /// never the workspace's name or directory, since the kind is the daemon's own authoritative signal
+    /// for which project is the home one.
+    var offersLifecycle: Bool { workspace.projectKind.hasWorkspaceLifecycle }
+
     /// Whether Start should be offered even while `workspace.isRunning` is true, mirroring the Mac
     /// footer/sidebar's `workspaceLifecycleControlsOfferStart`. `isRunning` turns true the moment an ad
     /// hoc terminal or coding-agent session starts and says nothing about whether any configured process
     /// is actually running, so a workspace can be `isRunning` from ad hoc runtime alone with a configured
     /// process still missing. `canRun` is true for a configured-process row the daemon has not reported as
     /// `.running` (exited or never launched), so its presence is exactly "Start has something to do."
-    private var offersStart: Bool { !workspace.isRunning || workspace.processRows.contains { $0.canRun } }
+    var offersStart: Bool { offersLifecycle && (!workspace.isRunning || workspace.processRows.contains { $0.canRun }) }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -37,7 +45,7 @@ struct WorkspaceControlBar: View {
                 WorkspaceControlButton(
                     title: "Start", systemImage: "play.fill", tint: Theme.accent, identifier: "workspace.start.\(workspace.id)", action: onStart)
             }
-            if workspace.isRunning {
+            if workspace.isRunning && offersLifecycle {
                 WorkspaceControlButton(
                     title: "Restart", systemImage: "arrow.clockwise", tint: Theme.muted, identifier: "workspace.restart.\(workspace.id)",
                     action: onRestart)

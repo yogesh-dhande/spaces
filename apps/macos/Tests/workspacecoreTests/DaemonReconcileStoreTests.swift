@@ -40,8 +40,8 @@ final class DaemonReconcileStoreTests: XCTestCase {
     func testRepeatedPassesSeeWritesMadeByAnotherConnectionBetweenPasses() async throws {
         let seedStore = try SQLiteStore(path: databasePath)
         let project = ProjectRecord(
-            id: "project-router", name: "Router", dir: "/projects/router", isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil,
-            ports: [], processes: [], browserSessions: [])
+            id: "project-router", name: "Router", dir: "/projects/router", isGitRepo: false, defaultBranch: nil, kind: .standard, setupScript: nil,
+            stopScript: nil, ports: [], processes: [], browserSessions: [])
         try seedStore.upsert(project: project)
         let workspace = WorkspaceRecord(
             id: "workspace-router", projectID: project.id, dir: "/projects/router", dirname: nil, branch: nil, isDefault: false, isRunning: false,

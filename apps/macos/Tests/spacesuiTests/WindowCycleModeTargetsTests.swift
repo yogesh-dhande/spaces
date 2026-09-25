@@ -660,7 +660,7 @@ import workspacecore
     ) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
             id: id, projectID: projectID, projectName: projectID, branch: id, baseBranch: "main", dir: "/tmp/\(id)", isRunning: true,
-            isHidden: isHidden, isDefault: false, sessionCount: processes.count + agents.count + terminals.count,
+            isHidden: isHidden, isDefault: false, hasTrackedRuntimeIndicators: !(processes.isEmpty && agents.isEmpty && terminals.isEmpty),
             config: SpacesDeviceWorkspaceConfig(
                 resolvedBrowserSessions: browserSessionURL.map { [SpacesDeviceBrowserSession(name: "docs", url: $0)] } ?? []), processRows: processes,
             codingAgentRows: agents, terminalRows: terminals)

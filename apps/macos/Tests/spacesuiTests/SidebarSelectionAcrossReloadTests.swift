@@ -74,7 +74,7 @@ extension ProcessProfileEnvironmentSuites {
         private func workspace(terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []) -> SpacesDeviceWorkspaceSummary {
             SpacesDeviceWorkspaceSummary(
                 id: Self.workspaceID, projectID: Self.projectID, projectName: "Project", branch: "feature", baseBranch: "main",
-                dir: "/tmp/project-feature", isRunning: true, isHidden: false, isDefault: false, sessionCount: terminalRows.count,
+                dir: "/tmp/project-feature", isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: !terminalRows.isEmpty,
                 codingAgentRows: [], terminalRows: terminalRows)
         }
 
@@ -109,7 +109,8 @@ extension ProcessProfileEnvironmentSuites {
             let controller = makeController()
             attachOutline(controller)
             controller.deviceModel.deviceSections = [
-                section(deviceID: controller.deviceModel.localDeviceID, isLocal: true, loadState: .loaded, terminalRows: [terminalRow(id: "terminal-1")])
+                section(
+                    deviceID: controller.deviceModel.localDeviceID, isLocal: true, loadState: .loaded, terminalRows: [terminalRow(id: "terminal-1")])
             ]
             controller.sidebar.applySidebarDataChange()
             let summary = try #require(controller.sidebar.findWorkspace(id: Self.workspaceID)?.1)
@@ -145,7 +146,8 @@ extension ProcessProfileEnvironmentSuites {
             let controller = try selectedController()
 
             controller.deviceModel.deviceSections = [
-                section(deviceID: controller.deviceModel.localDeviceID, isLocal: true, loadState: .loaded, terminalRows: [terminalRow(id: "terminal-1")]),
+                section(
+                    deviceID: controller.deviceModel.localDeviceID, isLocal: true, loadState: .loaded, terminalRows: [terminalRow(id: "terminal-1")]),
                 section(deviceID: "remote-device", isLocal: false, loadState: .loading, terminalRows: []),
             ]
             controller.sidebar.applySidebarDataChange()

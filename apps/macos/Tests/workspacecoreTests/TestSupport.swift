@@ -167,8 +167,8 @@ func seedBindablePortRange(in store: SQLiteStore, count: Int = 4) throws {
 
 func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRecord {
     ProjectRecord(
-        id: id, name: "Project", dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil, ports: [], processes: [],
-        browserSessions: [])
+        id: id, name: "Project", dir: dir, isGitRepo: false, defaultBranch: nil, kind: .standard, setupScript: nil, stopScript: nil, ports: [],
+        processes: [], browserSessions: [])
 }
 
 func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, dir: String, branch: String? = nil) -> WorkspaceRecord {

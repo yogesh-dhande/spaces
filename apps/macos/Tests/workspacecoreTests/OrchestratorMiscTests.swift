@@ -1486,7 +1486,7 @@ extension OrchestratorTests {
 
         // Insert a fake git project at a temp path so removeProject reaches isManagedRepositoryDirectory.
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
-        let projectRecord = ProjectRecord(id: tempDir, name: "coverage-test", dir: tempDir, isGitRepo: true, defaultBranch: "main")
+        let projectRecord = ProjectRecord(id: tempDir, name: "coverage-test", dir: tempDir, isGitRepo: true, defaultBranch: "main", kind: .standard)
         try store.upsert(project: projectRecord)
         let workspaceRecord = WorkspaceRecord(
             id: UUID().uuidString, projectID: tempDir, dir: tempDir, dirname: nil, branch: "main", isDefault: true, isRunning: false,

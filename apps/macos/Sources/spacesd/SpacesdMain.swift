@@ -312,6 +312,10 @@ enum SpacesDaemonErrorClassification {
     /// Cores that have left `sessionCores` but whose queued end-of-session writes have not committed yet.
     /// See `retainUntilPersistenceDrains(_:)`: entries remove themselves as each queue empties.
     @TerminalEngineActor private var coresDrainingPersistence: [ObjectIdentifier: GhosttyEmbeddedSessionCore] = [:]
+    /// The running-flag reconciles of sessions that ended on their own, still in flight. See
+    /// `clearWorkspaceRunningAfterSessionExit(_:)`: entries remove themselves as each finishes, and
+    /// `shutdown()` awaits whatever is left.
+    @TerminalEngineActor private var sessionExitRunningFlagReconciles: [UUID: Task<Void, Never>] = [:]
     @TerminalEngineActor private var sessionCores: [String: GhosttyEmbeddedSessionCore] = [:] {
         didSet { livenessState.storeSessionCount(sessionCores.count) }
     }
@@ -448,23 +452,27 @@ enum SpacesDaemonErrorClassification {
         try TerminalSessionPersistence.clearAllClientsAndAttachments()
         // Startup is the one lifecycle transition NOT excluded against teardown (issue #391). A signal
         // landing in the adoption suspension below runs `shutdownOnce()` concurrently, so cores adopted
-        // after its engine snapshot escape termination and `startSharedServices()` can restart services
-        // the stop phase already stopped. Deferred rather than fixed here because both residues self-heal:
-        // an unterminated session's row falls to `recoverStaleSessions`' dead-pid branch at the next
-        // daemon start, and an orphaned Caddy is adopted through its live admin socket by the next
-        // daemon's `ensureRunning`. The window is also only the successor image's post-handoff adoption —
-        // `resumeSessionsFromHandoffIfNeeded` returns without suspending on a fresh boot.
+        // after its engine snapshot escape termination. Deferred rather than fixed here because that
+        // residue self-heals: an unterminated session's row falls to `recoverStaleSessions`' dead-pid
+        // branch at the next daemon start. The window is also only the successor image's post-handoff
+        // adoption: `resumeSessionsFromHandoffIfNeeded` returns without suspending on a fresh boot.
+        // What such a signal cannot do is bring services back up behind the stop phase: whichever
+        // suspension it lands in, `startSharedServices()` checks `startupMayProceed()` before it opens a
+        // listener or starts a service.
         let adoptedSessionIDs = try await resumeSessionsFromHandoffIfNeeded()
         // Reconcile stale runtime rows AFTER handoff adoption so the adopted sessions are exempt: the
         // sweep repairs any live-state row that claims this pid but was not adopted, which is the backstop
         // for a predecessor's exited-state write that was dropped across `execv` (see recoverStaleSessions).
         try recoverStaleSessions(adoptedSessionIDs: adoptedSessionIDs)
-        try startSharedServices()
+        try await startSharedServices()
     }
 
     /// Starts the shared (non-per-session) services. Shared by the normal `start()` tail and the
     /// failed-`execv` fallback, which stopped them in `stopSharedServices()` before quiescing.
-    private func startSharedServices() throws {
+    ///
+    /// Async because the home-project seed has to run off this main actor and still finish before either
+    /// request listener accepts a request; see `ensureHomeProject()`.
+    private func startSharedServices() async throws {
         // Seed the off-actor liveness snapshot before the socket accepts connections so the very first
         // `.ping` already carries this daemon's identity. Runs on both fresh start and handoff resume.
         livenessState.storeFingerprint(daemonIdentityFingerprint)
@@ -485,10 +493,40 @@ enum SpacesDaemonErrorClassification {
         // against the no-op defaults (a nil foreground sample reads as a bare shell, a handoff reads as
         // not in progress).
         installProcessWideOrchestratorHooks()
+        // Seeded before either listener opens, so the first request an autostarted daemon answers already
+        // carries the Home row; see `ensureHomeProject()`. It runs after the hook install above because
+        // adopting a project at the home path ends that project's processes through the session terminator
+        // those hooks provide.
+        //
+        // The seed is the one suspension between here and the listeners opening, so it is guarded on both
+        // sides against a termination signal landing inside it (see `startupMayProceed()`): before, so a
+        // teardown that has already begun never starts the adoption's writes, and after, so a seed that
+        // finished alongside `shutdownOnce()` cannot open listeners or start runtime services the stop
+        // phase has already passed.
+        guard startupMayProceed() else { return }
+        await ensureHomeProject()
+        guard startupMayProceed() else { return }
         try server.start()
         deviceAPISupervisor.start()
         startLifecycleTimer()
         startDeviceRuntimeServices()
+    }
+
+    /// Startup's half of the startup/teardown coordination, consulted on both sides of the home-project
+    /// seed's suspension in `startSharedServices()`. Startup is the one lifecycle transition that is not
+    /// otherwise excluded against teardown (issue #391), so without this a signal landing in that
+    /// suspension lets startup open the control socket, the Device API listener, the lifecycle timer and
+    /// the device runtime services after `shutdownOnce()` already stopped them, leaving them running into
+    /// `exit(0)`.
+    ///
+    /// `shutdownTask` rather than `shutdownInProgress` is the state to read, for the same reason
+    /// `performExecHandoff()`'s teardown guard reads it: `shutdownOnce()` stores the task synchronously
+    /// before it suspends, whereas `shutdownInProgress` is not set until `shutdown()` itself begins, so a
+    /// teardown still waiting out a handoff or the seed would be invisible here.
+    private func startupMayProceed() -> Bool {
+        guard shutdownTask != nil else { return true }
+        writeStandardError("spacesd startup_aborted reason=shutting_down\n")
+        return false
     }
 
     /// Device-runtime work (worktree discovery, process-exit monitoring) is owned by
@@ -629,6 +667,53 @@ enum SpacesDaemonErrorClassification {
                 }
             }
         } catch { writeStandardError("spacesd automation_service_error error=\(error)\n") }
+    }
+
+    /// One-shot startup maintenance: creates or adopts this daemon's home project, the always-present row
+    /// that holds terminals belonging to no project. Idempotent, so every start converges on the one
+    /// record without writing anything when it is already in shape. Best-effort and logged on failure
+    /// rather than fatal: a daemon that could not seed the row still serves every other project, and the
+    /// next start tries again.
+    ///
+    /// It completes before `startSharedServices` opens either request listener (the local control socket
+    /// and the Device API's pinned-TLS listener), because the Home row is contractually always present: a
+    /// Mac app that autostarts the daemon queries it the moment the socket answers, so a seed running
+    /// alongside the first overview could answer without the row or midway through adoption, and a
+    /// concurrent mutation could race the adoption writes. Finishing first also puts it ahead of the
+    /// worktree discovery scan, which skips the project since the home record is stored as non-git.
+    ///
+    /// The result is discarded. Nothing here needs the record, and a start that finds a multi-workspace
+    /// project at the home path deliberately produces none (see `ensureHomeProject`, which logs that
+    /// case): the daemon serves every other project exactly as it would otherwise.
+    ///
+    /// The work runs on a detached task rather than on this main actor, and is awaited so the sequencing
+    /// stays exactly as described above. Adopting a project already registered at the home path ends the
+    /// processes it left running, which goes through the built-in session terminator installed by
+    /// `installProcessWideOrchestratorHooks`; that terminator enters the terminal engine actor through
+    /// `TerminalEngineActor.runSynchronously`, whose one-way-rule precondition aborts the process when it
+    /// is called from the main thread, so no `catch` here could recover from it. Awaiting rather than
+    /// blocking is what keeps the hop legal: the engine is free to hop synchronously back onto the main
+    /// actor while this suspends, which a semaphore wait would deadlock against.
+    ///
+    /// The database path is resolved inside that detached task rather than passed in, because profile
+    /// resolution can spawn a git probe and this main actor must not block on one (issue #425).
+    private func ensureHomeProject() async {
+        let seed = Task.detached(priority: .userInitiated) {
+            do {
+                let orchestrator = WorkspaceOrchestrator(store: try SQLiteStore(path: try DatabaseLocator.defaultPath()))
+                // The home comes from this daemon's own profile, not `NSHomeDirectory()`: a HOME-isolated
+                // profile (a test or e2e harness) resolves its database and runtime under the overridden
+                // home, and `NSHomeDirectory()` ignores that override, so defaulting to it would report the
+                // real account's home as this device's Home row and launch terminals there.
+                try orchestrator.ensureHomeProject(homeDirectory: try SpacesProfile.current().homeDirectoryURL.path)
+            } catch { writeStandardError("spacesd home_project_error error=\(error)\n") }
+        }
+        // Published before the await and cleared after, both on this main actor, so a `shutdownOnce()`
+        // that starts while this suspends finds the adoption in flight and waits it out
+        // (`awaitHomeProjectSeedCompletion()`) instead of tearing the daemon down midway through it.
+        homeProjectSeedTask = seed
+        await seed.value
+        homeProjectSeedTask = nil
     }
 
     /// One-shot startup maintenance: removes `workspace-setup` run directories that no longer belong
@@ -777,9 +862,28 @@ enum SpacesDaemonErrorClassification {
         // durable runtime row stays stuck at `.running`. This is a cold path; the writes are bounded by
         // SQLite's busy timeout plus the bounded exited-state retry, so a blocking drain is acceptable.
         for core in terminatedCores { await core.drainPersistenceForShutdown() }
+        await awaitSessionExitRunningFlagReconciles()
+    }
+
+    /// Suspends until every running-flag reconcile a natural session exit queued has finished, so `exit(0)`
+    /// cannot destroy one mid-write and leave its workspace reading Running with nothing alive in it. Runs
+    /// after the persistence drains above because each reconcile reads the `.exited` state those drains
+    /// commit.
+    ///
+    /// Drains one at a time and re-reads the table rather than awaiting a single snapshot: the terminations
+    /// above close cores, and a core's close callback is what queues a reconcile, so entries can still be
+    /// arriving as this starts. It converges because every core closes once and intake is already latched.
+    ///
+    /// Unbounded, like the drains it follows: a reconcile is one bounded pass of SQLite work behind one
+    /// bounded lifecycle operation's gate.
+    private func awaitSessionExitRunningFlagReconciles() async {
+        while let reconcile = await TerminalEngineActor.run({ self.sessionExitRunningFlagReconciles.values.first }) { await reconcile.value }
     }
 
     private var shutdownTask: Task<Void, Never>?
+    /// The in-flight home-project seed, set only for the span `ensureHomeProject()` awaits it; see
+    /// `awaitHomeProjectSeedCompletion()`.
+    private var homeProjectSeedTask: Task<Void, Never>?
     private var handoffCompletionWaiters: [CheckedContinuation<Void, Never>] = []
 
     /// Single entry point for every termination path — the SIGTERM/SIGINT handler, AppKit's
@@ -798,12 +902,24 @@ enum SpacesDaemonErrorClassification {
             return
         }
         let task = Task { @MainActor in
+            await self.awaitHomeProjectSeedCompletion()
             await self.awaitHandoffCompletion()
             await self.shutdown()
         }
         shutdownTask = task
         await task.value
     }
+
+    /// Suspends until the startup home-project seed has finished, so teardown never runs against a
+    /// half-applied adoption: `ensureHomeProject`'s adoption ends the adopted project's processes and then
+    /// rewrites its rows, and an `exit(0)` between those steps leaves the store with a project whose
+    /// workspaces do not match it. The seed is therefore waited out rather than cancelled; startup's own
+    /// `startupMayProceed()` check is what keeps a seed from starting once this teardown exists, so the
+    /// only seed reached here is one already past its first write.
+    ///
+    /// Unbounded, like `awaitHandoffCompletion()` below: the seed is a single bounded pass of idempotent
+    /// SQLite work with no network or user input in it.
+    private func awaitHomeProjectSeedCompletion() async { await homeProjectSeedTask?.value }
 
     /// Suspends until no exec-in-place handoff is in flight, so a termination signal cannot interleave
     /// teardown with one. `performExecHandoff` suspends at every quiesce and drain, so without this a
@@ -1355,7 +1471,7 @@ enum SpacesDaemonErrorClassification {
     /// masters were never CLOEXEC, so no descriptor restore is needed) and restart shared services.
     private func resumeInPlaceAfterFailedHandoff(quiescedCores: [GhosttyEmbeddedSessionCore]) async {
         for core in quiescedCores { await core.resumeInPlaceAfterFailedExec() }
-        do { try startSharedServices() } catch { writeStandardError("spacesd handoff_resume_in_place_failed error=\(error)\n") }
+        do { try await startSharedServices() } catch { writeStandardError("spacesd handoff_resume_in_place_failed error=\(error)\n") }
     }
 
     /// `execv`s `path` with this process's original argv verbatim. Original argv matters: the new
@@ -1878,7 +1994,17 @@ enum SpacesDaemonErrorClassification {
             } else {
                 workspaces = try orchestrator.store.projects().flatMap { try orchestrator.store.workspaces(projectID: $0.id) }
             }
-            return TerminalServiceProfileCommandResponse(message: "Listed workspaces.", workspaces: workspaces.map(profileWorkspaceRecord))
+            // Each record is named by its own project's kind, which is what makes the home project's
+            // workspace read `~` here exactly as it does over the Device API. The kinds come from one
+            // query rather than one per row.
+            let kindsByProjectID = Dictionary(uniqueKeysWithValues: try orchestrator.store.projects().map { ($0.id, $0.kind) })
+            let records = try workspaces.map { workspace -> TerminalServiceProfileWorkspaceRecord in
+                guard let kind = kindsByProjectID[workspace.projectID] else {
+                    throw SpacesRuntimeError.invalidArgument(message: "Project not found for id \(workspace.projectID).")
+                }
+                return profileWorkspaceRecord(workspace, projectKind: kind)
+            }
+            return TerminalServiceProfileCommandResponse(message: "Listed workspaces.", workspaces: records)
         case .workspaceCreate(let payload):
             let orchestrator = try makeProfileOrchestrator()
             guard let project = try orchestrator.store.project(id: payload.projectID) else {
@@ -1886,7 +2012,8 @@ enum SpacesDaemonErrorClassification {
             }
             let workspace = try orchestrator.createWorkspaceOnDevice(
                 projectID: project.id, branch: payload.branch, baseBranch: payload.baseBranch, allowExistingBranchReuse: payload.existingBranch)
-            return TerminalServiceProfileCommandResponse(message: "Created workspace.", workspace: profileWorkspaceRecord(workspace))
+            return TerminalServiceProfileCommandResponse(
+                message: "Created workspace.", workspace: profileWorkspaceRecord(workspace, projectKind: project.kind))
         // Workspace start/stop/restart and agent kill/signal are peeled off main by `dispatch(_:)` into their
         // dedicated synchronous off-main handlers (`workspaceStartOffMain`, `workspaceStopOffMain`, `agentKillOffMain`,
         // `agentSignalOffMain`) because their call graph reaches the launcher/terminator, whose engine hop
@@ -2163,7 +2290,8 @@ enum SpacesDaemonErrorClassification {
             try orchestrator.upWorkspace(workspaceID: workspaceID, restartIfRunning: restartIfRunning, background: true)
             let workspace = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
             let profile = TerminalServiceProfileCommandResponse(
-                message: restartIfRunning ? "Workspace restarted." : "Workspace is running.", workspace: profileWorkspaceRecord(workspace))
+                message: restartIfRunning ? "Workspace restarted." : "Workspace is running.",
+                workspace: profileWorkspaceRecord(workspace, projectKind: try profileWorkspaceProjectKind(workspace, orchestrator: orchestrator)))
             return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
         } catch { return Self.failureResponse(error) }
     }
@@ -2180,7 +2308,9 @@ enum SpacesDaemonErrorClassification {
             let workspaceID = try orchestrator.resolveWorkspaceID(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
             _ = try orchestrator.stopWorkspace(workspaceID: workspaceID)
             let workspace = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
-            let profile = TerminalServiceProfileCommandResponse(message: "Workspace stopped.", workspace: profileWorkspaceRecord(workspace))
+            let profile = TerminalServiceProfileCommandResponse(
+                message: "Workspace stopped.",
+                workspace: profileWorkspaceRecord(workspace, projectKind: try profileWorkspaceProjectKind(workspace, orchestrator: orchestrator)))
             return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
         } catch { return Self.failureResponse(error) }
     }
@@ -2422,11 +2552,23 @@ enum SpacesDaemonErrorClassification {
             id: value.id, name: value.name, dir: value.dir, isGitRepo: value.isGitRepo, defaultBranch: value.defaultBranch)
     }
 
-    private nonisolated func profileWorkspaceRecord(_ value: WorkspaceRecord) -> TerminalServiceProfileWorkspaceRecord {
+    /// - Parameter projectKind: The kind of the project owning `value`, which decides the record's
+    ///   display name. Passed in rather than looked up here so a listing that already walked the
+    ///   projects does not re-read each one.
+    private nonisolated func profileWorkspaceRecord(_ value: WorkspaceRecord, projectKind: ProjectKind) -> TerminalServiceProfileWorkspaceRecord {
         TerminalServiceProfileWorkspaceRecord(
-            id: value.id, projectID: value.projectID, dir: value.dir, dirname: value.dirname, branch: value.branch, baseBranch: value.baseBranch,
-            isDefault: value.isDefault, isHidden: value.isHidden, isRunning: value.isRunning, lastLaunchedAt: value.lastLaunchedAt, notes: value.notes
-        )
+            id: value.id, projectID: value.projectID, dir: value.dir, dirname: value.dirname, branch: projectKind.maskedBranch(value.branch),
+            baseBranch: projectKind.maskedBranch(value.baseBranch), isDefault: value.isDefault, isHidden: value.isHidden, isRunning: value.isRunning,
+            lastLaunchedAt: value.lastLaunchedAt, notes: value.notes,
+            displayName: projectKind.workspaceDisplayName(branch: value.branch, dir: value.dir))
+    }
+
+    /// The kind of the project a workspace belongs to, which decides the workspace's display name.
+    private nonisolated func profileWorkspaceProjectKind(_ value: WorkspaceRecord, orchestrator: WorkspaceOrchestrator) throws -> ProjectKind {
+        guard let project = try orchestrator.store.project(id: value.projectID) else {
+            throw SpacesRuntimeError.invalidArgument(message: "Project not found for id \(value.projectID).")
+        }
+        return project.kind
     }
 
     private nonisolated func requiredProfileWorkspace(id: String, orchestrator: WorkspaceOrchestrator) throws -> WorkspaceRecord {
@@ -2939,9 +3081,43 @@ enum SpacesDaemonErrorClassification {
                 // Same reason as the terminate path: a session that ended on its own writes its `.exited`
                 // state write-behind, and a capture taken before it lands would offer the agent back.
                 self?.retainUntilPersistenceDrains(closedCore)
+                self?.clearWorkspaceRunningAfterSessionExit(closedCore)
             })
         sessionCores[launchConfiguration.sessionID] = created
         return created
+    }
+
+    /// Marks the workspace owning a session that ended on its own stopped, once that exit left it with no
+    /// live runtime. A natural exit deletes no product rows (the ended pane stays listed and reopenable),
+    /// so no stop path runs for it and nothing else would ever clear the flag: the workspace would read
+    /// Running with no live terminal until retention garbage collection removed the pane days later, and a
+    /// workspace that refuses Stop (the home row) has no way to be cleared by hand in the meantime.
+    ///
+    /// Awaits the core's persistence queue first, because the reconcile reads exactly the `.exited` state
+    /// this core writes write-behind; reconciling before it commits would read the session as still live
+    /// and leave the flag set. The work then runs off both the engine and the main actor, on a detached
+    /// task: it opens a store, waits for the workspace lifecycle gate, and writes.
+    ///
+    /// The detached task is owned by an engine-actor bookkeeping task, the same shape
+    /// `retainUntilPersistenceDrains` uses, so `shutdown()` can await whatever is still in flight: a
+    /// daemon stopping in the moment after an exit would otherwise `exit(0)` out from under the write and
+    /// leave the workspace reading Running until the next start's `recoverStaleTerminalSessions` swept it.
+    /// Registering here is synchronous on the engine actor, which this function holds for its whole body,
+    /// so the entry is in place before the bookkeeping task can remove it.
+    @TerminalEngineActor private func clearWorkspaceRunningAfterSessionExit(_ closedCore: GhosttyEmbeddedSessionCore) {
+        let sessionID = closedCore.launchConfiguration.sessionID
+        let key = UUID()
+        let reconcile = Task.detached(priority: .utility) { [weak self] in
+            await closedCore.drainPersistenceForShutdown()
+            guard let self else { return }
+            do { try self.makeProfileOrchestrator().clearWorkspaceRunningAfterTerminalSessionExit(sessionID: sessionID) } catch {
+                writeStandardError("spacesd session_exit_running_flag_error session=\(sessionID) error=\(error)\n")
+            }
+        }
+        sessionExitRunningFlagReconciles[key] = Task { @TerminalEngineActor [weak self] in
+            await reconcile.value
+            self?.sessionExitRunningFlagReconciles.removeValue(forKey: key)
+        }
     }
 
     /// `nonisolated`: reads only `TerminalSessionPersistence` (disk), so it runs correctly regardless of
@@ -3278,10 +3454,18 @@ enum SpacesDaemonErrorClassification {
     /// generation means this image is a fresh start and a row carrying its pid belongs to a daemon the
     /// operating system reissued the pid from (a reboot, where launchd can hand the fresh daemon the dead
     /// one's pid). Those rows are stranded by an unclean exit, and their coding agents are offered back.
+    ///
+    /// Driven through `WorkspaceOrchestrator.recoverStaleTerminalSessions`, which pairs that repair with
+    /// the running-flag reconcile of the workspaces owning the repaired sessions: the repair builds no
+    /// session core, so those sessions end without the closed-core callback the natural-exit reconcile
+    /// rides on. The orchestrator carries the store alone, since the repair and the reconcile only read and
+    /// write rows, and this runs ahead of `installProcessWideOrchestratorHooks` anyway. It also runs ahead
+    /// of `startSharedServices`, so it is the only party in this process that can hold a workspace
+    /// lifecycle gate and it lands before either request listener opens.
     private func recoverStaleSessions(adoptedSessionIDs: Set<String> = []) throws {
-        let result = try TerminalSessionStaleRecovery.reconcile(
-            ownPID: getpid(), adoptedSessionIDs: adoptedSessionIDs, resumedFromHandoff: handoffGeneration != 0,
-            isProcessAlive: { Self.isProcessAlive(pid: Int($0)) })
+        let orchestrator = WorkspaceOrchestrator(store: try SQLiteStore(path: try DatabaseLocator.defaultPath()))
+        let result = try orchestrator.recoverStaleTerminalSessions(
+            adoptedSessionIDs: adoptedSessionIDs, resumedFromHandoff: handoffGeneration != 0, isProcessAlive: { Self.isProcessAlive(pid: Int($0)) })
         // A repair write that could not commit within the sweep's bounded retry leaves the row in its
         // prior live state; it heals at the next daemon restart via the dead-pid branch. Log it so the
         // strand is observable rather than silent.

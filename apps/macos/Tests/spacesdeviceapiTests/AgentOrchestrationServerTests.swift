@@ -562,8 +562,8 @@
             let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
             try store.upsert(
                 project: ProjectRecord(
-                    id: "project-1", name: "Spaces", dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil, ports: [],
-                    processes: [], browserSessions: []))
+                    id: "project-1", name: "Spaces", dir: dir, isGitRepo: false, defaultBranch: nil, kind: .standard, setupScript: nil,
+                    stopScript: nil, ports: [], processes: [], browserSessions: []))
             try store.upsert(
                 workspace: WorkspaceRecord(
                     id: "workspace-1", projectID: "project-1", dir: dir + "/ws", dirname: nil, branch: "feature", isDefault: false, isRunning: false,
@@ -583,8 +583,8 @@
             let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
             try store.upsert(
                 project: ProjectRecord(
-                    id: "project-1", name: "Spaces", dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil, ports: [],
-                    processes: [], browserSessions: []))
+                    id: "project-1", name: "Spaces", dir: dir, isGitRepo: false, defaultBranch: nil, kind: .standard, setupScript: nil,
+                    stopScript: nil, ports: [], processes: [], browserSessions: []))
             try store.upsert(
                 workspace: WorkspaceRecord(
                     id: "workspace-1", projectID: "project-1", dir: dir + "/ws", dirname: nil, branch: "feature", isDefault: false, isRunning: false,
@@ -597,8 +597,8 @@
             let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
             try store.upsert(
                 project: ProjectRecord(
-                    id: "project-1", name: "Spaces", dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil, ports: [],
-                    processes: [], browserSessions: []))
+                    id: "project-1", name: "Spaces", dir: dir, isGitRepo: false, defaultBranch: nil, kind: .standard, setupScript: nil,
+                    stopScript: nil, ports: [], processes: [], browserSessions: []))
             try store.upsert(
                 workspace: WorkspaceRecord(
                     id: "workspace-1", projectID: "project-1", dir: dir + "/ws", dirname: nil, branch: "feature", isDefault: false, isRunning: true,

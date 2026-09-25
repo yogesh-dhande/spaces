@@ -692,7 +692,7 @@ extension ProcessProfileEnvironmentSuites {
             }
             let workspace = SpacesDeviceWorkspaceSummary(
                 id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/workspace-1",
-                isRunning: true, isHidden: false, isDefault: false, sessionCount: processRows.count, processRows: processRows)
+                isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true, processRows: processRows)
             return SpacesDeviceOverviewPayload(
                 projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
                 workspaces: [workspace], sessions: sessions, retainedTerminalSessionIDs: retained)
@@ -766,7 +766,8 @@ extension ProcessProfileEnvironmentSuites {
                     SpacesDeviceWorkspaceSummary(
                         id: workspace.id, projectID: workspace.projectID, projectName: workspace.projectName, branch: "renamed-branch",
                         baseBranch: workspace.baseBranch, dir: workspace.dir, isRunning: workspace.isRunning, isHidden: workspace.isHidden,
-                        isDefault: workspace.isDefault, sessionCount: workspace.sessionCount, processRows: workspace.processRows)
+                        isDefault: workspace.isDefault, hasTrackedRuntimeIndicators: workspace.hasTrackedRuntimeIndicators,
+                        processRows: workspace.processRows)
                 }, sessions: renamed.sessions, retainedTerminalSessionIDs: renamed.retainedTerminalSessionIDs)
             let status = TerminalServiceDaemonStatus(
                 version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
@@ -954,6 +955,76 @@ extension ProcessProfileEnvironmentSuites {
             #expect(
                 controller.panelCoordinator.placement(forSessionID: "replacement") != nil,
                 "the stale mutation response's prune was skipped, so the already-claimed pane stayed put")
+        }
+
+        /// This device's two workspaces, the second one's project reported as `adoptedProjectKind` so a
+        /// test can install the same rows before and after the daemon adopts that project as its home
+        /// project. Workspace ids are unique to the adoption test below: closing a live code pane flushes
+        /// its final state into the process-global `CodePaneWorkspaceStateCache`, keyed only by device and
+        /// workspace id, and that flush is not guaranteed to land before the test function returns.
+        private func twoWorkspaceOverview(adoptedProjectKind: ProjectKind) -> SpacesDeviceOverviewPayload {
+            let standard = SpacesDeviceWorkspaceSummary(
+                id: "workspace-remote-standard", projectID: "project-standard", projectName: "Project", branch: "feature", baseBranch: "main",
+                dir: "/tmp/workspace-remote-standard", isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false,
+                processRows: [])
+            let adopted = SpacesDeviceWorkspaceSummary(
+                id: "workspace-remote-adopted", projectID: "project-adopted", projectName: "~", projectKind: adoptedProjectKind, branch: nil,
+                baseBranch: nil, dir: "/home/user", isRunning: true, isHidden: false, isDefault: true, hasTrackedRuntimeIndicators: false,
+                processRows: [])
+            return SpacesDeviceOverviewPayload(
+                projects: [
+                    SpacesDeviceProjectSummary(id: "project-standard", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main"),
+                    SpacesDeviceProjectSummary(
+                        id: "project-adopted", name: "~", dir: "/home/user", isGitRepo: false, defaultBranch: nil, kind: adoptedProjectKind),
+                ], workspaces: [standard, adopted], sessions: [], retainedTerminalSessionIDs: [])
+        }
+
+        private func twoWorkspaceSection(adoptedProjectKind: ProjectKind) -> AppKitController.DeviceSection {
+            let overview = twoWorkspaceOverview(adoptedProjectKind: adoptedProjectKind)
+            let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: deviceID)
+            return AppKitController.DeviceSection(
+                deviceID: deviceID, deviceName: "Linux Box", isLocal: false, loadState: .loaded, device: device(), projects: mapped.projects,
+                workspacesByProject: mapped.workspacesByProject, workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, overview: overview)
+        }
+
+        /// An overview install is authoritative for Editor eligibility, not just for workspace deletion:
+        /// adopting an existing project rooted at the home directory as the device's home project keeps
+        /// the workspace id, so a keep-set of workspace ids alone would leave a code pane open on a
+        /// workspace whose file listings and reads the daemon refuses. This path builds its keep-set with
+        /// the same `OpenPanePruning.editorEligibleWorkspaceIDs` the mutation-response path uses (see
+        /// `CodePanePlumbingTests.liveOverviewOrphansAndClosesAnEditorPaneWhoseWorkspaceBecameTheHomeProject`),
+        /// so the adopted workspace's pane closes on the install while the standard project's pane on the
+        /// same device is untouched. Both workspaces stay `isRunning` across the install, so nothing here
+        /// can be explained by the run-state transition close that also runs on this path.
+        @Test func anInstalledOverviewClosesACodePaneWhoseProjectBecameTheHomeProject() throws {
+            let controller = makeController()
+            controller.deviceModel.deviceSections = [twoWorkspaceSection(adoptedProjectKind: .standard)]
+            controller.rebuildFlatSidebarData()
+            let adoptedScope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-remote-adopted")
+            let standardScope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-remote-standard")
+            #expect(
+                controller.panelCoordinator.openCodePaneInNewTab(
+                    deviceID: deviceID, workspaceID: "workspace-remote-adopted", initialMode: .diff, in: adoptedScope))
+            #expect(
+                controller.panelCoordinator.openCodePaneInNewTab(
+                    deviceID: deviceID, workspaceID: "workspace-remote-standard", initialMode: .diff, in: standardScope))
+            let adopted = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: adoptedScope)).first?.id)
+            let standard = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: standardScope)).first?.id)
+
+            controller.sidebar.applyRemoteDeviceSection(
+                deviceID: deviceID,
+                result: .success(
+                    SidebarController.RemoteDeviceLoad(
+                        overview: SpacesDeviceOverview(device: device(), overview: twoWorkspaceOverview(adoptedProjectKind: .home)),
+                        daemonStatus: nil, compatibility: nil)), epoch: controller.panelCoordinator.paneReplacementEpoch)
+
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: adoptedScope)).isEmpty,
+                "the adopted workspace's row survives the install, but its project is the home project, which the Editor cannot show")
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: adopted) == nil, "its controller is torn down")
+            #expect(
+                controller.panelCoordinator.codePaneContent(forPaneID: standard) != nil,
+                "the standard project's pane on the same device is untouched by the install")
         }
     }
 }

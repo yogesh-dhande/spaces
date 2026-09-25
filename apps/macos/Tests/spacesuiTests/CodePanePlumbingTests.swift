@@ -63,7 +63,8 @@ extension ProcessProfileEnvironmentSuites {
         ) -> AppKitController.DeviceSection {
             let workspace = SpacesDeviceWorkspaceSummary(
                 id: workspaceID, projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/\(workspaceID)",
-                isRunning: true, isHidden: false, isDefault: false, sessionCount: 1, processRows: [], codingAgentRows: codingAgentRows)
+                isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true, processRows: [],
+                codingAgentRows: codingAgentRows)
             let overview = SpacesDeviceOverviewPayload(
                 projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
                 workspaces: [workspace],
@@ -110,10 +111,10 @@ extension ProcessProfileEnvironmentSuites {
         private func twoWorkspaceSection(deviceID: String) -> AppKitController.DeviceSection {
             let workspace1 = SpacesDeviceWorkspaceSummary(
                 id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature-1", baseBranch: "main", dir: "/tmp/workspace-1",
-                isRunning: true, isHidden: false, isDefault: false, sessionCount: 0, processRows: [])
+                isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false, processRows: [])
             let workspace2 = SpacesDeviceWorkspaceSummary(
                 id: "workspace-2", projectID: "project-1", projectName: "Project", branch: "feature-2", baseBranch: "main", dir: "/tmp/workspace-2",
-                isRunning: true, isHidden: false, isDefault: false, sessionCount: 0, processRows: [])
+                isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false, processRows: [])
             let overview = SpacesDeviceOverviewPayload(
                 projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
                 workspaces: [workspace1, workspace2], sessions: [], retainedTerminalSessionIDs: [])
@@ -123,23 +124,77 @@ extension ProcessProfileEnvironmentSuites {
                 workspacesByProject: mapped.workspacesByProject, workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, overview: overview)
         }
 
+        /// One device section carrying the daemon's home workspace (`projectKind: .home`) and, when
+        /// `includingStandardWorkspace` is true, one ordinary workspace alongside it. Used by the
+        /// Editor-eligibility tests below: the home workspace is never a valid fallback or restoration
+        /// target, so a section with only it present must make every such lookup answer nil/none.
+        private func homeWorkspaceSection(deviceID: String, includingStandardWorkspace: Bool) -> AppKitController.DeviceSection {
+            let homeProject = SpacesDeviceProjectSummary(
+                id: "home-project", name: "~", dir: "/Users/test", isGitRepo: false, defaultBranch: nil, kind: .home)
+            let homeWorkspace = SpacesDeviceWorkspaceSummary(
+                id: "workspace-home", projectID: "home-project", projectName: "~", projectKind: .home, branch: nil, baseBranch: nil,
+                dir: "/Users/test", isRunning: true, isHidden: false, isDefault: true, hasTrackedRuntimeIndicators: false, processRows: [])
+            var projects = [homeProject]
+            var workspaces = [homeWorkspace]
+            if includingStandardWorkspace {
+                projects.append(
+                    SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main"))
+                workspaces.append(
+                    SpacesDeviceWorkspaceSummary(
+                        id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
+                        dir: "/tmp/workspace-1", isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false,
+                        processRows: []))
+            }
+            let overview = SpacesDeviceOverviewPayload(projects: projects, workspaces: workspaces, sessions: [], retainedTerminalSessionIDs: [])
+            let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: deviceID)
+            return AppKitController.DeviceSection(
+                deviceID: deviceID, deviceName: "This Mac", isLocal: true, loadState: .loaded, device: nil, projects: mapped.projects,
+                workspacesByProject: mapped.workspacesByProject, workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, overview: overview)
+        }
+
+        /// One device section carrying the daemon's home workspace alongside two ordinary workspaces
+        /// (`workspace-1`, `workspace-2`). Used by the follow-selection retarget-gate test below: it needs
+        /// a home row to select into (which must not retarget an open Editor) and a second, editor-eligible
+        /// workspace to select afterward (which must retarget normally, proving the gate only skips the
+        /// ineligible target rather than wedging the monitor in place).
+        private func homeAndTwoStandardWorkspacesSection(deviceID: String) -> AppKitController.DeviceSection {
+            let homeProject = SpacesDeviceProjectSummary(
+                id: "home-project", name: "~", dir: "/Users/test", isGitRepo: false, defaultBranch: nil, kind: .home)
+            let homeWorkspace = SpacesDeviceWorkspaceSummary(
+                id: "workspace-home", projectID: "home-project", projectName: "~", projectKind: .home, branch: nil, baseBranch: nil,
+                dir: "/Users/test", isRunning: true, isHidden: false, isDefault: true, hasTrackedRuntimeIndicators: false, processRows: [])
+            let workspace1 = SpacesDeviceWorkspaceSummary(
+                id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature-1", baseBranch: "main", dir: "/tmp/workspace-1",
+                isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false, processRows: [])
+            let workspace2 = SpacesDeviceWorkspaceSummary(
+                id: "workspace-2", projectID: "project-1", projectName: "Project", branch: "feature-2", baseBranch: "main", dir: "/tmp/workspace-2",
+                isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false, processRows: [])
+            let overview = SpacesDeviceOverviewPayload(
+                projects: [
+                    homeProject,
+                    SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main"),
+                ], workspaces: [homeWorkspace, workspace1, workspace2], sessions: [], retainedTerminalSessionIDs: [])
+            let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: deviceID)
+            return AppKitController.DeviceSection(
+                deviceID: deviceID, deviceName: "This Mac", isLocal: true, loadState: .loaded, device: nil, projects: mapped.projects,
+                workspacesByProject: mapped.workspacesByProject, workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, overview: overview)
+        }
+
         private func recoveredEditorWorkspaceState() -> CodePaneWorkspaceState {
             CodePaneWorkspaceState(
                 mode: .editor, scope: .init(kind: "ref", refName: "main"), diffLayout: "split", diffSelectedPath: "Sources/App.swift",
-                diffTreeExpandedPaths: ["Sources"], diffTreeSelectedPath: "Sources/App.swift",
-                fileTreeExpandedPaths: ["Sources"], fileTreeSelectedPath: "Sources/App.swift", editorSidebarMode: "changes",
-                editorRecentPaths: ["Sources/App.swift"], diffScrollLine: 41, diffScrollSide: "new",
-                diffFocusedPath: "Sources/App.swift", diffFocusedLine: 42, diffFocusedSide: "new",
-                editorScrollLine: 12, editorFocusedLine: 13,
+                diffTreeExpandedPaths: ["Sources"], diffTreeSelectedPath: "Sources/App.swift", fileTreeExpandedPaths: ["Sources"],
+                fileTreeSelectedPath: "Sources/App.swift", editorSidebarMode: "changes", editorRecentPaths: ["Sources/App.swift"], diffScrollLine: 41,
+                diffScrollSide: "new", diffFocusedPath: "Sources/App.swift", diffFocusedLine: 42, diffFocusedSide: "new", editorScrollLine: 12,
+                editorFocusedLine: 13,
                 editorState: .init(
                     path: "Sources/App.swift", baseSHA256: "base-sha", baseContent: "let value = 1", content: "let value = 2", dirty: true,
-                    conflict: false),
-                pendingReviewComments: nil)
+                    conflict: false), pendingReviewComments: nil)
         }
 
-        private func persistEditorWorkspaceState(
-            _ state: CodePaneWorkspaceState, controller: AppKitController, deviceID: String, workspaceID: String
-        ) throws {
+        private func persistEditorWorkspaceState(_ state: CodePaneWorkspaceState, controller: AppKitController, deviceID: String, workspaceID: String)
+            throws
+        {
             try controller.clientDatabase().writeCodePaneWorkspaceState(
                 deviceID: deviceID, workspaceID: workspaceID, stateJSON: String(decoding: try JSONEncoder().encode(state), as: UTF8.self))
             CodePaneWorkspaceStateCache.remove(
@@ -156,8 +211,7 @@ extension ProcessProfileEnvironmentSuites {
             let suffix = "}));"
             guard script.hasPrefix(prefix), script.hasSuffix(suffix) else { throw CodePaneInitialStateParseError.unexpectedScript }
             struct InitDetail: Decodable { let workspaceState: CodePaneBridge.WorkspaceState }
-            return try JSONDecoder().decode(
-                InitDetail.self, from: Data(script.dropFirst(prefix.count).dropLast(suffix.count).utf8)).workspaceState
+            return try JSONDecoder().decode(InitDetail.self, from: Data(script.dropFirst(prefix.count).dropLast(suffix.count).utf8)).workspaceState
         }
 
         private enum CodePaneInitialStateParseError: Error { case unexpectedScript }
@@ -287,7 +341,9 @@ extension ProcessProfileEnvironmentSuites {
         @Test func closeCodePanesByDeviceAndWorkspaceClosesOnlyTheMatchingScopedPaneAndLeavesAGlobalEditorPaneUntouched() throws {
             let controller = makeController()
             let deviceID = controller.deviceModel.localDeviceID
-            controller.deviceModel.deviceSections = [twoWorkspaceSection(deviceID: deviceID), section(deviceID: "other-device", sessionID: "sess-other")]
+            controller.deviceModel.deviceSections = [
+                twoWorkspaceSection(deviceID: deviceID), section(deviceID: "other-device", sessionID: "sess-other"),
+            ]
             controller.rebuildFlatSidebarData()
             let scope1 = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
             let scope2 = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-2")
@@ -395,6 +451,89 @@ extension ProcessProfileEnvironmentSuites {
                 controller.panelCoordinator.codePaneContent(forPaneID: "monitor") != nil, "its controller survives, unlike a workspace-scoped prune")
         }
 
+        /// A workspace still listed in a live overview, but reassigned to the home project (adoption can
+        /// turn a workspace into the daemon's home workspace without ever removing its row), is not "still
+        /// live" for the Editor: the keep-set `applyDeviceOverview` builds for `pruneOpenCodePanes` keeps
+        /// only editor-eligible workspace ids (`ProjectKind.isEditorEligible`, the same predicate applied
+        /// here to a real home-kind `SpacesDeviceWorkspaceSummary`), so this counts as gone for the Editor
+        /// even though the workspace id itself survives. `resolveOrphanedGlobalEditorPane` then closes the
+        /// orphaned pane outright, since the home workspace is the only one left to retarget to and it is
+        /// excluded too. Drives `pruneOpenCodePanes`/`resolveOrphanedGlobalEditorPane` directly, the same
+        /// way `deletingTheLastRemainingWorkspaceClosesTheMonitorsWindow` does, rather than through
+        /// `applyDeviceMutationResponse`'s full sidebar-reload pipeline, which is unrelated to what this
+        /// test covers. Its workspace id (`workspace-adopted`) is not reused by any other test in this
+        /// file: closing a live code pane flushes its final state into the process-global
+        /// `CodePaneWorkspaceStateCache`/`CodePaneWorkspaceStateHandoff` (keyed only by device and
+        /// workspace id, with no per-test isolation), and that flush's completion is not guaranteed to
+        /// land before this test function returns, so a shared id could otherwise leak stale cache state
+        /// into whichever later test happens to reuse it.
+        @Test func liveOverviewOrphansAndClosesAnEditorPaneWhoseWorkspaceBecameTheHomeProject() throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-adopted")), to: PanelLayout()
+            )
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
+            #expect(
+                controller.panelCoordinator.codePaneContent(forPaneID: "monitor") != nil, "precondition: the Editor pane is open on workspace-adopted"
+            )
+
+            let homeWorkspace = SpacesDeviceWorkspaceSummary(
+                id: "workspace-adopted", projectID: "home-project", projectName: "~", projectKind: .home, branch: nil, baseBranch: nil,
+                dir: "/Users/test", isRunning: true, isHidden: false, isDefault: true, hasTrackedRuntimeIndicators: false, processRows: [])
+            let homeOverview = SpacesDeviceOverviewPayload(
+                projects: [
+                    SpacesDeviceProjectSummary(id: "home-project", name: "~", dir: "/Users/test", isGitRepo: false, defaultBranch: nil, kind: .home)
+                ], workspaces: [homeWorkspace], sessions: [], retainedTerminalSessionIDs: [])
+            let editorEligibleWorkspaceIDs = Set(homeOverview.workspaces.filter { $0.projectKind.isEditorEligible }.map(\.id))
+            #expect(editorEligibleWorkspaceIDs.isEmpty, "precondition: workspace-adopted's only row in this overview is now the home workspace")
+
+            let orphan = controller.panelCoordinator.pruneOpenCodePanes(deviceID: deviceID, liveWorkspaceIDs: editorEligibleWorkspaceIDs)
+            let unwrappedOrphan = try #require(orphan, "workspace-adopted is no longer editor-eligible, so the monitor is reported orphaned")
+            controller.resolveOrphanedGlobalEditorPane(excluding: unwrappedOrphan.workspaceID)
+
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).isEmpty,
+                "the pane closes: workspace-adopted's row still exists but its project became home, which the Editor cannot show")
+        }
+
+        /// `globalEditorFallbackWorkspaceID`'s chain (focused window, selected workspace, the daemon's
+        /// last-active workspace, then the first workspace found on any device) never lands on the home
+        /// workspace: a home workspace is excluded both as a chain candidate and from the final scan
+        /// (`ProjectKind.isEditorEligible`). Forces the chain through its last-active-workspace link
+        /// (`clientActiveWorkspaceID`, the one candidate this suite can set deterministically without
+        /// depending on `NSApp.isActive` or a running Chrome) so the home workspace it names is skipped,
+        /// falling through to the standard workspace the final scan finds.
+        @Test func globalEditorFallbackWorkspaceIDSkipsAHomeWorkspaceAsAChainCandidateAndFallsThroughToTheFinalScan() throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [homeWorkspaceSection(deviceID: deviceID, includingStandardWorkspace: true)]
+            controller.rebuildFlatSidebarData()
+            AppKitController.setClientActiveWorkspaceID("workspace-home")
+
+            let fallback = controller.globalEditorFallbackWorkspaceID(excluding: nil, allowedWorkspaceKeys: nil)
+
+            #expect(
+                fallback?.workspaceID == "workspace-1",
+                "the daemon's last-active workspace names the home workspace, an ineligible chain candidate, so the chain falls through to the final scan's standard workspace"
+            )
+        }
+
+        /// When the home workspace is the only workspace anywhere, every chain candidate and the final
+        /// scan all come up empty, so there is no fallback at all; `resolveOrphanedGlobalEditorPane`
+        /// reads this as "close the Editor" rather than retargeting it onto the workspace with no Editor.
+        @Test func globalEditorFallbackWorkspaceIDReturnsNilWhenOnlyTheHomeWorkspaceExists() throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [homeWorkspaceSection(deviceID: deviceID, includingStandardWorkspace: false)]
+            controller.rebuildFlatSidebarData()
+
+            let fallback = controller.globalEditorFallbackWorkspaceID(excluding: nil, allowedWorkspaceKeys: nil)
+
+            #expect(fallback == nil, "the only workspace anywhere is the home workspace, which has no Editor, so no fallback exists")
+        }
+
         /// `openOrFocusGlobalEditorWindow` — the ⌘⌥E shortcut, the sidebar's "Open in Editor" item, and
         /// every other open-editor entry point — creates one code pane in the global singleton window
         /// when none is open anywhere yet, restores the target workspace's saved mode, and re-focuses
@@ -441,9 +580,7 @@ extension ProcessProfileEnvironmentSuites {
             controller.deviceModel.deviceSections = [section(deviceID: deviceID, sessionID: "sess-no-state", workspaceID: workspaceID)]
             controller.rebuildFlatSidebarData()
             var openedGlobalScopes: [PanelScope] = []
-            controller.panelCoordinator.onLayoutChanged = { scope, _ in
-                if case .globalWindow = scope { openedGlobalScopes.append(scope) }
-            }
+            controller.panelCoordinator.onLayoutChanged = { scope, _ in if case .globalWindow = scope { openedGlobalScopes.append(scope) } }
 
             let opened = controller.panelCoordinator.openOrFocusGlobalEditorWindow(deviceID: deviceID, workspaceID: workspaceID)
 
@@ -634,6 +771,56 @@ extension ProcessProfileEnvironmentSuites {
             #expect(
                 persistedPane.content == .codePane(deviceID: deviceID, workspaceID: "workspace-2"),
                 "the persisted layout on disk reflects the retarget, not just the in-memory copy")
+        }
+
+        /// Selecting the home row while a global Editor monitor is open on an ordinary workspace must not
+        /// retarget it: the home workspace has no Editor (`ProjectKind.isEditorEligible`), so the daemon
+        /// refuses its file API and retargeting there would trade a working monitor for a dead one.
+        /// Selecting a further, editor-eligible workspace afterward retargets normally, proving the gate
+        /// in `showWorkspaceDetail` only skips the ineligible target rather than wedging the monitor in
+        /// place for the rest of the session.
+        @Test func selectingTheHomeRowLeavesAnOpenGlobalEditorOnItsCurrentWorkspace() throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [homeAndTwoStandardWorkspacesSection(deviceID: deviceID)]
+            controller.rebuildFlatSidebarData()
+            // Selecting the home row also starts a terminal in it when none is running
+            // (`autoOpenHomeTerminalIfNeeded`), which asks a daemon this process does not have. This test
+            // is about the Editor monitor, so that creation is stubbed out rather than exercised here.
+            controller.createWorkspaceTerminalSessionOverrideForTesting = { _, _ in }
+            let scope = PanelScope.globalWindow(panelWindowID: "panel-1")
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "monitor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
+            controller.panelCoordinator.restorePanelWindow(panelWindowID: "panel-1", layout: layout, frame: nil)
+            let (project1, workspace1) = try #require(controller.findWorkspace(id: "workspace-1"))
+            let (projectHome, workspaceHome) = try #require(controller.findWorkspace(id: "workspace-home"))
+            let (project2, workspace2) = try #require(controller.findWorkspace(id: "workspace-2"))
+
+            // First-ever presentation this session (a no-op retarget, same as the sibling test above).
+            controller.showWorkspaceDetail(project: project1, workspace: workspace1, presentation: .userNavigation)
+            let contentAfterFirstPresentation = try #require(controller.panelCoordinator.codePaneContent(forPaneID: "monitor"))
+
+            controller.showWorkspaceDetail(project: projectHome, workspace: workspaceHome, presentation: .userNavigation)
+
+            #expect(
+                (controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as AnyObject?) === (contentAfterFirstPresentation as AnyObject?),
+                "selecting the home row does not retarget the monitor: the home workspace has no Editor")
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" }?.content
+                    == .codePane(deviceID: deviceID, workspaceID: "workspace-1"), "the monitor's pane descriptor stays on workspace-1")
+
+            controller.showWorkspaceDetail(project: project2, workspace: workspace2, presentation: .userNavigation)
+
+            let retargetedContent = try #require(
+                controller.panelCoordinator.codePaneContent(forPaneID: "monitor") as? CodePaneContentController,
+                "the monitor's pane id keeps a live controller after retargeting")
+            #expect(
+                (retargetedContent as AnyObject?) !== (contentAfterFirstPresentation as AnyObject?),
+                "a subsequent editor-eligible selection retargets normally, so the gate only skips the home row")
+            #expect(retargetedContent.workspaceID == "workspace-2", "the new controller is scoped to the newly selected, editor-eligible workspace")
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first { $0.id == "monitor" }?.content
+                    == .codePane(deviceID: deviceID, workspaceID: "workspace-2"), "the layout's pane descriptor moves to workspace-2")
         }
 
         /// A detour through the Alerts detail between two workspace presentations does not reset which
@@ -881,6 +1068,52 @@ extension ProcessProfileEnvironmentSuites {
             #expect(PanelLayoutEngine.allPanes(in: storedLayout).map(\.content) == [expected])
         }
 
+        /// Adoption can turn a workspace into the daemon's home workspace while Spaces is not running, the
+        /// same way a workspace can be deleted offline. Startup restoration treats the two alike: the
+        /// restoration keep set (`retainedWorkspaceKeys` in `reopenPersistedPanelWindowsIfPossible`)
+        /// excludes an editor-ineligible workspace even though its row is still present
+        /// (`ProjectKind.isEditorEligible`), so a persisted Editor pane pointed at it retargets to a live
+        /// fallback exactly as it would for a workspace whose row is gone entirely.
+        @Test func persistedEditorPointingAtAWorkspaceThatBecameHomeRestoresOnAFallbackWorkspace() throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [homeWorkspaceSection(deviceID: deviceID, includingStandardWorkspace: true)]
+            controller.rebuildFlatSidebarData()
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "editor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-home")), to: PanelLayout())
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().upsertPanelWindow(.init(id: "editor-window", layoutJSON: json, frame: nil))
+
+            controller.reopenPersistedPanelWindowsIfPossible()
+
+            let scope = PanelScope.globalWindow(panelWindowID: "editor-window")
+            let expected = PaneContentDescriptor.codePane(deviceID: deviceID, workspaceID: "workspace-1")
+            #expect(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.id) == ["editor"])
+            #expect(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).map(\.content) == [expected],
+                "the pane retargets to the live standard workspace since its own persisted target has no Editor")
+        }
+
+        /// The discard half of the same rule: when the home workspace is the only workspace anywhere,
+        /// restoration has no live fallback to retarget the persisted Editor pane to, so the whole row is
+        /// discarded rather than reopened pointing at a workspace whose files the daemon refuses to serve.
+        @Test func persistedEditorPointingAtAWorkspaceThatBecameHomeIsDiscardedWhenNoFallbackExists() throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            controller.deviceModel.deviceSections = [homeWorkspaceSection(deviceID: deviceID, includingStandardWorkspace: false)]
+            controller.rebuildFlatSidebarData()
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "editor", content: .codePane(deviceID: deviceID, workspaceID: "workspace-home")), to: PanelLayout())
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().upsertPanelWindow(.init(id: "editor-window", layoutJSON: json, frame: nil))
+
+            controller.reopenPersistedPanelWindowsIfPossible()
+
+            #expect(
+                try controller.clientDatabase().panelWindows().first { $0.id == "editor-window" } == nil,
+                "no editor-eligible workspace exists anywhere, so the persisted row is discarded rather than restored onto the home workspace")
+        }
+
         // MARK: - Legacy multi-tab global window restore (decision: global windows carry no tabs)
 
         /// A global panel window persisted before global windows dropped tabs can still have more than
@@ -936,8 +1169,10 @@ extension ProcessProfileEnvironmentSuites {
             controller.rebuildFlatSidebarData()
             let scope1 = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
             let scope2 = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-2")
-            #expect(controller.panelCoordinator.openCodePaneInNewTab(deviceID: deviceID, workspaceID: "workspace-1", initialMode: .editor, in: scope1))
-            #expect(controller.panelCoordinator.openCodePaneInNewTab(deviceID: deviceID, workspaceID: "workspace-2", initialMode: .editor, in: scope2))
+            #expect(
+                controller.panelCoordinator.openCodePaneInNewTab(deviceID: deviceID, workspaceID: "workspace-1", initialMode: .editor, in: scope1))
+            #expect(
+                controller.panelCoordinator.openCodePaneInNewTab(deviceID: deviceID, workspaceID: "workspace-2", initialMode: .editor, in: scope2))
             let paneID1 = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope1)).first?.id)
             let paneID2 = try #require(PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope2)).first?.id)
             let pane1 = try #require(controller.panelCoordinator.codePaneContent(forPaneID: paneID1) as? CodePaneContentController)
@@ -969,9 +1204,9 @@ extension ProcessProfileEnvironmentSuites {
 
         /// Polls `predicate` until true or `timeout` elapses; the fan-out's completion is delivered on
         /// the main queue, so it can never be observed synchronously.
-        private func waitUntil(
-            timeout: Duration = .seconds(5), sourceLocation: SourceLocation = #_sourceLocation, _ predicate: @MainActor () -> Bool
-        ) async {
+        private func waitUntil(timeout: Duration = .seconds(5), sourceLocation: SourceLocation = #_sourceLocation, _ predicate: @MainActor () -> Bool)
+            async
+        {
             let clock = ContinuousClock()
             let deadline = clock.now.advanced(by: timeout)
             while !predicate(), clock.now < deadline {

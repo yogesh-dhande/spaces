@@ -81,7 +81,7 @@ extension OrchestratorTests {
 
         let importedProject = ProjectRecord(
             id: "12345678-1234-1234-1234-123456789ABC", name: "sample-repo",
-            dir: reposRoot.appendingPathComponent(managedDirname, isDirectory: true).path, isGitRepo: true, defaultBranch: "main")
+            dir: reposRoot.appendingPathComponent(managedDirname, isDirectory: true).path, isGitRepo: true, defaultBranch: "main", kind: .standard)
         let sharedWorkspaceRoot = workspacesRoot.appendingPathComponent(managedDirname, isDirectory: true)
         let importedWorkspaceDir = sharedWorkspaceRoot.appendingPathComponent("main", isDirectory: true).path
         let siblingWorkspaceDir = sharedWorkspaceRoot.appendingPathComponent("feature", isDirectory: true).path

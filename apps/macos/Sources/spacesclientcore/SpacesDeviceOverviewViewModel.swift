@@ -5,8 +5,10 @@ public struct SpacesDeviceProjectActions: Equatable, Sendable {
     public let showsSettings: Bool
     public let showsAddWorkspace: Bool
 
-    public init(isGitRepo: Bool) {
-        self.showsSettings = true
+    public init(isGitRepo: Bool, kind: ProjectKind) {
+        // The home project has no configuration to open a dialog onto: no `spaces.yaml`, no scripts, no
+        // services, processes, or browser sessions, and no Delete. Its row therefore carries no gear.
+        self.showsSettings = kind != .home
         self.showsAddWorkspace = isGitRepo
     }
 }
@@ -17,19 +19,24 @@ public struct SpacesDeviceProjectRow: Equatable, Sendable {
     public let dir: String
     public let isGitRepo: Bool
     public let defaultBranch: String?
+    public let kind: ProjectKind
     public let isHidden: Bool
     public let isCollapsed: Bool
     public let actions: SpacesDeviceProjectActions
 
-    public init(id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, isHidden: Bool = false, isCollapsed: Bool = false) {
+    public init(
+        id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, kind: ProjectKind = .standard, isHidden: Bool = false,
+        isCollapsed: Bool = false
+    ) {
         self.id = id
         self.name = name
         self.dir = dir
         self.isGitRepo = isGitRepo
         self.defaultBranch = defaultBranch
+        self.kind = kind
         self.isHidden = isHidden
         self.isCollapsed = isCollapsed
-        self.actions = SpacesDeviceProjectActions(isGitRepo: isGitRepo)
+        self.actions = SpacesDeviceProjectActions(isGitRepo: isGitRepo, kind: kind)
     }
 }
 
@@ -73,7 +80,7 @@ public struct SpacesDeviceOverviewViewModel: Equatable, Sendable {
     public init(overview: SpacesDeviceOverviewPayload) {
         projects = overview.projects.map {
             SpacesDeviceProjectRow(
-                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isHidden: $0.isHidden)
+                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, kind: $0.kind, isHidden: $0.isHidden)
         }
 
         workspacesByProject = Dictionary(grouping: overview.workspaces, by: \.projectID).mapValues { workspaces in
@@ -88,7 +95,6 @@ public struct SpacesDeviceOverviewViewModel: Equatable, Sendable {
                     workspace.processRows.filter { $0.runState == .exited }.count + workspace.codingAgentRows.filter { $0.runState == .exited }.count
                     + workspace.terminalRows.filter { $0.runState == .exited }.count
                 let waitingAgentCount = workspace.codingAgentRows.filter { $0.activityState == .waiting }.count
-                let hasTrackedIndicators = runningProcessCount > 0 || exitedProcessCount > 0 || waitingAgentCount > 0 || workspace.sessionCount > 0
                 // `canRun` is true for every configured-process row the daemon did not report `.running` for
                 // (never launched, or exited), computed server-side (`SpacesDeviceOverviewBuilder.processRows`)
                 // over every configured template, not only ones with a runtime record. Counting it here is
@@ -100,7 +106,7 @@ public struct SpacesDeviceOverviewViewModel: Equatable, Sendable {
                     workspace.id,
                     SpacesDeviceWorkspaceRuntime(
                         workspaceID: workspace.id, lifecycleState: SpacesDeviceWorkspaceLifecycle(isRunning: workspace.isRunning),
-                        hasTrackedRuntimeIndicators: hasTrackedIndicators, runningProcessCount: runningProcessCount,
+                        hasTrackedRuntimeIndicators: workspace.hasTrackedRuntimeIndicators, runningProcessCount: runningProcessCount,
                         exitedProcessCount: exitedProcessCount, waitingAgentWindowCount: waitingAgentCount,
                         missingConfiguredProcessCount: missingConfiguredProcessCount)
                 )

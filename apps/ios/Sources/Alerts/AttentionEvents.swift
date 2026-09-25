@@ -60,7 +60,7 @@ struct SpacesMobileAttentionGroup: Identifiable, Equatable, Sendable {
     let workspaceID: String
     let workspaceDisplayName: String
     let projectName: String
-    let isGitWorkspace: Bool
+    let bandGlyph: WorkspaceBandGlyph
     let events: [SpacesMobileAttentionEvent]
 
     var id: String { workspaceID }
@@ -208,8 +208,8 @@ enum SpacesMobileAttention {
             let sampleSession = events.compactMap { $0.sessionID.flatMap { sessionByID[$0] } }.first
             return SpacesMobileAttentionGroup(
                 workspaceID: workspaceID, workspaceDisplayName: workspace?.displayName ?? sampleSession?.workspaceTitle ?? "Unassigned",
-                projectName: workspace?.projectName ?? sampleSession?.projectName ?? "Unassigned", isGitWorkspace: workspace?.isGitWorkspace ?? false,
-                events: events.sorted { $0.date > $1.date })
+                projectName: workspace?.projectName ?? sampleSession?.projectName ?? "Unassigned",
+                bandGlyph: workspace.map(WorkspaceBandGlyph.from) ?? .directory, events: events.sorted { $0.date > $1.date })
         }.sorted { lhs, rhs in
             guard let lhsNewest = lhs.events.first?.date, let rhsNewest = rhs.events.first?.date else { return false }
             if lhsNewest != rhsNewest { return lhsNewest > rhsNewest }

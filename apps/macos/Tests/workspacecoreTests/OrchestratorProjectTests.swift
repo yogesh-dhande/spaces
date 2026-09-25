@@ -538,7 +538,7 @@ extension OrchestratorTests {
         // A recorded directory that does not survive normalization (here, a trailing slash), so the
         // directory lookup used by `removeProject(dir:)` cannot find it.
         let recordedDir = projectDir.path + "/"
-        let project = ProjectRecord(id: UUID().uuidString, name: "project", dir: recordedDir, isGitRepo: false, defaultBranch: nil)
+        let project = ProjectRecord(id: UUID().uuidString, name: "project", dir: recordedDir, isGitRepo: false, defaultBranch: nil, kind: .standard)
         try store.upsert(project: project)
         try orchestrator.ensureDefaultWorkspace(for: project)
         XCTAssertEqual(try store.workspaces(projectID: project.id).count, 1)
@@ -677,7 +677,9 @@ extension OrchestratorTests {
         let orchestrator = makeTestOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
         let projectDir = reposRoot.appendingPathComponent(
             managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "missing-owned-repo"), isDirectory: true)
-        try store.upsert(project: ProjectRecord(id: UUID().uuidString, name: "Owned", dir: projectDir.path, isGitRepo: true, defaultBranch: "main"))
+        try store.upsert(
+            project: ProjectRecord(
+                id: UUID().uuidString, name: "Owned", dir: projectDir.path, isGitRepo: true, defaultBranch: "main", kind: .standard))
 
         XCTAssertThrowsError(try orchestrator.managedGitProjectImportReplacementCandidates(gitURL: fixture.path)) { error in
             guard case WorkspaceError.projectAlreadyExists = error else { return XCTFail("Expected projectAlreadyExists, got \(error)") }
@@ -758,7 +760,9 @@ extension OrchestratorTests {
         try "owner".write(to: ownerMarker, atomically: true, encoding: .utf8)
         XCTAssertEqual(try orchestrator.managedGitProjectImportReplacementCandidates(gitURL: fixture.path).map(\.path), [projectDir.path])
 
-        try store.upsert(project: ProjectRecord(id: UUID().uuidString, name: "Owned", dir: projectDir.path, isGitRepo: true, defaultBranch: "main"))
+        try store.upsert(
+            project: ProjectRecord(
+                id: UUID().uuidString, name: "Owned", dir: projectDir.path, isGitRepo: true, defaultBranch: "main", kind: .standard))
 
         XCTAssertThrowsError(try orchestrator.prepareGitProject(gitURL: fixture.path, replaceExistingManagedDirectories: true)) { error in
             guard case WorkspaceError.projectAlreadyExists = error else { return XCTFail("Expected projectAlreadyExists, got \(error)") }

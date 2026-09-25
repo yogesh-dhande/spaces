@@ -23,7 +23,8 @@ extension WorkspaceOrchestrator {
                 let assigned = try store.workspacePortsAssigned(workspaceID: workspace.id)
                 guard !assigned.isEmpty else { continue }
                 let slug = SpacesProfile.workspaceHostSlug(
-                    branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
+                    branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, isHomeProject: project.kind == .home,
+                    workspaceID: workspace.id)
                 for assignment in assigned {
                     let name = assignment.name.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !name.isEmpty else { continue }

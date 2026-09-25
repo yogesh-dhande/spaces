@@ -14,14 +14,37 @@ struct HeaderBand<Content: View>: View {
     }
 }
 
+/// Which glyph a workspace band draws. The three cases are mutually exclusive rather than a `Bool` plus a
+/// second flag: a home workspace always reads `.home` regardless of its branch, so the glyph is a fact
+/// about the workspace, not two independent conditions layered on top of each other.
+enum WorkspaceBandGlyph: Equatable {
+    case git
+    case directory
+    case home
+
+    var systemName: String {
+        switch self {
+        case .git: "arrow.triangle.branch"
+        case .directory: "folder"
+        case .home: "house.fill"
+        }
+    }
+
+    /// The home project's kind wins over branch shape: its workspace carries no branch either way (it is
+    /// stored as a non-git project), but the kind is the authoritative signal, not the absence of one.
+    static func from(_ workspace: SpacesDeviceWorkspaceSummary) -> WorkspaceBandGlyph {
+        if workspace.projectKind == .home { return .home }
+        return workspace.isGitWorkspace ? .git : .directory
+    }
+}
+
 /// Leading glyph + workspace name band content shared by the Spaces and Alerts tabs.
 struct WorkspaceBandLabel: View {
-    let isGitWorkspace: Bool
+    let glyph: WorkspaceBandGlyph
     let displayName: String
 
     var body: some View {
-        Image(systemName: isGitWorkspace ? "arrow.triangle.branch" : "folder").font(.system(size: 12, weight: .medium)).foregroundStyle(
-            Theme.mutedSecondary)
+        Image(systemName: glyph.systemName).font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.mutedSecondary)
         Text(displayName).font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
     }
 }

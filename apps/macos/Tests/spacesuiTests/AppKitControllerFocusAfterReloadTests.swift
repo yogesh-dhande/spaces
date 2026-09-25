@@ -71,7 +71,8 @@ extension ProcessProfileEnvironmentSuites {
         private func overview(processIsRunning: Bool) -> SpacesDeviceOverviewPayload {
             let workspace = SpacesDeviceWorkspaceSummary(
                 id: Self.workspaceID, projectID: Self.projectID, projectName: "Project", branch: "feature", baseBranch: "main",
-                dir: "/tmp/project-feature", isRunning: processIsRunning, isHidden: false, isDefault: false, sessionCount: processIsRunning ? 1 : 0,
+                dir: "/tmp/project-feature", isRunning: processIsRunning, isHidden: false, isDefault: false,
+                hasTrackedRuntimeIndicators: processIsRunning,
                 config: SpacesDeviceWorkspaceConfig(processes: [
                     SpacesDeviceProcessTemplate(id: "template-backend", name: Self.processName, command: "npm run dev")
                 ]),

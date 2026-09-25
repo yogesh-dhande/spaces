@@ -1267,6 +1267,39 @@ public enum TerminalSessionPersistence {
         }
     }
 
+    /// Where each of `sessionIDs` stands in its life (when its launch was recorded and its runtime state)
+    /// read in one query.
+    ///
+    /// This serves the rule that decides whether a session has ended, which the workspace tracked-runtime
+    /// computation applies to every retained pane and coding-agent row a workspace holds. Those rows
+    /// accumulate (an ended pane keeps its row so it stays listed and reopenable), and asking per row cost
+    /// a runtime-state read to classify it plus another to rule out a pending launch, both on the profile
+    /// database's serialized lane that every mutation also waits behind. An empty `sessionIDs` issues no
+    /// query at all.
+    ///
+    /// A session with no `terminal_sessions` row is absent from the result, which is what retention garbage
+    /// collection leaves behind and what a per-session read reports as no session to read.
+    public static func sessionLifecycleStates(sessionIDs: some Collection<String>) throws -> [String: TerminalSessionLifecycleState] {
+        guard !sessionIDs.isEmpty else { return [:] }
+        let sessionIDList = Array(sessionIDs)
+        let sessionIDPlaceholders = Array(repeating: "?", count: sessionIDList.count).joined(separator: ", ")
+        // The lane returns raw rows only; decoding happens after it releases, as in the sibling batched reads.
+        let rows = try withProfileDatabase { database in
+            try database.queryRows(
+                sql: """
+                    SELECT s.session_id, s.created_at, COALESCE(r.state, '')
+                    FROM terminal_sessions s
+                    LEFT JOIN terminal_runtime_states r ON r.root_directory = s.root_directory
+                    WHERE s.session_id IN (\(sessionIDPlaceholders))
+                    """, bindings: sessionIDList)
+        }
+        return try Dictionary(
+            rows.map { row in
+                guard row.count >= 3 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
+                return (row[0], TerminalSessionLifecycleState(createdAt: row[1], runtimeState: TerminalSessionState(rawValue: row[2])))
+            }, uniquingKeysWith: { existing, _ in existing })
+    }
+
     /// Whether the session's persisted final-render state carries a replayable frame. Reads the stored
     /// answer rather than decoding `payload_json`, which is a ~36 KB base64 grid snapshot.
     public static func hasFinalRender(paths: TerminalSessionPaths) throws -> Bool {
