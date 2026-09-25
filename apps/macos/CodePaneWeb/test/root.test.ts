@@ -5803,7 +5803,7 @@ describe("mountRoot's live-refresh notice", () => {
     const notice = container.querySelector<HTMLElement>("#code-pane-live-refresh-notice")!;
     expect(notice.hidden).toBe(false);
     expect(notice.textContent).toContain("Live refresh off: fsevents: too many open files");
-    // The Files sidebar gets no notice of its own (docs/spec.md), and keeps its own tree intact.
+    // The Files sidebar gets no notice of its own, and keeps its own tree intact.
     expect(container.querySelector('.file-list #code-pane-live-refresh-notice')).toBeNull();
     expect(container.querySelector('.file-list [data-path="a.ts"]')).not.toBeNull();
   });

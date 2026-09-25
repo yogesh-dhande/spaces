@@ -6130,8 +6130,8 @@ PY
     admin_skip_request_id="$(extract_request_id "$admin_skip_line")"
     [[ "$admin_skip_target" != "browser:${browser_admin_url}" ]] \
       || fail "unopened admin browser session was included in window cycling"
-    # Cycling follows most-recently-focused order (docs/spec.md: "rather than the static
-    # workspace definition order"), so from docs the next target is the ad hoc terminal —
+    # Cycling follows most-recently-focused order (docs/spec.md, "Mac Shortcuts and Navigation >
+    # Window cycling"), so from docs the next target is the ad hoc terminal —
     # the most recently focused window before docs in this case's seed sequence.
     case "$admin_skip_target" in
       "terminal:${adhoc_name}")

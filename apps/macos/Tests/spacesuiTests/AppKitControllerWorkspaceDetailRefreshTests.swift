@@ -299,8 +299,7 @@ import workspacecore
     }
 
     /// The home row's footer never shows a branch, even for an adopted git home whose workspace record
-    /// keeps the checkout's branch (docs/spec.md: the home footer carries only run-state, `~`, the
-    /// directory path, the focused pane title, and the overflow button).
+    /// keeps the checkout's branch.
     @Test func workspaceFooterShowsBranchOnlyForNonHomeWorkspacesWithADistinctBranch() {
         #expect(AppKitController.workspaceFooterShowsBranch(branch: "feature", displayName: "checkout-name", projectKind: .standard))
         #expect(!AppKitController.workspaceFooterShowsBranch(branch: "", displayName: "checkout-name", projectKind: .standard), "no branch recorded")

@@ -1251,8 +1251,7 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
     body.appendChild(fileListEl);
     body.appendChild(fileListDividerEl);
     body.appendChild(showingDiff ? diffAreaEl : editorContainerEl);
-    // The Files sidebar gets no notice of its own (docs/spec.md's Editor section): only the content
-    // area does, in either mode.
+    // The Files sidebar gets no notice of its own: only the content area does, in either mode.
     if (showingDiff) liveRefreshNotice.attachTo(diffAreaEl);
     else liveRefreshNotice.attachTo(editorView.overlayHost());
   }

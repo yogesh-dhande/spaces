@@ -586,9 +586,9 @@ describe("CommentsController — Fix 1 (P2): text typed into a card while its se
     expect(anchoredAfter).toHaveLength(0); // no leftover live text — no new card appears
   });
 
-  // docs/spec.md makes a send itself a commit point ("A draft's text is
-  // durable as of its last commit point (its card losing focus, or a send)"), so `doSendBatch`'s
-  // drain loop commits any live-divergent draft via `persistBody` before building the batch
+  // docs/spec.md ("Editor > Review comments") makes a send itself a commit point ("A send delivers
+  // each draft's latest text, including text typed into a card that still has focus"), so
+  // `doSendBatch`'s drain loop commits any live-divergent draft via `persistBody` before building the batch
   // payload (see `doSendBatch`'s own doc comment). This scenario (an `input` event with no
   // `blur`, then a direct `sendBatch()` call) is exactly what that commit loop is meant to catch: from
   // the controller's point of view it is indistinguishable from a hibernation-restored draft that will

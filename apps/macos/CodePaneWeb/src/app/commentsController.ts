@@ -768,15 +768,16 @@ export class CommentsController {
    * and a restored *persisted* draft can likewise have newer text in `liveBodies` than in its
    * `body`/`revision`. Without this commit loop, a restored provisional's `provisional-N` id would go
    * straight into the send payload — an id the daemon has never seen, so it rejects the whole batch
-   * — and a restored persisted draft would silently deliver stale text. docs/spec.md ("A draft's
-   * text is durable as of its last commit point (its card losing focus, or a send)") is what commits
-   * us to fixing this: a send is itself a commit point for every sendable draft, not only the ones
-   * that happened to blur first. `persistBody` is the right seam to commit through: it serializes per
-   * id, and `doPersistBody` handles the provisional re-key (fresh server id + `idAliases`), the
-   * revision bump, and the live-carry (deleting the `liveBodies` entry once live matches the newly
-   * persisted body, or re-seeding it under a re-keyed id if the user kept typing mid-persist) — which
-   * is exactly why looping again after committing is required: a re-key or a keystroke that landed
-   * during the persist RPC can leave new work for `pendingPersistById`/`liveBodies` that the next
+   * — and a restored persisted draft would silently deliver stale text. docs/spec.md ("Editor > Review
+   * comments": "A send delivers each draft's latest text, including text typed into a card that still
+   * has focus") is what commits us to fixing this: a send is itself a commit point for every sendable
+   * draft, not only the ones that happened to blur first. `persistBody` is the right seam to commit
+   * through: it serializes per id, and `doPersistBody` handles the provisional re-key (fresh server id
+   * + `idAliases`), the revision bump, and the live-carry (deleting the `liveBodies` entry once live
+   * matches the newly persisted body, or re-seeding it under a re-keyed id if the user kept typing
+   * mid-persist) — which is exactly why looping again after committing is required: a re-key or a
+   * keystroke that landed during the persist RPC can leave new work for
+   * `pendingPersistById`/`liveBodies` that the next
    * iteration's drain-then-commit pass picks up. Commits run sequentially (`for...of` with `await`,
    * not `Promise.all`): the daemon serializes per-workspace writes anyway, and sequential persists
    * keep the abort semantics on a failure obvious (see below). A card emptied on screen (live `""`)

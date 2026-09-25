@@ -6994,8 +6994,9 @@
         /// only escalates from `.connected`/`.reconnecting`) -- and then `scheduleReconnect` with the
         /// fixed 150 ms/1 s cadence instead of the stage 2 ladder, which would drop the redial pace
         /// exactly when the daemon is proven still unreachable. This proves a clean close in that state
-        /// keeps the tracker on the 1/2/4/8/15 s ladder (docs/spec.md) instead of reverting to the fast
-        /// cadence.
+        /// keeps the tracker on the 1/2/4/8/15 s ladder (`TerminalUnreachableBackoff.ladderSeconds`;
+        /// docs/spec.md, "Terminal Sessions > Connection loss", redials up to 15 seconds apart) instead of
+        /// reverting to the fast cadence.
         func testACleanCloseWhileUnreachableKeepsTheRedialOnTheLadder() async throws {
             let backend = StageTrackerTestBackend()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
