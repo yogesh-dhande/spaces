@@ -104,9 +104,8 @@ export function pathAfterMove(path: string, from: string, to: string): string | 
   return path.startsWith(`${from}/`) ? to + path.slice(from.length) : undefined;
 }
 
-/** The chip's wording for each save state (docs/spec.md's Editor section owns this copy). The failed
- *  state names both the reason and when the scheduler retries on its own, since the "Retry now"
- *  action beside it only skips that wait. */
+/** The chip's wording for each save state. The failed state names both the reason and when the
+ *  scheduler retries on its own, since the "Retry now" action beside it only skips that wait. */
 function saveStatusText(status: AutosaveStatus): string {
   switch (status.kind) {
     case "idle":
@@ -143,10 +142,9 @@ function formatByteSize(bytes: number): string {
  * Editor mode: a single-file `@pierre/diffs` `CodeView` in edit mode, saved through the CAS
  * `workspaceFileWrite` call. This class owns no file-picking UI of its own — every file this view
  * shows arrives via its public `open()`, called by root.ts from the ⌘P quick-open overlay, Editor
- * mode's Files tree, or the Changes list (see quickOpen.ts/editorSidebar.ts/README.md's "Editor
- * mode" section for the three entry points and how root.ts routes between them). The top bar this
- * view renders is just the open file's path (or a "⌘P to open a file" hint when none is open) and
- * the autosave status chip.
+ * mode's Files tree, or the Changes list (see quickOpen.ts/editorSidebar.ts for the three entry
+ * points and how root.ts routes between them). The top bar this view renders is just the open
+ * file's path (or a "⌘P to open a file" hint when none is open) and the autosave status chip.
  *
  * Saving is automatic: every buffer edit notes itself with an `AutosaveScheduler` (autosave.ts),
  * which coalesces a burst of keystrokes into one CAS write, never overlaps two writes, backs off on
@@ -1743,8 +1741,7 @@ export class EditorView {
 
   /**
    * Rehydrates the editor from the host's post-hibernation snapshot (`spaces:init`'s
-   * `editorState` field, see README.md "Editor state survives hibernation"). Called once at
-   * startup, before anything else touches this view.
+   * `editorState` field). Called once at startup, before anything else touches this view.
    *
    * - `state` absent: nothing to restore — blank editor, same as a pane's first-ever load.
    * - `state.dirty`: the buffer had unsaved edits when the pane last hibernated. Restoring the

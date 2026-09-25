@@ -1,13 +1,30 @@
 # Code Pane Web
 
-The code pane's web bundle: a self-contained plugin (Diff review + Editor modes) that runs
-inside the macOS app's WKWebView and talks to the Swift host only through the typed
-`window.spaces` bridge. Built with Vite + TypeScript, rendering with `@pierre/diffs`
-(Shiki-based).
+The Editor's web bundle: Diff and Editor modes, running inside the macOS app's `WKWebView` and
+reaching the host only through the typed `window.spaces` bridge. Vite and TypeScript, rendering
+with `@pierre/diffs` (Shiki-based).
 
-Nothing in this bundle makes a network request at runtime; it is served to the WKWebView over the
-app's `spaces-codepane` custom URL scheme by a `WKURLSchemeHandler` reading the checked-in
-`Resources/CodePane` bundle, and every asset path in the built output is relative.
+This README owns the package workflow, the JS/Swift wire protocol, and the constraints of the
+bundle itself. Elsewhere:
+
+| Topic | Where |
+| --- | --- |
+| What the Editor does for the user | `docs/spec.md` (the Editor rules) |
+| Native hosting, diff transfer, persistence, previews, autosave, and why | `docs/implementation.md` (Editor integration, Editor previews, Editor autosave) |
+| Per-method bridge semantics | doc comments on `SpacesBridge` in `src/bridge/types.ts` |
+| Host side of the bridge | `apps/macos/Sources/spacesui/Panels/CodePaneBridge.swift` (decode, dispatch, replies) and `CodePaneContentController.swift` (events, lifecycle) |
+
+## Layout
+
+- `src/main.ts` installs the WebKit `getComposedRanges` shim, preloads the highlighter, and mounts
+  `src/app/root.ts`, which wires every view to the bridge.
+- `src/app/`: the views and their DOM-free helpers (diff, editor, previews, trees, comments,
+  autosave).
+- `src/bridge/`: the bridge contract (`types.ts`), the WKWebView implementation (`realBridge.ts`),
+  and the dev-only mock and fixtures.
+- `src/theme/`, `src/styles/`: highlighter setup and CSS tokens. Appearance comes only from the
+  host (`spaces:init`'s `theme`, then `spaces:theme`) stamped on `<html data-theme>`; the bundle
+  never reads `prefers-color-scheme`.
 
 ## Build and dev harness
 
@@ -15,790 +32,126 @@ app's `spaces-codepane` custom URL scheme by a `WKURLSchemeHandler` reading the 
 npm install
 npm run build       # tsc --noEmit, then vite build -> ../Sources/spacesui/Resources/CodePane/
 npm run typecheck   # tsc --noEmit only
-npm run test        # vitest run
-npm run dev         # dev harness: mock bridge + fixture diff, at the printed localhost URL
+npm run test        # vitest run (jsdom)
+npm run dev         # dev harness: mock bridge + fixture diff at the printed localhost URL
 npm run icons       # regenerate the file-type icon sprite from vscode-icons (needs network)
 ```
 
-`npm run build` emits directly into `apps/macos/Sources/spacesui/Resources/CodePane/`
-(`vite.config.ts`'s `build.outDir`, with `emptyOutDir: true`), which is a `.copy` resource of
-the `spacesui` SwiftPM target (`apps/macos/Package.swift`) and is bundled into the app at
-`Bundle.module`. That output is checked into the repo, so building or testing the Swift app
-never requires node — only editing this web bundle does, which then requires rerunning
-`npm run build` and committing the refreshed output alongside the source change.
+`npm run build` empties and rewrites `apps/macos/Sources/spacesui/Resources/CodePane/`, a `.copy`
+resource of the `spacesui` SwiftPM target. That output is checked in, so Swift builds and tests
+never need node. A change to this bundle ships only when the rebuilt output is committed with it.
+Neither `scripts/verify.sh` nor CI runs this package's tests, typecheck, or build, so run
+`npm run test` and `npm run build` locally before committing a change here.
 
-`npm run dev` runs against `MockSpacesBridge` (`src/bridge/mockBridge.ts`) instead of the real
-WKWebView bridge, seeded with a realistic fixture diff (`src/bridge/fixtures.ts`: a modified
-file, a rename, an addition, a deletion, an untracked file, a binary file, a nested submodule
-(a checked-out pointer with its own changed and untracked files, plus a nested submodule
-checked out inside it), and a submodule pointer that is not checked out). A floating "Simulate
-remote change" button
-(`src/dev/harnessControls.ts`) fires a `spaces:diffSignature` event so the live-refresh path
-(preserve scroll, re-fetch, re-render) is exercisable without a real daemon or git repo. A
-"Toggle live refresh error" button fires `liveRefreshError` (`FIXTURE_LIVE_REFRESH_ERROR`) on both
-signature streams so the persistent notice is exercisable the same way; clicking it again clears
-the error, simulating the daemon's watcher recovering. The
-harness controls and the mock bridge/fixtures are dev-only: `src/bridge/index.ts` dynamically
-imports the mock only under `import.meta.env.DEV`, so Rollup tree-shakes all of it out of the
-production build.
+`npm run dev` runs against `MockSpacesBridge` (`src/bridge/mockBridge.ts`) with a fixture diff
+(`src/bridge/fixtures.ts`) covering every entry kind: modified, renamed, added, deleted, untracked,
+binary, nested checked-out submodules, and a submodule pointer that is not checked out. Floating
+controls (`src/dev/harnessControls.ts`) simulate host pushes without a daemon: Simulate remote
+change (a diff-signature push), Cycle agents, Change file on disk, Delete file on disk, and Toggle
+live refresh error. The mock, fixtures, and controls load only under `import.meta.env.DEV`, so
+Rollup drops them from the production build.
 
-## Bridge contract
+Tests live in `test/`. `root.test.ts`, `diffView.test.ts`, and `editorView.test.ts` stub
+`@pierre/diffs` to test the pane's own logic; the `*.pierre.test.ts` files run against the real
+renderer for behavior that depends on it (shadow-DOM event paths, the library's own key handling).
 
-`window.spaces` (typed in `src/bridge/types.ts`) is the plugin's only way to reach the host:
+## Serving and the no-network rule
 
-- `workspaceDiffManifestChunk(scope, {manifestID?, fileIndex})` — one bounded metadata page for the
-  requested `DiffScope`, plus its `manifestID` and `scopeSignature`. The initial page creates the
-  manifest; later pages echo its id and semantic file-index cursor until no next cursor remains. The
-  manifest freezes the file enumeration and comparison plan for one refresh; it does not contain patch bytes.
-  A manifest entry's `isSubmodule` flags a git submodule (gitlink) change. Every entry carries a
-  full workspace-relative `path`; an entry nested inside a checked-out submodule also carries
-  `submodulePath`, the workspace-relative path of the nearest enclosing submodule (a nested
-  submodule's own pointer row carries its parent submodule's path, not its own). A submodule's
-  nested entries immediately follow its pointer row in manifest order.
-- `workspaceDiffFileChunk(scope, {manifestID, relativePath, byteOffset, transferID?})` — one bounded
-  raw-byte range of a file's patch, returned as base64. A first request creates that file's transfer;
-  later requests echo its `transferID` until EOF. `workspaceDiffFileChunkCancel` cancels an active
-  transfer, and `workspaceDiffManifestRelease` releases the manifest and its transfers. A binary or
-  submodule entry sends no patch bytes at all: its `file` metadata (`isBinary`, or `submodule` with
-  the pointer commits, dirty flag, unmerged flag, and `checkedOut`) arrives on the first reply and
-  the transfer completes there. `checkedOut: false` means the pointer row has nothing nested under
-  it (never initialized, missing commit, or deeper than the daemon's depth guard); such a pointer
-  is never `dirty` or `unmerged`.
-- `workspaceFileRead(path, purpose, comparison?)` — content, `sha256`, size. `editor` makes the
-  native host's single file-signature watcher follow the standalone editor; `inlineDiff` does not
-  retarget that watcher, and a confirmed rename or move retargets it through the
-  `retargetFileSignature` notification instead, having read nothing. An inline-diff request with an immutable `comparison.baseRevision` also
-  returns Git-filtered `comparisonOldContent` for that revision (and its optional rename
-  `oldPath`), without adding old text to the streamed patch. Every caller must identify one of
-  these purposes.
-- `workspaceImageRead(path, purpose)`: one image file's exact bytes as `base64Data`, plus the
-  `mediaType` its extension resolves to, `sha256`, and `size`. Only `.png`, `.jpg`, `.jpeg`, `.gif`,
-  `.webp`, and `.bmp` are readable this way; every other file the daemon guesses is binary stays
-  refused by `workspaceFileRead` as unopenable text. `editor` is the image the Editor is opening as
-  the pane's document; `markdownEmbed` is an image a Markdown document displays. Neither retargets
-  the file-signature watcher, so an open image does not live-refresh. `editor` does count as the
-  pane navigating: the host claims a fresh navigation token for it at dispatch, so a text read still
-  in flight for the file being left cannot point the watcher at itself when it lands, which is what
-  the failing-image-open case depends on (the page keeps showing the previous file and sends no
-  `unsubscribeFileSignature` of its own). That superseded read also never installs a watcher of its
-  own, while its own dispatch already retired the watcher for the file still showing, so the host
-  reuses a watcher only while it belongs to the current subscription generation: the page's reread of
-  the file it is still showing reinstalls it rather than being skipped for naming the same path.
-- `workspaceRevisionFileRead({path, revision, oldPath?})` — the exact live-checkout `content`,
-  `sha256`, and size whose Git-filter-aware equivalence was checked against the manifest-pinned
-  revision, plus the first-parent filtered `comparisonOldContent` (using `oldPath` for renames).
-  The revision target is existence/type checked but never transferred. Last Commit inline editing
-  uses this one response as its CAS baseline and guard, so it never races a separate live read;
-  it never moves the standalone editor watcher.
-- `workspaceFileWrite(path, content, {baseSHA256, purpose})` — compare-and-swap write. `inlineDiff`
-  rejects symbolic-link components so the patch's path cannot save into its link target; `editor`
-  retains contained-link workspace editing. It returns
-  `{ok:true, sha256}` (the hash of exactly what was just written, adopted directly as the next
-  save's CAS baseline) or `{conflict:true, currentSHA256}` (`currentSHA256` omitted and
-  `fileMissing:true` set instead when the file was deleted out from under the write). Never
-  throws for a stale write — a conflict is a normal result, not an error.
-- `workspaceFileList()` — the full workspace file listing, backing Editor mode's Files tree and
-  the ⌘P quick-open overlay's fuzzy search. `paths` includes nested submodule files inline;
-  `submodules` separately names every checked-out submodule (nested ones included) with the commit
-  its checkout sits at, so callers can distinguish a submodule's own directory from an ordinary one
-  without re-deriving it from file paths, and label it with that commit. Callers (`editorSidebar.ts`, `quickOpen.ts`) fetch this
-  lazily through the shared `WorkspaceFileListCache`, which keeps at most one bridge call
-  outstanding at a time across `get()` and `getFresh()` and does not cache a failed fetch. It runs
-  on the daemon's per-workspace serial git queue (shared with file reads/saves/diffs), so a call
-  arriving while one is already in flight can never come back sooner than one chained after it:
-  `invalidate()` therefore never starts a request of its own while one is in flight, instead
-  marking it stale and letting any number of `invalidate()`/`get()`/`getFresh()` calls that arrive
-  before it settles collapse into exactly one trailing refetch, fired the instant it does. It is
-  invalidated on every diff-signature push, but that push only ever fires once a `workspaceDiffManifestChunk`
-  fetch has succeeded — a non-git workspace or a pane still on its first Editor render never gets
-  one — so `getFresh()` additionally revalidates in the background, stale-while-revalidate style, at
-  the moments the listing is actually shown (⌘P opening, the Files tab becoming visible): callers
-  keep rendering the cached value while `getFresh()`'s returned promise resolves to a fresh one, and
-  a failed revalidation leaves the previous cached value in place. The invalidating push itself also
-  asks an already-open ⌘P overlay to refetch right away (`QuickOpen.refreshListing()`, called from
-  `root.ts` ungated on pane mode — unlike the Files tab's own editor-mode-gated refresh): the cache's
-  invalidation only affects the *next* caller, so an overlay whose `getFresh()` call already
-  resolved (or was in flight) before the push would otherwise sit on a stale listing until closed
-  and reopened. Each consumer paints its own local copy of the last listing it saw synchronously at
-  show time, before its `getFresh()` call resolves — which leaves a consumer that has never rendered
-  before blank even when the OTHER consumer already populated this cache (e.g. ⌘P in Diff mode
-  fetches a listing, then the Files tab's first show has nothing of its own yet). `snapshot()`
-  exposes the cache's own last successfully fetched listing (regardless of invalidation; never
-  cleared by `invalidate()`, since stale-while-revalidate means the pre-invalidation listing is still
-  worth showing until the refetch lands) so a consumer can seed its local copy from it before
-  painting, whichever consumer originally fetched it.
-- `subscribeDiffSignature(scope, listener)` — returns an unsubscribe function. Only one scope
-  is observed at a time; calling it again is expected to replace the previous subscription's
-  effective scope rather than layer another live one.
-- `unsubscribeFileSignature()`: fire-and-forget, ends the host's file-signature stream outright.
-  The `subscribeFileSignature` unsubscribe function above only detaches this page's listener; the
-  host keeps the daemon streaming for whichever path an `editor` read last named, since that read is
-  the only thing that points it. Editor mode sends this when it opens an image, which has no buffer
-  a disk change could be reconciled into, so the previous file's stream stops rather than polling on
-  behind it. The next successful `editor` read points the stream again in the ordinary way, and it is
-  the only thing that does: while the stop stands, a failed open's own restore of the file left
-  showing is skipped, so nothing resubscribes behind a page that holds no listener.
-- `subscribeFileListSignature(listener)`: returns an unsubscribe function for the Files-list
-  membership stream.
-- Both signature events carry `liveRefreshError` (a string) whenever the daemon's file watcher for
-  the workspace is down; that stream stops recomputing on git/membership changes until the watcher
-  is retried successfully. root.ts shows the persistent notice (`src/app/liveRefreshNotice.ts`,
-  element id `code-pane-live-refresh-notice`) with the error text verbatim while either stream
-  carries one.
-- `retryLiveRefresh()`, the notice's Retry action: resolves with no payload once the host has
-  stopped and reopened both signature streams; the daemon re-attempts the workspace's file watcher
-  as a result, and whichever stream answers first reports the outcome on its next push frame.
-- `reviewCommentList()` — every draft comment in the workspace, called once from `root.ts` after
-  mount to rehydrate `CommentsController`'s in-memory mirror; never called again afterward (see
-  "Comments" below for why).
-- `reviewCommentUpsert({id?, filePath, side, lineNumber, lineText, body})` — creates a draft when
-  `id` is omitted, updates one in place when present. Rejects `notFound` for an `id` with no
-  matching draft.
-- `reviewCommentDelete(id)` — deletes one draft.
-- `reviewCommentsSend(sessionId, text, comments)` — sends `text` to the agent session, then, only
-  once that write succeeds, archives every draft named in `comments` (each entry an `{id,
-  revision}` pair; the daemon rejects `conflict` if a draft's current `revision` no longer
-  matches, before sending anything). A rejection leaves every named draft exactly as it was; the
-  caller must not remove them from its own state before this resolves. The guarantee is
-  send-then-archive ordering, not two-way atomicity — see "Send failure leaves drafts untouched"
-  below.
+The page is served over the `spaces-codepane` custom scheme by `CodePaneSchemeHandler`, which
+reads the checked-in bundle and refuses paths outside it. A `file://` origin is opaque, so WebKit
+would block the CORS-fetched module script and stylesheet and the page would never send `ready`.
+Every asset path in the build is relative (`base: "./"`).
 
-`SpacesReviewComment` (a draft, as returned by `reviewCommentList`/`reviewCommentUpsert`):
-`{id, filePath, side, lineNumber, lineText, body, createdAt, revision}`. `revision` is a monotonic
-counter the daemon bumps on every update, used as the send-concurrency token in place of a
-timestamp (see docs/implementation.md for why a timestamp can't distinguish two edits inside the
-same second).
+Nothing in the bundle makes a network request at runtime. Icons are inlined, highlighter chunks
+load from the same origin, and a Markdown preview resolves images and links only to workspace
+files read through the bridge; anything else renders as inert text.
 
-Every rejected call is a `SpacesBridgeError` with a `code` (`notFound` / `invalidArgument` /
-`conflict` / `internalError` / `unavailable`), never a bare string or generic `Error` — callers
-branch on `.code`.
+## Bridge wire protocol
 
-### Wire protocol (what the Swift host implements)
+One `WKScriptMessageHandler` named `spacesBridge` carries every JS-to-Swift message; Swift answers
+by evaluating JS.
 
-- **Requests (JS -> Swift):** one message handler,
-  `window.webkit.messageHandlers.spacesBridge.postMessage({id, method, params})`. `id` is a
-  string the JS side generates to correlate the reply.
-- **Replies (Swift -> JS):** the host evaluates JS calling `window.__spacesBridge.resolve(id,
-  result)` or `window.__spacesBridge.reject(id, {code, message})`. `__spacesBridge` is installed
-  by `realBridge.ts` as an import-time side effect, before anything else runs, so there is no
-  race between a reply arriving and the resolver existing.
-- **Ready (JS -> Swift, fire-and-forget):** the same message handler with `{method:"ready"}`
-  and no `id`, sent once after the plugin's `spaces:init` listener is attached. The host must
-  wait for this before dispatching `spaces:init` — the plugin renders nothing until it arrives.
-- **Watcher stop (JS -> Swift, fire-and-forget):** the same message handler with
-  `{method:"unsubscribeFileSignature"}` and no `id`. It carries no path: the host already knows
-  which one it is watching, and the page must not be able to name a different one.
-- **State pushes (JS -> Swift, fire-and-forget):** the same message handler receives
-  `{method:"workspaceStateChanged", params: CodePaneWorkspaceState}`. The web app debounces
-  continuous edits and immediately reports discrete changes through one complete, self-contained
-  workspace document; the host persists the latest document keyed by `(deviceID, workspaceID)`.
-  There are no separate Editor, mode, or Editor-UI state notification streams.
-- **File-signature retarget (JS -> Swift, fire-and-forget):**
-  `{method:"retargetFileSignature", params:{from, to}}` moves the host's one file-signature stream
-  from the workspace-relative path a confirmed Files-tree rename or move emptied to the
-  workspace-relative path it carried the open file to, somewhere the editor never read it from. The
-  host stops the current stream and subscribes to `to`, but only while its watcher still follows
-  `from`: a notification overtaken by another file's editor-purpose read leaves that file's stream
-  alone. A path that is not workspace-relative is refused and the stream stays where it is. A device
-  that is away carries the destination into the file-signature reconnect loop, so the attempt that
-  finds it subscribes to the destination rather than the path the move emptied.
-- **Render metrics (JS -> Swift, fire-and-forget):** `{method:"renderMetric", params}` reports
-  validated post-render diagnostics to the native DEBUG performance log. It contains only bounded
-  timing and aggregate-size metadata, not source text.
-- **Edit flush (Swift -> JS, then JS -> Swift, fire-and-forget):** the host dispatches
-  `spaces:flushEdits` with `{token}` when it is about to quit or tear the pane down; the page
-  writes whatever is still unsaved and answers on the same message handler with
-  `{method:"editsFlushed", params:{token}}`, once per token and with no `id`.
-- **Teardown pull (Swift -> JS, synchronous):**
-  `window.__spacesCollectWorkspaceState` returns the current complete workspace-state document as
-  JSON text. The host uses it before hibernation or close to capture edits inside the debounce window;
-  rendered patches and DOM state are not included. The persisted document is sent back in the next
-  `spaces:init`.
-- **Push events (Swift -> JS):** `window.dispatchEvent(new CustomEvent(name, {detail}))`
-  carries:
-  - `spaces:init` once, after the page sends `ready`. Its `CodePaneInitPayload` includes
-    `workspaceId`, `workspaceName`, the restored `workspaceState`, current `theme`, optional
-    `baseBranch`, `isGitRepository` (false suppresses every diff fetch, the diff-signature
-    subscription, the compare control, and the sidebar's Changes tab), and the workspace's running
-    `agents`. The restored state is applied before the
-    initial manifest and file-list requests, so the page can restore selection, tree context,
-    scroll/focus, buffers, comments, and agent/launch state while fresh patch bytes stream in.
-  - `spaces:agents` whenever the workspace's running-agent set changes; the full replacement
-    `{agents}` list lets the comments controller preserve a valid selection or reapply its
-    default-agent rule.
-  - `spaces:agentStartStatus` for a started command's session, with `detected`, `exited`, or
-    `timedOut` status. A detected hook-backed agent becomes assignable; an exited or timed-out
-    command remains available to retry and is shown as not detected.
-  - `spaces:setMode` when the native host asks the page to switch modes, and `spaces:theme`
-    when effective appearance changes.
-  - `spaces:flushEdits` when the host needs unsaved edits written before it quits or tears the
-    pane down; the page answers with `editsFlushed` (see the edit-flush entry above).
-  - `spaces:diffSignature` when the active scope's git signature changes. The page refreshes by
-    requesting a new manifest; stale responses are ignored and transient typed/untyped failures use
-    the bounded retry path, while durable request errors remain visible.
-  - `spaces:fileListSignature` when the authoritative `workspaceFileList` result changes; the page
-    invalidates the shared file-listing cache (see `workspaceFileList()` above).
-  - Both of these carry `liveRefreshError` on every frame while the workspace's watcher is down
-    (see the `subscribeDiffSignature`/`subscribeFileListSignature` entries above).
+- **Request (JS to Swift):** `postMessage({id, method, params})`. Every promise-returning
+  `SpacesBridge` method posts its own name as `method`; `CodePaneBridge.decodeRequest` drops a
+  message without `id` or `method`, since there is nothing to reply to.
+- **Reply (Swift to JS):** `window.__spacesBridge.resolve(id, result)` or
+  `window.__spacesBridge.reject(id, {code, message})`. `realBridge.ts` installs `__spacesBridge`
+  at import, before anything else runs, so a reply can never beat its resolver. A reply for an
+  unknown id is dropped.
+- **Errors:** every rejection is a `SpacesBridgeError` whose `code` is `notFound`,
+  `invalidArgument`, `conflict`, `internalError`, or `unavailable`; an unknown code becomes
+  `internalError`, and a missing message handler rejects `unavailable`. Callers branch on `code`.
+  A compare-and-swap write that loses is a normal `{conflict: true}` result, not an error.
+- **Notifications (JS to Swift, no `id`, no reply):**
+  - `ready`: sent once the `spaces:init` listener is attached. The host dispatches nothing before
+    it, and the page renders nothing before `spaces:init`.
+  - `workspaceStateChanged` with one complete `CodePaneWorkspaceState`: debounced (250 ms) for
+    continuous changes, immediate for discrete ones. The host persists the latest document per
+    `(deviceID, workspaceID)`. There is no other state channel.
+  - `editsFlushed` with `{token}`: the answer to one `spaces:flushEdits`.
+  - `unsubscribeFileSignature`: ends the file-signature stream. It carries no path, so the page
+    can never name a file the host is not already watching.
+  - `retargetFileSignature` with `{from, to}`: moves the stream after a confirmed rename or move.
+  - `renderMetric`: bounded timing and size metadata for the native DEBUG performance log; never
+    source text.
+- **Teardown pull (Swift to JS, synchronous):** `window.__spacesCollectWorkspaceState()` returns
+  the current state document as JSON, so hibernation and close capture edits still inside the
+  debounce window. The host sends the stored document back in the next `spaces:init`.
+- **Events (Swift to JS):** `window.dispatchEvent(new CustomEvent(name, {detail}))`.
+  - `spaces:init` (once, after `ready`): `CodePaneInitPayload` with the workspace id and name, the
+    restored `workspaceState`, `theme`, optional `baseBranch`, `isGitRepository` (false suppresses
+    every diff fetch and the diff-signature subscription), `isLocalWorkspace`, and running
+    `agents`. The page applies the restored state before its first manifest and listing requests.
+  - `spaces:theme`, `spaces:agents` (full replacement list, so the page keeps a still-valid
+    selection or reapplies its default-agent rule), `spaces:agentStartStatus` (`detected`,
+    `exited`, or `timedOut` for a started command), `spaces:setMode`.
+  - `spaces:flushEdits` with `{token}` before quit or pane teardown; the page writes what is
+    unsaved and answers `editsFlushed` once per token.
+  - `spaces:diffSignature` (active scope's git signature), `spaces:fileListSignature` (workspace
+    listing membership), and `spaces:fileSignature` (the open file changed or was deleted). These
+    are "go look" signals that never carry content. The first two carry `liveRefreshError` on
+    every frame while the daemon's watcher for the workspace is down.
 
-### Live-refresh notice
+Rules the protocol relies on:
 
-`src/app/liveRefreshNotice.ts` renders the persistent corner banner (`code-pane-live-refresh-notice`)
-root.ts shows while `liveRefreshError` is set: one line, top-trailing, in the Diff pane's
-content area or, in Editor mode, `EditorView`'s own content pane below the open-file bar
-(`EditorView.overlayHost()`); the Files sidebar never gets one. Its text is "Live refresh off:
-`<reason>`", the daemon's error text verbatim, with a single Retry action at its trailing end that
-sends `retryLiveRefresh` (the host reopens both streams, and the daemon retries the watcher as a
-result) and reads "Retrying…", disabled, until the next frame from either stream or until the
-request itself is rejected, whichever comes first. Only the Retry button takes clicks; the label
-and the banner's own chrome are `pointer-events: none`, so a click beside it reaches the diff or
-editor content underneath, per docs/design.md's persistent-banner pattern. `liveRefreshError` holds
-whichever stream's push frame arrived most recently, not a merge of both: the two streams share one
-daemon-side workspace watcher, but a scope switch can reinstall it and clear one stream's error
-before the other stream's next frame does, so tracking the latest frame rather than combining both
-streams' last-known state keeps the banner from showing a reason that already cleared.
-
-A pane has one banner (docs/design.md): root.ts's `attachTo` call moves the notice's element into
-its current content-area container and watches that container with a `MutationObserver` for the
-`style` changes `editorView.ts`'s, `diffView.ts`'s, and `commentsController.ts`'s own transient
-`.banner` elements toggle their visibility through. Whenever any of those is visible, the notice
-stays hidden regardless of `liveRefreshError`; it reappears once every transient banner in that
-container clears. None of those three owners knows this notice exists.
-
-## Editor changes view
-
-The Editor's Changes view has a file-list sidebar and one `@pierre/diffs` `CodeView` holding
-all changed files in order as one virtualized scrolling region (`src/app/diffView.ts`). A
-complete `workspaceDiffManifestChunk` metadata sequence paints the sidebar and queued file rows. Patches
-then arrive through per-file `workspaceDiffFileChunk` transfers: one file streams at a time in
-bounded 4 MiB chunks, the selected queued file can be promoted, and incoming UTF-8 bytes are
-decoded incrementally. A binary entry has an explicit non-commentable placeholder; textual
-patches have no daemon truncation or aggregate UI cap. A submodule (gitlink) entry renders the
-same way: a read-only pointer row naming its old/new commit shas, then every flag the daemon
-reports in the fixed order dirty, unmerged, then `, not checked out` when `checkedOut` is false.
-`checkedOut` says only whether the diff nested this submodule's own files under the pointer, not
-whether the checkout is clean, so a readable dirty checkout at the daemon's depth limit arrives as
-`checkedOut: false, dirty: true` and keeps its `(dirty)`; no flag is dropped on the strength of
-another. The pointer row has no gutter, comments, or edit affordance. In the Changes list the pointer entry is not a file row at
-all: `fileTree.ts` makes it the directory node for its own path, holding the entries whose
-`submodulePath` names it as their owner (a nested submodule's pointer names its parent, so a chain
-groups one level at a time). Ownership, not path prefix, is what decides this: the two disagree
-when a submodule is replaced by ordinary files at the same path, and a superproject `A/foo` placed
-inside a removed pointer `A` would show another repository's file in it and make a pointer with no
-checkout behind it look expandable. A path can therefore carry both a pointer node and a plain
-directory node, as sibling rows; the pointer row is identified as a change entry
-(`code-pane-change-<path>`) rather than a directory so the two never share an element id. A
-submodule directory is also a compaction boundary in both directions, so its row is never folded
-into a chain. `fileList.ts` renders that row with a chip in place of the +/- stat, carrying the
-pointer's 7-character commit and the whole `submoduleLabel` string as its tooltip, orange when
-`checkedOut` is false (such a row has no children, so its disclosure slot stays empty and the row is
-no toggle). The chip reads "submodule" from the manifest's `isSubmodule` flag alone and is rebuilt by
-`updateFileListRow` when the metadata-only chunk lands. Clicking the row discloses the submodule's
-files; clicking the chip selects the pointer entry, which scrolls the diff to its placeholder and is
-a no-op in Editor mode (it names a directory, not a file). `pathTree.ts`/`filesTree.ts` mark the
-Files tree's submodule checkouts from `workspaceFileList`'s `submodules` with the same chip and the
-same compaction boundary. Untracked files render as additions with
-no old side. Scope/signature refreshes release the old manifest and replace it with a new
-metadata-first generation while preserving the relevant selection and scroll context. A refresh
-that preserves the viewport reveals no arriving patch at all until its stream finishes, the user
-navigates, or the view resets, which is what keeps the refresh an inline edit's own autosave
-raises from scrolling the typist away from the caret, including when the Changes selection sits
-on a file other than the one being edited.
-
-Right-clicking a rendered diff line, or its number in the gutter, opens the pane's own in-page menu (`src/app/contextMenu.ts`,
-mounted on the pane root so it is neither clipped by nor scrolled with the diff region) carrying a
-`<file>:<line>` header and a single Open in Editor item. `src/app/diffLineTarget.ts` holds that
-flow's DOM-free logic: resolving the stamped row out of the event's composed path (Pierre renders
-lines inside shadow roots, and a gutter cell borrows its row's stamps since it is a sibling column
-rather than a descendant) and mapping the row's diff-side line to the line Editor mode lands the
-caret on, where an old-side line maps to the nearest kept new-side line after the deletion (the
-last kept line when a context-carrying hunk shows the deletion reached the end of the file). In
-Last Commit scope `root.ts` first checks that the worktree file still matches the committed
-revision (the same `workspaceRevisionFileRead` equivalence used to gate inline editing there) and
-opens the file without a reveal when it does not. A right-click on selected text, on a line of the file being edited inline, on a binary or deleted
-file, or off any rendered line is left to WebKit's native menu instead.
-
-## Editor mode
-
-A read-only open-file bar (`src/app/editorView.ts`, `.editor-path`) feeds a single-item,
-edit-mode `CodeView` and, for a previewable file, a rendered surface beside it (see Previews
-below), with an Editor sidebar sharing the Changes list element.
-Files uses a lazily fetched full workspace listing and a collapsed, lazy-materialized directory
-tree; that listing is sorted and capped at 50,000 paths with a `truncated` flag. Changes
-reparents the existing changed-files list, so toggling the sidebar does not rebuild its rows.
-The shared tree state and selected file are restored from the workspace document; a confirmed
-rename or move of a directory re-keys that expansion onto the destination, the moved directory and
-every directory under it, before the listing refetch repaints the tree.
-
-Both lists lead every row with one disclosure slot (`src/app/disclosureChevron.ts`): an inline
-chevron on a directory that holds something, turned down by the `.tri.open` class while it is
-expanded, and the same slot left empty elsewhere so names line up down the column.
-
-The Files tree's own right-click menu (`src/app/filesTree.ts`) offers New file, New folder, Rename,
-Move to…, Delete, and, for a file the Editor cannot open as text in a local workspace, Open in
-system viewer. New file/New folder/Rename run through the in-row field (`src/app/inlineRowEditor.ts`);
-Move to… picks a destination in `src/app/folderPicker.ts`, the same overlay quick-open uses
-(`src/app/pickerOverlay.ts` owns the panel, filtering, keyboard model, and focus restore for both),
-listing the folders `workspaceFolderPaths` derives from the current listing with the item's own
-subtree left out and its current parent marked unpickable. Every mutation resolves against the
-daemon before the tree changes: the row reads as busy while a move runs, and a refusal renders as an
-`.inline-error` under it. A listing refresh arriving while an inline field is open, or while a row
-action is still awaiting its answer, is held and applied once that surface settles; a refusal the
-action settled with is repainted under the row the applied listing draws, so the held refresh cannot
-swallow it.
-
-The ⌘P quick-open overlay, Files tree, and Changes list all call `EditorView.open(path)`.
-Opening a file already in the current Changes set keeps the Changes view and focuses that file;
-opening any other file uses Editor mode. A different-file open while the buffer is dirty flushes
-the pending save first and proceeds once the buffer is clean; a save that fails or is blocked
-refuses the open and reports that reason, so there is no discard consent to give. Reselecting the
-already-open file is a no-op. Successful opens update the most-recent-first recent-path list.
-
-The new/right side of a changed file is editable through the library's line editor, and edits
-save themselves. `src/app/autosave.ts` schedules a write 800 ms after the last keystroke, keeps a
-single write in flight, and retries a failed write with exponential backoff between 1 s and 30 s.
-A write uses the captured CAS baseline, adopts the returned hash on success, and leaves the edit
-session open. There are no Save or Cancel buttons: the one save affordance is a status chip in
-the inline edit header and in Editor mode's top bar, reading `Unsaved`, `Saving…`, `Saved`,
-`Save blocked: <reason>`, or `Save failed: <reason> · retry in <N> s` with a Retry now action,
-and absent while there is nothing to report. ⌘S flushes the pending write immediately. Esc ends
-the edit session, saving first when the buffer is dirty. Clicking into another file's lines
-flushes the open session and switches once it is clean. Quitting is one event pair: the host
-dispatches `spaces:flushEdits` with a token, the page awaits the flush in flight and answers with
-`editsFlushed` carrying that token.
-
-### Previews
-
-One segmented control at the trailing end of the open-file bar (`src/app/modeControl.ts`) drives
-every preview; `src/app/previewMode.ts` decides a file's kind from its extension, which segments
-its control offers, and which one it opens on. `src/app/previewSurface.ts` builds whichever
-rendered surface the pick names, into the preview half of the `.editor-split` row that also holds
-the source `CodeView` and a draggable divider (`src/app/editorSplitDivider.ts`). A mode switch
-hides a half rather than unmounting it, so returning to the source finds the same document, caret,
-and scroll position.
-
-Markdown renders through markdown-it with `html: false`, the same pipeline and options the iOS
-terminal Markdown artifact viewer uses; `src/styles/markdownPreview.css` is an adapted copy of
-`apps/ios/Resources/terminal-markdown.css` (see that file's own header for why it is a copy).
-Top-level blocks are stamped with their source line, which is what the split's two-way scroll sync
-reads. A source line before the first stamped block (a document opening with blank lines) scrolls the
-preview to its top, since that is where such a line's part of the document sits. Preview mode hides
-the source half, and a hidden half has no geometry, so the reading position the pane persists comes
-from the block at the preview's own scroll top while Preview is showing; a hibernated pane returns to
-the line the user was reading there rather than to the one showing when Preview was picked. An image or link the document writes resolves against the workspace through
-`src/app/workspacePath.ts`; a resolved image is fetched once per path with `workspaceImageRead` and
-cached. Rendered anchors carry no `href` at all: the target the preview resolved goes in `data-link`,
-and one delegated click/Enter listener opens that workspace file in the Editor, or scrolls to the
-heading a `#fragment` names. An `href` would give
-the web view navigations no listener ever sees (a middle click, WKWebView's own Open Link item, a
-dragged link), and the pane has nowhere to send them. A link carrying a `data-link` is a tab stop
-with `role="link"`, so the keyboard reaches what the pointer does. A reference that resolves to no
-workspace file (an absolute URL, a `data:` URL, a protocol-relative `//host/path`, a climb above the
-root) is followed by nothing: such a link gets no `data-link` and no tab stop, keeping its text and
-link styling while doing nothing, and an image never becomes an `<img>` at all. A `#fragment` is
-resolved against the document's own headings, which the renderer gives GitHub-style slug ids
-(lowercased, trimmed, punctuation dropped, spaces hyphenated, repeats suffixed `-1`, `-2`); the
-fragment is percent-decoded before it is matched, and one naming no heading is left inert the same
-way a link out of the workspace is, so a table of contents works and a stale anchor is not a focus
-stop with nothing behind it. Rendering is two steps (`md.parse`, then `md.renderer.render`) so the
-heading ids are known before the link rule runs, since a table of contents names headings that come
-after it. Its alt text renders
-in a muted `.markdown-image-alt` span instead, since an `<img>` carrying that `src` would be fetched
-the instant the markup is assigned, and this bundle makes no network request.
-
-Image loading is bounded by four fixed rules. At most 4 reads are in flight at once, the rest
-waiting in a FIFO queue, so a document full of screenshots does not put the user's next save behind
-all of them on the daemon's per-workspace serial git queue; document order is request order, since
-the queue is filled by walking the rendered DOM. At most 200 distinct images resolve per document,
-and a reference past that renders its alt text exactly as a reference naming no workspace file does,
-which is also why an admitted path stays admitted while the document is retyped. The document also
-carries an aggregate byte budget, `MAX_DOCUMENT_IMAGE_BYTES` (64 MiB of encoded payload): the count
-cap alone bounds how many images render but not how large each one is, and a single image can
-approach the bridge's 10 MiB per-file limit, so 200 of them could otherwise retain roughly 2 GiB of
-base64 strings and decoded bitmaps until the document changes, enough to terminate the web-content
-process. Beside it sits an aggregate decoded-pixel budget, `MAX_DOCUMENT_IMAGE_PIXELS` (64 megapixels,
-roughly 256 MiB of decoded bitmaps at 4 bytes per pixel), charged once an image's `<img>` element has
-loaded and its natural size is known, since the byte budget bounds encoded size, not what an ordinary
-photo (a few MiB encoded, tens of megapixels decoded) costs once decoded. A workspace path cited more
-than once in a document is charged once, not once per citation: every citation gets its own `<img>`
-element and its own `load` listener (one reference's element can still be mid-decode, its listener
-not yet fired, when a re-render leaves a second listener on the fresh element that replaces it), but
-the cache entry the path shares across them records the charge, and every listener after the first to
-fire for an already-charged entry is a no-op. Every reference in a document is admitted, and its read dispatched, before any read
-settles, so the budget is enforced where a read settles rather than at admission: a result that
-would cross it is discarded rather than cached or rendered, and renders its alt text the same way a
-reference past the count cap does. That settle also closes the document's budget, so every image
-still queued for the document is dropped unfetched (rendering alt text too) and every later read for
-that document, queued or not yet requested, is refused the same way; an image already rendered from
-a read that settled under the budget is unaffected, since a closed budget only gates what has not
-rendered yet. The loaded data URLs belong to the open document: a keystroke re-render and a mode
-switch (which clears the rendered
-DOM, not the cache) reuse them. One `MarkdownPreview` instance serves the pane, so `previewSurface.ts`
-tells it (`beginDocument`) whenever a different document of any kind takes the surface, and that
-clears the rendered DOM alongside the cache, the admitted set, and whatever is still queued, so the
-`<img src="data:...">` nodes of the document being left do not stay reachable through this instance
-for as long as the pane stays open; reopening the first document reads its images again, whether a
-JSON, table, SVG, plain, or image file was shown in between. Tearing the pane down calls `dispose()`,
-which does the same and leaves the queue empty, so a document citing more images than the concurrency
-cap admits stops reading instead of working through the remainder after the pane is gone. A read
-already in flight either way settles and is dropped by its own generation check.
-
-The JSON tree (`src/app/jsonTreeView.ts`) is read-only, builds a container's children on its first
-expand, and is offered only for a `.json` file whose buffer parses as strict JSON, which is
-re-evaluated on every keystroke. That one parse is also what the tree is built from
-(`jsonTreeDocument` hands its result to `PreviewSurface.renderText`), so a keystroke parses the
-buffer once rather than once to offer the segment and again to render it. That parse runs through this bundle's own
-recursive-descent parser (`src/app/jsonDocument.ts`) rather than `JSON.parse`, and it builds the
-tree's model directly: a value carries its own `kind` tag, and a number carries the lexeme the file
-wrote, which the tree prints verbatim, so `9007199254740993` and `1.00` read as typed where
-`JSON.parse` hands over `9007199254740992` and `1`. Nothing is materialized as a JavaScript object,
-so a `"__proto__"` member is an ordinary member rather than a write through the prototype setter
-that `Object.entries` would then not report. The grammar accepted is exactly RFC 8259, the same
-strictness as `JSON.parse`: a repeated key keeps its first occurrence's position and takes its last
-value, and everything else (comments, trailing commas, single quotes, unquoted keys) throws a
-`SyntaxError` carrying the offset it stopped at, which is what leaves such a file on the Text view. Each disclosure button carries an `aria-label` naming the member it
-opens and that member's summary (`Expand items: array of 3`, `Collapse user: object with 4 keys`),
-kept in sync with the button's state, since the button's own content is a bare triangle. The CSV/TSV table (`src/app/tableView.ts`, parsed by
-`src/app/delimitedTable.ts`) is read-only with a sticky first row. It caps rendered columns at 200
-and rendered rows at 2000, further bounded by a 50,000-cell (rendered rows x rendered columns)
-budget on a wide file that shrinks the rendered row count, never the column count, below 2000; the
-JSON tree caps at 2000 children per container, and at 100,000 retained values across the whole
-document. A muted trailing note names the real count
-where a cap bites: "Showing first R of N rows" (R the rows actually rendered), "Showing first C
-of N columns" (C the columns actually rendered, set by the widest row the parse retained, which the
-row cap can leave narrower than the column cap), or "2000 of N items shown", one line per cap a file
-trips. The Markdown preview
-caps the same way, at whichever of 5000 source lines (`MAX_RENDERED_SOURCE_LINES`) or 1,000,000
-source characters (`MAX_PREVIEW_SOURCE_CHARS`, `src/app/markdownPreview.ts`) the source hits first,
-with "Showing first 5000 of N lines" or "Showing the first 1,000,000 characters of N" naming whichever
-bound applied; the character bound exists because the line bound alone lets a near-10 MiB document
-with almost no newlines (a single generated line) through whole, which can expand into millions of
-DOM nodes and hang or terminate the web-content process. `truncateSource` picks the more restrictive
-of the two candidates (the first 5000 lines, or the longest prefix of whole lines fitting the
-character budget, cutting mid-line only when the very first line alone exceeds it) and runs on every
-render, not only on open, so an edit that grows a document past either bound is caught the same way.
-The rendered part
-keeps its `data-source-line` stamps (stamped on every top-level block including a fenced or
-indented code block), so scroll sync works over it unchanged.
-The Markdown preview parses whole (one pass over a string the editor has already read), so its
-count is the file's real one. The table and the JSON tree parse to a budget instead. For the table,
-parser and renderer share one set of constants (`src/app/tableLimits.ts`), and `parseDelimitedTable`
-takes the retention budget they name, keeping the first 2000 rows and each row's first 200 fields as
-strings while everything past that is counted and dropped character by character rather than built.
-A near-10 MiB spreadsheet therefore costs the rows the table can show rather than every field it
-holds, and the result's `rowCount` and `widestRowWidth` are the whole file's, which is what keeps
-the notes naming real totals. The JSON parser holds the same shape, with two budgets of its own
-(`MAX_CONTAINER_CHILDREN` and `MAX_DOCUMENT_NODES` in `src/app/jsonDocument.ts`, the first read by
-the tree for its note): it retains a container's first 2000 members and at most 100,000 values across
-the document, validates everything past either bound without building a model for it, and gives each
-container a `count` of every member the document gave it beside what was kept. A near-10 MiB array of
-a few million scalars therefore costs the members the tree can show rather than one model object per
-value, on the open and on every keystroke after it, and the tree's note names the file's real total.
-The per-container cap alone would not bound the document: a matrix of 2000 arrays of 2000 scalars
-keeps every container inside it while building about four million models, which is what the document
-budget stops. Past that budget the parse retains nothing further, and every container it had already
-started keeps counting its remaining members, so such a container's note names the file's real total
-exactly as a container past the per-container cap does. A key repeated past the document budget still
-updates the retained member it names: the replacement is parsed like any value, charging one node for
-itself, and if the budget is already spent its own children land the same way an over-budget
-container's do elsewhere, counted but not retained. A key first seen past a bound is counted, not
-kept. A third budget, `MAX_NESTING_DEPTH` (512), bounds recursion itself rather than what gets
-retained: it applies on both the retaining and the skip path, and a container opening past it throws
-`JSONDepthError` rather than recursing further, since the JS engine's own recursion limit is a
-runtime detail rather than a language guarantee (`parseStrictJSON` disables Tree for a
-`JSONDepthError` the same way it does for a `JSONSyntaxError`). It is the element count, rebuilt on
-every keystroke, that decides
-whether the pane stays responsive. SVG previews and image files
-share one stage (`src/app/imageStage.ts`), which renders through `<img>` so no document script or
-subresource ever runs. The SVG preview is bounded by character count instead, at 1,000,000
-(`MAX_PREVIEW_SVG_CHARS` in `src/app/previewSurface.ts`, the same figure as the Markdown preview's
-`MAX_PREVIEW_SOURCE_CHARS`): past it the surface renders a muted note in place of the image rather
-than building a data URL from the buffer, since that cost is in the URL and its decode rather than
-in DOM elements. An image has no text buffer at all: it claims no file-signature
-subscription, contributes no workspace-state snapshot, and reports its byte size and decoded pixel
-dimensions in the bar instead. The mode a user picks is remembered per file for the pane's
-lifetime only, deliberately outside the persisted workspace document.
-
-A concurrent change produces the merge/conflict UI without discarding the user's buffer: clean
-buffers reload, non-overlapping edits merge with Undo, overlapping or deleted-file edits show
-the compare view with Keep mine and Take disk/Close without saving actions. A standing conflict
-blocks autosave with that reason, and because the autosave that follows a merge keeps the session
-open, the merge's Undo offer stays available after the merged content is written.
-
-The complete workspace document is collected through `window.__spacesCollectWorkspaceState` and
-persisted by the host per `(deviceID, workspaceID)`; it includes mode, scope, layout, tree and
-file selection/scroll/focus (with each diff position paired to its old/new side), open buffers and
-baselines, review-comment drafts, agent selection, and pending agent launch. Patch bodies and rendered DOM remain ephemeral, so restored Editor
-state is combined with a fresh manifest and fresh file transfers.
-
-## Toolbar
-
-One compact strip (`src/app/toolbar.ts`) provides the Editor mode toggle and, in the Changes
-view, scope and split/unified controls. The agent slot stays compact: with no running agent it
-shows a `Start agent…` button; with running agents it shows the assigned-agent selector plus a
-separated `Start new…` action. The command dialog accepts an arbitrary command and Run starts it
-in a background workspace terminal without moving Editor focus. It reports Starting while waiting
-for hook-backed detection, then clears on detection or shows `No agent detected` after exit or
-timeout while retaining the command and failure feedback for retry, including after app restart.
-
-The comment send action is disabled unless a running agent is assigned and there is sendable draft
-text. The composer and send controls explain that comments require a running, assigned agent;
-starting an agent from the toolbar does not implicitly send comments.
-
-## Comments
-
-Diff-mode-only line comments (`src/app/commentsController.ts`, `src/app/reviewComments.ts`), owned
-end to end by `CommentsController`:
-
-- **Draft = the unit.** A draft attaches to a `(filePath, side, lineNumber, lineText)` and renders
-  as an inline card under that line, via `@pierre/diffs`' `renderAnnotation`/`onGutterUtilityClick`
-  hooks (`DiffCommentHooks` in `src/app/diffView.ts`). Every draft is always part of the batch —
-  there is no separate batched/unbatched data state. "Send to `<agent>`" on a card sends that one
-  draft immediately; "Add to batch" only hides the card (tracked in `collapsedIds`, UI-only) and
-  moves it into the tray; clicking its tray row un-hides it. "Send batch · n" in the toolbar sends
-  every current draft with a non-empty body in one call.
-- **Creation and persistence.** The gutter's hover affordance opens a new card immediately with no
-  RPC — the daemon rejects an empty-body `reviewCommentUpsert` outright, so a just-opened card is
-  *provisional*: rendered under a local id, sendable/batchable state stays off, and nothing exists
-  server-side yet. The body is saved via `reviewCommentUpsert` on the textarea's `blur` only (no
-  per-keystroke save, no debounce timer); the first successful save for a provisional card omits
-  `id` to create it and adopts the response's server-assigned id as the card's key from then on,
-  every save after that updates by that id. A draft emptied back out (or never typed into) is
-  discarded silently on blur — deleted server-side if it had already been persisted, or just dropped
-  from the local mirror with no RPC at all if it was still provisional. Clicking a card's Send or
-  Delete button fires *after* that same click's `mousedown` has already blurred the textarea, so a
-  card action always waits for that blur's in-flight persist to resolve before acting, then resolves
-  its own (possibly now-stale, pre-re-keying) id through `CommentsController.resolveId` — this is
-  what makes a provisional card's persist-then-immediately-send or persist-then-immediately-delete
-  behave as one operation on the server-assigned id rather than racing it.
-- **In-progress text and focus survive a live diff refresh.** A diff refresh
-  (`CommentsController.setFiles`/`refresh`) rebuilds every card's DOM node from scratch, but a
-  card's not-yet-blurred keystrokes are tracked separately (`liveBodies`) and taken over
-  `comment.body` when a card is rebuilt, and the focused card's id and caret position are captured
-  before the rebuild and restored after it — so typing through a refresh (or a refresh landing
-  mid-keystroke) never drops what was typed or moves focus.
-- **Rehydration vs. re-anchoring.** `reviewCommentList()` is called exactly once, from `root.ts`
-  after mount (workspace-scoped, independent of the active scope/mode). Its response is merged into
-  the in-memory mirror rather than replacing it outright: response rows first, then any current
-  local draft whose (alias-resolved) id isn't already in the response — so a draft created, or a
-  persist that completes and re-keys a provisional id, while that one `reviewCommentList` call is
-  still in flight is kept rather than clobbered, without being duplicated once the response catches
-  up to it. Every subsequent create/edit/delete/send updates the in-memory mirror directly; a live diff refresh
-  (`CommentsController.setFiles`) only re-anchors the existing drafts against the new file set via
-  `reanchorComments` (`src/app/reviewComments.ts`, DOM-free and unit-tested in isolation) — it never
-  re-fetches, since a slow `reviewCommentList` reply racing a local mutation could otherwise revert
-  it. Re-anchoring rule: an exact `(filePath, side, lineNumber, lineText)` match stays put; else the
-  nearest same-file/same-side line whose text still matches floats there (ties break toward the
-  smaller line number); else the comment is `outdated` and pins near its file's header (or is
-  tray-only if the file itself is gone).
-- **Send failure leaves drafts untouched.** `reviewCommentsSend` archives its named drafts only
-  after its terminal write succeeds (send-then-archive ordering, not two-way atomicity — see the
-  Bridge contract section above); `CommentsController` never removes a draft from its local mirror
-  before the call resolves, so a rejection surfaces an error banner with every draft exactly as it
-  was. A rejection typed `conflict`, `invalidArgument`, or `notFound` specifically proves the
-  mirror is stale — a `conflict` means one or more entries' `revision` no longer matched the
-  daemon's, `invalidArgument`/`notFound` mean a named comment was already sent, deleted, or never
-  existed the way the mirror thought — so `CommentsController` also re-fetches every draft from
-  `reviewCommentList()` before re-rendering (see `CommentsController.reconcileMirrorAfterRejection`,
-  called from both `handleSendFailure` and `deleteDraft`'s failure path). Every other rejection —
-  a non-typed transport failure, or a `SpacesBridgeError` coded `internalError`/`unavailable` —
-  proves nothing about staleness and skips the re-fetch.
-- **Drafts survive a pane hibernating or closing, not just a live diff refresh.** The unified
-  workspace-state collector includes pending comment text, including a focused card whose textarea
-  has not blurred. The native host persists that document per workspace and restores it before the
-  replacement page loads its daemon draft list; provisional cards receive fresh local ids, while
-  persisted drafts overlay their in-progress body until the normal blur path saves it.
-- **A context-line click always anchors to the new side.** Split layout's gutter reports a
-  context row's click as the old (deletions) side even though the line is unchanged;
-  `reviewComments.ts`'s `canonicalizeContextAnchor` (used by `diffView.ts`'s `requestNewComment`)
-  rewrites such a click to its new-side `(side, lineNumber)` before it ever becomes a stored
-  anchor, so `formatReviewCommentsText`'s "(removed line)" suffix only ever labels a genuine
-  deletion, never a still-present context line whose old-side line number could also have drifted
-  from the current file's own numbering.
-- **`sendBatch` reads last-saved bodies, not live keystrokes** — see the doc comment on
-  `CommentsController.sendBatch` for why a card mid-edit that has not yet blurred is accepted to
-  send its last-saved body rather than in-progress typing.
+- `subscribeDiffSignature`, `subscribeFileSignature`, and `subscribeFileListSignature` only attach
+  a page listener; they send nothing. One diff scope is observed at a time.
+- The host's single file-signature stream follows the last successful `editor`-purpose
+  `workspaceFileRead`, or a `retargetFileSignature` the host applies only while the stream still
+  follows `from`. `inlineDiff` reads, `workspaceRevisionFileRead`, and `workspaceImageRead` never
+  point it.
+- Reads and writes name a purpose. `workspaceFileWrite`'s purpose (`editor`, `inlineDiff`,
+  `createFile`) selects how the host resolves the path, so `realBridge.ts` rejects a write without
+  one rather than inferring it.
+- `postMessage`'s structured clone drops `undefined` properties, so values whose absence means
+  something (`baseSHA256` for the create convention, nullable state fields) are sent as `null`.
 
 ## Language set and bundle size
 
-`src/theme/index.ts` preloads Shiki for a fixed set: `typescript`, `javascript`, `tsx`, `jsx`,
-`swift`, `python`, `go`, `rust`, `c`, `cpp`, `objective-c`, `json`, `yaml`, `toml`, `html`,
-`css`, `markdown`, `shellscript`, `sql`, plus `text` as the fallback. Every call site that hands
-a file to `CodeView` (`diffView.ts`, `editorView.ts`) explicitly sets `lang` via
-`resolveAllowedLanguage()` rather than letting `@pierre/diffs` auto-detect it from the filename:
-auto-detection can resolve to any of Shiki's ~180 bundled languages, and the shared highlighter
-only has the set above attached, so an unresolved language would make the highlighter throw and
-`@pierre/diffs` would render a visible error box in its place (its default
-`disableErrorHandling: false` behavior) instead of the plaintext fallback this bundle wants.
-Forcing `lang` explicitly (falling back to `"text"` for anything outside the set) is what makes
-the plaintext fallback actually plaintext.
+`src/theme/index.ts` preloads Shiki for a fixed set (TypeScript, JavaScript, TSX, JSX, Swift,
+Python, Go, Rust, C, C++, Objective-C, JSON, YAML, TOML, HTML, CSS, Markdown, shell, SQL, plus
+`text`). Every call site that hands a file to `CodeView` sets `lang` from
+`resolveAllowedLanguage()`, which maps anything outside the set to `text`. Letting `@pierre/diffs`
+auto-detect would pick a language the shared highlighter never loaded, and the library renders a
+visible error box in place of the file instead of plain text.
 
-`@pierre/diffs`'s language resolver (`resolveLanguage.js`) statically imports Shiki's full
-`bundledLanguages` map from the `shiki` package; this is a closed set of dynamic `import()`
-targets that Rollup must code-split into a chunk per language regardless of which ones
-`preloadHighlighter` is ever asked to load. There's no public `@pierre/diffs` option to swap in
-a scoped highlighter that only knows about these files. As a result the built output is ~11MB
-across ~320 files, but only the entry chunk (~1.24MB, ~385KB gzipped, ~137KB of which is the inlined file-type icon sprite) and its CSS load eagerly: `index.html` has
-a single `<script type="module">` tag and no `modulepreload` hints — and `resolveAllowedLanguage`
-guarantees only the 19 whitelisted languages' chunks can ever actually be requested at runtime,
-since anything else resolves to `"text"` first. The remaining ~300 files sit on disk unused.
-Aliasing `shiki`'s `bundledLanguages` export to a hand-curated subset (Shiki's documented
-"fine-grained bundle" pattern) would shrink the built output to just the 19 languages, but requires
-re-exporting the rest of `shiki`'s value exports that `@pierre/diffs` also imports from the
-same specifier, reaching into a third-party package's unexported deep paths — left as an open
-decision rather than done unilaterally (see Open items).
+`@pierre/diffs` imports Shiki's full bundled-language map, so Rollup emits a chunk for every Shiki
+language: the build is about 12 MB across about 320 files. Only the entry chunk (about 1.2 MB,
+about 380 KB gzipped, of which about 140 KB is the icon sprite) and its CSS load eagerly;
+`index.html` has one module script and no preload hints, and `resolveAllowedLanguage` means only
+the whitelisted languages' chunks are ever requested. The shipped size is an accepted trade-off:
+shrinking it would mean aliasing `shiki`'s bundled-language export to a curated subset, which
+reaches into the package's unexported paths, for chunks the app never loads.
 
 ## File-type icons
 
-A file row in the Files tree and the Changes list carries a file-type icon before its name
-(`src/app/fileTypeIcon.ts`). The art and every name/extension mapping come from the
-[vscode-icons](https://github.com/vscode-icons/vscode-icons) pack, MIT-licensed; the license text
-lives in `public/vscode-icons-LICENSE.txt`, which Vite copies into the built bundle so the notice ships
-inside the app beside the art it covers.
-
-`npm run icons` (`scripts/generate-file-type-icons.mjs`) fetches the pinned pack commit, resolves
-its `ICON_SEEDS` (the file kinds the trees are expected to name) through the pack's own manifest,
-and writes three checked-in files:
-
-- `src/app/fileTypeIconSprite.ts`: one `<symbol>` per shipped icon, whitespace-stripped and with
-  each icon's internal ids namespaced so gradients and clip paths cannot collide. It is inlined in
-  the bundle, mounted once per pane, and referenced by a `<use>` per row, so a row costs no request.
-- `src/app/fileTypeIconTable.ts`: every file name and extension the pack's manifest points at one
-  of those icons. The seeds pick which icons ship; the pack picks which files reach them.
-- `public/vscode-icons-LICENSE.txt`: the pack's license, with the commit the art came from, copied into the bundle by the build.
-
-The generator is deliberately not part of `npm run build`, which stays offline and reproducible;
-rerun it by hand only to move the pinned commit or change the seed list, and commit its output.
-
-## Tests
-
-`npm run test` (Vitest + jsdom): `test/bridge.test.ts` covers the real bridge's promise
-correlation (including out-of-order replies), unknown-error-code normalization to
-`internalError`, dropped replies for untracked ids, `unavailable` when the WKWebView handler
-isn't installed, and the mock bridge's CAS conflict/success shapes and signature-event
-subscribe/unsubscribe/dedup behavior. `test/state.test.ts` covers `codePaneReducer` for all five
-actions and `initialState`. `test/autosave.test.ts` covers `AutosaveScheduler`
-(`src/app/autosave.ts`) in isolation: the 800 ms debounce, coalescing edits made during a write
-into one follow-up write, the backoff schedule and its countdown, a blocked host writing nothing,
-and `flush`/`cancel`. `test/fuzzyMatch.test.ts` covers the ⌘P overlay's scorer directly:
-subsequence matching (including the empty-query and no-match cases), case-insensitive matching
-with indices reported into the original text, and that a consecutive run, a path/word
-segment-start match, and a basename match each score higher than an equivalent match without that
-property. `test/editorView.test.ts` covers autosave in Editor mode: one write 800 ms after the last
-keystroke against the load's hash with the chip stepping through dirty, saving, and saved; a
-failed write reporting its countdown and retrying on its own backoff, with Retry now writing
-immediately; no Save button in any state; and the public `open(path)` entry point flushing the
-dirty buffer before it reads the new file, with a failed or conflict-blocked write refusing the
-open and reporting that reason. Re-picking the file already open while dirty is a no-op, no
-re-read, the edit left intact, the same way during a standing conflict. It also covers its error
-surfacing on a rejected read via the `.banner.error` element,
-a save adopting the write result's own hash as the next CAS baseline with no intervening file
-read, the unified `workspaceStateChanged` snapshot being updated immediately for discrete changes
-and debounced for edits, and `restoreState` rehydrating a dirty snapshot without a disk re-read versus re-reading a
-clean one from `path`, with the workspace-state collector capturing an edit still inside the
-debounce window (`@pierre/diffs`' `CodeView`/`Editor`
-are stubbed out — these tests are about `EditorView`'s own logic, not the diff-rendering library).
-`test/pathTree.test.ts` and `test/filesTree.test.ts` cover the Files tab's directory-tree builder
-and renderer (root-level files, nesting, single-child-chain compaction, compaction stopping at a
-branch point) with the same behavior `test/fileTree.test.ts` already covers for Diff mode's own
-tree builder, plus the renderer's own collapsed-by-default/lazy-materialize contract: no descendant
-DOM before a directory's first expand, element identity preserved across toggles and across
-`FilesTreeHandle.setSelected` calls, and `setSelected` expanding just the target path's ancestor
-chain. `test/fileTypeIcon.test.ts` covers the file-type icons: `fileTypeIconID`'s lookup order (an exact file name beating the extension it ends with, case-insensitive matching, a dotfile read as a name rather than an extension, an unknown extension and an extensionless name falling to the pack's default) and the icon's placement (a `<use>` on every file row of the Files tree and the Changes list, directly before the name; none on a directory row, an empty-folder row, or a quick-open row), plus that every icon the lookup can return has a symbol in the shipped sprite. `test/workspaceFileListCache.test.ts` covers the shared cache's lazy-fetch-once,
-concurrent-caller dedup, not-caching-a-failed-fetch, and `invalidate()` behavior, plus `getFresh()`'s
-stale-while-revalidate contract (serving the cached value while a deduped background refetch is in
-flight, the refetch's result replacing the cache on success, and a failed refetch leaving the
-previous cached value untouched), and the single-flight/trailing-refetch contract: any number of
-`invalidate()`, `get()`, and `getFresh()` calls arriving while one bridge call is in flight collapse
-into exactly one trailing call fired once it settles — whether it succeeds or fails — never one per
-caller or per invalidation, and `snapshot()`'s own contract: `undefined` before any fetch, the last
-successful result afterward (including one whose generation went stale), surviving `invalidate()`,
-and updating once a revalidation resolves. `test/editorSidebar.test.ts` covers the Files/Changes toggle
-(including `onModeChange` firing and the toggle's `on` class), the Changes tab reparenting the same
-`changesListEl` node rather than re-rendering it, that construction itself never fetches the
-workspace listing regardless of which tab it starts on, the Files tab's lazy fetch first firing on
-`reattach()` or on switching into the Files tab (including the cache being re-consulted on
-`refreshFilesListing()` and on `reattach()`, and revalidating in the background via `getFresh()`
-even without an explicit `invalidate()` first), the truncated note's visibility, switching to
-the Changes tab while a Files fetch is still pending not letting that stale fetch touch the
-truncation note once it resolves, and seeding `this.paths`/`this.truncated` (and the truncation
-note) from the shared cache's `snapshot()` at construction and on every Files show, so a sidebar
-that has never fetched a listing itself still paints one another consumer already fetched, before
-its own revalidation resolves. `test/quickOpen.test.ts` covers the
-overlay's ⌘P open/Escape-close keybinding, the before-typing recents list (most-recent-first,
-filtered against the workspace listing, falling back to unfiltered before the listing has loaded or
-when the loaded listing is truncated), fuzzy search while typing, arrow-key navigation, Enter-to-open,
-open semantics in both modes (Diff mode jumps to an in-diff file and stays in Diff mode; anything
-else opens in Editor mode), re-showing the overlay with an already-cached listing revalidating
-in the background and re-rendering once a newly-added file lands, and `computeFuzzyMatches`'s
-candidate-narrowing optimization (an extending keystroke rescans only the previous keystroke's
-match set rather than the full cached listing — asserted both behaviorally, via equivalence with a
-fresh query and a backspace reappearance, and directly, via a `fuzzyMatch` call-count spy — and a
-listing refresh resets that narrowed state so a query typed before the refresh still matches
-against the new listing), and seeding from the shared cache's `snapshot()` on `show()` so an
-overlay that has never fetched a listing itself fuzzy-matches against one another consumer already
-fetched, immediately and before its own revalidation resolves. `test/fuzzyMatch.test.ts` also covers the scorer's fast subsequence
-pre-check returning `null` before the DP runs. `test/root.test.ts` covers `refreshDiff`'s
-stale-response guard (a slower, superseded scope's reply, success or error, never overwrites a
-newer scope's already-applied result); its permanent-vs-transient failure classification (a typed
-`SpacesBridgeError` renders in place of the file list with no retry scheduled, an untyped rejection
-keeps retrying, a scope switch out of a rendered permanent error fetches the new scope normally,
-and the typed `unavailable` and `internalError` codes are the exceptions that both render and
-retry, while a typed `invalidArgument` — e.g. a ref the daemon could not resolve — still renders
-with no retry scheduled); its
-bounded-backoff retry on a transient failure (floor, doubling, cap, reset-on-success, and a scope
-switch superseding a pending retry); the unified workspace-state snapshot reflecting every toolbar
-toggle, and the `spaces:agents` listener re-running the auto-default rule
-and updating the toolbar; a diff-signature push while the pane is in Diff mode invalidates the
-shared file-listing cache without fetching a fresh listing for the Files tab, with that fetch
-instead happening on the next transition into Editor mode (a pane sitting in Diff mode never
-fetches the listing at all, including at mount, since `EditorSidebar`'s constructor never starts
-that fetch itself) — except that the same push still refetches for an already-open ⌘P overlay
-regardless of pane mode, since the overlay itself is reachable from Diff mode too; a pane that
-starts, or is rehydrated, directly into Editor mode still gets that first fetch even though it never
-goes through the mode-toggle dispatch that would otherwise trigger it; and a Changes-tab sidebar
-survives a Diff→Editor round trip instead of coming back blank (Diff mode's own render reparents the
-shared list node out of the sidebar without the sidebar ever re-rendering on that reparent). A
-further `test/root.test.ts` suite
-covers the Files/Changes sidebar and recent-files recording: opening a file from the Files
-tree records it as `recentPaths`' sole entry and updates the unified workspace-state snapshot;
-opening a second, different file puts it first without dropping the one already recorded; re-opening
-an already-recent path moves it to the front instead of duplicating it; the list is capped at 12
-entries, dropping the oldest; toggling Files/Changes pushes the updated `sidebarMode` independent of
-`recentPaths`; an open refused by a failed write and a failed read both record nothing, while an
-open the pending write clears records the target path once that open actually succeeds; and a
-Diff-mode ⌘P jump to a file already in the diff records it into `recentPaths` just
-as an Editor-mode open does. `test/toolbar.test.ts` covers the "vs base branch" option's
-disabled/enabled state and label based on whether `baseBranch` is present, that a click reaching a
-disabled button never fires `onScopeChange`, and the agent slot's three renderings (single-agent
-label, multi-agent select with a disabled placeholder, empty in Editor mode) plus "Send batch"'s
-three disabled-reason states and its enabled click-through. `test/reviewComments.test.ts` covers
-the pure logic in `src/app/reviewComments.ts` in isolation: `extractDiffLines`'s per-side line
-extraction from a raw patch, `reanchorComments`'s exact-match/nearest-match/tie-break/outdated/
-file-gone cases, `selectDefaultAgentId`'s every branch (auto-select-one, none-when-zero-or-many,
-keep-a-manual-pick, re-default-when-it-disappears), `formatReviewCommentsText`'s exact send-text
-shape (single comment, removed-line suffix, multi-comment join), and the `toAnnotationSide`/
-`fromAnnotationSide` round trip. `test/commentsController.test.ts` covers `CommentsController`
-against a hand-built fake `SpacesBridge`: card create/edit/delete RPC round-trips (including
-blur-only persistence and silent discard of an empty draft), send-one and send-batch (including a
-rejected send leaving drafts unchanged and surfacing the error banner), the no-running-agent
-disabled state, and `onAgentsChanged` re-running the auto-default rule.
-`test/diffLineTarget.test.ts` covers the diff-line resolution and old-side-to-editor-line mapping
-directly, and `test/contextMenu.test.ts` covers the menu surface itself (clamping inside its host,
-focus on open and restore on close, arrow-key movement, and the focus-move/scroll/blur/resize dismissals);
-`test/diffView.pierre.test.ts` covers a right-click on real rendered old-side and new-side rows,
-and `test/root.test.ts` covers the menu end to end, from the right-click to the file opening in
-Editor mode at the mapped line, including the deleted-file and selected-text cases that keep the
-native menu.
-
-## Open items
-
-- **The file-list sidebar is not in Variant A's literal mockup markup** — Variant A's own
-  markup has no file-picker chrome, so this bundle borrows Variant B's `.rail`/`.rr` token and
-  metric vocabulary for it (see comments in `src/styles/app.css`), since a file list is a hard
-  functional requirement of Diff mode regardless of which toolbar variant was picked.
-  Confirming this deviation against the mockup's intent is worth a look before Swift-host
-  integration locks in the pane's overall layout.
-  - **Shiki bundle size**, discussed above: whether the ~11MB/~320-file built output (only
-  ~1.24MB of which loads eagerly) is acceptable as-is, or worth a `shiki` aliasing pass to
-  physically shrink it to the 19 languages.
+File rows in the Files tree and the Changes list carry an icon from the MIT-licensed
+[vscode-icons](https://github.com/vscode-icons/vscode-icons) pack. `npm run icons`
+(`scripts/generate-file-type-icons.mjs`) fetches the pinned pack commit, resolves the script's
+`ICON_SEEDS` through the pack's own manifest, and writes three checked-in files:
+`src/app/fileTypeIconSprite.ts` (one namespaced `<symbol>` per icon, inlined and referenced by a
+`<use>` per row), `src/app/fileTypeIconTable.ts` (every name and extension the pack maps to those
+icons), and `public/vscode-icons-LICENSE.txt`, which Vite copies into the bundle so the notice
+ships beside the art. The generator is deliberately outside `npm run build`, which stays offline
+and reproducible; rerun it only to move the pinned commit or change the seeds, and commit its
+output.

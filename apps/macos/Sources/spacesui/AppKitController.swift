@@ -4546,9 +4546,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Whether the footer strip draws its branch label. A git workspace's branch is shown only when it
     /// differs from the displayed name (which is that same branch for a standard git workspace, so the
     /// label would just repeat it) and only for a project kind whose footer has a lifecycle/configuration
-    /// surface to attach branch metadata to. The home row's footer carries only the run-state indicator,
-    /// `~`, the directory path, the focused pane title, and the overflow button (docs/spec.md); an adopted
-    /// git home keeps its checkout's branch on the workspace record so terminals keep resolving correctly,
+    /// surface to attach branch metadata to. An adopted git home keeps its checkout's branch on the
+    /// workspace record so terminals keep resolving correctly,
     /// but that branch is deliberately not part of what the home row's footer shows.
     nonisolated static func workspaceFooterShowsBranch(branch: String, displayName: String, projectKind: ProjectKind) -> Bool {
         projectKind != .home && !branch.isEmpty && branch != displayName

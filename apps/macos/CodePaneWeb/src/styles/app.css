@@ -23,9 +23,10 @@
   background: var(--bg);
 }
 
-/* The code pane's own toolbar: one 30pt strip (see docs/design.md's rule
-   against ad hoc chrome heights — this matches the app's existing pane
-   toolbar metric). */
+/*
+ * The code pane's own toolbar: one 30pt strip (matching the app's existing pane
+ * toolbar metric).
+ */
 .pane-hdr {
   height: 30px;
   flex: 0 0 30px;

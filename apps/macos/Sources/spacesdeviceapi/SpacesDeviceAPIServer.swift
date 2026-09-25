@@ -5420,9 +5420,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// `SpacesDeviceWorkspaceFileListEngine.listFiles`. Read-only, so unlike the CAS file read/write handlers
     /// above there is no path-escape or size guard to apply, and unlike `handleWorkspaceDiffManifestRequest` there is
     /// no `assertIsGitRepository` gate here either: this endpoint deliberately serves both git and non-git
-    /// workspaces, because a non-git workspace's Editor (docs/spec.md's non-git project rows still offer Open
-    /// in Editor) has no other way to open a file — the tree and ⌘P quick-open ARE the file picker for it.
-    /// `listFiles` itself picks the git-vs-filesystem listing strategy per call.
+    /// workspaces, because a non-git workspace opens in the Editor like any other, where the Files tree
+    /// and quick-open are its only way to open a file (docs/spec.md, "Editor > Editor window") — the tree
+    /// and ⌘P quick-open ARE the file picker for it. `listFiles` itself picks the git-vs-filesystem
+    /// listing strategy per call.
     private func handleWorkspaceFileListRequest(_ request: SpacesDeviceWorkspaceFileListRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {

@@ -783,11 +783,10 @@
         }
 
         /// Unlike `workspaceDiff`, `workspaceFileList` deliberately serves a non-git workspace instead of
-        /// rejecting it: a non-git project's Editor pane has no direct-path input, so the file tree and
-        /// ⌘P quick-open are the only way to open a file there (docs/spec.md's non-git project rows still
-        /// offer Open in Editor). This falls back to a plain filesystem walk — sorted, recursive, including
-        /// a dotfile and a nested subdirectory's file, at parity with what the git branch would list for
-        /// the same tree.
+        /// rejecting it: a non-git workspace opens in the Editor like any other, where the Files tree and
+        /// quick-open are its only way to open a file (docs/spec.md, "Editor > Editor window"). This falls
+        /// back to a plain filesystem walk — sorted, recursive, including a dotfile and a nested
+        /// subdirectory's file, at parity with what the git branch would list for the same tree.
         func testWorkspaceFileListOnANonGitWorkspaceListsFilesFromDisk() throws {
             try withNonGitWorkspaceFixture { workspaceID, dir, _, requestClient, clientApp, authToken in
                 try "hello".write(to: dir.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)

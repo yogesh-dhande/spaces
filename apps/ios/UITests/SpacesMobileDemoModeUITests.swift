@@ -11,7 +11,7 @@ import XCTest
 /// simulator carried over from another lane could otherwise launch already paired or already in Demo
 /// Mode. The launch arguments shadow those keys through the `NSArgumentDomain` (highest-precedence,
 /// volatile) so every run starts from the same not-paired, Demo-off state without mutating on-disk
-/// records. See docs/dev.md ("Demo Mode recording + App Review").
+/// records. See docs/dev.md ("Demo Mode Recording and App Review").
 final class SpacesMobileDemoModeUITests: XCTestCase {
     override func setUpWithError() throws { continueAfterFailure = false }
 

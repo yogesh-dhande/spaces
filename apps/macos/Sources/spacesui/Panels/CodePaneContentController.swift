@@ -839,8 +839,9 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     }
 
     /// Pushes a mode switch into the page, or — if the page isn't live to receive a push — arranges
-    /// for the pane's next load to open directly in `mode`. Called by `PanelCoordinator`'s navigation
-    /// resolver to apply a reused/focused pane's requested mode (see docs/implementation.md).
+    /// for the pane's next load to open directly in `mode`. Called by `PanelCoordinator` to apply a
+    /// reused/focused pane's requested mode (docs/implementation.md, "Editor pane hosting": a reused
+    /// or retargeted pane keeps the mode it restored).
     ///
     /// Deliberately does not set `currentMode` on the live-push path: `currentMode` is a
     /// single-source-of-truth mirror of the page's own live state, fed only by

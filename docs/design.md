@@ -1,199 +1,185 @@
 # Spaces UI Design Guide
 
-This document defines app-wide visual and interaction guidelines for Spaces Mac and iOS apps.
-
-Use it when adding or updating UI anywhere in the app. The goal is consistency: new surfaces should feel like the same product, not isolated one-off screens.
-
-## Scope
-- This guide is for product UI patterns and visual rules.
-- `docs/spec.md` remains the source of truth for user-visible behavior.
-- `docs/implementation.md` remains the source of truth for structure and data flow.
+The visual system and reusable interaction patterns for the Spaces Mac and iOS apps. Use it when adding or changing UI so new surfaces read as the same product. What a feature does belongs in `docs/spec.md`; how it is built belongs in `docs/implementation.md`.
 
 ## Design Intent
-- Spaces should feel compact, modern, and operational.
-- The app is a control plane for active coding work, so screens should privilege scanability, direct manipulation, and clear status over decorative chrome.
+
+- Spaces is a control plane for active coding work: compact, operational, and calm. Screens favor scanability, direct manipulation, and visible status over decorative chrome.
 - Prefer calm density over sparse layouts. Information should fit without feeling cramped.
-- Use a consistent visual language so different parts of the app feel related even when they solve different problems.
+- Different surfaces share one visual language, so they read as related even when they solve different problems.
 
 ## Core Principles
-- Prefer shallow navigation and direct access to context. When a flow can be handled in one screen or one continuous page, prefer that over unnecessary tabs, drill-downs, or modal stacks.
-- Show the most important controls inline near the data they affect.
-- Use visual hierarchy through spacing, typography, tint, and dividers before introducing more borders or containers.
-- Default to lightweight controls. Primary buttons and prominent controls should be rare.
-- Keep state visible near the thing it describes so users can scan what is live, idle, waiting, failed, selected, or actionable without opening secondary views.
-- Editing should happen inline whenever practical. Avoid sending users to detached modal editors for simple items or short lists.
+
+- Keep navigation shallow. When a flow fits one screen or one continuous page, do not add tabs, drill-downs, or modal stacks.
+- Put the most important controls inline, next to the data they affect.
+- Build hierarchy with spacing, typography, tint, and dividers before adding borders or containers.
+- Default to lightweight controls. Primary buttons are rare.
+- Keep state next to the thing it describes, so what is live, idle, waiting, failed, selected, or actionable reads without opening another view.
+- Edit inline whenever practical.
 
 ## Layout
-- Prefer layouts that are easy to scan top-to-bottom and left-to-right.
-- The main app shell should remain compact and stable rather than decorative.
-- Scrollable content areas are preferred over fixed-height panels that hide important information below the fold.
-- Use grouping to clarify structure, but avoid excessive nesting.
-- The default main-window pattern is a compact navigation area plus a detail area, but smaller flows can use simpler layouts when that is the clearer choice.
+
+- Lay out for top-to-bottom, left-to-right scanning.
+- The main window is a compact navigation sidebar plus a detail area; smaller flows may use simpler layouts when that is clearer.
+- Prefer scrollable content over fixed-height panels that hide information below the fold.
+- Group to show structure, but avoid deep nesting.
+- A secondary column beside a pane's own content (a coding agent's brief) is a fixed-width (300 pt) strip on `surface`, set off from the content by a 1 pt `border` on its leading edge rather than a shadow or gap, so it reads as its own region without competing with the pane's banner. It carries a small header (a title and a muted relative-time caption) over a read-only, selectable body, and has no controls of its own: showing and hiding it belongs to a footer glyph and an overflow-menu item.
 
 ## Color And Surfaces
-- Use the shared `Theme` tokens as the source of truth. Do not hard-code one-off colors for production UI.
-- Token values live in the theme system (`ThemeRegistry` in `spacesterminalcore`): each theme defines one semantic token set per appearance plus the terminal colors exported to embedded Ghostty surfaces, so the app chrome and terminals always share one palette. `Theme` (AppKit) is an adapter over the active descriptor — add new tokens to the descriptor, not as ad-hoc colors in an adapter or view.
-- The palette should remain warm-neutral with restrained accenting, not pure grayscale and not loud by default.
-- Use a small number of semantic surface layers:
-  - Background for the app shell.
-  - Secondary/background-soft surface for contrast between regions.
-  - Primary surface for cards, grouped content, or elevated panels.
-  - Inset surface for editing areas, code-like content, and subdued containers.
-- Borders should be soft and structural. They should separate content, not dominate it.
-- Respect light and dark mode through semantic tokens rather than per-screen custom color decisions.
+
+- Colors come from the shared theme tokens, never from one-off values in a view. The values live in `ThemeRegistry` (`spacesterminalcore`): each theme defines one semantic token set per appearance plus the terminal colors exported to embedded Ghostty surfaces, so app chrome and terminals share one palette. `Theme` is the adapter on each platform (AppKit in `spacesui`, SwiftUI in `apps/ios`). Add a new color to the token set, not as an ad hoc color in an adapter or view.
+- The shipped theme is `spaces-brand`: a single teal accent over neutral surfaces (warm off-white in light appearance, deep blue-green slate in dark). Both apps default to dark. Status colors carry state; the accent carries selection, focus, and primary actions.
+- Surface tokens, from back to front:
+  - `bg` (`background` in the token set): the app shell.
+  - `surface2`: the secondary surface, for inputs, code-like content, subdued containers, and iOS list header bands.
+  - `surface`: cards and grouped content.
+  - `paletteSurface`: floating panels such as the command palette and confirmation panels.
+- The iOS terminal and browser-session screens sit on a fixed dark terminal surface in both appearances.
+- Borders (`border`, `borderStrong`) are soft and structural: they separate content without dominating it.
+- Light and dark appearance come from the tokens, never from per-screen color decisions.
 
 ## Typography
-- Keep typography compact.
-- Use weight, spacing, and color to create hierarchy before using large size jumps.
-- Chrome text is sized by role token, never by a font literal at the call site. Tokens live in `TypographyRole` (`spacesterminalcore`) with `Typography` as the AppKit adapter, mirroring the `ThemeDescriptor`/`Theme` split. Text sizing is deliberately outside the theme: switching themes recolors the interface without moving any text.
-- Pick a token by what the text is, not by what size it should be. A token fixes both size and weight, so a call site never chooses a weight of its own; a genuine variant is a token of its own.
-- The scale is 20, 16, 14, 13, 12, 11, and 10 pt. Nothing else, and no half points.
-- The roles, largest to smallest:
-  - `pageTitle` (20) for a top-level pane or window; `sheetTitle` (16) for a sheet, form window, setup step, or the command palette.
-  - `cardTitle` (14) for a card that leads a pane; `emptyStateTitle` (14) for the centered headline of an empty or loading pane.
-  - `sectionTitle` (13) for a section heading, `rowLabel` (13) for a row's primary label, `body` (13) for explanatory copy, and `primaryButtonLabel`/`secondaryButtonLabel`/`textButtonLabel` (13) for the three button styles.
-  - `compactTitle` (12) for a compact element's name or a labeled value's key, `controlLabel` (12) for a control or dense row name, `rowDetail` (12) for secondary detail.
-  - `metadataTitle`, `metadataEmphasis`, and `metadata` (11) for quiet headers, counts, and supporting text.
-  - `captionTitle` and `caption` (10) for the smallest text: dense-row tags, shortcut hints, footer legends.
-- Use monospaced text selectively for paths, commands, branches, shortcuts, ports, and scripts. Its roles ride the same scale: `monoRowLabel` and `monoBody` (12), `monoMetadata` (11), and `monoCaption`, `monoBadge`, and `monoBadgeStrong` (10).
-- Digits that have to align rather than reflow, such as two version numbers set side by side, take `Typography.tabularDigits(_:)` over the role the call site already picked. It changes only the digit advance, so the role still decides size and weight and the scale stays the one place a size is chosen.
-- Terminal content is not chrome. It is sized by the terminal's own font setting and takes no chrome token.
-- Favor short labels and concise helper text over long explanatory copy inside the interface. Omit helper text when the field label and control already make the input's purpose clear; reserve it for behavior, constraints, or consequences the control does not communicate.
+
+- Keep type compact. Build hierarchy with weight, spacing, and color before size jumps.
+- The type scale below is for the Mac app. There, chrome text is sized by role token, never by a font literal at the call site. Roles live in `TypographyRole` (`spacesterminalcore`) with `Typography` as the AppKit adapter. Type sizing sits outside the theme on purpose: switching themes recolors the interface without moving text.
+- Pick a role by what the text is, not by the size you want. A role fixes size and weight together, so a call site never picks its own weight; a genuine variant gets its own role.
+- The scale is 20, 16, 14, 13, 12, 11, and 10 pt, with no other sizes and no half points:
+  - 20: `pageTitle` (a top-level pane or window). 16: `sheetTitle` (a sheet, form window, setup step, or the command palette).
+  - 14: `cardTitle` (a card that leads a pane), `emptyStateTitle` (the centered headline of an empty or loading pane).
+  - 13: `sectionTitle`, `rowLabel`, `body`, and the three button labels `primaryButtonLabel`, `secondaryButtonLabel`, `textButtonLabel`.
+  - 12: `compactTitle` (a compact element's name, a labeled value's key), `controlLabel` (a control or dense row name), `rowDetail`.
+  - 11: `metadataTitle`, `metadataEmphasis`, `metadata` for quiet headers, counts, and supporting text.
+  - 10: `captionTitle` and `caption` for dense-row tags, shortcut hints, and footer legends.
+- Use monospaced text only for paths, commands, branches, shortcuts, ports, and scripts. Its roles use the same scale: `monoRowLabel` and `monoBody` (12), `monoMetadata` (11), `monoCaption`, `monoBadge`, and `monoBadgeStrong` (10).
+- Digits that must align rather than reflow, such as two version numbers side by side, take `Typography.tabularDigits(_:)` over the role already chosen; it changes only digit advance.
+- Terminal content is not chrome: it follows the terminal's own font size setting.
+- Prefer short labels. Omit helper text when the label and control already say what the input is for; keep it for behavior, constraints, or consequences the control does not show.
 
 ## Spacing And Density
-- Preserve tight, intentional spacing.
-- In wide data tables, cap leading identity columns at a readable width and give surplus space to a descriptive middle column so fixed trailing controls do not bunch together.
-- Use a small set of repeated spacing rhythms so the app feels coherent.
-- Avoid oversized empty regions, especially in information-dense workflows.
+
+- Keep spacing tight and intentional, using a small set of repeated rhythms.
+- Avoid large empty regions in information-dense views.
+- In wide tables, cap leading identity columns at a readable width and give spare width to a descriptive middle column, so fixed trailing controls do not bunch together.
 
 ## Sections And Grouping
-- Group related controls and data into clearly bounded sections when that improves scanability.
-- Prefer one section per concern instead of mixing unrelated controls into one generic settings block.
-- Use section cards when they help related content read as one unit. Avoid card-on-card-on-card nesting.
-- When a card's rows each own a piece of setup, expand that setup inline under its own row rather than in a separate card: the panel sits on the inset surface, shares that surface with the row that opened it (no hairline between them), and indents to the row's title column so it reads as belonging to that row. Only one panel in a card is open at a time — opening another moves it, and activating the open row's control closes it — so the card never grows into a stack of competing forms.
+
+- One section per concern; do not mix unrelated controls in a generic settings block.
+- Use section cards when they help content read as one unit. Avoid card-on-card nesting.
+- When each row of a card owns a piece of setup, expand that setup inline under its row: the panel shares the row's inset surface with no hairline between them and indents to the row's title column. Only one panel in a card is open at a time.
 
 ## Status And Feedback
-- Status should usually be conveyed with compact iconography and placement, not verbose labels everywhere.
-- Keep status indicators small, consistent, and easy to scan.
-- Use color to reinforce meaning, not to carry meaning alone.
-- A row's leading status dot speaks one vocabulary everywhere: a haloed green dot for something running, a solid green dot for something enabled and healthy but idle or a run that finished cleanly, a solid blue dot for a coding agent that finished its turn, a hollow red dot for something stopped or failed, a hollow muted dot for something switched off or never started, and a solid orange dot for something waiting.
-- Operational sidebar rows tint the primary name and kind icon rather than adding pills or row washes: brand green means working/running, amber means blocked, blue means done, red means exited, and gray means inactive/not started. A workspace header rolls up its descendants with red, amber, blue, green, gray priority. Selection uses its own neutral region and accent rail without suppressing the semantic tint.
-- An alert entry wears the same color as the row it came from, so a blocked coding agent is amber in both places and a finished one is blue in both. The alert keeps the item's own kind glyph and lets that shared color carry the state.
-- Surface actionable state near the affected item.
-- When a state has exactly one recovery action, render the action alone and let it carry the status: tint it with the state's own color and put the detail in its tooltip, rather than pairing a status label with a button that says the same thing twice. Keep a label only where there is no action to carry it.
-- Daemon-compatibility uses two distinct surfaces scoped to a single device. The blocking surface replaces that device's detail content, and since the situation is a version gap it is built as a centered version hero on the pane itself, with no card frame and no warning icon: a small uppercase orange eyebrow naming the state ("CAN'T CONNECT" plus which side has to move), the two versions the gap spans set large with the side that must move muted and an accent arrow between them, a quiet line saying whose versions those are and how the fix travels, one sentence of pitch, and at most one action. Orange appears only in the eyebrow, which is the whole severity marking. A version the state has no fact for renders as "?" rather than an invented number. When the fix is a command the user runs on the device, the command is a selectable monospaced block and is the surface's main element if nothing else resolves the block, or a quiet line under the action when something does. The same hero is the blocking surface on every client, replacing the device's detail pane on the Mac and its device screen on iPhone. A quiet variant carries a version state that blocks nothing: a muted "update pending" caption where the client asks nothing of the user, or, where the client must offer the action itself, a compact accent-outlined card stating the gap in small digit-aligned figures and carrying that one action above content that stays fully usable — accent rather than orange, and no warning icon, since nothing is wrong. Badge an incompatible or update-pending device inline in the device list/selector so it reads before the user navigates into it. Keep other paired devices fully interactive.
-- Rows belonging to an unreachable device stay listed and are dimmed to 55% opacity, with the device named in the row's tooltip. The dimming is the whole marking — the device's own header already reports the state through the control that recovers it, so the rows themselves take no extra icon or label. The same treatment marks any row that stands for an unreachable device, including one that cannot be picked.
-- A compact single-line banner may overlay the top-trailing corner of a content pane, rather than blocking it, in two variants. A transient banner carries state tied to that pane's current action: an indeterminate progress state with a Cancel affordance, a transient error, or an informational notice. Progress stays until the triggering action clears it or is cancelled; error and notice variants auto-dismiss after a few seconds or on click. A persistent banner carries a lasting fact about the pane itself, has no Cancel or click-to-dismiss affordance, and clears only when the fact stops being true. A stopped or ended session's banner outlines itself in the tint of the state it reports, so it separates from the content behind it instead of reading as one more transient overlay. The connection-health banner (Reconnecting / Device unreachable) instead fills opaquely in a red dark enough that its label, icon, and Retry text stay legible in both light and dark appearance, so a frozen or failed connection is noticed at once rather than read as a quieter, lower-stakes state; it uses the same opaque red for both stages, since a stalled reconnect deserves the same urgency as a confirmed outage. When the fact it reports has exactly one recovery action, the banner carries a single labeled action at its trailing end, sharing the slot a transient banner's Cancel affordance uses; a fact with no recovery action leaves that slot empty. That action's label is bold and underlined, set apart from the plain label beside it so it reads as a control rather than a continuation of the same sentence. A pane has one banner: a transient banner overrides the persistent one while it is up, and dismissing it restores the persistent one. Only a banner's control (its Cancel affordance or its single action) takes clicks; its label and chrome are transparent, so a click beside the button reaches the content underneath. The exception is a transient notice, which dismisses on a click anywhere on it.
-- When a pane's content still looks interactive but is not, the banner is the only thing distinguishing the two, so acting on the pane should pulse it rather than leave the action silently inert.
-- A secondary column beside a pane's own content (for example, a coding agent's brief) is a fixed-width strip on the primary surface (`surface`), separated from the content by a 1 pt structural border on its leading edge rather than a shadow or gap, so it reads as a distinct region without competing with the pane's own banner. It carries a small header (a title plus a muted relative-time caption) and a read-only, selectable text body; it never adds its own controls beyond what toggles it, since showing and hiding it is what a footer glyph and an overflow-menu item are for.
-- A footer glyph that toggles a secondary view (rather than performing an action) speaks one three-state vocabulary: accent while the view it toggles is showing, muted while available but hidden, and absent entirely when there is nothing to show. This is distinct from a status glyph, which never disappears for having nothing to report.
-- Progressive content should reveal structure before detail: show file metadata in the sidebar immediately, then fill patches in reading order. Keep queued-file priority visible through selection and avoid replacing the pane with a blank loading state.
+
+- Convey status with compact glyphs, dots, and tint in a consistent position, not verbose labels. Color reinforces meaning and never carries it alone.
+- Status dots speak one vocabulary everywhere:
+  - haloed green: running
+  - solid green: enabled and healthy but idle, or a run that finished cleanly
+  - solid blue: a coding agent that finished its turn
+  - solid orange: waiting (a blocked agent)
+  - hollow red: stopped or failed
+  - hollow muted: switched off or never started
+- Compact identity rows (workspaces, automations) use the 10 pt filled/hollow dot; richer detail rows may use the larger dot with its halo.
+- Operational sidebar rows tint the name and kind glyph instead of adding pills or row fills: green working or running, orange blocked, blue done, red exited, gray inactive. A workspace header rolls up its rows with priority red, orange, blue, green, gray. Selection uses its own neutral fill and accent rail without hiding that tint.
+- An alert wears the same color as the row it came from and keeps that item's own kind glyph.
+- When a state has exactly one recovery action, show the action alone, tinted with the state's color and with the detail in its tooltip, rather than a status label beside a button that says the same thing.
+- Rows that belong to an unreachable device stay listed at 55% opacity, with the device named in the tooltip. The dimming is the whole marking; the device's own header reports the state.
+- Progressive content reveals structure before detail (for example, a diff's file list appears before its patches) and never replaces a pane with a blank loading state.
+
+### Banners
+
+- A content pane can carry one compact, single-line banner in its top-trailing corner that overlays rather than blocks the content.
+- A transient banner reports the pane's current action: progress with a Cancel control, an error, or a notice. Errors and notices dismiss themselves after a few seconds or on click; progress stays until its action ends or is cancelled.
+- A persistent banner reports a lasting fact about the pane, has no dismiss affordance, and clears when the fact stops being true. A stopped or ended session's banner outlines itself in its state's tint. The connection-health banner (Reconnecting, Device unreachable) fills with the opaque `connectionBannerFill` red at both stages so a stalled connection is noticed at once.
+- When the fact has exactly one recovery action, the banner carries it at its trailing end as a bold, underlined label.
+- A pane has one banner: a transient banner temporarily replaces the persistent one. Only the banner's control takes clicks; the rest lets clicks through to the pane, except a transient notice, which dismisses on any click.
+- When a pane still looks interactive but is not, acting on it pulses its banner rather than doing nothing silently.
+
+### Version-gap surfaces
+
+- A device whose daemon and client cannot talk because of a version gap gets a centered hero in place of that device's detail content, on every client: a small uppercase orange eyebrow naming the state, the two versions large with the side that must move muted and an accent arrow between them, one line on how the fix travels, and at most one action. No card frame, no warning icon. An unknown version renders as "?". A command the user must run on the device is a selectable monospaced block.
+- A gap that blocks nothing uses a quiet variant: a muted caption, or a compact accent-outlined card with the one action, above content that stays usable.
+- Badge an incompatible or update-pending device inline in device lists and selectors. Other devices stay fully interactive.
 
 ## Icons And Chips
-- Use icons for obvious actions and state.
-- Use text labels when icon-only affordances would be ambiguous.
-- Use compact chips for short metadata that benefits from separation but should not dominate the layout.
-- Chips should stay small, low-contrast, and compact.
-- Monospaced chips work well for shortcuts, branch names, and code-like metadata.
-- Avoid large capsule badges for routine metadata.
+
+- Use icons for status and obvious actions; use text where an icon alone would be ambiguous.
+- Chips are small, low-contrast, and compact, for short metadata that benefits from separation. Monospaced chips suit shortcuts, branches, and code-like values. Avoid large capsule badges for routine metadata.
 
 ## Actions And Controls
-- Prefer lightweight control chrome in dense contexts.
-- Reserve strong emphasis for genuinely primary actions.
-- Keep frequent actions visible and secondary actions quieter.
-- Use icon-only buttons for obvious actions such as edit, remove, copy, reveal, launch, stop, and overflow.
-- Use text buttons where clarity matters more than compactness. A primary setup action a user has to find, rather than one they already know is there, gets an accent-tinted label next to its icon instead of a bare glyph.
-- Destructive row actions use the `trash` icon tinted `Theme.red` and always confirm first. The confirmation names the target in its title, states in plain terms what the action does and does not touch, marks the destructive button as such, and leaves Cancel as the default so Return dismisses it.
-- Put infrequent or contextual actions behind an overflow menu instead of overcrowding the main UI.
-- Use a segmented control in a sheet's or view's toolbar/navigation-bar principal position to switch between a small, fixed set of content-rendering modes (e.g. Rendered/Raw) instead of separate screens, buttons, or menu items.
-- In a crowded Editor toolbar, represent agent assignment as a compact selector when running agents exist, with a separated `Start new…` menu item; when none exist, use a compact `Start agent…` action that opens the command-entry dialog without widening the row.
-- When a file can be shown more than one way, put one segmented control at the trailing end of the surface's own header rather than a control per rendering. In the Editor's open-file bar that means the path leads, any read-only facts about the file follow it, and the segmented control sits last, so its position stays put as the labels beside it change. Its segments name what this file can be shown as, so a file with only one rendering shows no control at all. A rendering that exists but is unavailable for this particular file stays visible and disabled, with its reason as the tooltip: hiding it would say the feature is missing rather than that the file does not qualify.
-- A drag divider between two halves of one view is a hairline whose hit area is wider than what it paints, tints to the accent color on hover and while dragging, takes a tab stop, and resizes from the arrow keys. A divider that splits a view evenly by default carries its position for as long as the view is open rather than persisting it.
+
+- Keep frequent actions visible and secondary actions quiet; reserve strong emphasis for genuinely primary actions.
+- Use icon-only buttons for obvious actions such as edit, remove, copy, reveal, launch, stop, and overflow. A setup action the user has to discover gets an accent-tinted text label beside its icon.
+- Destructive row actions use the `trash` icon tinted `Theme.red` and always confirm first. The confirmation names the target in its title, says plainly what the action does and does not touch, marks the destructive button as destructive, and leaves Cancel as the default so Return dismisses it.
+- Put infrequent or contextual actions in a trailing `⋯` overflow menu, grouped, with keyboard equivalents where useful. Prefer stock AppKit menu behavior.
+- Controls that depend on state show only the actions that apply; an action that cannot fire in the current state is absent, not disabled. The exception is a rendering choice (below), which stays visible and disabled with its reason as the tooltip.
+- A footer glyph that toggles a secondary view, rather than performing an action, has three states: accent while the view is showing, muted while it is available but hidden, and absent when there is nothing to show. Its tooltip names the action a click takes. A status glyph differs: it never disappears for having nothing to report.
+- To switch among a small fixed set of renderings of one thing (for example, Rendered and Raw), use one segmented control, not separate screens, buttons, or menu items. In a sheet with a navigation bar it sits in the principal slot; in a surface with its own header (such as the Editor's open-file bar) it sits last at the trailing end, so it stays put as the labels before it change. Its segments name only the renderings this item supports, so an item with one rendering shows no control.
+- A drag divider between two halves of a view is a hairline with a wider hit area. It tints to the accent on hover and while dragging, takes a tab stop, and moves with the arrow keys. A divider that splits a view evenly by default keeps its position while the view is open and does not persist it.
 
 ## Forms
-- Keep forms compact and aligned.
-- For simple editors, prefer a small number of clearly grouped fields over long generic forms.
-- Inputs should use subtle borders and a clear focus state tied to the accent color.
-- Use inset surfaces for code-like or multiline content.
+
+- Keep forms compact and aligned, with a few clearly grouped fields rather than long generic forms.
+- Inputs have subtle borders and an accent-colored focus state. Code-like or multiline input sits on `surface2`.
 
 ## Inline Editing
-- Prefer inline editing when the item being edited is already visible in a list or section.
-- The collapsed and editing states should feel like two states of the same object.
-- Draft items should enter editing immediately.
-- A row in a list is renamed by becoming the field: the row's label is swapped for a text field in place, and a new entry enters as a draft row already in that state, inside the container it will belong to. Return commits, Escape cancels, an empty name cancels, and committing the value the row already has closes the field without doing anything. A refusal from the device appears as a line under the row with the field left open so the value can be corrected.
-- An open inline field outranks a refresh of the list behind it: a list that reloads while the field is open holds that content back, keeping the field and its draft exactly as typed, and shows it once the field commits or cancels.
-- Canceling a never-saved draft should remove the row rather than leaving placeholder data behind.
-- Detached modal editors should be reserved for edits that are too large, risky, or complex for inline treatment.
-- Diff editing stays inline on the new/right side and one file at a time. Put **Save** and **Cancel** in the edited file's own header, and show **Unsaved changes** there so the recovery state remains attached to the file rather than floating in global chrome. Conflict recovery should use the existing comparison surface and its explicit Keep mine/Take disk actions.
-- For single-value labels such as a connected-device name, rename in place: a right-click context menu (long-press on iOS) offers Rename, which swaps the label for a text field seeded with the current value. Return commits, Esc reverts, and there are no separate Save/Cancel buttons. The label may also enter this state on double-click. Workspace names are not renamed this way: a git workspace shows its branch and a non-git workspace shows its folder name, both read-only.
+
+- The collapsed and editing states read as two states of the same object.
+- A row is renamed by becoming the field: its label is swapped for a text field in place. Return commits, Escape cancels, an empty value cancels, and committing the unchanged value just closes the field. A refusal from the device shows as a line under the row with the field left open.
+- A new item enters as a draft row, already editing, inside the container it will belong to. Canceling a never-saved draft removes the row.
+- A single-value label, such as a device name, offers Rename from its context menu (long-press on iOS) and may also enter editing on double-click, with no separate Save and Cancel buttons.
+- An open inline field outranks a refresh of the list behind it: the list holds the refreshed content back until the field commits or cancels.
+- Keep a file's edit state attached to that file: its save status and conflict recovery sit in the file's own header, not in global chrome.
+- Reserve detached modal editors for edits too large, risky, or complex to do inline.
 
 ## Navigation
-- Navigation should stay quiet, stable, and predictable.
-- Selection should be obvious without becoming loud.
-- Secondary actions in navigation should remain visually subordinate until hover or selection makes them relevant.
-- Navigation rows should prioritize quick scanning over descriptive prose.
-- A selected expandable workspace should read as one selected region: the selected-row fill and border wrap the workspace row together with any visible child rows instead of highlighting only the title row.
-- Persistent navigation entries such as Alerts use the same selected-row fill and border when active, so the sidebar has one selection language.
-- A pinned status row is the exception to that language: a row that reports a state and opens a menu, rather than navigating anywhere, carries no selected fill and no selection rail, takes no keyboard focus, and is skipped by the sidebar's arrow navigation. It pins to an edge of the sidebar rather than scrolling with the list, reads as one dense line (glyph, quiet caption, the state in accent, a monospaced count, its shortcut hint), and tints its glyph muted when the state it reports is empty. When the row is too narrow for all of it, the shortcut hint is dropped before any of the state is truncated.
-- Example: the current sidebar uses compact single-line project and workspace rows. A git workspace row is labeled with its branch; a non-git project owns a single workspace and collapses to one flat row labeled with its folder name, with no nested workspace row, so the folder name is not duplicated across a header and a child. That flat row still reads as a project — title left-aligned like a git project header, sitting in the project rows' leading glyph column — rather than as a nested workspace of the project above it.
-- A nested list encodes depth two ways at once: a leading glyph that identifies the row's kind and progressive indentation that shows the nesting. In the sidebar, a project row leads with a project-type glyph (a commit-graph mark for a git repository, an attention-tinted folder for a plain directory, an attention-tinted house for the device's home row), a git project's workspace rows indent one level under it and lead with an attention status dot, and runtime-target rows indent a further level and lead with a compact `⌘`-number hint slot. The glyph says what the row is; the indent says where it sits. A row the product owns rather than the user earns its own glyph only when it is not a project at all: the home row sits in the same leading glyph column and wears the same run-state tint as a plain directory, and the house is what says it is the device's home and not something that was added.
-- Workspace and automation identity rows use the same compact 10-point filled/hollow status-dot component. Richer detail rows may use the larger status primitive when its halo and additional waiting/failed states carry useful information.
-- A collapsible navigation row carries its disclosure affordance as a muted right-edge chevron (`chevron.down` when expanded, `chevron.right` when collapsed), kept visually subordinate to the row's own actions. Clicking the chevron toggles expansion without changing the selection, so a row that is both selectable and collapsible (a workspace) keeps the two gestures separate. Counts immediately before disclosure chevrons share one trailing column with peer navigation-row counts; a peer without a chevron reserves the same trailing slot.
-- A row that carries extra, optional content elsewhere (a coding-agent row with a brief) marks that with a small muted glyph at its own trailing edge, distinct from the trailing shortcut-hint or chevron column: it is presence-only (shown exactly when the content exists, nothing to click), so it never competes with a row's disclosure or count column.
-- A hierarchical file tree discloses the other way round: every row reserves one leading slot, a directory that holds something carries a chevron there that points right collapsed and turns down expanded, and a row with nothing to disclose leaves the slot empty so names line up down the column.
-- A file row in such a tree then carries a 16px file-type icon, 6px before its name, keeping the icon set's own colors rather than a tinted or monochrome treatment: color is what makes a row's kind readable before its name is. The slot is on file rows only (a folder's chevron already marks it), it never changes the row's height, and it is presentational: hidden from assistive technology, carrying no tooltip and taking no focus.
-- Flat tab strips place neighboring tabs flush and use a neutral selected chip. Close glyphs are contextual actions and should appear on tab hover while preserving stable tab width. Drag reorder uses a narrow accent insertion marker and stays scoped to the current strip.
 
-## iOS List Pattern
-- The iOS navigation shell is a native bottom tab bar; each tab owns its navigation stack, and badge counts (the Alerts unread count) ride the tab item.
-- iOS lists speak one header-band language: a full-bleed secondary-surface (`surface2`) band carries the group header and is the only separation device — no section cards, borders, or per-row dividers. Rows sit directly on the app background beneath their band.
-- Row anatomy is shared with the Mac sidebar: a leading status dot carries state on its own (no state chips), followed by a type-icon tile, a medium-weight title over a muted detail line (monospaced for paths, commands, and branches), and a trailing muted chevron, or an accent play glyph when the row's primary action is launching it. A coding-agent row adds the same small muted "has extra content" glyph the Mac sidebar uses (for example, a brief) just before that trailing chevron.
-- A row family with no run state (a browser session is a URL, not a process) holds the dot's slot empty rather than drawing a dot or dropping the slot, so the icon column stays aligned down the list. Such a row also carries no lifecycle context menu, since it has nothing to run, stop, or restart.
-- Workspace bands lead with a branch glyph (folder for non-git workspaces, house for the home row) and toggle collapse with the standard muted right-edge chevron. Row lifecycle actions (Run, Stop, Restart) live in long-press context menus rather than persistent trailing buttons.
-- Group-level actions get a visible control bar rather than a hidden gesture: an expanded workspace leads its rows with a strip of compact pill buttons (icon plus text label, since an icon alone cannot say what Start starts). Hide and Delete stay in the band's long-press menu and trailing swipe instead. Hide acts on the tap, since it only changes what the list shows and interrupts nothing; only Delete, which is irreversible, stays behind a confirmation.
-- State-dependent controls render only the actions that currently apply instead of showing disabled ones: a stopped workspace offers Start alone, a running one offers Restart and Stop. A control that can never fire in the current state is absent, not greyed.
+- Navigation is quiet, stable, and predictable. Selection is obvious without being loud. Secondary actions in navigation stay subordinate until hover or selection.
+- A selected expandable row reads as one selected region: the selection fill and border wrap the row together with its visible children. Persistent entries such as Alerts use the same selection fill and border.
+- A pinned status row (a row that reports a state and opens a menu rather than navigating) is the exception: no selection fill or rail, no keyboard focus, skipped by arrow navigation, pinned to an edge rather than scrolling. It reads as one dense line (glyph, caption, the state in accent, a monospaced count, its shortcut hint), mutes its glyph when the state is empty, and drops the shortcut hint first when narrow.
+- A nested list encodes depth twice: a leading glyph that says what the row is, and indentation that says where it sits. In the Mac sidebar, a project row leads with a type glyph (a commit-graph mark for a Git project, a folder for a plain directory, a house for the device's home row), a Git project's workspace rows indent one level and lead with a status dot, and target rows indent another level and lead with a `⌘`-number hint. A non-Git project is one flat row labeled with its folder name, aligned like a project header.
+- A collapsible navigation row carries a muted chevron at its right edge (`chevron.down` expanded, `chevron.right` collapsed). Clicking the chevron toggles expansion without changing selection. Counts before chevrons share one trailing column with peer rows' counts.
+- A row with optional content shown elsewhere (a coding-agent row whose agent has a brief) marks it with a small muted `doc.text` glyph at its own trailing edge, apart from the shortcut-hint and chevron column. The glyph is presence-only: shown exactly while the content exists, and not clickable.
+- A file tree reserves one leading slot on every row: a directory with contents shows a chevron there (right when collapsed, down when expanded), and other rows leave it empty so names align. File rows then carry a 16 px file-type icon, 6 px before the name, in the icon set's own colors; the icon is presentational (hidden from assistive technology, no tooltip, no focus) and never changes row height.
+- Flat tab strips place tabs flush with a neutral selected chip. Close glyphs appear on hover without changing tab width. Drag reorder shows a narrow accent insertion marker and stays within its strip.
 
-## Overflow Menus
-- Use a trailing `⋯` overflow button for contextual actions that do not deserve persistent visibility.
-- Overflow menus should group low-frequency actions without hiding the primary workflow.
-- Include keyboard equivalents where useful.
-- Prefer stock AppKit menu behavior unless a richer interaction is clearly needed.
+## iOS Lists
 
-## In-Page Context Menus
-- The Editor's web content cannot add items to WebKit's native right-click menu, so every right-click action inside it (Open in Editor on a diff line, the file actions on a Files tree row) uses one in-page menu pattern: a small floating panel at the pointer, clamped inside the pane, styled like the toolbar's compare menu (panel surface, hairline border, 4px radius on items, row-selection hover), with an optional muted monospace header naming the target (`file:line`, or a workspace-relative path) above the items.
-- The in-page menu only ever appears where it has something to offer. Where the system menu is the point (selected text and its Copy item, a live inline edit and its Paste and Undo items, a click off any target) the native menu is left untouched rather than replaced with an empty or irrelevant one.
-- Focus moves to the first item on open and returns to the previously focused element on close; arrow keys move between items, Return or Space activates, and Esc, a click outside, focus moving to another surface (such as the quick-open overlay), scrolling, a window blur, a resize, or a replacement of the content the menu was opened over dismisses.
-- The menu is never wider than the pane: a long header wraps rather than pushing its tail past the edge.
-- A destructive action in that web content confirms through the same menu rather than a second surface: the pane has no native confirmation dialog to raise, so the action reopens the menu where it was opened, names the target in the header, and offers the destructive verb and Cancel. Every destructive action confirms, including one whose target looks empty on screen: a list shows what the device reported, not everything the target holds.
+- The app shell is a native bottom tab bar; each tab owns its navigation stack, and counts ride the tab item as badges.
+- Lists use one header-band language: a full-bleed `surface2` band carries each group header and is the only separator. No section cards, borders, or per-row dividers; rows sit on `bg` below their band.
+- Row anatomy matches the Mac sidebar: a leading status dot carries state on its own (no state chips), then a type-icon tile, a medium-weight title over a muted detail line (monospaced for paths, commands, and branches), and a trailing muted chevron, or an accent play glyph when the row's primary action is launching it. A coding-agent row with a brief adds the Mac sidebar's muted `doc.text` glyph just before that trailing chevron.
+- A row with no run state (a browser session) keeps the dot's slot empty so icons stay aligned, and has no lifecycle context menu.
+- Workspace bands lead with a branch glyph (a folder for non-Git workspaces, a house for the home row) and collapse with the trailing chevron. Row lifecycle actions (Run, Stop, Restart) live in long-press context menus, not trailing buttons.
+- Group actions get a visible control bar: an expanded workspace starts with a strip of compact pill buttons with icon and text. Hide and Delete stay in the band's long-press menu and trailing swipe. Hide acts at once, since it only changes what the list shows; only Delete, which is irreversible, confirms.
 
-## Motion And Hover Behavior
-- Motion should be minimal and functional.
-- A confirmation the user asked for with a keystroke is the one thing that may take the center of the detail pane: a small panel on the palette surface with a hairline border and the large radius, naming the state it is confirming, one line of what that state holds, and the chord that acts on it. It shows and hides with no motion of its own, stays up for about a second, replaces its own text when the state changes again while it is up, and passes clicks through to the pane beneath it. Everything else transient belongs in the top-trailing banner slot, which carries facts about the pane itself.
-- Hover should mostly:
-  - Reveal low-emphasis actions.
-  - Increase action visibility.
-  - Add subtle background feedback.
-- Avoid decorative animation. Spaces is tooling-oriented and should feel responsive rather than ornamental.
+## Web Content Menus
+
+- Web content in a pane (the Editor) cannot extend WebKit's native context menu, so every right-click action there uses one in-page menu: a small panel at the pointer, clamped inside the pane and never wider than it, styled like the toolbar's menus, with an optional muted monospaced header naming the target. Where the system menu is the point (selected text, a live text field, empty space) the native menu is left alone.
+- Focus moves to the first item on open and returns on close. Arrow keys move, Return or Space activates, and Escape, an outside click, scrolling, blur, resize, or focus moving elsewhere dismisses it.
+- A destructive action there confirms in the same menu, reopened with the target in its header and offering the destructive verb and Cancel. Every destructive action confirms, even when its target looks empty on screen, because a list shows what the device reported, not everything the target holds.
+
+## Motion And Hover
+
+- Motion is minimal and functional; no decorative animation.
+- Hover reveals low-emphasis actions, raises action visibility, and adds subtle background feedback.
+- A confirmation the user triggered with a keystroke may briefly take the center of the detail pane: a small `paletteSurface` panel with a hairline border naming the state, one line on what it holds, and the chord that acts on it. It appears without animation, stays about a second, and lets clicks through. Everything else transient goes in the banner slot.
 
 ## Empty, Missing, And Draft States
-- Empty or missing values should use muted text placeholders rather than large empty-state treatments in dense views.
-- A full pane whose only content is its recovery actions is the one carve-out: it may center a block of the subject's name, its path in monospaced caption, and the labeled pill actions that fill the pane, with their shortcut hints beneath. The pill is the iOS control bar's (glyph plus label on the secondary surface), and the same state rules apply, so only the actions that currently apply are drawn. A pane that has content of its own keeps the muted placeholder instead.
-- Missing state should preserve context when possible so the user can act on it in place.
-- Draft state should be obvious and easy to complete or cancel.
-- A blocked review-comment composer should explain the missing prerequisite directly beneath its text area: say whether no agent is running or a running agent must be assigned. Do not add a success helper when sending is available; the enabled action and its agent label are sufficient.
+
+- In dense views, show empty or missing values as muted placeholder text, not large empty-state treatments, and keep enough context to act in place.
+- A pane whose only content is its recovery actions may center the subject's name, its path in a monospaced caption, and the pill actions that apply, with their shortcut hints beneath.
+- Draft state is obvious and easy to complete or cancel. When a draft cannot be sent, explain the missing prerequisite directly under it; do not add a success hint when sending is available.
 
 ## Accessibility And Testability
-- Add accessibility identifiers to important controls and fields.
-- Reusable UI patterns should remain testable in isolation.
-- When adding a new visual primitive, consider whether it should have focused tests alongside the implementation.
 
-## Anti-Patterns To Avoid
-- Adding navigation depth where a direct layout would work.
-- Mixing unrelated concerns into one oversized form or panel.
-- Creating one-off visual styles with different radii, spacing, button treatments, or color semantics for no strong reason.
-- Using heavy borders, gradients, or saturated fills for routine controls.
-- Replacing compact status patterns with verbose labels everywhere.
-- Pushing simple edits into modal dialogs when inline editing is feasible.
-- Hard-coding colors instead of using `Theme`.
-- Hiding important state or actions behind unnecessary clicks.
-- Unnecessary card-based layouts that add visual noise.
+- Give important controls and fields accessibility identifiers.
+- Keep reusable UI primitives testable in isolation, and add focused tests for a new primitive where they add value.
+
+## Anti-Patterns
+
+- Navigation depth where a direct layout works.
+- Unrelated concerns mixed into one oversized form or panel.
+- One-off radii, spacing, button treatments, or color semantics.
+- Heavy borders, gradients, or saturated fills on routine controls.
+- Verbose labels in place of compact status.
+- Modal dialogs for edits that fit inline.
+- Colors hard-coded outside the theme tokens, or font sizes outside the type roles on the Mac.
+- Important state or actions hidden behind extra clicks.
