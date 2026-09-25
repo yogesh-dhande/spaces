@@ -23,7 +23,7 @@ export default function WorkspaceLifecycleDocsPage() {
           <li>• <strong>Running</strong> &mdash; Spaces has started its processes. Browser sessions stay configured but open on demand when you focus them.</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Visibility is separate from runtime state. Independently of being running or stopped, a workspace can be <strong>hidden</strong>, which collapses it into the Hidden section at the bottom of the sidebar and leaves it there until you unhide it.
+          Visibility is separate from runtime state. A workspace or project can be <strong>hidden</strong> whether it is running or stopped: hiding takes it out of the sidebar and every other list without asking first, leaves everything in it running, and the Workspaces dialog brings it back.
         </p>
       </Section>
 

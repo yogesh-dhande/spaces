@@ -10,7 +10,6 @@ struct SpacesTabView: View {
     @State private var selectedBrowserSession: SelectedBrowserSessionRoute?
     @State private var pendingTerminalLaunch: PendingTerminalLaunch?
     @State private var isShowingVisibilitySheet = false
-    @State private var pendingHideWorkspace: SpacesDeviceWorkspaceSummary?
     @State private var pendingDeleteWorkspace: SpacesDeviceWorkspaceSummary?
     @State private var pendingStop: PendingStop?
     @State private var terminalListRefreshGeneration = 0
@@ -42,20 +41,6 @@ struct SpacesTabView: View {
             model: model, tab: .spaces, route: pollingRoute, refreshGeneration: terminalListRefreshGeneration
         ).sheet(isPresented: workspaceCreateSheetBinding) { WorkspaceCreateSheet(model: model) }.sheet(isPresented: $isShowingVisibilitySheet) {
             WorkspaceVisibilitySheet(model: model)
-        }.confirmationDialog(
-            "Hide this workspace?", isPresented: hideWorkspaceDialogBinding, titleVisibility: .visible, presenting: pendingHideWorkspace
-        ) { workspace in
-            // `pendingHideWorkspace` is only ever set for a non-home workspace (the home row hides
-            // directly, see the band's `onHide`), so `copy(for:)` always resolves here; the `if let` keeps
-            // that invariant at the type rather than force-unwrapping it.
-            if let copy = HideWorkspaceConfirmation.copy(for: workspace) {
-                // Hiding stops the workspace first, so a running one loses its processes and agents; the
-                // confirm button says so rather than hiding that behind a bare "Hide".
-                Button(copy.buttonTitle, role: .destructive) { Task { await model.setWorkspaceHidden(workspaceID: workspace.id, isHidden: true) } }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: { workspace in
-            Text(HideWorkspaceConfirmation.copy(for: workspace)?.message ?? "")
         }.confirmationDialog(pendingStop?.title ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible, presenting: pendingStop) {
             stop in
             Button("Stop", role: .destructive) { Task { await performPendingStop(stop) } }
@@ -67,10 +52,6 @@ struct SpacesTabView: View {
                 Task { await model.deleteWorkspace(workspace, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch) }
             }
         }
-    }
-
-    private var hideWorkspaceDialogBinding: Binding<Bool> {
-        Binding(get: { pendingHideWorkspace != nil }, set: { if !$0 { pendingHideWorkspace = nil } })
     }
 
     private var pendingStopDialogBinding: Binding<Bool> { Binding(get: { pendingStop != nil }, set: { if !$0 { pendingStop = nil } }) }
@@ -131,7 +112,7 @@ struct SpacesTabView: View {
                     #if DEBUG
                         let _ = SpacesListIdentityDump.record(
                             listIdentitySections,
-                            state: "pendingDelete=\(pendingDeleteWorkspace?.id ?? "none") pendingHide=\(pendingHideWorkspace?.id ?? "none") "
+                            state: "pendingDelete=\(pendingDeleteWorkspace?.id ?? "none") "
                                 + "mutating=\(model.isMutating) marked=\(model.overview?.workspaces.filter { model.isWorkspacePendingDeletion($0.id) }.map(\.id).joined(separator: "+") ?? "")"
                         )
                     #endif
@@ -375,16 +356,8 @@ struct SpacesTabView: View {
         ).bandListHeaderRow(topGap: topGap).modifier(
             WorkspaceBandActions(
                 model: model, workspace: group.workspace,
-                onHide: {
-                    // The home row has no lifecycle to stop and needs no confirmation (see
-                    // `HideWorkspaceConfirmation`), so it hides directly rather than opening the dialog
-                    // every other workspace's Hide opens.
-                    if group.workspace.projectKind == .home {
-                        Task { await model.setWorkspaceHidden(workspaceID: group.workspace.id, isHidden: true) }
-                    } else {
-                        pendingHideWorkspace = group.workspace
-                    }
-                }, onDelete: { pendingDeleteWorkspace = group.workspace })
+                onHide: { Task { await model.setWorkspaceHidden(workspaceID: group.workspace.id, isHidden: true) } },
+                onDelete: { pendingDeleteWorkspace = group.workspace })
         ).id(SpacesListRowID.workspaceBand(group.id))
         if !isCollapsed {
             // Dimmed and inert with the band while the delete runs: the rows stay listed (removing them is
@@ -638,31 +611,6 @@ private enum PendingStop {
     }
 }
 
-/// The Hide-workspace confirmation dialog's button title and message, decided from the workspace's run
-/// state. Factored out from `SpacesTabView`'s body so it is testable without hosting the view: see
-/// `HideWorkspaceConfirmationTests`.
-///
-/// The home project has no lifecycle and is never stopped on hide (see
-/// `SpacesMobileAppModel.setWorkspaceHidden`), so it needs no confirmation at all: both `SpacesTabView` and
-/// `WorkspaceVisibilitySheet` call `setWorkspaceHidden` directly for it rather than presenting a dialog.
-/// `copy(for:)` returns `nil` for a home workspace so that rule lives on the model, not on each call site.
-enum HideWorkspaceConfirmation {
-    struct Copy {
-        let buttonTitle: String
-        let message: String
-    }
-
-    static func copy(for workspace: SpacesDeviceWorkspaceSummary) -> Copy? {
-        guard workspace.projectKind != .home else { return nil }
-        if workspace.isRunning {
-            return Copy(
-                buttonTitle: "Stop and Hide",
-                message: "\"\(workspace.displayName)\" is running. Hiding it stops its processes and coding agents. Bring it back from Workspaces.")
-        }
-        return Copy(buttonTitle: "Hide", message: "\"\(workspace.displayName)\" leaves this list. Bring it back from Workspaces.")
-    }
-}
-
 /// The identity of every row in the Spaces list.
 ///
 /// Each row states its own identity with `.id(…)` rather than leaving SwiftUI to infer one from where the
@@ -691,10 +639,11 @@ private enum SpacesListRowID {
     static func looseSession(_ sessionID: String) -> String { "loose.session.\(sessionID)" }
 }
 
-/// The workspace band's actions — Hide and Delete — offered both on long press and on trailing swipe.
+/// The workspace band's actions, Hide and Delete, offered both on long press and on trailing swipe.
 /// Demo Mode's backend can do neither, so there the band presents no menu and no swipe rather than
-/// actions that would fail. A full swipe cannot fire either action: Delete needs its confirmation sheet
-/// and Hide its confirmation dialog, so neither is safe to trigger by over-swiping.
+/// actions that would fail. A full swipe fires neither: Delete needs its confirmation sheet, and Hide acts
+/// on the tap with no confirmation, so it stays a deliberate tap on the revealed button rather than
+/// something an over-swipe triggers.
 private struct WorkspaceBandActions: ViewModifier {
     let model: SpacesMobileAppModel
     let workspace: SpacesDeviceWorkspaceSummary
@@ -729,8 +678,8 @@ private struct WorkspaceBandActions: ViewModifier {
         }
     }
 
-    /// Hide carries no role for the same reason `swipeDeleteButton` does not: it opens a confirmation and
-    /// the band stays listed until a refreshed overview reports the workspace hidden.
+    /// Hide carries no role for the same reason `swipeDeleteButton` does not: the tap removes nothing, and
+    /// the band stays listed until the overview the hide returns reports the workspace hidden.
     private var hideButton: some View {
         Button {
             onHide()

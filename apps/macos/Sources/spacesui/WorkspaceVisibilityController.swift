@@ -149,66 +149,26 @@ import workspacecore
 
     @objc func closeWorkspaceVisibilityWindow() { workspaceVisibilityWindow?.performClose(nil) }
 
-    /// Hides a workspace from the sidebar without the visibility dialog open — used by the sidebar
-    /// workspace row's right-click menu. Reuses `setWorkspaceHidden` (stop-if-running prompt included);
-    /// the sidebar refreshes from the mutation response, so the completion is a no-op.
+    /// Hides a workspace from the sidebar without the visibility dialog open, used by the sidebar
+    /// workspace row's right-click menu. The sidebar refreshes from the mutation response, so the
+    /// completion is a no-op.
     func hideWorkspace(workspaceID: String) { setWorkspaceHidden(workspaceID: workspaceID, isHidden: true) { _ in } }
 
-    /// Sets a workspace's sidebar visibility (persisted as `isHidden`), routing to
-    /// the device that owns the workspace and stopping it first if it is running.
+    /// Sets a workspace's sidebar visibility (persisted as `isHidden`), routing to the device that owns
+    /// the workspace.
     private func setWorkspaceHidden(workspaceID: String, isHidden: Bool, completion: @escaping (Bool) -> Void) {
-        guard let (project, workspace) = host.findWorkspace(id: workspaceID) else { return completion(false) }
+        guard let project = host.findWorkspace(id: workspaceID)?.0 else { return completion(false) }
         Task { @MainActor [weak self] in
             guard let self else { return completion(false) }
             // Route by the owning project's device: hide/unhide is a daemon mutation, and the
             // wrong daemon would either reject it or hide a same-id row it does not own. It also
-            // goes through the mutation chokepoint, so an unreachable device refuses it up front
-            // instead of stopping the workspace against a daemon that is not there.
+            // goes through the mutation chokepoint, so an unreachable device refuses it up front.
             guard let device = host.deviceForWorkspaceMutation(workspaceID: workspaceID) else {
                 host.showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
                 return completion(false)
             }
             let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
-            // Decide the "Stop and Hide" prompt and the stop from fresh daemon state,
-            // not a possibly-stale cached snapshot (remote overviews refresh on a
-            // throttled cadence), so a running workspace is never hidden without being
-            // stopped, nor a stopped one prompted about needlessly.
-            //
-            // A home workspace is the exception: it has no stop (its daemon refuses one), because it is
-            // marked running by whatever ad hoc terminal is open in it rather than by configured runtime.
-            // Hiding it takes the row off the sidebar and leaves those terminals running, so it neither
-            // reads fresh run state nor prompts.
-            let stopsBeforeHiding = isHidden && project.kind != .home
-            var isRunning = workspace.isRunning
-            if stopsBeforeHiding {
-                let overviewResult: Result<SpacesDeviceOverview, Error> = await Task.detached(priority: .userInitiated) {
-                    do { return .success(try SpacesDeviceClient.overview(context: DeviceRequestContext(device: device, clientApp: clientApp))) } catch
-                    { return .failure(error) }
-                }.value
-                switch overviewResult {
-                case .success(let overview): isRunning = overview.overview.workspaces.first(where: { $0.id == workspaceID })?.isRunning ?? false
-                case .failure(let error):
-                    host.showError(error)
-                    return completion(false)
-                }
-            }
-            if stopsBeforeHiding, isRunning {
-                let alert = NSAlert()
-                alert.alertStyle = .warning
-                alert.messageText = "Hide workspace?"
-                alert.informativeText = "\"\(workspace.displayName)\" is currently running. Hiding it stops the workspace first."
-                alert.addButton(withTitle: "Stop and Hide")
-                alert.addButton(withTitle: "Cancel")
-                guard alert.runModal() == .alertFirstButtonReturn else { return completion(false) }
-                let stopResult = await AppKitController.deviceMutation(device: device) { device in
-                    try SpacesDeviceClient.stopWorkspace(
-                        workspaceID: workspaceID, context: DeviceRequestContext(device: device, clientApp: clientApp))
-                }
-                if case .failure(let error) = stopResult {
-                    host.showError(error)
-                    return completion(false)
-                }
-            }
+            // Hide changes only the hidden flag, never run state.
             let epoch = host.panelCoordinator.paneReplacementEpoch
             let result = await AppKitController.deviceMutation(device: device) { device in
                 try SpacesDeviceClient.updateWorkspaceMetadata(
@@ -229,7 +189,7 @@ import workspacecore
     }
 
     /// Sets a project's sidebar visibility (persisted as the project's own `isHidden`), routing to the
-    /// device that owns the project and stopping its running workspaces first.
+    /// device that owns the project.
     ///
     /// The project flag is independent of each workspace's, so this never writes a child's flag:
     /// unhiding the project brings back exactly the workspaces that were shown before it was hidden.
@@ -238,60 +198,13 @@ import workspacecore
         Task { @MainActor [weak self] in
             guard let self else { return completion(false) }
             // Same routing and gating rule as a workspace hide: the owning project's device, resolved
-            // through the mutation chokepoint so an unreachable device refuses up front rather than
-            // stopping workspaces against a daemon that is not there.
+            // through the mutation chokepoint so an unreachable device refuses up front.
             guard let device = host.deviceForProjectMutation(projectID: projectID) else {
                 host.showProjectDeviceUnavailableError(projectID: projectID)
                 return completion(false)
             }
             let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
-            if isHidden {
-                // Decide the prompt and the stops from fresh daemon state rather than a possibly-stale
-                // cached snapshot, for the same reason as `setWorkspaceHidden`.
-                let overviewResult: Result<SpacesDeviceOverview, Error> = await Task.detached(priority: .userInitiated) {
-                    do { return .success(try SpacesDeviceClient.overview(context: DeviceRequestContext(device: device, clientApp: clientApp))) } catch
-                    { return .failure(error) }
-                }.value
-                let running: [SpacesDeviceWorkspaceSummary]
-                switch overviewResult {
-                case .success(let overview): running = overview.overview.workspaces.filter { $0.projectID == projectID && $0.isRunning }
-                case .failure(let error):
-                    host.showError(error)
-                    return completion(false)
-                }
-                if !running.isEmpty {
-                    // One prompt for the whole project, naming every workspace the hide will stop, so the
-                    // user confirms the full cost once instead of once per workspace.
-                    let alert = NSAlert()
-                    alert.alertStyle = .warning
-                    alert.messageText = "Hide project?"
-                    alert.informativeText =
-                        "Hiding this project stops its running workspaces first: \(running.map(\.displayName).joined(separator: ", "))."
-                    alert.addButton(withTitle: "Stop and Hide")
-                    alert.addButton(withTitle: "Cancel")
-                    guard alert.runModal() == .alertFirstButtonReturn else { return completion(false) }
-                    for workspace in running {
-                        let stopResult = await AppKitController.deviceMutation(device: device) { device in
-                            try SpacesDeviceClient.stopWorkspace(
-                                workspaceID: workspace.id, context: DeviceRequestContext(device: device, clientApp: clientApp))
-                        }
-                        // A workspace that would not stop is left running and visible: hiding the project
-                        // now would strand it out of view still running.
-                        if case .failure(let error) = stopResult {
-                            host.showError(error)
-                            return completion(false)
-                        }
-                    }
-                }
-            }
-            // The stops above and this flag write are separate requests, so a launch from another
-            // client can in principle land between them and leave a hidden workspace running. That is
-            // accepted rather than closed with a compound daemon-side stop-and-hide operation:
-            // hidden-and-running is already a legal state (automations keep and run hidden targets,
-            // and nothing stops another client from starting any workspace regardless of its flags),
-            // the prompt above exists so the user never hides active work unknowingly - not to
-            // guarantee nothing hidden ever runs - and the dialog lists every hidden row, so such a
-            // workspace stays one unhide away. The single-workspace hide has the same shape.
+            // Hide changes only the hidden flag, never run state.
             let epoch = host.panelCoordinator.paneReplacementEpoch
             let result = await AppKitController.deviceMutation(device: device) { device in
                 try SpacesDeviceClient.updateProjectMetadata(

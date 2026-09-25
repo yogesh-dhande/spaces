@@ -14,50 +14,6 @@ struct WorkspaceVisibilitySheet: View {
     /// Reset on every presentation (this is `@State` on a sheet that is created fresh each time), so the
     /// sheet always opens on the whole list rather than on the last search.
     @State private var query = ""
-    @State private var pendingHide: PendingHide?
-
-    /// A hide waiting on confirmation because it would stop running work. Carries what it would stop so
-    /// the prompt can name it, decided from the overview the app is showing; the mutation itself re-reads
-    /// fresh daemon state before stopping anything (see `SpacesMobileAppModel.setWorkspaceHidden`).
-    private struct PendingHide: Identifiable {
-        enum Target {
-            /// Carries the full summary, not just an id, so the prompt can go through
-            /// `HideWorkspaceConfirmation`, the same wording `SpacesTabView`'s own Hide confirmation
-            /// uses. `setWorkspaceHidden(workspaceID:isHidden:)` below only ever constructs this case for a
-            /// running, non-home workspace (a home workspace hides directly, with no confirmation at all),
-            /// so `HideWorkspaceConfirmation.copy(for:)` always resolves for it.
-            case workspace(SpacesDeviceWorkspaceSummary)
-            /// A project hide is only ever offered for a git project with running workspaces to stop
-            /// (see `toggle(_:)`), and the home project's single workspace never reaches this case (its
-            /// row toggles `.workspace` like any other non-git project's), so this always genuinely stops
-            /// something and keeps its own fixed wording.
-            case project(projectID: String, runningNames: [String])
-        }
-
-        let target: Target
-
-        var id: String {
-            switch target {
-            case .workspace(let workspace): "workspace:\(workspace.id)"
-            case .project(let projectID, _): "project:\(projectID)"
-            }
-        }
-
-        var buttonTitle: String {
-            switch target {
-            // `!` is safe here: see the `.workspace` case's doc comment above.
-            case .workspace(let workspace): HideWorkspaceConfirmation.copy(for: workspace)!.buttonTitle
-            case .project: "Stop and Hide"
-            }
-        }
-
-        var message: String {
-            switch target {
-            case .workspace(let workspace): HideWorkspaceConfirmation.copy(for: workspace)!.message
-            case .project(_, let runningNames): "Hiding this project stops its running workspaces first: \(runningNames.joined(separator: ", "))."
-            }
-        }
-    }
 
     private var projects: [WorkspaceVisibilityProjectNode] { model.workspaceVisibilityProjects(query: query) }
 
@@ -85,17 +41,8 @@ struct WorkspaceVisibilitySheet: View {
                 .navigationBarTitleDisplayMode(.inline).toolbar {
                     ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.accessibilityIdentifier("visibility.done") }
                 }
-        }.tint(Theme.accent).accessibilityIdentifier("visibility.sheet").confirmationDialog(
-            "Hide?", isPresented: hideDialogBinding, titleVisibility: .visible, presenting: pendingHide
-        ) { hide in
-            Button(hide.buttonTitle, role: .destructive) { Task { await confirm(hide) } }
-            Button("Cancel", role: .cancel) {}
-        } message: { hide in
-            Text(hide.message)
-        }
+        }.tint(Theme.accent).accessibilityIdentifier("visibility.sheet")
     }
-
-    private var hideDialogBinding: Binding<Bool> { Binding(get: { pendingHide != nil }, set: { if !$0 { pendingHide = nil } }) }
 
     private var searchField: some View {
         HStack(spacing: 7) {
@@ -131,7 +78,7 @@ struct WorkspaceVisibilitySheet: View {
     /// dimming is what says the project's flag, not this one's, is suppressing it.
     private func workspaceRow(_ workspace: WorkspaceVisibilityWorkspaceNode, in project: WorkspaceVisibilityProjectNode) -> some View {
         Button {
-            setWorkspaceHidden(workspaceID: workspace.workspaceID, isHidden: workspace.isChecked)
+            Task { await model.setWorkspaceHidden(workspaceID: workspace.workspaceID, isHidden: workspace.isChecked) }
         } label: {
             HStack(spacing: 10) {
                 VisibilityCheckbox(isChecked: workspace.isChecked)
@@ -146,41 +93,12 @@ struct WorkspaceVisibilitySheet: View {
 
     // MARK: - Actions
 
+    /// Every toggle fires directly, hide and unhide alike: a hide changes only the hidden flag, never run
+    /// state, so there is nothing to confirm.
     private func toggle(_ project: WorkspaceVisibilityProjectNode) {
         switch project.toggle {
-        case .project(let isHidden):
-            guard !isHidden else {
-                Task { await model.setProjectHidden(projectID: project.projectID, isHidden: false) }
-                return
-            }
-            let running = model.runningWorkspaceNames(inProjectID: project.projectID)
-            guard running.isEmpty else {
-                pendingHide = PendingHide(target: .project(projectID: project.projectID, runningNames: running))
-                return
-            }
-            Task { await model.setProjectHidden(projectID: project.projectID, isHidden: true) }
-        case .workspace(let workspaceID, let isHidden): setWorkspaceHidden(workspaceID: workspaceID, isHidden: !isHidden)
-        }
-    }
-
-    /// Hiding a running workspace stops it, so it asks first and the confirm button says what it does.
-    /// Unhiding stops nothing and starts nothing, so it fires directly, and so does a workspace the
-    /// overview no longer carries: a stale row from a hide already in flight elsewhere has nothing left
-    /// here to confirm. The home project's workspace has no lifecycle and is never stopped on hide, so it
-    /// fires directly too, with no confirmation at all: its terminals keep running while the row leaves
-    /// the list (see `SpacesMobileAppModel.setWorkspaceHidden`).
-    private func setWorkspaceHidden(workspaceID: String, isHidden: Bool) {
-        guard isHidden, let workspace = model.workspace(id: workspaceID), workspace.isRunning, workspace.projectKind != .home else {
-            Task { await model.setWorkspaceHidden(workspaceID: workspaceID, isHidden: isHidden) }
-            return
-        }
-        pendingHide = PendingHide(target: .workspace(workspace))
-    }
-
-    private func confirm(_ hide: PendingHide) async {
-        switch hide.target {
-        case .workspace(let workspace): await model.setWorkspaceHidden(workspaceID: workspace.id, isHidden: true)
-        case .project(let projectID, _): await model.setProjectHidden(projectID: projectID, isHidden: true)
+        case .project(let isHidden): Task { await model.setProjectHidden(projectID: project.projectID, isHidden: !isHidden) }
+        case .workspace(let workspaceID, let isHidden): Task { await model.setWorkspaceHidden(workspaceID: workspaceID, isHidden: !isHidden) }
         }
     }
 }

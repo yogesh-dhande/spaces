@@ -305,47 +305,64 @@
             XCTAssertTrue(Set(model.terminalGroups.map(\.id)).isDisjoint(with: Set(model.workspaceGroups.map(\.id))))
         }
 
-        func testHidingAWorkspaceRechecksRunningStateBeforeStoppingAndHiding() async {
+        /// Hiding is pure suppression: hiding a running workspace, with a live process and coding agent in
+        /// it, sends the hidden flag and nothing else, so everything in it keeps running hidden.
+        func testHidingARunningWorkspaceSendsOnlyTheHiddenFlag() async {
             let recorder = SpacesMobileRequestRecorder()
             let settings = SpacesMobileConnectionSettings()
-            let runningOverview = makeOverview(featureIsRunning: true)
+            let hiddenOverview = makeOverview(featureIsRunning: true, featureIsHidden: true)
             let client = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
-                if request.commandName == "overview" { return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(runningOverview)) }
-                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "ok", result: .mutation(SpacesDeviceMutationResult(overview: hiddenOverview, workspaceID: "workspace-feature"))
+                )
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
-            let staleStoppedWorkspace = makeOverview(featureIsRunning: false).workspaces[0]
+            model.overview = makeOverview(featureIsRunning: true)
 
-            await model.setWorkspaceHidden(workspaceID: staleStoppedWorkspace.id, isHidden: true)
+            await model.setWorkspaceHidden(workspaceID: "workspace-feature", isHidden: true)
 
             let requests = await recorder.snapshot()
-            XCTAssertEqual(requests.map(\.commandName), ["overview", "stopWorkspace", "updateWorkspaceMetadata"])
+            XCTAssertEqual(requests.map(\.commandName), ["updateWorkspaceMetadata"])
+            guard case .updateWorkspaceMetadata(let payload)? = requests.first?.command else {
+                XCTFail("Expected an updateWorkspaceMetadata command.")
+                return
+            }
+            XCTAssertEqual(payload.workspaceID, "workspace-feature")
+            XCTAssertEqual(payload.isHidden, true)
+            XCTAssertEqual(payload.updatesHidden, true)
+            XCTAssertEqual(model.overview, hiddenOverview)
+            XCTAssertFalse(model.workspaceGroups.contains { $0.workspace.id == "workspace-feature" })
         }
 
-        /// Hiding a project stops every workspace running under it first, for the same reason hiding one
-        /// workspace stops it: nothing may be left running with no row left to stop it from.
-        func testHidingAProjectStopsItsRunningWorkspacesFirst() async {
+        /// Hiding a project with running workspaces sends the project's hidden flag and nothing else: no
+        /// workspace under it is stopped, and none of their flags is written.
+        func testHidingAProjectWithRunningWorkspacesSendsOnlyTheProjectHiddenFlag() async {
             let recorder = SpacesMobileRequestRecorder()
             let settings = SpacesMobileConnectionSettings()
-            let runningOverview = makeOverview(featureIsRunning: true)
+            let hiddenOverview = makeOverview(featureIsRunning: true, projectIsHidden: true)
             let client = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
-                if request.commandName == "overview" { return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(runningOverview)) }
-                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "ok", result: .mutation(SpacesDeviceMutationResult(overview: hiddenOverview, workspaceID: "workspace-feature"))
+                )
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = makeOverview(featureIsRunning: true)
 
             await model.setProjectHidden(projectID: "project-1", isHidden: true)
 
             let requests = await recorder.snapshot()
-            // Only the running workspace is stopped; the stopped one needs nothing.
-            XCTAssertEqual(requests.map(\.commandName), ["overview", "stopWorkspace", "updateProjectMetadata"])
-            guard case .stopWorkspace(let payload) = requests[1].command else {
-                XCTFail("Expected a stopWorkspace command.")
+            XCTAssertEqual(requests.map(\.commandName), ["updateProjectMetadata"])
+            guard case .updateProjectMetadata(let payload)? = requests.first?.command else {
+                XCTFail("Expected an updateProjectMetadata command.")
                 return
             }
-            XCTAssertEqual(payload.workspaceID, "workspace-feature")
+            XCTAssertEqual(payload.projectID, "project-1")
+            XCTAssertEqual(payload.isHidden, true)
+            XCTAssertEqual(payload.updatesHidden, true)
+            XCTAssertEqual(model.overview, hiddenOverview)
+            XCTAssertTrue(model.workspaceGroups.isEmpty)
         }
 
         /// The Workspaces sheet is the mirror image of the `workspaceGroups` exclusion: a hidden workspace
@@ -411,8 +428,8 @@
             XCTAssertEqual(project?.workspaces.first { $0.workspaceID == "workspace-docs" }?.isChecked, true)
         }
 
-        /// Unhiding sends `setWorkspaceHidden(isHidden: false)` and, unlike hiding, never checks or stops
-        /// anything first — there is nothing running to stop on a workspace that is already hidden.
+        /// Unhiding sends `setWorkspaceHidden(isHidden: false)` and nothing else, the mirror of a hide: it
+        /// starts nothing, so a workspace comes back in whatever run state it kept while hidden.
         func testUnhidingAWorkspaceSendsSetWorkspaceHiddenFalseAndPublishesRefreshedOverview() async {
             let recorder = SpacesMobileRequestRecorder()
             let settings = SpacesMobileConnectionSettings()

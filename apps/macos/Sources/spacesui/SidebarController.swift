@@ -2672,7 +2672,7 @@ private struct DeviceSyncState {
                 representedObject: AppKitController.WorkspacePathActionContext(workspaceID: workspace.id, path: workspace.dir))
         }
         menu.addItem(.separator())
-        // Hide stops the workspace through its daemon before hiding the row, so it is a daemon action.
+        // Hide writes the workspace's hidden flag, which lives on its daemon, so it is a daemon action.
         addItem(
             "Hide", symbol: "eye.slash", target: self, action: #selector(hideWorkspaceMenuItem(_:)), identifier: workspace.id,
             isEnabled: daemonActionsEnabled)
