@@ -1557,9 +1557,13 @@ private final class StreamSubscription: @unchecked Sendable {
     private var buffer = Data()
     private var decodedState = false
     private var connectionReady = false
-    /// Uptime of the last bytes received, keepalives included. Confined to the stream's queue, which runs
-    /// both the receive callbacks and the silence check.
-    private var lastReceiveUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+    /// When the last bytes arrived, keepalives included. Confined to the stream's queue, which runs both
+    /// the receive callbacks and the silence check.
+    ///
+    /// `ContinuousClock` rather than uptime: uptime stops while the device sleeps, so a stream that died
+    /// across a suspension would not be counted silent for the seconds the phone was asleep and would go
+    /// on looking alive until the timeout had passed again in awake time.
+    private var lastReceiveInstant = ContinuousClock.now
 
     init(
         connection: NWConnection, pinRejection: SpacesPinnedTLSPinRejection, request: SpacesDeviceAPIRequest, initialEventTimeout: Duration,
@@ -1598,7 +1602,7 @@ private final class StreamSubscription: @unchecked Sendable {
             switch state {
             case .ready:
                 connectionReady = true
-                lastReceiveUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+                lastReceiveInstant = ContinuousClock.now
                 // Armed only once the connection is up: everything before that (dial, TLS handshake, the
                 // wait for the first payload) is already covered by `initialEventTimeout`, and starting
                 // the silence clock earlier would just double-count the handshake.
@@ -1651,8 +1655,7 @@ private final class StreamSubscription: @unchecked Sendable {
         let checkInterval = TerminalStreamLiveness.silenceCheckIntervalSeconds(forTimeout: silenceTimeout)
         queue.asyncAfter(deadline: .now() + checkInterval) { [weak self] in
             guard let self, !lifecycle.isFinished else { return }
-            let elapsed = Double(DispatchTime.now().uptimeNanoseconds &- lastReceiveUptimeNanoseconds) / 1_000_000_000
-            guard elapsed < silenceTimeout else {
+            guard ContinuousClock.now - lastReceiveInstant < .seconds(silenceTimeout) else {
                 lifecycle.finish(error: SpacesDeviceAPIClientError.streamStalled)
                 connection.cancel()
                 return
@@ -1666,7 +1669,7 @@ private final class StreamSubscription: @unchecked Sendable {
             if let content, !content.isEmpty {
                 // Any bytes count as proof of life, including the daemon's empty-line keepalives, which
                 // the framing loop below drops before decoding.
-                lastReceiveUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+                lastReceiveInstant = ContinuousClock.now
                 buffer.append(content)
                 while let newlineIndex = buffer.firstIndex(of: 0x0A) {
                     let line = Data(buffer.prefix(upTo: newlineIndex))

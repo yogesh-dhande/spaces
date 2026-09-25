@@ -59,6 +59,10 @@
         }
     }
 
+    /// Records whether a foreground-endpoint-refresh waiter has been resumed, so a test can assert that a
+    /// resume belonging to an older backgrounding left the newer one's waiter still waiting.
+    @MainActor private final class ForegroundGateWaiterFlag { var didResume = false }
+
     /// The status a fake device reports about itself, changeable mid-test from the `@Sendable` request
     /// closure's side, so a device can be made to finally come back on its staged build.
     private actor SpacesMobileDaemonStatusBox {
@@ -3395,6 +3399,141 @@
 
             let commandNames = await recorder.snapshot().map(\.commandName)
             XCTAssertEqual(commandNames, [])
+        }
+
+        /// The app can mount with its scene already backgrounded (state restoration, a background launch),
+        /// which delivers no `.background` change for the shell to arm the gate from, while a terminal
+        /// detail mounting beside it does arm its own foreground redial for that phase. The shell arms the
+        /// gate from the initial phase too, so that redial waits for the endpoint refresh rather than
+        /// dialing the address the reset is about to discard.
+        func testAShellThatMountsWithTheSceneBackgroundedArmsTheEndpointGate() async {
+            let overview = makeOverview()
+            let client = pairedClient { _ in SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview)) }
+            let model = SpacesMobileAppModel(settings: pairedSettings(), bridgeClient: client)
+
+            model.noteInitialSceneIsBackgrounded(true)
+            let flag = ForegroundGateWaiterFlag()
+            let waiter = Task {
+                await model.waitForForegroundEndpointRefresh()
+                flag.didResume = true
+            }
+            for _ in 0..<100 { await Task.yield() }
+            XCTAssertFalse(flag.didResume, "a redial owed by a detail that mounted backgrounded must wait for the shell's refresh")
+
+            await model.resumeFromBackground()
+            await waiter.value
+            XCTAssertTrue(flag.didResume, "the foreground resume releases the gate the initial phase armed")
+        }
+
+        /// The mirror of the case above: a shell that mounts on screen owes the connection no foreground
+        /// refresh, so nothing waits. What arms the gate is an absence, not a mount.
+        func testAShellThatMountsOnScreenLeavesTheEndpointGateOpen() async {
+            let overview = makeOverview()
+            let client = pairedClient { _ in SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview)) }
+            let model = SpacesMobileAppModel(settings: pairedSettings(), bridgeClient: client)
+
+            model.noteInitialSceneIsBackgrounded(false)
+            let flag = ForegroundGateWaiterFlag()
+            let waiter = Task {
+                await model.waitForForegroundEndpointRefresh()
+                flag.didResume = true
+            }
+            await waiter.value
+
+            XCTAssertTrue(flag.didResume, "nothing may wait on a refresh the shell does not owe")
+        }
+
+        /// An open terminal's foreground redial waits for the shell's own endpoint refresh, and rapid app
+        /// switching can leave an earlier resume still reading the device when the app backgrounds and
+        /// returns again. That earlier resume must not answer for the newer absence: its refresh re-raced
+        /// addresses the device may have moved off since, so a redial released by it would dial exactly the
+        /// stale address the gate exists to keep it off. Only the resume for the newest backgrounding opens
+        /// the gate.
+        func testAResumeFromAnEarlierBackgroundingDoesNotReleaseALaterBackgroundingsWaiter() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let gate = SpacesMobileAsyncGate()
+            let overview = makeOverview()
+            let client = pairedClient { request in
+                await recorder.append(request)
+                guard request.commandName == "overview" else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                await gate.wait()
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: pairedSettings(), bridgeClient: client)
+
+            model.noteBackgroundedForEndpointRefresh()
+            let firstResume = Task { await model.resumeFromBackground() }
+            // Wait for the first resume to be inside its device read, so the backgrounding below really does
+            // land while it is still running.
+            while await overviewReadCount(recorder) < 1 { await Task.yield() }
+
+            model.noteBackgroundedForEndpointRefresh()
+            let flag = ForegroundGateWaiterFlag()
+            let waiter = Task {
+                await model.waitForForegroundEndpointRefresh()
+                flag.didResume = true
+            }
+
+            await gate.open()
+            await firstResume.value
+            for _ in 0..<100 { await Task.yield() }
+            XCTAssertFalse(flag.didResume, "a resume for an earlier backgrounding must leave the later backgrounding's gate closed")
+
+            await model.resumeFromBackground()
+            await waiter.value
+            XCTAssertTrue(flag.didResume, "the resume for the newest backgrounding opens the gate")
+        }
+
+        /// The shell runs a resume on every `.active`, and an `.inactive` bounce (a control-center pull, a
+        /// call banner) reaches `.active` again with no backgrounding in between, so two resumes of the
+        /// same backgrounding can overlap. The second one's endpoint reset aborts the first one's read, so
+        /// the first call comes back having warmed nothing: only the newest resume may open the gate, or a
+        /// terminal redial goes out against a resolver the reset has just cleared.
+        func testAnOverlappingResumeOfTheSameBackgroundingIsTheOnlyOneThatOpensTheGate() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let reads = SpacesMobilePollCounter()
+            let firstRead = SpacesMobileAsyncGate()
+            let secondRead = SpacesMobileAsyncGate()
+            let overview = makeOverview()
+            let client = pairedClient { request in
+                await recorder.append(request)
+                guard request.commandName == "overview" else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                if await reads.increment() == 1 { await firstRead.wait() } else { await secondRead.wait() }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: pairedSettings(), bridgeClient: client)
+
+            model.noteBackgroundedForEndpointRefresh()
+            let flag = ForegroundGateWaiterFlag()
+            let waiter = Task {
+                await model.waitForForegroundEndpointRefresh()
+                flag.didResume = true
+            }
+
+            let firstResume = Task { await model.resumeFromBackground() }
+            while await overviewReadCount(recorder) < 1 { await Task.yield() }
+            // No second `noteBackgroundedForEndpointRefresh()`: this is the same backgrounding, resumed
+            // again while the first resume is still inside its read, which is the overlap under test.
+            let secondResume = Task { await model.resumeFromBackground() }
+            // The second call cannot be seen making a request of its own yet: its endpoint reset waits on
+            // the command channel the first call's held read still occupies. What the overlap turns on is
+            // that it has entered and taken its place as the newest resume, which it does before its first
+            // await, so yielding until it has run is the whole of what this has to establish.
+            for _ in 0..<100 { await Task.yield() }
+
+            await firstRead.open()
+            await firstResume.value
+            for _ in 0..<100 { await Task.yield() }
+            XCTAssertFalse(flag.didResume, "an overtaken resume must leave the gate closed for the one that overtook it")
+
+            await secondRead.open()
+            await secondResume.value
+            await waiter.value
+            XCTAssertTrue(flag.didResume, "the newest resume opens the gate")
+        }
+
+        private func overviewReadCount(_ recorder: SpacesMobileRequestRecorder) async -> Int {
+            await recorder.snapshot().filter { $0.commandName == "overview" }.count
         }
 
         private func makeRenamingModel(overview: SpacesDeviceOverviewPayload, fetchedOverview: SpacesDeviceOverviewPayload? = nil) -> (

@@ -88,7 +88,12 @@ struct RootTabView: View {
         // Spaces tab: backgrounding closes its tunnels, and foregrounding restores them. Backgrounding
         // also ends any run of failed refreshes, since a suspended app polls nothing and cannot claim the
         // connection kept failing while it was away.
-        .task { model.browserProxyStart() }.onChange(of: scenePhase) { _, newPhase in
+        .task {
+            // A shell that mounts with the scene already backgrounded gets no `.background` change to arm
+            // the endpoint gate from: see `noteInitialSceneIsBackgrounded`.
+            model.noteInitialSceneIsBackgrounded(scenePhase == .background)
+            model.browserProxyStart()
+        }.onChange(of: scenePhase) { _, newPhase in
             DevicePerformanceLog.sceneChanged(phase: scenePhaseName(newPhase), openTerminal: model.activeTerminalSessionID != nil)
             switch newPhase {
             case .active:
@@ -113,6 +118,9 @@ struct RootTabView: View {
             case .background:
                 model.browserProxyStop()
                 model.noteConnectionMonitoringPaused()
+                // Closes the gate an open terminal's foreground redial waits behind, so the redial cannot
+                // run ahead of the endpoint reset the `.active` branch above performs.
+                model.noteBackgroundedForEndpointRefresh()
                 // An open terminal detail survives backgrounding, so watching has to be ended here or the
                 // app would go on treating a session the user cannot see as the one they are looking at
                 // and swallow the bells it rings while away.
