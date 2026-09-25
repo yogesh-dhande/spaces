@@ -1288,11 +1288,7 @@
         /// never transported because client and daemon cell geometry differ; absent coordinates resolve to
         /// the origin, which is the only position a host with no rendered pointer can name.
         private func pointerCell(x: Double?, y: Double?) -> (column: Int, row: Int) {
-            let columns = max(terminalSize.columns, 1)
-            let rows = max(terminalSize.rows, 1)
-            let column = Int((min(max(x ?? 0, 0), 1) * Double(columns)).rounded(.down))
-            let row = Int((min(max(y ?? 0, 0), 1) * Double(rows)).rounded(.down))
-            return (column: min(column, columns - 1), row: min(row, rows - 1))
+            TerminalPointerGrid.cell(x: x ?? 0, y: y ?? 0, columns: terminalSize.columns, rows: terminalSize.rows)
         }
 
         private static let wheelUpButton = UInt8(SPACES_GHOSTTY_VT_MOUSE_BUTTON_FOUR.rawValue)

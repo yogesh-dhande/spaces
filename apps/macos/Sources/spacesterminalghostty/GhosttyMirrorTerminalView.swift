@@ -967,8 +967,31 @@
         private func forwardMouseButtonIfReported(state: ghostty_input_mouse_state_e, button: ghostty_input_mouse_button_e, event: NSEvent) {
             guard let onSendMouseButton, mouseButtonBelongsToSession(modifierFlags: event.modifierFlags) else { return }
             let mods = Self.ghosttyMouseModifiers(for: event.modifierFlags)
-            let pointerPosition = Self.scrollPointerPosition(for: event.locationInWindow, in: self, mods: mods.rawValue)
+            let pointerPosition = clickedCellPointerPosition(for: event.locationInWindow, mods: mods.rawValue)
             onSendMouseButton(UInt8(clamping: button.rawValue), state.rawValue == GHOSTTY_MOUSE_PRESS.rawValue, pointerPosition)
+        }
+
+        /// The cell the click landed on, named as that cell's center in this pane's grid, which is what a
+        /// forwarded button carries (`TerminalControlMouseButtonPayload`).
+        ///
+        /// The pane's mirror surface and the session's own surface hold the same grid but not the same
+        /// pixels: they have their own scale factors, so their cell sizes, their padding, and the leftover
+        /// pixels past the last cell all differ. A position proportional to this pane's pixels would
+        /// therefore resolve to the neighbouring cell on the session host near a boundary, so the click is
+        /// quantized here, against the geometry this pane actually rendered.
+        private func clickedCellPointerPosition(for locationInWindow: NSPoint, mods: UInt32) -> TerminalScrollPointerPosition? {
+            guard let surface = mirrorSurface() else { return nil }
+            let size = ghostty_surface_size(surface)
+            guard size.columns > 0, size.rows > 0, size.cell_width_px > 0, size.cell_height_px > 0 else { return nil }
+            // The same scale `updateSurfaceGeometry()` gave the surface, so the padding matches the one
+            // Ghostty laid the grid out with.
+            let scale = Double(window?.backingScaleFactor ?? 2.0)
+            let point = convert(locationInWindow, from: nil)
+            let padding = GhosttySurfaceGridPadding.perSidePixels(scale: scale)
+            let column = ((Double(point.x - bounds.minX) * scale - padding) / Double(size.cell_width_px)).rounded(.down)
+            let row = ((Double(bounds.maxY - point.y) * scale - padding) / Double(size.cell_height_px)).rounded(.down)
+            let center = TerminalPointerGrid.center(column: Int(column), row: Int(row), columns: Int(size.columns), rows: Int(size.rows))
+            return TerminalScrollPointerPosition(x: center.x, y: center.y, mods: mods)
         }
 
         /// True when the application on the other end owns this click. Shift is the local escape hatch:
@@ -1483,6 +1506,15 @@
         /// The snapshot the live mirror surface exports, so a test can read back the cell state the
         /// surface actually holds rather than the frame that was handed to it. Nil with no mirror.
         var debugMirrorSurfaceSnapshot: GhosttyTerminalSnapshot? { GhosttyTerminalSnapshotCapture.captureFromSurface(mirrorSurface()) }
+        /// The pixel geometry the live mirror surface laid its grid out with, so a test can place a click
+        /// on a cell boundary the surface actually drew rather than one derived from the pane's bounds.
+        /// Nil with no mirror.
+        var debugMirrorSurfaceCellGeometry: (columns: Int, rows: Int, cellWidthPx: Int, cellHeightPx: Int)? {
+            guard let surface = mirrorSurface() else { return nil }
+            let size = ghostty_surface_size(surface)
+            guard size.columns > 0, size.rows > 0, size.cell_width_px > 0, size.cell_height_px > 0 else { return nil }
+            return (Int(size.columns), Int(size.rows), Int(size.cell_width_px), Int(size.cell_height_px))
+        }
         /// Whether the live surface holds a selection. Selection lives in the surface and cannot
         /// outlive it, so a test can tell a pane that kept its surface from one whose surface was
         /// freed and rebuilt underneath it.

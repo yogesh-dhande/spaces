@@ -673,7 +673,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         XCTAssertEqual(forwarded.map(\.pressed), [true, false], "the application must see both the press and the release")
         XCTAssertEqual(forwarded.map(\.button), [UInt8(GHOSTTY_MOUSE_LEFT.rawValue), UInt8(GHOSTTY_MOUSE_LEFT.rawValue)])
-        XCTAssertNotNil(forwarded.first?.pointer, "the click must carry the cell it landed on")
+        // Which cell the click carries is pinned by
+        // `GhosttyMirrorForwardedClickTests.testMirrorForwardsTheClickedCellAcrossACellBoundary`: it needs
+        // a real mirror surface to quantize against, and this harness deliberately keeps mouse events away
+        // from one.
     }
 
     /// A session that exits with tracking still enabled leaves a final frame that says the

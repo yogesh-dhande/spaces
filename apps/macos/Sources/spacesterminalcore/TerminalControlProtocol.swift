@@ -375,8 +375,20 @@ public struct TerminalControlScrollPayload: Sendable, Equatable {
 }
 
 /// A single mouse button press or release forwarded to the session's terminal so a mouse-aware
-/// application can receive it. The pointer is normalized (0...1 across the grid) exactly like the
-/// scroll payload's pointer, so the daemon can resolve it against its own surface size.
+/// application can receive it.
+///
+/// The pointer names one cell of the session's grid, and it names it as that cell's center:
+/// `(column + 0.5) / columns`, `(row + 0.5) / rows` (``TerminalPointerGrid/center(column:row:columns:rows:)``).
+/// A click is discrete in a way a scroll is not, so every client quantizes the click to a cell against its
+/// own rendered geometry and sends the center, and every session host decodes it back to a cell by flooring
+/// over its own grid (``TerminalPointerGrid/cell(x:y:columns:rows:)``). The Linux headless host encodes that
+/// cell straight into the mouse report; the macOS-hosted core expands it to the pixel center of the cell on
+/// its own surface, past the padding Ghostty lays the grid out inside, because Ghostty resolves a pointer
+/// back to a cell from pixels. Sending a position anywhere else in the cell would floor into the
+/// neighbouring column or row on a host whose padding or cell size differs from the sender's.
+///
+/// This is deliberately not the scroll payload's meaning: a scroll pointer is a place on a continuous
+/// surface, normalized over the whole rendered area, padding included.
 public struct TerminalControlMouseButtonPayload: Sendable, Equatable {
     public let clientID: String?
     public let ownerEpoch: UInt64?

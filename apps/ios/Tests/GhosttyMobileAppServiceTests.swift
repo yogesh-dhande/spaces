@@ -326,26 +326,42 @@
             XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
         }
 
-        /// An iOS tap never drives the remote application's mouse (#465): a tap that misses a link only
-        /// focuses the keyboard, whether or not the session's own terminal is tracking the mouse.
-        func testRemoteTerminalHostViewTapNeverSendsMouseClickEvenWhenMouseCaptured() {
+        /// A tap that no link claimed reaches the application as a click while that application is
+        /// tracking the mouse, which is how a phone drives the controls such an application draws (#764).
+        /// The click belongs to the application alone, so the tap does not also raise the keyboard, and a
+        /// session whose application is not tracking the mouse keeps the focus-only tap.
+        func testRemoteTerminalHostViewTapForwardsAClickWhileTheApplicationTracksTheMouse() {
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 100, height: 200))
             hostView.setAcceptsTerminalInput(true)
             hostView.debugAppliedFrameCoversHostColumnsForTesting = true
             hostView.debugTapLinkHandlerForTesting = { _ in false }
             hostView.debugMouseCapturedForTesting = true
+            var forwardedClicks: [(button: UInt8, pointerPosition: TerminalScrollPointerPosition)] = []
+            hostView.onSendMouseClick = { button, pointerPosition in
+                forwardedClicks.append((button, pointerPosition))
+                return true
+            }
 
-            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 25, y: 50)), .forwardedClick)
+
+            XCTAssertEqual(forwardedClicks.count, 1)
+            XCTAssertEqual(forwardedClicks.last?.button, UInt8(GHOSTTY_MOUSE_LEFT.rawValue), "a tap is a left click, as a Mac pane's click is")
+            // Which cell the position names is pinned by
+            // `testRemoteTerminalHostViewForwardsTheTappedCellAcrossACellBoundary`; here it only has to be
+            // a position the daemon will accept.
+            XCTAssertEqual(forwardedClicks.last?.pointerPosition.isValid, true, "the click carries a pointer normalized over the daemon's grid")
+            XCTAssertEqual(forwardedClicks.last?.pointerPosition.mods, 0, "a tap carries no modifiers")
 
             hostView.debugMouseCapturedForTesting = false
-            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 25, y: 50)), .focused)
+            XCTAssertEqual(forwardedClicks.count, 1, "a session with no application tracking the mouse keeps the focus-only tap")
         }
 
         /// A tap on a URL opens the link on the phone even while the session's application is tracking
-        /// the mouse, and that tap never reaches the application: iOS taps never drive the remote
-        /// application's mouse (#465), so every tap either opens a link locally or only focuses the
-        /// keyboard.
-        func testRemoteTerminalHostViewTapOnLinkOpensLocallyWhileOtherTapsOnlyFocus() {
+        /// the mouse, and that tap reaches the application as nothing at all: the phone cannot tell what
+        /// the remote program linkifies, so a forwarded click on a link would open it a second time on
+        /// the session host (#465). Links win; every other tap in such a session is the click.
+        func testRemoteTerminalHostViewTapOnLinkOpensLocallyAndForwardsNoClick() {
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 100, height: 200))
             hostView.setAcceptsTerminalInput(true)
             hostView.debugAppliedFrameCoversHostColumnsForTesting = true
@@ -355,12 +371,123 @@
                 probedPoints.append(point)
                 return point.y < 100
             }
+            var forwardedClickCount = 0
+            hostView.onSendMouseClick = { _, _ in
+                forwardedClickCount += 1
+                return true
+            }
 
             XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .openedLink)
             XCTAssertEqual(probedPoints, [CGPoint(x: 12, y: 18)])
+            XCTAssertEqual(forwardedClickCount, 0, "a tap the link probe claimed never reaches the application")
 
             XCTAssertEqual(
-                hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 150)), .focused, "a tap off a link only focuses the keyboard")
+                hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 150)), .forwardedClick, "a tap off a link is the application's click"
+            )
+            XCTAssertEqual(forwardedClickCount, 1)
+        }
+
+        /// The app layer owns the rest of the gate: while the phone is scrolled into its own scrollback
+        /// replay the rows under the finger are history this client painted rather than the screen the
+        /// application is drawing, so it declines the click and the tap falls back to focusing the
+        /// keyboard.
+        func testRemoteTerminalHostViewTapFocusesWhenTheAppLayerDeclinesTheClick() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 100, height: 200))
+            hostView.setAcceptsTerminalInput(true)
+            hostView.debugAppliedFrameCoversHostColumnsForTesting = true
+            hostView.debugTapLinkHandlerForTesting = { _ in false }
+            hostView.debugMouseCapturedForTesting = true
+            var offeredClickCount = 0
+            hostView.onSendMouseClick = { _, _ in
+                offeredClickCount += 1
+                return false
+            }
+
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 25, y: 50)), .focused)
+
+            XCTAssertEqual(offeredClickCount, 1, "the tap is offered, and the app layer's refusal is what turns it back into a focus tap")
+        }
+
+        /// A forwarded tap names the cell the finger was on, not the point it touched: the session host
+        /// resolves a click by flooring the normalized position over its own grid, so a position taken
+        /// from the edge of a cell would resolve to the cell next to it. The tap is quantized against the
+        /// geometry the surface lays its grid out with (Ghostty's padding and the cell size the metrics
+        /// cache holds) and the cell's center is what travels, so two taps a quarter point apart on either
+        /// side of a boundary resolve to the cells on either side of it, in both axes.
+        ///
+        /// The cell is read back with `TerminalPointerGrid.cell`, the decoder both session hosts run on a
+        /// forwarded click, so this pins the phone against the contract rather than against its own
+        /// arithmetic. What the macOS-hosted daemon then does with that cell (expanding it to a pixel
+        /// inside the cell on its own surface) is pinned by `GhosttyEmbeddedMouseButtonPointerTests`,
+        /// which cannot run here: that host lives in a macOS-only module.
+        func testRemoteTerminalHostViewForwardsTheTappedCellAcrossACellBoundary() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            hostView.setAcceptsTerminalInput(true)
+            hostView.debugAppliedFrameCoversHostColumnsForTesting = true
+            hostView.debugTapLinkHandlerForTesting = { _ in false }
+            hostView.debugMouseCapturedForTesting = true
+            var forwardedPositions: [TerminalScrollPointerPosition] = []
+            hostView.onSendMouseClick = { _, pointerPosition in
+                forwardedPositions.append(pointerPosition)
+                return true
+            }
+
+            let scale = UIScreen.main.scale
+            let cell = GhosttyRemoteTerminalViewport.cellMetrics(fontSize: .default, scale: scale)
+            let padding = CGFloat(GhosttyTerminalCellMetricsCache.paddingPerSidePx(scale: Double(scale))) / scale
+            let grid = hostView.renderedViewportSizeForTesting()
+            let boundaryX = padding + cell.width * 4
+            let boundaryY = padding + cell.height * 2
+
+            // The decode a session host runs on the position that travels.
+            func tappedCell(_ position: TerminalScrollPointerPosition) -> (column: Int, row: Int) {
+                TerminalPointerGrid.cell(x: position.x, y: position.y, columns: grid.columns, rows: grid.rows)
+            }
+
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: boundaryX - 0.25, y: boundaryY + 0.25)), .forwardedClick)
+            let beforeBoundary = tappedCell(try XCTUnwrap(forwardedPositions.last))
+            XCTAssertEqual(beforeBoundary.column, 3, "a tap just short of the column boundary belongs to the column before it")
+            XCTAssertEqual(beforeBoundary.row, 2, "a tap just past the row boundary belongs to the next row")
+
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: boundaryX + 0.25, y: boundaryY - 0.25)), .forwardedClick)
+            let afterBoundary = tappedCell(try XCTUnwrap(forwardedPositions.last))
+            XCTAssertEqual(afterBoundary.column, 4, "a tap just past the column boundary belongs to the next column")
+            XCTAssertEqual(afterBoundary.row, 1, "a tap just short of the row boundary belongs to the row before it")
+        }
+
+        /// A tap the application takes ends a flick still running under it. A finger can land on moving
+        /// content without travelling far enough for the pan recognizer to claim it, so the momentum
+        /// display link has to be invalidated on the tap's own path; otherwise its later frames deliver
+        /// wheel reports behind the click's press and release. The flick's own ended scroll goes out
+        /// before the click, which is the order the app layer flushes them to the session in.
+        func testAForwardedTapStopsTheFlickItLandedOn() {
+            enum ForwardedGesture: Equatable {
+                case scroll
+                case click
+            }
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            hostView.setAcceptsTerminalInput(true)
+            hostView.debugAppliedFrameCoversHostColumnsForTesting = true
+            hostView.debugTapLinkHandlerForTesting = { _ in false }
+            hostView.debugMouseCapturedForTesting = true
+            var forwarded: [ForwardedGesture] = []
+            hostView.onSendScroll = { _, _, _, _ in forwarded.append(.scroll) }
+            hostView.onSendMouseClick = { _, _ in
+                forwarded.append(.click)
+                return true
+            }
+
+            hostView.debugBeginScrollGestureForTesting()
+            hostView.debugContinueScrollGestureForTesting(translation: CGPoint(x: 0, y: 40))
+            hostView.debugEndScrollGestureForTesting(velocity: CGPoint(x: 0, y: 2_000))
+            XCTAssertTrue(hostView.debugIsMomentumRunningForTesting, "a fast lift hands the gesture to its momentum")
+            forwarded.removeAll()
+
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 25, y: 50)), .forwardedClick)
+
+            XCTAssertFalse(hostView.debugIsMomentumRunningForTesting, "the tap ended the flick it landed on")
+            XCTAssertEqual(forwarded, [.scroll, .click], "the flick ends before the click, and no momentum frame follows it")
         }
 
         /// While the phone shows a frame narrower than the host's grid (every frame between taking
