@@ -292,13 +292,13 @@ final class SpacesClientDatabaseTests: XCTestCase {
         XCTAssertEqual(try SpacesClientDatabase.defaultDatabase().setting(key: "active_workspace_id"), "workspace-b")
     }
 
-    // Regression for #425: `defaultDatabase()` used to call `defaultPath()` on every read, and
-    // `defaultPath()` reruns full profile resolution unconditionally — including, for a repo-local dev
-    // build, `SpacesProfile.resolveDevelopmentContext`'s two synchronous `git` spawns. A UI loop that
-    // rereads client settings in a tight loop (e.g. `loadShortcutSpecs()`) beachballed the app by
-    // spawning git dozens of times per reload. `DefaultDatabaseStorage` now checks a cheap
-    // environment/executable-path fingerprint before ever calling `defaultPath()`, so the probe should
-    // run once per process for an unchanged environment and again only when that fingerprint changes.
+    // Regression for #425: calling `defaultPath()` on every read reruns full profile resolution
+    // unconditionally (including, for a repo-local dev build, `SpacesProfile.resolveDevelopmentContext`'s
+    // two synchronous `git` spawns), so a UI loop that rereads client settings in a tight loop (e.g.
+    // `loadShortcutSpecs()`) would beachball the app by spawning git dozens of times per reload.
+    // `DefaultDatabaseStorage` checks a cheap environment/executable-path fingerprint before ever calling
+    // `defaultPath()`, so the probe runs once per process for an unchanged environment and again only when
+    // that fingerprint changes.
     //
     // A fake repo root (an `apps/macos/Package.swift` marker under a scratch directory, matching
     // `SpacesProfileTests.makeFakeRepoRoot()`) plus an injected executable path under it stand in for a

@@ -17,7 +17,6 @@ export function delimiterForPath(path: string): TableDelimiter {
   return path.toLowerCase().endsWith(".tsv") ? "\t" : ",";
 }
 
-/** What one parse produced: the part of the file the renderer can use, plus the whole file's shape. */
 export interface DelimitedTable {
   /** The retained rows: the file's first `budget.rows` rows, each holding its first
    *  `budget.columns` fields. */

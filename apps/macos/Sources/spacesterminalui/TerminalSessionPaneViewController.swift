@@ -1010,14 +1010,14 @@ private final class NotificationObserverBag: @unchecked Sendable {
 
     /// Resolves which renderer the pane shows. An interactive session this pane owns always resolves to
     /// `.ghosttyOwner`, whether or not a frame has actually landed on its mirror surface yet
-    /// (`hasRenderableSurface()`): the owner-with-no-frame-yet case used to fall through to
-    /// `.ghosttyTakeoverStatus` here, sharing one status screen with the unrelated "another client owns
-    /// this session" case below and leaving both indistinguishable from a plain blank pane. That case is
-    /// now covered by the connection banner instead (`stateProvider.connectionStageTracker`,
-    /// `TerminalPaneBannerNotice`) — a normal missing-first-frame moment shows nothing extra and clears
-    /// itself the instant a frame lands, and a frame that is missing because a subscription actually
-    /// dropped shows "Reconnecting…" once the grace elapses. `.ghosttyTakeoverStatus` is left to mean
-    /// exactly one thing: this pane is attached as a viewer because another client owns the session.
+    /// (`hasRenderableSurface()`): falling through to `.ghosttyTakeoverStatus` for an owner with no frame
+    /// yet would share one status screen with the unrelated "another client owns this session" case
+    /// below, leaving both indistinguishable from a plain blank pane. The connection banner covers that
+    /// case instead (`stateProvider.connectionStageTracker`, `TerminalPaneBannerNotice`) — a normal
+    /// missing-first-frame moment shows nothing extra and clears itself the instant a frame lands, and a
+    /// frame that is missing because a subscription actually dropped shows "Reconnecting…" once the grace
+    /// elapses. `.ghosttyTakeoverStatus` is left to mean exactly one thing: this pane is attached as a
+    /// viewer because another client owns the session.
     private func resolveVisibleRenderer(isOwner: Bool?) -> VisibleRenderer {
         guard case .ghosttyEmbedded = rendererMode else { return .textView }
         if isExplicitlyNonInteractiveRuntimeState(lastObservedRuntimeState) {

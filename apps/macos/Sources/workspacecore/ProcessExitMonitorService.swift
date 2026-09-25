@@ -72,7 +72,6 @@
             reconcileInFlight = false
         }
 
-        /// Reconciles the installed observers to the currently-running owned pids.
         /// The daemon calls this on `databaseDidChange`, since launches and stops
         /// change the running set.
         public func refreshObservers() {

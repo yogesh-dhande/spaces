@@ -121,7 +121,6 @@ function makeReloadBridge(reads: WorkspaceFileReadResult[]): {
   return { bridge, fireFileSignature: (event) => listener?.(event) };
 }
 
-/** Dispatches a paste of `text` over the editor's whole document. */
 function pasteOverWholeDocument(editorElement: HTMLElement, text: string): void {
   const paste = new Event("paste", { bubbles: true, cancelable: true });
   Object.defineProperty(paste, "clipboardData", {

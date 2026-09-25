@@ -415,7 +415,7 @@ private final class ApplyMailbox: @unchecked Sendable {
     ///   everything `pending`'s screen content would have, regardless of either output's reason. This is
     ///   what lets a newer `resize` or `state_change` full frame collapse an older frameless `runtime_state`
     ///   barrier in the middle of a burst, not just another screen-content output.
-    /// - The reason-shape rule this collapse used to be the whole of: both entries are coalescible-on-apply
+    /// - The reason-shape rule: both entries are coalescible-on-apply
     ///   reasons (`isCoalescibleOnApply`), AND either `output` itself carries a frame
     ///   (`reduction?.frameToApply != nil`) or the pending entry never carried one either
     ///   (`pending.reduction?.frameToApply == nil`). Without that second half, a frameless newer output —

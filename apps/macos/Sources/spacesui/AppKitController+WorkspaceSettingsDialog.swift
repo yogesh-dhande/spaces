@@ -9,8 +9,7 @@ import workspacecore
 /// configuration editing only — processes, coding agents, browser sessions, ports, and
 /// the stop script. Runtime controls (start/stop/restart/focus) live on the sidebar's
 /// runtime-target rows, not here, so the sections render without runtime chrome and
-/// every edit commits immediately through the owning device's config update (the same
-/// auto-save behavior the sections had in the old inline workspace detail).
+/// every edit commits immediately through the owning device's config update.
 extension AppKitController {
     @objc func showWorkspaceSettings(_ sender: NSButton) {
         guard let workspaceID = sender.identifier?.rawValue, let (project, workspace) = findWorkspace(id: workspaceID) else { return }
@@ -31,7 +30,7 @@ extension AppKitController {
         stack.spacing = 16
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        // --- Directory subtitle (the workspace name is shown in the dialog header) ---
+        // The workspace name is shown in the dialog header.
         let dirField = NSTextField(string: workspace.dir)
         dirField.font = Typography.monoMetadata
         dirField.textColor = .tertiaryLabelColor
@@ -45,7 +44,6 @@ extension AppKitController {
         stack.addArrangedSubview(dirField)
         constrainFormFieldToFillWidth(dirField, in: stack)
 
-        // --- Config sections, committing immediately like the sections always have for workspaces ---
         let workspaceID = workspace.id
         func commit(_ update: @escaping (inout WorkspaceSettings) -> Void) {
             // Route by this dialog's workspace, not the sidebar selection: the dialog is

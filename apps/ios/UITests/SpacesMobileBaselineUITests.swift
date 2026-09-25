@@ -181,9 +181,9 @@ final class SpacesMobileBaselineUITests: XCTestCase {
     // MARK: - Scenario 4: streaming
 
     /// Waits for `AGENT_SCREEN_READY`/`BURST_DONE n` through the app's E2E render-dump mechanism (see
-    /// `SpacesMobileUITestDriver.waitForRenderedText`), the same one the takeover UI tests use to read
-    /// terminal content: the surface is a Metal view with no accessible text. A marker that never shows
-    /// up fails the scenario rather than being guessed at with a fixed hold.
+    /// `SpacesMobileUITestDriver.waitForRenderedText`): the surface is a Metal view with no accessible
+    /// text. A marker that never shows up fails the scenario rather than being guessed at with a fixed
+    /// hold.
     private func streaming(_ context: ScenarioContext) throws {
         openFixtureSession(context)
         let renderDumpPath = renderDumpPath(for: context.configuration)

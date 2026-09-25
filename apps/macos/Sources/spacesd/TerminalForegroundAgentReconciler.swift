@@ -39,9 +39,9 @@ import workspacecore
         reconcileStore = DaemonReconcileStore(label: "spaces.daemon.foreground-agent-reconcile", databasePath: databasePath)
     }
 
-    /// Installs the observer and runs one pass immediately. The startup pass is what finalizes agent rows
-    /// whose sessions died while the daemon was down: those sessions post no runtime-state change on the
-    /// way back up, so without it their rows would sit live until some unrelated terminal produced output.
+    /// The startup pass is what finalizes agent rows whose sessions died while the daemon was down: those
+    /// sessions post no runtime-state change on the way back up, so without it their rows would sit live
+    /// until some unrelated terminal produced output.
     func start() {
         guard observer == nil else { return }
         observer = NotificationCenter.default.addObserver(forName: .spacesTerminalRuntimeStateDidChange, object: nil, queue: .main) { [weak self] _ in

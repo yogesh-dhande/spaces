@@ -137,7 +137,7 @@ spaces_profile_socket_owner_pids() {
 # so both stop functions below start from the same "is there anything to stop" check instead of
 # each re-walking `profile-socket-paths`' newline-separated candidates. Returns 1 (nothing to
 # print) when resolution fails or no candidate exists on disk, matching the `return 0` early-out
-# every caller used to write out by hand.
+# every caller would otherwise write out by hand.
 _spaces_profile_terminal_service_existing_socket_path() {
   local cli="$1"
   local socket_paths

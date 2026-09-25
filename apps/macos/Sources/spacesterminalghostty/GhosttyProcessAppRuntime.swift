@@ -17,7 +17,6 @@
     /// windowless views whose `ensureMirrorIfNeeded` bails on `window == nil`, so they never call
     /// `startIfNeeded`). `initializeOnce` asserts that contract.
     enum GhosttyProcessAppRuntime {
-        /// Which service owns the single live embedded app in this process.
         enum Owner: String { case daemon, mirror }
 
         private static let lock = NSLock()
@@ -25,9 +24,8 @@
         private nonisolated(unsafe) static var didInit = false
         private nonisolated(unsafe) static var startingOwner: Owner?
 
-        /// Runs `ghostty_init` at most once per process and records the owning service. A second start by
-        /// a *different* owner traps: it would mean both an embedded daemon core and the app mirror tried
-        /// to drive ghostty in one process, which the one-app-per-process contract forbids.
+        /// A second start by a *different* owner traps: it would mean both an embedded daemon core and the
+        /// app mirror tried to drive ghostty in one process, which the one-app-per-process contract forbids.
         static func initializeOnce(owner: Owner) throws {
             lock.lock()
             defer { lock.unlock() }
@@ -42,9 +40,8 @@
             didInit = true
         }
 
-        /// Generates the Spaces theme config files for the active profile and loads them into a fresh
-        /// finalized ghostty config handle. Embedded terminals load ONLY this generated config — never the
-        /// user's `~/.config/ghostty` files — so the look is owned by the active Spaces theme.
+        /// Embedded terminals load ONLY this generated config — never the user's `~/.config/ghostty` files
+        /// — so the look is owned by the active Spaces theme.
         static func makeThemeConfiguration() throws -> ghostty_config_t {
             let configRoot = URL(fileURLWithPath: try SpacesProfile.current().rootDirectory, isDirectory: true).appendingPathComponent(
                 "ghostty", isDirectory: true)

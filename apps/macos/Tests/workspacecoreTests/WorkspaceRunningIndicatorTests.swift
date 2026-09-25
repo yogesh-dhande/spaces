@@ -273,7 +273,7 @@ extension OrchestratorTests {
         XCTAssertTrue(try fixture.orchestrator.workspaceRuntimeStatus(workspaceID: fixture.workspace.id).hasTrackedRuntimeIndicators)
     }
 
-    /// A browser target has no session of its own, so it keeps counting exactly as it always has.
+    /// A browser target has no session of its own, so it keeps counting unconditionally.
     func testBrowserWindowKeepsWorkspaceRunning() throws {
         let fixture = try makeRunningIndicatorFixture()
         try fixture.store.upsert(

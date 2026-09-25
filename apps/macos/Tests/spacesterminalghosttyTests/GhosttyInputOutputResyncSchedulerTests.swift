@@ -37,8 +37,6 @@ import XCTest
         scheduler.handleOutputDidChange(interactive: true)
         XCTAssertTrue(scheduler.hasScheduledResync)
 
-        // A second interactive output while a work item is in flight reschedules the
-        // resync rather than cancelling it; the cancelled prior item never fires.
         scheduler.handleOutputDidChange(interactive: true)
         XCTAssertTrue(scheduler.hasScheduledResync)
 
@@ -85,10 +83,8 @@ import XCTest
         var resyncCount = 0
         let scheduler = GhosttyInputOutputResyncScheduler { resyncCount += 1 }
 
-        // Schedule a work item via the command path so termination has one to cancel.
         scheduler.noteLocalOwnerCommand()
         scheduler.handleOutputDidChange(interactive: true)
-        // The owner types again before shutdown, marking input pending.
         scheduler.noteLocalOwnerInput()
         XCTAssertTrue(scheduler.hasScheduledResync)
 

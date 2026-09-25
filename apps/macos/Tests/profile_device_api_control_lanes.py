@@ -209,17 +209,17 @@ time.sleep(3)
 
 
 def live_producer_fixture_count() -> int:
-    """How many producer fixtures are still running. A producer that emitted one frame and exited leaves a
-    session the daemon keeps answering `.state` for, so an advancing revision alone cannot tell a producer
-    that streamed through the window from one that died inside it."""
+    """A producer that emitted one frame and exited leaves a session the daemon keeps answering `.state`
+    for, so an advancing revision alone cannot tell a producer that streamed through the window from one
+    that died inside it."""
     completed = subprocess.run(["pgrep", "-f", PRODUCER_FIXTURE_PATTERN], capture_output=True, text=True)
     return len(completed.stdout.split())
 
 
 def perf_log_offset() -> int:
-    """How far the perf log has been written. Lane-wait rows are read from the offset taken when the
-    measured window opens, so the distribution covers the same requests the latencies do: appends are
-    serialized and only ever extend the file, so everything past that offset belongs to the window."""
+    """Lane-wait rows are read from the offset taken when the measured window opens, so the distribution
+    covers the same requests the latencies do: appends are serialized and only ever extend the file, so
+    everything past that offset belongs to the window."""
     try:
         return os.path.getsize(PERF_LOG)
     except OSError:

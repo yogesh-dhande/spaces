@@ -93,10 +93,8 @@ struct BrowserProxyRoutingTable: Sendable, Equatable {
     /// Drops every route owned by a device (e.g. after it is unpaired or its overview goes away).
     mutating func removeDevice(deviceID: String) { targets = targets.filter { $0.value.deviceID != deviceID } }
 
-    /// Looks up the target for a browser `Host`. The host is lowercased to match the stored keys.
     func target(forHost host: String) -> BrowserProxyRouteTarget? { targets[host.lowercased()] }
 
-    /// Extracts the lowercased host from a workspace service URL, or nil if the URL has no host.
     static func routingKey(forURL urlString: String) -> String? {
         let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let components = URLComponents(string: trimmed), let host = components.host, !host.isEmpty else { return nil }

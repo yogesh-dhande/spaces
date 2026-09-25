@@ -76,8 +76,7 @@
             return handler(url)
         }
 
-        /// Classifies `url` by file extension and dispatches to the matching handler. An
-        /// unclassified file (source code, an archive, anything without a recognized extension)
+        /// An unclassified file (source code, an archive, anything without a recognized extension)
         /// falls through to `defaultOpenHandler` — deliberately preserving macOS "open anything
         /// local" semantics, e.g. a `.swift` file opens in the user's default editor.
         @discardableResult public func openLocalFile(at url: URL) -> Bool {

@@ -147,7 +147,6 @@ public final class SpacesDeviceAPIRequestClient: @unchecked Sendable {
         return try settle(responseLine, connection: resolved.connection, host: resolved.host, generation: generation)
     }
 
-    /// One round trip on an established connection.
     private func exchange(_ requestLine: Data, on connection: any SpacesPinnedTLSLineConnection) throws -> Data {
         try connection.sendLine(requestLine, timeout: timeoutSeconds)
         do { return try connection.readLine(timeout: timeoutSeconds) } catch SpacesPinnedTLSConnectionError.connectionClosed {

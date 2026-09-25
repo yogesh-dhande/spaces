@@ -166,7 +166,6 @@ struct ConnectionSettingsView: View {
         return "\(SpacesDeviceHostAddressKind(host: host).label) · \(host)"
     }
 
-    /// Compact chip marking the synthetic Demo Mac in the device list.
     private var demoTag: some View {
         Text("Demo").font(.caption2.weight(.semibold)).foregroundStyle(Theme.accent).padding(.horizontal, 6).padding(.vertical, 2).background(
             Theme.accentTint, in: Capsule())

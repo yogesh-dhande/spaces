@@ -53,13 +53,10 @@ public struct AutomationDraft: Sendable, Equatable {
 
     /// Returns a normalized copy after enforcing the automation authoring rules, throwing an
     /// `AutomationValidationError` for the first violation:
-    /// - `name` must be non-empty after trimming.
-    /// - every draft requires a workspace. Script commands run at that workspace's root.
-    /// - an `agent`-kind draft requires a non-empty `agentCommand` and `agentPrompt`. The `agentCommand` must
-    ///   launch a supported coding agent (`AgentSpawnCommandGate`), so an unspawnable command is rejected at
-    ///   save time rather than failing every run at launch.
+    /// - the `agentCommand` on an `agent`-kind draft must launch a supported coding agent
+    ///   (`AgentSpawnCommandGate`), so an unspawnable command is rejected at save time rather than
+    ///   failing every run at launch.
     /// - a positive `timeoutSeconds` when present (a non-positive budget would time a run out instantly).
-    /// - a cron automation must carry a cron expression that `AutomationCronSchedule.parse` accepts.
     /// - a manual automation must not carry a cron expression (it has no schedule).
     /// The returned draft has whitespace trimmed from `name`/`workspaceID` and its cron expression
     /// normalized to nil for a manual automation, so the persisted row is canonical regardless of caller.

@@ -10,10 +10,10 @@ import spacesterminalcore
 /// these methods must enforce the same acyclic invariant a plain local watch does — a self-edge or a
 /// cycle-closing edge must be rejected instead of silently recorded.
 final class AgentSubscribeWatchTests: XCTestCase {
-    /// Failing-first equivalent of the bug: `spaces agent subscribe <session> --device local` used to take
-    /// the cross-device branch and call `insertAgentRemoteSubscription`, which runs no cycle detection, so a
-    /// terminal could subscribe to its own agent. Routed through `subscribeAgentWatch`, the self-edge is a
-    /// loud error.
+    /// Guards a self-edge in `spaces agent subscribe <session> --device local`: naming the local device
+    /// must not fall into the cross-device branch and call `insertAgentRemoteSubscription`, which runs no
+    /// cycle detection and would let a terminal subscribe to its own agent. Routed through
+    /// `subscribeAgentWatch`, the self-edge is a loud error instead.
     func testSubscribeAgentWatchToOwnAgentByTerminalIDThrowsSelfEdge() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)

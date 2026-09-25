@@ -9,7 +9,6 @@
  * a layout preference worth restoring across relaunch.
  */
 
-/** An even split is where a document with source on one side and its rendering on the other starts. */
 export const DEFAULT_EDITOR_SPLIT_FRACTION = 0.5;
 /** Neither half may be squeezed past a fifth of the split: below that the narrow side stops being
  *  readable, and the user has Source or Preview for the cases where one side is all they want. */
@@ -25,16 +24,14 @@ export function clampEditorSplitFraction(fraction: number): number {
 }
 
 export interface EditorSplitDividerHost {
-  /** The split container the fraction is measured against. */
   container: HTMLElement;
-  /** The fraction of the split the source half currently occupies. */
   fraction(): number;
   /** Records and paints a new fraction. */
   setFraction(fraction: number): void;
 }
 
 /**
- * Wires `divider` to drag and arrow-key the split. The divider is a bare div for layout reasons,
+ * The divider is a bare div for layout reasons,
  * so separator semantics, a tab stop, and arrow-key resizing are added by hand: without them the
  * control is pointer-only for keyboard and VoiceOver users.
  */

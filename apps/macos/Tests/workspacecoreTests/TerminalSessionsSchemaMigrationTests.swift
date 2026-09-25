@@ -25,7 +25,6 @@ final class TerminalSessionsSchemaMigrationTests: XCTestCase {
 
         XCTAssertEqual(try scalar(database, "SELECT current_version FROM migration_state"), "\(DatabaseSchema.currentVersion)")
 
-        // Every seeded row is carried forward, with workspace_id intact and automation_run_id NULL.
         XCTAssertEqual(try scalar(database, "SELECT COUNT(*) FROM terminal_sessions"), "3")
         XCTAssertEqual(try scalar(database, "SELECT COUNT(*) FROM terminal_sessions WHERE automation_run_id IS NOT NULL"), "0")
         XCTAssertEqual(try scalar(database, "SELECT workspace_id FROM terminal_sessions WHERE session_id = 'session-full'"), "ws-1")
@@ -37,7 +36,6 @@ final class TerminalSessionsSchemaMigrationTests: XCTestCase {
         XCTAssertEqual(try scalar(database, "SELECT workspace_id FROM terminal_sessions WHERE session_id = 'session-null-cmd'"), "ws-2")
         XCTAssertEqual(try scalar(database, "SELECT workspace_id FROM terminal_sessions WHERE session_id = 'session-third'"), "ws-3")
 
-        // The new automation tables exist.
         XCTAssertEqual(try scalar(database, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'automations'"), "1")
         XCTAssertEqual(try scalar(database, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'automation_runs'"), "1")
 

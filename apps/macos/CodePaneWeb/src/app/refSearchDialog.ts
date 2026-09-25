@@ -115,7 +115,6 @@ export class RefSearchDialog {
     host.appendChild(this.backdropEl);
   }
 
-  /** Opens in `mode` — called only from `toolbar.ts`'s "Branch…" / "Commit or ref…" menu items. */
   show(mode: RefSearchMode): void {
     if (!this.isOpen) {
       const active = document.activeElement;
@@ -141,7 +140,6 @@ export class RefSearchDialog {
     this.priorFocusEl = undefined;
   }
 
-  /** Fetched fresh on every `show()` — no cache, per this class's doc comment. */
   private fetchListing(): void {
     const token = ++this.fetchToken;
     void this.listRefs()
@@ -187,7 +185,6 @@ export class RefSearchDialog {
     this.callbacks.onSelect(refName);
   }
 
-  /** Recomputes `this.rows` for the current query and mode, and re-renders the list from scratch. */
   private renderResults(): void {
     const trimmed = this.query.trim();
     this.rows = this.mode === "branch" ? this.computeBranchRows(trimmed) : this.computeCommitRows(trimmed);

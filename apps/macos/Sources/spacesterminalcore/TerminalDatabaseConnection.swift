@@ -104,7 +104,7 @@ final class TerminalDatabaseConnection: @unchecked Sendable {
         /// Queue-confined. The path `database` is open on, so a caller naming a different profile's
         /// database replaces it rather than being served the wrong one.
         private var openPath: String?
-        /// Queue-confined. Opened on first use and reused by every unit of work after it.
+        /// Queue-confined.
         private var database: SpacesSQLiteDatabase?
         /// Queue-confined except for the test-facing read below, which is taken on the queue too.
         private var runCount = 0

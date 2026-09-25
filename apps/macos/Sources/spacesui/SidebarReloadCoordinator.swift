@@ -16,9 +16,7 @@ import Foundation
         let forceRemoteRefresh: Bool
         // Whether this request clears a device's failure backoff, distinct from `forceRemoteRefresh`
         // (which only bypasses the freshness window): see `SidebarController.startRemoteOverviewPull`.
-        // Defaults to `forceRemoteRefresh` at the call site so every existing caller keeps its current,
-        // coupled behavior; only a caller that explicitly wants freshness without clearing backoff (the
-        // remote workspace-setup progress poll) passes them independently.
+        // Defaults to `forceRemoteRefresh`, so callers that don't need them separated don't pass both.
         let bypassesBackoff: Bool
     }
 
@@ -121,9 +119,8 @@ import Foundation
         for waiter in waiters { waiter.continuation.resume() }
     }
 
-    /// Starts immediately when the spacing interval has already elapsed, otherwise holds the request as
-    /// pending and schedules the one start that will run it. At most one start is ever scheduled; every
-    /// further request merges into the pending one that start will carry.
+    /// At most one start is ever scheduled; every further request merges into the pending one that
+    /// start will carry.
     private func startOrSchedule(_ request: ReloadRequest) {
         guard scheduledStartTask == nil else {
             pendingRequest = mergedPendingRequest(existing: pendingRequest, next: request)

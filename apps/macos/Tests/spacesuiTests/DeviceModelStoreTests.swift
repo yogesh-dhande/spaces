@@ -5,7 +5,7 @@ import workspacecore
 
 @testable import spacesui
 
-/// Behavior of `DeviceModelStore`, the device/sidebar data cache extracted from `AppKitController`:
+/// Behavior of `DeviceModelStore`, the device/sidebar data cache:
 /// the fixed effect ordering its `workspacesByProject` `didSet` runs through the two injected hooks,
 /// `workspaceIndex`'s derivation from a multi-project `workspacesByProject`, and `DeviceSection`'s
 /// `overviewInstallGeneration` bookkeeping.

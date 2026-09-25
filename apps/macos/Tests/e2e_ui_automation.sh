@@ -61,8 +61,6 @@ APPLESCRIPT
   fail "timed out waiting for Spaces window"
 }
 ui_click_identifier() {
-  # The GUI identifiers added for this suite keep the AppleScript automation
-  # resilient when labels or ordering change.
   local identifier="$1"
   osascript - "$SPACES_PID" "$identifier" <<'APPLESCRIPT'
 on elementMatchesIdentifier(targetElement, targetID)
@@ -286,7 +284,6 @@ on run argv
 end run
 APPLESCRIPT
 }
-# Polls until a UI identifier with the given prefix appears, echoing the full identifier.
 wait_for_ui_identifier_with_prefix() {
   local prefix="$1"
   local description="${2:-$prefix}"

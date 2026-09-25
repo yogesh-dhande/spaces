@@ -140,11 +140,9 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         driverA?.setOutputHandler { collectorA.append($0) }
         try driverA?.startIfNeeded()
 
-        // The child echoes through driver A before the handoff begins.
         driverA?.sendRawBytes(Data("ping\n".utf8))
         XCTAssertTrue(waitUntil { collectorA.string.contains("ping") }, "driver A never observed its child echo")
 
-        // Stage the handoff: buffer, flush to a file, then snapshot the descriptors.
         beginHandoffOutputBuffering(driverA)
         let filePath = makeTemporaryFilePath()
         try driverA?.finishHandoffOutputBuffering(appendingTo: filePath)
@@ -201,8 +199,6 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         driver.setSessionClosedHandler { closedExpectation.fulfill() }
         try driver.startIfNeeded()
 
-        // Flip mid-stream: wait until the handler has captured some early lines, then
-        // swap to buffering and immediately to the append-only file sink.
         XCTAssertTrue(waitUntil { handlerCollector.string.contains("L0010") }, "no early output captured before the swap")
         beginHandoffOutputBuffering(driver)
         let filePath = makeTemporaryFilePath()
@@ -210,8 +206,6 @@ final class HostManagedPTYAdoptTests: XCTestCase {
 
         wait(for: [closedExpectation], timeout: 10)
 
-        // Concatenate handler bytes (pre-swap) then file bytes (buffered + direct) and
-        // assert every numbered line appears exactly once, in order, with no gaps.
         let fileData = (try? Data(contentsOf: URL(fileURLWithPath: filePath))) ?? Data()
         let combined = handlerCollector.snapshot + fileData
         let text = String(decoding: combined, as: UTF8.self)
@@ -241,11 +235,10 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         driver.setSessionClosedHandler { sessionClosed.fulfill() }
         try driver.startIfNeeded()
 
-        // 10s to match the other spawned-child waits in this file (a child's first PTY output is what
-        // is being awaited, same as lines 128/211); the previous 5s was the file's outlier. Bail on
-        // timeout instead of falling through: the two barrier assertions below both invert their
-        // meaning once no delivery is in flight (buffering returns immediately because nothing blocks
-        // it), so continuing would report two misleading failures for this one.
+        // 10s to match the other spawned-child waits in this file: a child's first PTY output is what
+        // is being awaited. Bail on timeout instead of falling through: the two barrier assertions
+        // below both invert their meaning once no delivery is in flight (buffering returns immediately
+        // because nothing blocks it), so continuing would report two misleading failures for this one.
         guard XCTWaiter().wait(for: [handlerEntered], timeout: 10) == .completed else {
             XCTFail("output handler never entered within 10s; the child never delivered its first PTY output")
             // Pre-signal the release in case output arrives right after the timeout: the handler would

@@ -188,9 +188,10 @@
 
         /// A trim that cannot run must not fail the clear-mutation append that triggered it: `clearScreen`
         /// must still report success, apply the clear to the live renderer, and leave the durable mutation
-        /// bytes at the tail of `output.log`. Pre-fix (one conflated do/catch around the inline trim) the
-        /// trim throw returned false, so `clearScreen` returned ok:false and never touched the live renderer
-        /// even though the clear bytes were already durable — diverging live state from a future replay.
+        /// bytes at the tail of `output.log`. A single conflated do/catch around the inline trim would let
+        /// the trim's throw return false, so `clearScreen` would return ok:false and never touch the live
+        /// renderer even though the clear bytes were already durable — diverging live state from a future
+        /// replay.
         @Test func clearScreenSucceedsWhenTrimFailsAfterDurableWrite() async throws {
             let paths = try makeTemporaryPaths()
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }

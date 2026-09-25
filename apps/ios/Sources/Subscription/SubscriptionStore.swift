@@ -151,8 +151,6 @@ import UIKit
         return scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
     }
 
-    /// Restores purchases by syncing with the App Store, then re-reads the entitlement. Used by both the
-    /// paywall and the Settings section.
     func restore() async {
         isPurchasing = true
         errorMessage = nil

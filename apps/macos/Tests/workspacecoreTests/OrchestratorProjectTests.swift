@@ -7,7 +7,6 @@ import systembridge
 
 extension OrchestratorTests {
 
-    // Tests add project by cloning uses repos root and repo name by arranging representative inputs and asserting the expected result.
     func testAddProjectByCloningUsesReposRootAndRepoName() throws {
         let fixture = try makeTempGitRepo(name: "sample-repo")
         let root = try makeTempDirectory()
@@ -33,7 +32,6 @@ extension OrchestratorTests {
         XCTAssertTrue(FileManager.default.fileExists(atPath: "\(defaultWorkspace.dir)/README.md"))
     }
 
-    // Tests add project by cloning strips git suffix from repo name by arranging representative inputs and asserting the expected result.
     func testAddProjectByCloningStripsGitSuffixFromRepoName() throws {
         let fixture = try makeTempGitRepo(name: "source.git")
         let root = try makeTempDirectory()
@@ -53,7 +51,6 @@ extension OrchestratorTests {
             try runGitAndCapture(["rev-parse", "--is-bare-repository"], cwd: project.dir).trimmingCharacters(in: .whitespacesAndNewlines), "true")
     }
 
-    // Tests add project by cloning follows a repository default branch named master.
     func testAddProjectByCloningUsesMasterWhenItIsRepositoryDefault() throws {
         let fixture = try makeTempGitRepo(name: "master-only", initialBranch: "master")
         let root = try makeTempDirectory()
@@ -71,7 +68,6 @@ extension OrchestratorTests {
         XCTAssertTrue(FileManager.default.fileExists(atPath: "\(defaultWorkspace.dir)/README.md"))
     }
 
-    // Tests remove project deletes managed git project directory by arranging representative inputs and asserting the expected result.
     func testRemoveProjectDeletesManagedGitProjectDirectory() throws {
         let fixture = try makeTempGitRepo(name: "managed")
         let root = try makeTempDirectory()
@@ -101,7 +97,6 @@ extension OrchestratorTests {
         XCTAssertTrue(try orchestrator.listProjects().isEmpty)
     }
 
-    // Tests remove project deletes managed workspace directories for managed git project by arranging representative inputs and asserting the expected result.
     func testRemoveProjectDeletesManagedWorkspaceDirectoriesForManagedGitProject() throws {
         let fixture = try makeTempGitRepo(name: "managed-with-workspace")
         let root = try makeTempDirectory()
@@ -168,7 +163,6 @@ extension OrchestratorTests {
             "the outside watcher must be told the child exited, got: \(recorder.delivered.first?.line ?? "nothing")")
     }
 
-    // Tests remove project does not delete unmanaged project directory but deletes managed workspace directories by arranging representative inputs and asserting the expected result.
     func testRemoveProjectDoesNotDeleteUnmanagedProjectDirectoryButDeletesManagedWorkspaceDirectories() throws {
         let projectDir = try makeTempDirectory()
         try runGit(["init"], cwd: projectDir.path)
@@ -201,7 +195,6 @@ extension OrchestratorTests {
         XCTAssertFalse(parseWorktreePaths(worktreesAfter).contains(normalizedWorkspaceDir))
     }
 
-    // Tests list projects returns sorted summaries by arranging representative inputs and asserting the expected result.
     func testListProjectsReturnsSortedSummaries() throws {
         let root = try makeTempDirectory()
         let aDir = root.appendingPathComponent("alpha", isDirectory: true)
@@ -342,7 +335,6 @@ extension OrchestratorTests {
         let orchestrator = makeTestOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
 
         let prepared = try orchestrator.prepareGitProject(gitURL: fixture.path, replaceExistingManagedDirectories: true)
-        // Sanity: the repo's spaces.yaml was detected.
         XCTAssertEqual(prepared.project.processes.first?.command, "npm run api")
 
         let project = try orchestrator.addPreparedGitProject(prepared) { config in
@@ -482,7 +474,6 @@ extension OrchestratorTests {
                     .path))
     }
 
-    // Tests add project stores in db only by arranging representative inputs and asserting the expected result.
     func testAddProjectStoresInDBOnly() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("myproject", isDirectory: true)
@@ -492,10 +483,7 @@ extension OrchestratorTests {
 
         let record = try orchestrator.addProject(dir: projectDir.path)
 
-        // Project is in DB
         XCTAssertNotNil(try store.project(id: record.id))
-
-        // Project count in DB is correct
         XCTAssertEqual(try store.projects().count, 1)
     }
 
@@ -562,7 +550,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests remove project deletes from db by arranging representative inputs and asserting the expected result.
     func testRemoveProjectDeletesFromDB() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -580,7 +567,6 @@ extension OrchestratorTests {
 
     // MARK: - listProjects
 
-    // Tests listProjects returns summaries for all stored projects by arranging representative inputs and asserting the expected result.
     func testListProjectsReturnsSummariesForAllProjects() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -603,7 +589,6 @@ extension OrchestratorTests {
         XCTAssertTrue(names.contains("b"))
     }
 
-    // Tests updateProjectConfig with git repo project refreshes default workspace by arranging representative inputs and asserting the expected result.
     func testAddProjectDirForGitRepoDetectsGitBranch() throws {
         let fixture = try makeTempGitRepo(name: "detect-git")
         let store = try makeTemporaryStore()
@@ -616,7 +601,6 @@ extension OrchestratorTests {
         XCTAssertFalse((project.defaultBranch ?? "").isEmpty)
     }
 
-    // Tests addProject throws when directory does not exist by arranging representative inputs and asserting the expected result.
     func testAddProjectThrowsWhenDirectoryNotFound() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -626,7 +610,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests addProject by gitURL overwrites abandoned managed destination state by arranging representative inputs and asserting the expected result.
     func testAddProjectByGitURLOverwritesAbandonedDestination() throws {
         let fixture = try makeTempGitRepo(name: "my-repo")
         let root = try makeTempDirectory()
@@ -770,7 +753,6 @@ extension OrchestratorTests {
         XCTAssertTrue(FileManager.default.fileExists(atPath: ownerMarker.path))
     }
 
-    // Tests addProject(dir:) throws projectAlreadyExists when the directory has already been imported.
     func testAddProjectDirThrowsWhenProjectAlreadyExists() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -805,7 +787,6 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.workspaces(projectID: project.id).count, 1)
     }
 
-    // Tests addProject(gitURL:) throws invalidArgument when the URL is an empty string.
     func testAddProjectByGitURLThrowsWhenURLIsEmpty() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -818,7 +799,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests addProject(gitURL:) throws projectAlreadyExists when the same destination is already registered.
     func testAddProjectByGitURLThrowsWhenProjectAlreadyExistsInDB() throws {
         let fixture = try makeTempGitRepo(name: "duplicate-project")
         let root = try makeTempDirectory()
@@ -829,8 +809,6 @@ extension OrchestratorTests {
 
         _ = try orchestrator.addProject(gitURL: fixture.path)
 
-        // The destination directory now exists in the repos root AND in the DB.
-        // Cloning again should fail because the project already exists in the DB.
         XCTAssertThrowsError(try orchestrator.addProject(gitURL: fixture.path)) { error in
             // Either projectAlreadyExists (DB hit) or invalidArgument (directory on disk hit) — both are valid.
             let desc = error.localizedDescription
@@ -838,7 +816,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests addProject(gitURL:) accepts a non-conventional branch name when it is the repository default.
     func testAddProjectByGitURLUsesRepositoryDefaultBranchWithNonStandardName() throws {
         let fixture = try makeTempGitRepo(name: "develop-only", initialBranch: "develop")
         let root = try makeTempDirectory()
@@ -855,7 +832,6 @@ extension OrchestratorTests {
         XCTAssertTrue(FileManager.default.fileExists(atPath: "\(defaultWorkspace.dir)/README.md"))
     }
 
-    // Tests addProject(gitURL:) succeeds for a repository whose default branch is master.
     func testAddProjectByGitURLSucceedsWithMasterBranch() throws {
         let fixture = try makeTempGitRepo(name: "master-only", initialBranch: "master")
         let root = try makeTempDirectory()
@@ -868,7 +844,6 @@ extension OrchestratorTests {
         XCTAssertEqual(project.defaultBranch, "master")
     }
 
-    // Tests addProject(gitURL:) with an SSH-style URL (no "://", colon after last slash) covers inferredProjectName SSH path.
     func testAddProjectByGitURLWithSSHStyleURLCoversInferredProjectName() throws {
         let root = try makeTempDirectory()
         let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
@@ -878,11 +853,10 @@ extension OrchestratorTests {
 
         // URL: "users/host:sshrepo.git" — no "://", colon (index 10) > last slash (index 5).
         // inferredProjectName strips the SSH prefix → "sshrepo.git" → strips ".git" → "sshrepo".
-        // Clone will fail (not a real remote), but lines 2657-2659 are covered before the clone attempt.
+        // Clone will fail (not a real remote), but inferredProjectName's SSH-path parsing is covered before the clone attempt.
         XCTAssertThrowsError(try orchestrator.addProject(gitURL: "users/host:sshrepo.git"))
     }
 
-    // Tests addProject(gitURL:) with a project name containing "." covers sanitizeDirname's return "-" path.
     func testAddProjectByGitURLWithSpecialCharsInNameSanitizesDirname() throws {
         let fixture = try makeTempGitRepo(name: "my.project", initialBranch: "main")
         let root = try makeTempDirectory()

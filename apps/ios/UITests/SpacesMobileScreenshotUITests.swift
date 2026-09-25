@@ -57,8 +57,8 @@ final class SpacesMobileScreenshotUITests: XCTestCase {
     }
 
     /// Shadows the persistence keys through the argument domain so a demo-mode screenshot launch
-    /// starts not-paired, Demo-off, and with no alert dismissed regardless of prior simulator state,
-    /// matching `SpacesMobileDemoModeUITests`. The non-Data, non-array string "unset" makes
+    /// starts not-paired, Demo-off, and with no alert dismissed regardless of prior simulator state.
+    /// The non-Data, non-array string "unset" makes
     /// `UserDefaults.data(forKey:)` and `stringArray(forKey:)` return nil; the value must not start with
     /// "-" or `NSArgumentDomain` parses it as the next option key and the shadow silently never registers.
     private func applyCleanSlateLaunchArguments(to app: XCUIApplication) {
@@ -68,7 +68,6 @@ final class SpacesMobileScreenshotUITests: XCTestCase {
         ]
     }
 
-    /// Taps Try Demo Mode from the unpaired Spaces empty state and waits for the Demo Mode banner.
     private func enableDemoMode(in app: XCUIApplication, timeout: TimeInterval) -> Bool {
         let tryDemo = app.buttons["spaces.tryDemoMode"]
         guard tryDemo.waitForExistence(timeout: timeout) else { return false }
@@ -79,8 +78,8 @@ final class SpacesMobileScreenshotUITests: XCTestCase {
     }
 
     private func applyLaunchEnvironment(to app: XCUIApplication, configuration: ScreenshotUITestConfiguration, includePaywallBypass: Bool) {
-        // DEBUG-only paywall bypass, mirrors SpacesMobileUITests. Omitted only when the caller wants
-        // the real paywall to render, e.g. the App Store Connect subscription-review screenshot.
+        // DEBUG-only paywall bypass. Omitted only when the caller wants the real paywall to render,
+        // e.g. the App Store Connect subscription-review screenshot.
         if includePaywallBypass { app.launchEnvironment["SPACES_MOBILE_PAYWALL_BYPASS"] = "1" }
         app.launchEnvironment["SPACES_MOBILE_TEST_HOST"] = configuration.host
         app.launchEnvironment["SPACES_MOBILE_TEST_PORT"] = String(configuration.port)
@@ -108,9 +107,8 @@ final class SpacesMobileScreenshotUITests: XCTestCase {
         return false
     }
 
-    /// Taps the first button whose accessibility label contains `titleSubstring`, scrolling the
-    /// Spaces list into view first if needed. Matches on label text rather than a row identifier
-    /// since the host supplies a human-readable title (or substring), not a session ID.
+    /// Matches on label text rather than a row identifier since the host supplies a human-readable
+    /// title (or substring), not a session ID.
     private func openRow(titled titleSubstring: String, in app: XCUIApplication, timeout: TimeInterval) -> Bool {
         let predicate = NSPredicate(format: "label CONTAINS[c] %@", titleSubstring)
         let deadline = Date().addingTimeInterval(timeout)

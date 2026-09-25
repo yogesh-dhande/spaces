@@ -79,8 +79,8 @@ function setup(options?: {
   const pickerHost = document.createElement("div");
   document.body.appendChild(pickerHost);
   const menu = makeContextMenu();
-  // The real picker, not a stub: Move to… is now entirely a pick from this overlay, so the tests
-  // below drive it exactly as the user does.
+  // The real picker, not a stub: Move to… is entirely a pick from this overlay, so the tests below
+  // drive it exactly as the user does.
   const folderPicker = new FolderPicker(pickerHost);
   const actions = makeActions(options?.actions);
   const callbacks = makeCallbacks(options?.callbacks);

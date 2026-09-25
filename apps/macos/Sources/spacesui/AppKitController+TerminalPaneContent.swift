@@ -41,7 +41,7 @@ extension AppKitController {
             if selectedWorkspaceID != workspaceID, let (_, workspace) = findWorkspace(id: workspaceID) { selectWorkspace(workspace) }
             // Explicitly focusing/opening a workspace terminal (sidebar row, numbered shortcut,
             // window cycle, `open`/`focus-workspace-process`) must bring Spaces to the foreground,
-            // mirroring how focusing a browser target activates Chrome. Post-panel-rework the
+            // mirroring how focusing a browser target activates Chrome. The
             // terminal is a pane inside the main window, so an already-visible-but-backgrounded
             // window would otherwise stay behind the frontmost app — leaving `NSApp.isActive`
             // false, which makes global window-cycle navigation unable to resolve the focused
@@ -209,12 +209,6 @@ extension AppKitController {
         return pruned.isEmpty ? .discard : .open(pruned)
     }
 
-    /// Reopens persisted global panel windows eagerly once possible. Called after
-    /// every device-section load; each row waits for the devices its panes reference.
-    /// A device that is not loaded is never ready: a pane needs a live daemon to attach
-    /// its session to, so an unreachable device's panes stay pending for the outage even
-    /// though it keeps its overview — and because the record is only ever deferred, its
-    /// panes are never pruned against a catalog the outage made unavailable.
     /// Points a still-pending global panel window's persisted pane at a replacement session.
     ///
     /// A window whose devices are not all loaded is deferred rather than restored, so a restart of a
@@ -279,6 +273,12 @@ extension AppKitController {
         }
     }
 
+    /// Reopens persisted global panel windows eagerly once possible. Called after
+    /// every device-section load; each row waits for the devices its panes reference.
+    /// A device that is not loaded is never ready: a pane needs a live daemon to attach
+    /// its session to, so an unreachable device's panes stay pending for the outage even
+    /// though it keeps its overview — and because the record is only ever deferred, its
+    /// panes are never pruned against a catalog the outage made unavailable.
     func reopenPersistedPanelWindowsIfPossible() {
         if pendingPanelWindowRestores == nil { pendingPanelWindowRestores = (try? clientDatabase().panelWindows()) ?? [] }
         guard let pending = pendingPanelWindowRestores, !pending.isEmpty else { return }

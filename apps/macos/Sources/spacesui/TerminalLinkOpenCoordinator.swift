@@ -312,11 +312,10 @@
         /// Removes cached artifacts older than 24h, once per app run. Mirrors the iOS preview-cache GC but
         /// stays local to the coordinator. Runs off the main actor since it scans the temp directory.
         ///
-        /// This used to fire a bare `Task.detached` that no one awaited, escaping `activeTask`
-        /// tracking entirely — the one genuinely fire-and-forget task in this file, since the
-        /// download/chunk-read detached tasks elsewhere are all immediately `await`ed by their
-        /// caller. It is folded into `inFlightOpenTasks` the same way as a fetch, so
-        /// `drainActiveWorkForTesting()` also accounts for it on the one run where it actually fires.
+        /// Folded into `inFlightOpenTasks` the same way as a fetch, so `drainActiveWorkForTesting()` also
+        /// accounts for it on the one run where it actually fires — unlike a bare `Task.detached` that no
+        /// one awaits, which would make this the one genuinely fire-and-forget task in this file, since
+        /// the download/chunk-read detached tasks elsewhere are all immediately `await`ed by their caller.
         private func startCacheGCIfNeeded() {
             guard !Self.didRunCacheGC else { return }
             Self.didRunCacheGC = true

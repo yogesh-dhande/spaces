@@ -10,8 +10,8 @@ import Testing
 /// live-root check runs independently of profile resolution so folding a refusal into "no profile"
 /// never drops that protection.
 @Suite struct ProfileDatabaseMigrationGuardTests {
-    /// Before the fix, resolving the profile unconditionally meant this call threw the test-host
-    /// refusal even though `databasePath` never depended on the profile at all, forcing tests to
+    /// Without this, resolving the profile unconditionally would mean this call throws the test-host
+    /// refusal even though `databasePath` never depends on the profile at all, forcing tests to
     /// rebind the process-wide SPACES_* environment instead of naming their own throwaway database.
     @Test func anExplicitThrowawayDatabaseOpensAndMigratesWithoutProfileResolution() throws {
         let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)

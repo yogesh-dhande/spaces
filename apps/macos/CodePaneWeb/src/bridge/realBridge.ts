@@ -160,7 +160,7 @@ class RealSpacesBridge implements SpacesBridge {
     return promise;
   }
 
-  /** Fire-and-forget lifecycle notification; see class doc comment. */
+  /** Fire-and-forget lifecycle notification. */
   notifyReady(): void {
     const handler = window.webkit?.messageHandlers?.spacesBridge;
     handler?.postMessage({ method: "ready" });

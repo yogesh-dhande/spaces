@@ -36,7 +36,6 @@ struct SessionRestoreOffer: Equatable {
         }
     }
 
-    /// The rows of one workspace, under the heading the list groups them beneath.
     struct WorkspaceGroup: Equatable {
         /// What the list puts above the group: the workspace's name when this client knows it, and the
         /// working directory of the group's first row when it does not. The launch step runs before any

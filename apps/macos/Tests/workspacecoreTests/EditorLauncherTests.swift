@@ -4,14 +4,12 @@ import XCTest
 @testable import workspacecore
 
 final class EditorLauncherTests: XCTestCase {
-    // Tests a local open invokes the editor CLI with the workspace directory.
     func testOpenInvokesCLIWithDirectory() throws {
         let (cli, log) = try makeLoggingCLI()
         try EditorLauncher.open(cliExecutablePath: cli, directory: "/tmp/workspace")
         XCTAssertEqual(try loggedLines(log), ["/tmp/workspace|"])
     }
 
-    // Tests a VS Code remote open hands the CLI a vscode-remote folder URI with [user@]host[:port] authority and a percent-encoded path.
     func testOpenRemoteVSCodeBuildsFolderURI() throws {
         let (cli, log) = try makeLoggingCLI()
         try EditorLauncher.openRemoteVSCode(
@@ -19,7 +17,7 @@ final class EditorLauncherTests: XCTestCase {
         XCTAssertEqual(try loggedLines(log), ["--folder-uri|vscode-remote://ssh-remote+dev@build.example:2200/srv/work%20space|"])
     }
 
-    // Tests a Zed remote open hands the CLI an ssh:// URL (Zed's built-in remoting) rather than a vscode-remote folder URI.
+    // A Zed remote open hands the CLI an ssh:// URL (Zed's built-in remoting) rather than a vscode-remote folder URI.
     func testOpenRemoteZedBuildsSSHURL() throws {
         let (cli, log) = try makeLoggingCLI()
         try EditorLauncher.openRemoteZed(
@@ -27,14 +25,12 @@ final class EditorLauncherTests: XCTestCase {
         XCTAssertEqual(try loggedLines(log), ["ssh://dev@build.example:2200/srv/work%20space|"])
     }
 
-    // Tests a remote open omits user and port from the authority when they are not configured.
     func testOpenRemoteOmitsMissingUserAndPort() throws {
         let (cli, log) = try makeLoggingCLI()
         try EditorLauncher.openRemoteVSCode(cliExecutablePath: cli, sshHost: "build.example", sshUser: nil, sshPort: nil, directory: "/srv/work")
         XCTAssertEqual(try loggedLines(log), ["--folder-uri|vscode-remote://ssh-remote+build.example/srv/work|"])
     }
 
-    // Tests a remote open rejects a paired device that has no SSH host configured.
     func testOpenRemoteThrowsWhenSSHHostMissing() throws {
         let (cli, _) = try makeLoggingCLI()
         XCTAssertThrowsError(
@@ -42,14 +38,12 @@ final class EditorLauncherTests: XCTestCase {
         ) { error in XCTAssertTrue(error.localizedDescription.contains("requires an SSH host")) }
     }
 
-    // Tests extension install invokes the editor CLI with the extension identifier.
     func testInstallRemoteSSHExtensionInvokesCLI() throws {
         let (cli, log) = try makeLoggingCLI()
         try EditorLauncher.installRemoteSSHExtension(cliExecutablePath: cli, extensionID: "ms-vscode-remote.remote-ssh")
         XCTAssertEqual(try loggedLines(log), ["--install-extension|ms-vscode-remote.remote-ssh|"])
     }
 
-    // Tests extension install surfaces a non-zero CLI exit as an error so the caller can report it.
     func testInstallRemoteSSHExtensionThrowsOnFailure() throws {
         let (cli, _) = try makeLoggingCLI(exitCode: 1)
         XCTAssertThrowsError(try EditorLauncher.installRemoteSSHExtension(cliExecutablePath: cli, extensionID: "x")) { error in
@@ -57,9 +51,8 @@ final class EditorLauncherTests: XCTestCase {
         }
     }
 
-    // Tests a launch pins TMPDIR to the stable per-user temp instead of leaking an ephemeral
-    // TMPDIR (e.g. a per-step harness temp), which would break editors that write SSH askpass
-    // scripts under TMPDIR.
+    // Leaking an ephemeral TMPDIR (e.g. a per-step harness temp) would break editors that write SSH
+    // askpass scripts under TMPDIR, so a launch pins TMPDIR to the stable per-user temp instead.
     func testLaunchPinsStableTemporaryDirectory() throws {
         let root = try makeTempDirectory()
         let seen = root.appendingPathComponent("seen-tmpdir")

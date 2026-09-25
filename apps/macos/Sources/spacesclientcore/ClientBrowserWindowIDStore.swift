@@ -23,15 +23,12 @@ public struct ClientBrowserWindowIDStore: Sendable {
         }
     }
 
-    /// All tracked browser-session tab locations for a workspace, used to close them when the
-    /// workspace stops.
     public func windowIDs(workspaceID: String) throws -> [(targetURL: String, windowID: Int)] {
         try SpacesClientDatabase.withDefaultDatabase { try $0.browserSessionWindowIDs(deviceID: deviceID, workspaceID: workspaceID) }
     }
 
-    /// Tracked browser-session tab locations for several workspaces at once, read through one
-    /// database handle. The window cycle's cross-device modes ask about every workspace on every
-    /// keypress, so they read them together rather than opening the database per workspace.
+    /// The window cycle's cross-device modes ask about every workspace on every keypress, so they read
+    /// them together rather than opening the database per workspace.
     public func windowIDs(workspaceIDs: [String]) throws -> [String: [(targetURL: String, windowID: Int)]] {
         try SpacesClientDatabase.withDefaultDatabase { database in
             var windowIDsByWorkspace: [String: [(targetURL: String, windowID: Int)]] = [:]

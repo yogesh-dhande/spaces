@@ -34,10 +34,10 @@ export interface EditorSidebarCallbacks {
 }
 
 /**
- * Editor mode's sidebar: a two-way "Files" / "Changes" segmented header (Design K) sitting inside
+ * Editor mode's sidebar: a two-way "Files" / "Changes" segmented header sitting inside
  * the same `.file-list` element diff mode's plain changed-files list occupies — root.ts swaps
  * `fileListEl`'s single child between this instance's `el` (editor mode) and the changed-files list
- * host directly (diff mode, no header, unchanged from before Design K).
+ * host directly (diff mode, no header).
  *
  * "Files" renders the full workspace listing (`filesTree.ts`, fed lazily from the shared
  * `WorkspaceFileListCache`) with no per-file status — every file in that listing is unchanged by
@@ -304,7 +304,7 @@ export class EditorSidebar {
       // Bump fetchToken so a Files fetch still in flight from before this switch can't land here: its
       // `.then()`'s `token !== this.fetchToken` guard now fails, so it can no longer flip
       // `noteEl.hidden` (or overwrite `paths`/`truncated`) underneath the Changes list it no longer
-      // applies to (Finding 2).
+      // applies to.
       this.fetchToken++;
       this.noteEl.hidden = true;
       return;

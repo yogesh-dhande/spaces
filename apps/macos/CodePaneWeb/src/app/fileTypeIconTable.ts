@@ -200,5 +200,4 @@ export const FILE_TYPE_ICON_BY_EXTENSION: Readonly<Record<string, string>> = {
   "zsh": "shell",
 };
 
-/** The pack's default file icon, for a name neither table answers. */
 export const DEFAULT_FILE_TYPE_ICON = "default_file";

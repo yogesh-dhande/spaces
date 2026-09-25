@@ -56,7 +56,7 @@ import XCTest
             SpacesProfile.resetCacheForTesting()
             // The admin socket lives under a short fixed root keyed by a hash of the runtime
             // directory, not the runtime directory itself; resolve it the same way the code under
-            // test does instead of assuming the old runtime-directory-relative location.
+            // test does rather than assuming it sits directly under the runtime directory.
             let socket = URL(fileURLWithPath: try CaddyService.adminSocketPath())
             defer {
                 try? Data().write(to: releaseRun)
@@ -94,7 +94,7 @@ import XCTest
             let stopFinished = LockedFlag()
             let stopThread = Thread {
                 // `stop(debugOnEnter:)` fires the instant this call is made, before it can even attempt to
-                // acquire the internal lock -- see its doc comment for why a flag set by the caller right
+                // acquire the internal lock -- a flag set by the caller right
                 // before the call cannot serve the same purpose (a preemption there can let this test
                 // release the fake Caddy's `run` loop while `stop()` has not been entered at all, so a
                 // `stop()` that does not wait for an in-flight call could still pass).

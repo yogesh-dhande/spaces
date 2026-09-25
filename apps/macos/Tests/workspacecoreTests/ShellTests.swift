@@ -12,13 +12,11 @@ final class ShellTests: XCTestCase {
         Shell.resetLoginShellPathCacheForTesting()
     }
 
-    // Tests run returns exit status by arranging representative inputs and asserting the expected result.
     func testRunReturnsExitStatus() throws {
         let status = try Shell.run(["sh", "-lc", "exit 7"])
         XCTAssertEqual(status, 7)
     }
 
-    // Tests run uses working directory by arranging representative inputs and asserting the expected result.
     func testRunUsesWorkingDirectory() throws {
         let directory = try makeTempDirectory()
         let output = try Shell.runAndCapture(["pwd"], cwd: directory.path)
@@ -27,7 +25,6 @@ final class ShellTests: XCTestCase {
         XCTAssertEqual(reported, expected)
     }
 
-    // Tests run and capture returns stdout by arranging representative inputs and asserting the expected result.
     func testRunAndCaptureReturnsStdout() throws {
         let output = try Shell.runAndCapture(["sh", "-lc", "printf 'hello'"])
         XCTAssertEqual(output, "hello")
@@ -649,7 +646,6 @@ final class ShellTests: XCTestCase {
         XCTAssertEqual(try Shell.runAndCapture(["mockcmd"], environment: unsetEnvironment), "without-zdotdir")
     }
 
-    // Tests run and capture throws with stderr on failure by arranging representative inputs and asserting the expected result.
     func testRunAndCaptureThrowsWithStderrOnFailure() throws {
         XCTAssertThrowsError(try Shell.runAndCapture(["sh", "-lc", "echo boom >&2; exit 9"])) { error in
             let nsError = error as NSError
@@ -659,7 +655,6 @@ final class ShellTests: XCTestCase {
         }
     }
 
-    // Tests run throws for empty command by arranging representative inputs and asserting the expected result.
     func testRunThrowsForEmptyCommand() {
         XCTAssertThrowsError(try Shell.run([])) { error in
             let nsError = error as NSError
@@ -667,7 +662,6 @@ final class ShellTests: XCTestCase {
         }
     }
 
-    // Tests runAndCapture throws for empty command by arranging representative inputs and asserting the expected result.
     func testRunAndCaptureThrowsForEmptyCommand() {
         XCTAssertThrowsError(try Shell.runAndCapture([])) { error in
             let nsError = error as NSError
@@ -675,7 +669,6 @@ final class ShellTests: XCTestCase {
         }
     }
 
-    // Tests AppleScript.run fails fast in XCTest when the test has not installed an osascript mock.
     func testAppleScriptRunRequiresMockDuringTests() {
         XCTAssertThrowsError(try AppleScript.run("return \"hello\"")) { error in
             let nsError = error as NSError
@@ -684,7 +677,6 @@ final class ShellTests: XCTestCase {
         }
     }
 
-    // Tests run(lines:) joins lines with newlines and executes the resulting script.
     func testAppleScriptRunJoinsLines() throws {
         try withMockCommands(["osascript": "#!/bin/bash\necho 'hello'\n"]) {
             let result = try AppleScript.run(lines: ["return \"hello\""])

@@ -65,7 +65,7 @@ import workspacecore
         }
     }
 
-    /// Names the automation run an alert card deep-links to (its device and run id).
+    /// Names the automation run an alert card deep-links to.
     struct AutomationRunAlertTarget: Sendable, Equatable {
         let deviceID: String
         let runID: String
@@ -660,7 +660,6 @@ import workspacecore
         stack.spacing = 14
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        // Header
         let accentColor = host.sidebar.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
         let headerTitle = NSTextField(labelWithString: "Alerts")
         headerTitle.font = Typography.pageTitle
@@ -711,7 +710,6 @@ import workspacecore
             for group in plan.groups {
                 let offlineDeviceName = group.offlineDeviceName
 
-                // Workspace group header
                 let groupHeaderStack = NSStackView()
                 groupHeaderStack.orientation = .horizontal
                 groupHeaderStack.alignment = .centerY
@@ -795,9 +793,8 @@ import workspacecore
         return section.displayName
     }
 
-    /// Builds an alerts card with focus and dismiss affordances while preserving the workspace Run tab
-    /// rows. The card's row is returned alongside its container so a later text-only refresh can write
-    /// into it (see `showAlertsDetail`).
+    /// Builds an alerts card with focus and dismiss affordances. The card's row is returned alongside
+    /// its container so a later text-only refresh can write into it (see `showAlertsDetail`).
     private func alertsWindowCard(entry: AlertsAttentionEntry, shortcut: String, action: (() async -> Void)? = nil) -> (
         container: NSView, row: ClickableRowView
     ) {

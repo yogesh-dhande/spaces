@@ -658,7 +658,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
     /// Coalescing a run of deltas must not drop the rects of the frames it collapses away.
     /// `GhosttyMirrorTerminalView` accumulates its drag-carry buffer only from applied frames, so a
     /// coalesced-away frame's rects have nowhere else to reach it; if `inheritingEffects(ofCoalesced:)`
-    /// only carried forward `coalescedAwayCount` and `inheritedResyncRequest` (as it used to), the
+    /// carried forward only `coalescedAwayCount` and `inheritedResyncRequest`, the
     /// surviving apply would silently under-report how far content moved, and a drag rebased against it
     /// would land on the wrong rows while `scrollRectsOverflowed` still claimed the carry was trustworthy.
     func testCoalescedFrameScrollRectsSurviveOnTheApplyThatReplacesThem() async throws {
@@ -824,8 +824,8 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
     /// synchronous, so the entry right after the one that fulfills `firstApply` almost always has its
     /// `target?` already evaluated as non-nil before this test's `await fulfillment` even resumes on
     /// its own thread — one further apply beyond the first is normal and this test waits for it to
-    /// finish, rather than racing to sample the count before it lands. A short `applyDelay` (as this
-    /// test used to use) shrinks that already-tight window further, so under scheduling jitter (worse
+    /// finish, rather than racing to sample the count before it lands. A short `applyDelay` shrinks
+    /// that already-tight window further, so under scheduling jitter (worse
     /// under parallel test load) more than one extra entry could start before release ever lands, up to
     /// the whole segment in the worst case — which is what made this test flake; a delay measured in
     /// hundreds of milliseconds keeps that a non-issue on any machine this test plausibly runs on.
@@ -958,11 +958,11 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
 
     /// A screen-shaped output (`state_change`, coalescible on its own reason) can still absorb a barrier
     /// reason ahead of it via `ApplyMailbox.mayCollapse`'s `carriesFullFrame` branch, which collapses
-    /// regardless of reason shape whenever the newer output carries a materialized FULL frame. Before this
-    /// fix, `defersDrain` classified the survivor by its own `incomingPayload.reason` alone, so an output
-    /// that absorbed `attachment_state`'s transition still deferred the drain because its own reason
-    /// (`state_change`) is screen-shaped — stranding that transition behind the pane's hold instead of
-    /// draining like a barrier, the way it would have applied on its own. Blocking the main actor is what
+    /// regardless of reason shape whenever the newer output carries a materialized FULL frame. Classifying
+    /// the survivor by its own `incomingPayload.reason` alone would defer the drain for an output that
+    /// absorbed `attachment_state`'s transition, because its own reason (`state_change`) is screen-shaped —
+    /// stranding that transition behind the pane's hold instead of draining like a barrier, the way it
+    /// would have applied on its own. Blocking the main actor is what
     /// makes both submissions land, and the second's cascade collapse the first, before any drain can run.
     func testHeldPaneDrainsAnOutputThatAbsorbedAnAttachmentTransition() async throws {
         let sessionID = "pipeline-held-absorbed-transition"

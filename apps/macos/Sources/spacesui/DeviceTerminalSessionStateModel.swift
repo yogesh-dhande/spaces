@@ -785,7 +785,7 @@
         /// Deterministic catch-up used by the connect recovery path after re-resolving a stale local port.
         /// Unlike `refreshState()` it bypasses the `refreshInFlight` throttle — the throttled fetch is
         /// against the now-cancelled stale-port client and about to fail — so the ended session's final
-        /// render reliably reloads against the fresh port. Reuses the same `fetchState` mapping.
+        /// render reliably reloads against the fresh port.
         private func reloadCatchUpState() async {
             let sessionID = self.sessionID
             let clientApp = self.clientApp
@@ -1186,14 +1186,13 @@
         /// transport failure, or a coded rejection on demand instead of standing up a daemon that stalls
         /// and then dies. It receives the address the real probe would pin to, so a test can also assert
         /// the probe is aimed at the stream's own address. Nil in production, where the real probe always
-        /// runs. Mirrors `stateStreamConnectOverrideForTesting`.
+        /// runs.
         var linkCorroborationProbeForTesting: (@MainActor (String?) async -> (any Error)?)?
 
         /// Overrides the local-device bootstrap a failed first connect runs before retrying, so
         /// `spacesuiTests` can drive the one production path that opens a second stream inside a single
-        /// connect attempt without a real local daemon behind it. Mirrors
-        /// `stateStreamConnectOverrideForTesting`. Nil in production, where only the local device's own
-        /// bootstrap can answer true.
+        /// connect attempt without a real local daemon behind it. Nil in production, where only the local
+        /// device's own bootstrap can answer true.
         var localDeviceRecoveryOverrideForTesting: (@MainActor () async -> Bool)?
 
         /// Awaits the in-flight corroboration probe and its verdict, so a test can observe the outcome
@@ -1203,7 +1202,7 @@
         /// The in-flight corroboration probe's task, if any. A test captures it before a replacement
         /// stream's probe takes the slot, so the superseded probe's verdict can be awaited to completion
         /// rather than yielded at: a superseded probe is out of `drainPendingLinkCorroborationProbeForTesting`'s
-        /// reach. Mirrors `connectAttemptTasksForTesting`.
+        /// reach.
         var pendingLinkCorroborationProbeTaskForTesting: Task<Void, Never>? { linkCorroborationProbe?.task }
 
         /// Whether a corroboration probe is in flight; `spacesuiTests` uses it to prove a second timeout
@@ -2082,8 +2081,6 @@
                 externalURL: metadata.externalURL)
         }
 
-        /// Maps a Device API terminal-link chunk payload into the terminal-service wire type.
-        /// Mirrors `SpacesdMain.terminalServiceLinkChunk`.
         private nonisolated static func terminalServiceLinkChunk(_ chunk: SpacesDeviceTerminalLinkChunk) -> TerminalServiceTerminalLinkChunk {
             TerminalServiceTerminalLinkChunk(
                 linkID: chunk.linkID, offset: chunk.offset, byteCount: chunk.byteCount, isFinal: chunk.isFinal, base64Data: chunk.base64Data)
@@ -2133,7 +2130,7 @@
         var current: (client: SpacesDeviceAPIRequestSessionClient, authToken: String?) { lock.withLock { (client, authToken) } }
 
         /// The current transcript client and the same auth token, read under the same lock and for the same
-        /// reason. Used only by the transcript fetch path.
+        /// reason.
         var currentTranscript: (client: SpacesDeviceAPIRequestSessionClient, authToken: String?) { lock.withLock { (transcriptClient, authToken) } }
 
         /// Swaps in both clients and their auth token, returning the previous pair so the caller can cancel

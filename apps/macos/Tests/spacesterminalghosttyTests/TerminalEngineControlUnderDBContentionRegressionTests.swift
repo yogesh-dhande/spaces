@@ -15,10 +15,10 @@ import XCTest
 /// every control request — and thus all terminal I/O — froze for bounded seconds, then recovered.
 ///
 /// This drives control sends through the engine's synchronous bridge WHILE a competing writer holds the
-/// shared write lock and asserts each round-trip stays fast and the PTY echo keeps flowing. With the durable
-/// writes moved off the engine onto the per-core persistence queue, a held write lock can no longer touch
-/// engine latency; before the fix the inline lease write on the send path blocked on the lock and the
-/// round-trip exceeded the budget by seconds.
+/// shared write lock and asserts each round-trip stays fast and the PTY echo keeps flowing. With durable
+/// writes off the engine on the per-core persistence queue, a held write lock cannot touch
+/// engine latency; without that, the inline lease write on the send path would block on the lock and the
+/// round-trip would exceed the budget by seconds.
 ///
 /// A plain (non-`@MainActor`, non-engine) `XCTestCase` with an `async` method so it runs on a
 /// cooperative-pool thread — the only context from which the engine's `runSynchronously` bridge is legal.
@@ -321,11 +321,11 @@ final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
         TerminalEngineActor.runSynchronously { box.core.terminate() }
     }
 
-    /// Finding B3 companion: terminating one core must not stall another live core's control requests. Both
-    /// cores share the single terminal-engine executor. Before the fix, `terminate()` ended with a blocking
-    /// `persistenceQueue.sync {}` drain; under a held write lock that drain blocked the engine thread up to
-    /// SQLite's 5s busy timeout, freezing every other session. With the fence made non-blocking, terminating
-    /// one core under a held write lock leaves another core's control round-trip fast.
+    /// Terminating one core must not stall another live core's control requests. Both
+    /// cores share the single terminal-engine executor. Without a non-blocking fence, `terminate()` would end
+    /// with a blocking `persistenceQueue.sync {}` drain; under a held write lock that drain would block the
+    /// engine thread up to SQLite's 5s busy timeout, freezing every other session. With the fence non-blocking,
+    /// terminating one core under a held write lock leaves another core's control round-trip fast.
     func testTerminatingOneCoreUnderHeldWriteLockDoesNotStallAnotherCoresControl() async throws {
         @TerminalEngineActor func makeCoreBox(tag: String) throws -> CoreBox {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -369,7 +369,7 @@ final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
         defer { releaseLock() }
 
         // Terminate one core on a background thread so it is in flight on the shared engine while the lock is
-        // held. Before the fix its blocking drain holds the engine thread; with the fix it returns at once.
+        // held. A blocking drain would hold the engine thread; the non-blocking fence returns at once.
         let terminated = DispatchSemaphore(value: 0)
         Thread.detachNewThread {
             TerminalEngineActor.runSynchronously { terminatingBox.core.terminate() }

@@ -145,7 +145,7 @@ import spacesterminalcore
         }
     }
 
-    // MARK: - Shared helpers (also used by `TerminalViewerModel`'s own events)
+    // MARK: - Shared helpers
 
     /// Uptime-based elapsed milliseconds, matching `SpacesDeviceTerminalPerformanceEvent
     /// .emittedUptimeNanoseconds`'s clock rather than wall-clock time: every timed event in this baseline

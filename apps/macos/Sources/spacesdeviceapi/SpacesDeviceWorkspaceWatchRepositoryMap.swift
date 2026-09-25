@@ -59,7 +59,7 @@ extension WorkspaceWatch {
         // macOS), while FSEvents reports the resolved form. Resolved here, at map-entry construction, not
         // by mutating `paths` inside the shared `RepositoryPathCache`: every other cache consumer only
         // fingerprints files through these paths, where spelling is irrelevant, and `WorkspaceWatch`'s own
-        // `resolvedWorkspaceRoot` gets the identical treatment for the same reason (see its doc comment).
+        // `resolvedWorkspaceRoot` gets the identical treatment for the same reason.
         entries.append(
             RepositoryMapEntry(
                 workingDir: workingDir, gitDir: Self.realPath(paths.gitDir), commonDir: Self.realPath(paths.commonDir),

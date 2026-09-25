@@ -34,13 +34,11 @@ final class SpacesMobileDemoModeUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
         RunLoop.current.run(until: Date().addingTimeInterval(1))
 
-        // 1. Not paired: the Spaces empty state offers Try Demo Mode (no daemon, nothing paired).
         SpacesMobileUITestDriver.selectTab("Spaces", in: app)
         let tryDemoButton = app.buttons["spaces.tryDemoMode"]
         XCTAssertTrue(tryDemoButton.waitForExistence(timeout: 20), "The unpaired empty state did not offer Try Demo Mode")
         XCTAssertFalse(demoBanner(in: app).exists, "The demo banner should be absent before Demo Mode is enabled")
 
-        // 2. Enter Demo Mode from the empty state: sample workspaces render and the banner appears.
         tryDemoButton.tap()
         for workspace in ["harbor-web", "lantern-api", "atlas-docs"] {
             XCTAssertTrue(
@@ -49,7 +47,6 @@ final class SpacesMobileDemoModeUITests: XCTestCase {
         }
         XCTAssertTrue(demoBanner(in: app).waitForExistence(timeout: 20), "The Demo Mode banner did not appear after enabling Demo Mode")
 
-        // 3. Alerts: the waiting-agent and exited-process events are present (badge count > 0).
         SpacesMobileUITestDriver.selectTab("Alerts", in: app)
         XCTAssertTrue(
             SpacesMobileUITestDriver.waitForAnyElement(withIdentifierPrefix: "alert.row.", in: app, timeout: 20),
@@ -62,7 +59,6 @@ final class SpacesMobileDemoModeUITests: XCTestCase {
         XCTAssertTrue(
             SpacesMobileUITestDriver.waitForText(containing: "Exited", in: app, timeout: 10), "The exited-process event kind was not visible")
 
-        // 4. Agents: the coding-agent session is listed.
         SpacesMobileUITestDriver.selectTab("Agents", in: app)
         XCTAssertTrue(
             SpacesMobileUITestDriver.waitForAnyElement(withIdentifierPrefix: "agents.row.", in: app, timeout: 20), "The Agents tab rendered no agents"
@@ -71,35 +67,32 @@ final class SpacesMobileDemoModeUITests: XCTestCase {
             SpacesMobileUITestDriver.waitForText(containing: waitingAgentTitle, in: app, timeout: 20),
             "The \"\(waitingAgentTitle)\" agent was not listed")
 
-        // 5. Terminal: open the harbor frontend and confirm the recorded transcript renders read-only.
         SpacesMobileUITestDriver.selectTab("Spaces", in: app)
         SpacesMobileUITestDriver.openTerminalRow(sessionID: harborFrontendSessionID, in: app)
         let detail = app.descendants(matching: .any)["terminal.detail.\(harborFrontendSessionID)"]
         XCTAssertTrue(detail.waitForExistence(timeout: 20), "The harbor frontend terminal detail did not open")
 
-        // (a) Recorded transcript content is visible through the render-dump plumbing.
         let dump = waitForRenderDump(path: renderDumpPath, timeout: 30) { dump in
             dump.sessionID == self.harborFrontendSessionID && dump.showsTerminalSurface && dump.combinedText.contains(self.frontendTranscriptMarker)
         }
         XCTAssertNotNil(dump, "The demo terminal never rendered the recorded transcript (\(frontendTranscriptMarker))")
         XCTAssertEqual(dump?.isOwner, false, "Demo terminals are view-only and must never report ownership")
 
-        // (b) The read-only notice is shown (by identifier, or by its copy if SwiftUI folds the
+        // The read-only notice is shown (by identifier, or by its copy if SwiftUI folds the
         // identified container into its inner text).
         let noticeShown =
             app.descendants(matching: .any)["demo.terminalNotice"].waitForExistence(timeout: 10)
             || SpacesMobileUITestDriver.waitForText(containing: "terminal input requires a paired Mac", in: app, timeout: 5)
         XCTAssertTrue(noticeShown, "The demo read-only notice was absent")
 
-        // (c) No input affordances: the view-only terminal offers no Take Over, no message composer,
-        // and no software keyboard — an owned terminal would surface all three.
+        // No input affordances: the view-only terminal offers no Take Over, no message composer, and
+        // no software keyboard — an owned terminal would surface all three.
         XCTAssertFalse(app.buttons["terminal.takeover"].exists, "Demo terminals must not offer Take Over")
         XCTAssertFalse(app.descendants(matching: .any)["composer.sheet"].exists, "Demo terminals must not present the message composer")
         XCTAssertFalse(app.textViews["composer.message-field"].exists, "Demo terminals must not expose a message field")
         XCTAssertFalse(app.buttons["composer.send"].exists, "Demo terminals must not expose a send control")
         XCTAssertEqual(app.keyboards.count, 0, "A demo terminal must not raise the software keyboard")
 
-        // 6. Turn Demo Mode off from Settings: the app returns to the not-paired empty state.
         SpacesMobileUITestDriver.leaveTerminalDetail(in: app)
         SpacesMobileUITestDriver.selectTab("Settings", in: app)
         let demoToggle = demoModeToggle(in: app)
@@ -131,7 +124,7 @@ final class SpacesMobileDemoModeUITests: XCTestCase {
     /// element or fold it, so match across the whole hierarchy rather than a single element type.
     private func demoBanner(in app: XCUIApplication) -> XCUIElement { app.descendants(matching: .any)["demo.banner"] }
 
-    /// The Demo Mode toggle, scrolled into view. SwiftUI `Toggle`s surface as switches.
+    /// SwiftUI `Toggle`s surface as switches.
     private func demoModeToggle(in app: XCUIApplication) -> XCUIElement {
         let toggle = app.switches["settings.demoMode"]
         let deadline = Date().addingTimeInterval(10)

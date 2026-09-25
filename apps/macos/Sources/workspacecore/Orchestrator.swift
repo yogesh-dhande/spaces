@@ -1599,7 +1599,7 @@ public final class WorkspaceOrchestrator {
     /// Running with nothing alive in it, indefinitely on a workspace that has no Stop to clear it by hand
     /// (the home workspace refuses Start, Stop, and Restart alike).
     ///
-    /// Everything else keeps counting exactly as before: a browser target is a window the workspace is
+    /// Everything else keeps counting: a browser target is a window the workspace is
     /// configured to have open and has no session of its own, and a terminal hosted by another app is one
     /// whose lifetime Spaces does not track.
     private func windowIsLiveRuntimeIndicator(_ window: WindowRecord, endedSessions: EndedTerminalSessions) -> Bool {

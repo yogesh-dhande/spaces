@@ -114,7 +114,7 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         }
     }
 
-    // (b) Removal deletes the dir and prunes every persisted row, including the final-render state row.
+    // Removal deletes the dir and prunes every persisted row, including the final-render state row.
     func testCollectsEndedUnattachedUnreferencedSession() throws {
         let paths = try seedSession(id: "ended", state: .exited, servicePID: 999_999, remoteState: true)
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.rootDirectory))
@@ -128,7 +128,7 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         XCTAssertTrue(try TerminalSessionPersistence.listKnownSessions().isEmpty, "terminal_sessions row must be pruned.")
     }
 
-    // (P2, tier 1) A tier-1 purge (ended, not shown, unreferenced) must still retire the session's own
+    // A tier-1 purge (ended, not shown, unreferenced) must still retire the session's own
     // subscriber standing before deleting it: a plain shell/process terminal that subscribed to agents has
     // queued inbound notices and outgoing agent_subscriptions/agent_remote_subscriptions watch edges that
     // have no foreign key to terminal_sessions and are not counted by isReferencedByProduct, so tier 1 must
@@ -144,7 +144,7 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.rootDirectory))
     }
 
-    // (P2, tier 1 containment) A releaseExpiredReferences failure for a tier-1 session must not be treated
+    // A tier-1 containment case: a releaseExpiredReferences failure for a tier-1 session must not be treated
     // as a purge: it is contained to that session, reported through onPurgeFailure, and left for the next
     // sweep (fail closed), while other unreferenced sessions in the same sweep still collect.
     func testTier1ReleaseFailureIsContainedAndOtherSessionsStillProcessed() throws {
@@ -165,7 +165,7 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: cleanPaths.rootDirectory))
     }
 
-    // (c) A live, interactive session is still shown and must be left untouched.
+    // A live, interactive session is still shown and must be left untouched.
     func testKeepsLiveInteractiveSession() throws {
         let paths = try seedSession(id: "live", state: .running, servicePID: getpid())
 
@@ -176,7 +176,7 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         XCTAssertNoThrow(try TerminalSessionPersistence.readRuntimeState(paths: paths))
     }
 
-    // (c) Tier 1: an ended session carrying only a stale local-window attachment (a crash leftover — the
+    // Tier 1: an ended session carrying only a stale local-window attachment (a crash leftover — the
     // exit path detaches every client, and the ended-pane viewer holds no attachment) is not "shown", so an
     // unreferenced one is collected like any other. A surviving attachment must not pin an ended session.
     func testCollectsEndedSessionWithStaleAttachment() throws {
@@ -188,7 +188,7 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.rootDirectory))
     }
 
-    // (c) An ended session still referenced by a product row (exited process/agent) must be kept.
+    // An ended session still referenced by a product row (exited process/agent) must be kept.
     func testKeepsReferencedEndedSession() throws {
         let paths = try seedSession(id: "referenced", state: .exited, servicePID: 999_999)
 
@@ -220,7 +220,7 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         XCTAssertEqual(Set(try TerminalSessionPersistence.listKnownSessions().map(\.sessionID)), ["alive", "kept-ref"])
     }
 
-    // (P2) A failed attachment read must fail closed for an interactive session whose service is momentarily
+    // A failed attachment read must fail closed for an interactive session whose service is momentarily
     // dead (the daemon-crash/handoff window): an unreadable attachment snapshot must not be mistaken for "no
     // attachments", or a session a client still holds through a daemon restart could be purged out from under
     // it. The state is interactive (`.running`) with a dead servicePID, so the service is not alive and the
@@ -242,7 +242,7 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
             "An attachment read failure must fail closed and keep an interactive session shown, not be treated as no attachments.")
     }
 
-    // (P2, ended sessions ignore attachments) An ended session never consults attachments: its exit path
+    // Ended sessions ignore attachments: an ended session never consults them; its exit path
     // detached every client, so a surviving attachment row is a crash leftover and must not read as "shown".
     // A corrupt attachment database would fail closed for an interactive session, but for an ended one the
     // read is skipped entirely, so it must read as not shown.
@@ -262,7 +262,7 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
             "An ended session must not consult attachments; a surviving attachment row is a crash leftover, not a live viewer.")
     }
 
-    // (P3) A `removeItem` failure must leave the DB rows intact so the whole purge is retried on the next
+    // A `removeItem` failure must leave the DB rows intact so the whole purge is retried on the next
     // sweep, instead of orphaning the directory with no row left to rediscover it.
     func testPurgeSessionKeepsRowsWhenDirectoryRemovalFails() throws {
         let paths = try seedSession(id: "leaky", state: .exited, servicePID: 999_999)
@@ -279,7 +279,7 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.rootDirectory))
     }
 
-    // (P3) Same guarantee through the collector's own entry point: a removeItem failure must not drop the
+    // Same guarantee through the collector's own entry point: a removeItem failure must not drop the
     // session from the next sweep, and the next sweep must finish the purge it left behind. The failure is
     // contained (the sweep does not throw) and reported to the caller so it can be logged; per the daemon
     // call site, the collector never performs the logging I/O itself.
@@ -301,7 +301,7 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         XCTAssertTrue(try TerminalSessionPersistence.listKnownSessions().isEmpty)
     }
 
-    // (P4) A single failing purge must not abort the whole sweep: the collector iterates sessions in a
+    // A single failing purge must not abort the whole sweep: the collector iterates sessions in a
     // stable order (`created_at`, then `session_id`), reruns every minute, and one permanently-undeletable
     // session (e.g. a permissions error) must not block collection of every session ordered after it
     // forever. "a-leaky" sorts before "b-clean" so it is purged first in sweep order.

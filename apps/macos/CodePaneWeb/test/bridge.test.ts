@@ -218,7 +218,7 @@ describe("MockSpacesBridge", () => {
     const result = await bridge.workspaceFileWrite("notes/TODO.md", "# TODO\n\n- done\n", {
       baseSHA256: read.sha256,
     });
-    // `ok: true` carries the write's own sha256 (round-4 Fix 1: adopted directly as the next CAS
+    // `ok: true` carries the write's own sha256 (adopted directly as the next CAS
     // baseline, with no re-read) rather than a bare `{ ok: true }`.
     expect(result).toEqual({ ok: true, sha256: expect.any(String) });
 

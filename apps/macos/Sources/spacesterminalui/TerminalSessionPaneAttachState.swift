@@ -51,8 +51,6 @@ enum TerminalOwnershipIntent: Equatable {
     }
 }
 
-/// A pane's Ghostty session host resolution.
-///
 /// Resolution is lazy and write-once per pane: `.unresolved` -> `.resolving` -> `.resolved` is a
 /// one-way path the controller never reverses (the host it creates outlives the pane).
 enum TerminalGhosttyHostResolution: Equatable {

@@ -3,7 +3,7 @@ import Testing
 
 @testable import spacesdeviceapi
 
-/// Round-19: `atomicallyWriteWorkspaceFile`'s rename-into-place replaces the target file's inode, which is
+/// `atomicallyWriteWorkspaceFile`'s rename-into-place replaces the target file's inode, which is
 /// already known (and accepted, see that method's doc comment) to drop custom xattrs. POSIX permissions are
 /// a different question: git tracks the exec bit, so silently losing it on a save would surface as a
 /// spurious mode change and a broken script. This calls the real write path directly (not a

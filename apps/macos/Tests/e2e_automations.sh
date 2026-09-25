@@ -95,7 +95,6 @@ provision_fixture() {
   printf '[automation-e2e] fixture dir=%s workspace=%s\n' "$FIXTURE_DIR" "$WORKSPACE_ID"
 }
 
-# Creates an automation, records it for cleanup, and returns its id in AUTOMATION_ID.
 AUTOMATION_ID=""
 create_automation() {
   local out
@@ -105,7 +104,6 @@ create_automation() {
   CREATED_AUTOMATIONS+=("$AUTOMATION_ID")
 }
 
-# Triggers an automation and returns the started/queued/skipped run id in RUN_ID.
 RUN_ID=""
 trigger_run() {
   local out
@@ -114,7 +112,6 @@ trigger_run() {
   [[ -n "$RUN_ID" ]] || fail "could not parse run id from: $out"
 }
 
-# Status of one run id (empty if not found), read from the automation's runs listing.
 run_status() {
   local automation_id="$1" run_id="$2" runs
   runs="$("$SPACES_E2E" automation-runs --automation-id "$automation_id")"
@@ -127,7 +124,6 @@ run_field() {
   json_field "$runs" 'next((str(r.get('"$expr"')) for r in d if r["id"]=="'"$run_id"'"), "")'
 }
 
-# Polls until a run reaches the expected terminal status or times out.
 wait_run_status() {
   local automation_id="$1" run_id="$2" expected="$3" timeout="${4:-20}" start status
   start="$(now_ms)"
@@ -201,7 +197,6 @@ part_c() {
   create_automation --name "e2e-skip" --script "sleep 60" --workspace-id "$WORKSPACE_ID" --trigger manual --concurrency skip
   trigger_run "$AUTOMATION_ID"
   local running_run="$RUN_ID"
-  # Give the first run time to become running before the second trigger.
   wait_run_status "$AUTOMATION_ID" "$running_run" "running" 10 || fail "first run never started running"
 
   trigger_run "$AUTOMATION_ID"

@@ -124,7 +124,6 @@ verify_remote_artifact() {
   )
 }
 
-# Step 1: Build macOS app in release mode
 echo "🧾 Step 1/13: Syncing release metadata..."
 "$SCRIPTS_DIR/sync-app-version.sh" \
   --short "$VERSION" \
@@ -140,7 +139,6 @@ echo "📦 Step 2/13: Building macOS app..."
 echo "✓ Build complete"
 echo ""
 
-# Step 3: Code sign binaries
 echo "🔐 Step 3/13: Code signing binaries..."
 BUILD_DIR="$MACOS_DIR/.build/apple/Products/Release"
 SPACES_APP="$BUILD_DIR/SpacesApp"
@@ -214,7 +212,6 @@ else
   echo ""
 fi
 
-# Step 8: Create DMG installer
 echo "💿 Step 8/13: Creating DMG installer..."
 "$SCRIPTS_DIR/create-dmg.sh" "$APP_BUNDLE" "$VERSION"
 DMG_NAME="Spaces-${VERSION}.dmg"
@@ -227,7 +224,6 @@ fi
 echo "✓ DMG created: $DMG_NAME"
 echo ""
 
-# Step 9: Create Sparkle archive
 echo "📦 Step 9/13: Creating Sparkle archive..."
 "$SCRIPTS_DIR/create-sparkle-archive.sh" "$APP_BUNDLE" "$VERSION"
 ZIP_NAME="Spaces-${VERSION}.zip"
@@ -235,7 +231,6 @@ ZIP_PATH="$REPO_ROOT/dist/releases/$VERSION/$ZIP_NAME"
 echo "✓ Sparkle archive created: $ZIP_NAME"
 echo ""
 
-# Step 10: Notarize the DMG container itself (optional)
 if [[ "${NOTARIZE:-}" == "1" ]]; then
   echo "🍎 Step 10/13: Notarizing DMG..."
   xcrun notarytool submit "$DMG_PATH" \
@@ -259,8 +254,7 @@ fi
 "$SCRIPTS_DIR/verify-release-artifacts.sh" "${verify_args[@]}" "$DMG_PATH" "$ZIP_PATH"
 echo ""
 
-# Step 11: Generate and publish the Sparkle appcast. This must
-# happen before the GitHub release is created below: the release upload
+# This must happen before the GitHub release is created below: the release upload
 # includes the appcast, and the website build (after the release) fetches its
 # copy of the appcast and zip back from that same release, so the release has
 # to exist and carry both assets first.
@@ -270,7 +264,6 @@ APPCAST_PATH="$REPO_ROOT/dist/updates/appcast.xml"
 echo "✓ Sparkle appcast updated"
 echo ""
 
-# Step 12: Create the GitHub release
 echo "🚀 Step 12/13: Creating GitHub release..."
 cd "$REPO_ROOT"
 release_assets=(
@@ -294,9 +287,8 @@ gh release create "$TAG" "${release_assets[@]}" \
 echo "✓ GitHub release created"
 echo ""
 
-# Step 13: Build website static output. prebuild downloads the appcast and
-# Sparkle zip from the GitHub release created above, so this must run after
-# that release exists.
+# prebuild downloads the appcast and Sparkle zip from the GitHub release created above, so this
+# must run after that release exists.
 echo "🌐 Step 13/13: Building website..."
 (
   cd "$REPO_ROOT/apps/web"

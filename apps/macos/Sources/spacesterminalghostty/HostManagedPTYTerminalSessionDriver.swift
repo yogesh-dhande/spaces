@@ -342,7 +342,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
 
     /// Tears the session down WITHOUT ever blocking the calling actor.
     ///
-    /// terminate() now runs on the terminal ENGINE executor. `close(master)` blocks in the kernel until
+    /// terminate() runs on the terminal ENGINE executor. `close(master)` blocks in the kernel until
     /// the PTY reader unblocks, and `waitpid` blocks until the child dies — doing either here would
     /// freeze the very engine this migration exists to protect. (In the pre-actor architecture the same
     /// blocking `close(master)` landed only on the main actor and was accepted as won't-fix; that

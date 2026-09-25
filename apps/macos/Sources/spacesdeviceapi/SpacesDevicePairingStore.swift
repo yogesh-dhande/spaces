@@ -94,8 +94,8 @@ public final class SpacesDevicePairingStore: @unchecked Sendable {
 
     /// How stale a persisted `lastUsedAt` may get before a write is spent refreshing it.
     ///
-    /// Every authorized request and every bootstrap used to rewrite the whole pairings file (encode,
-    /// temp file, rename) purely to move this one field, on paths that are otherwise pure reads — the
+    /// Without this, every authorized request and every bootstrap would rewrite the whole pairings file
+    /// (encode, temp file, rename) purely to move this one field, on paths that are otherwise pure reads — the
     /// authorize hop sits in front of every keystroke's control request. `lastUsedAt` exists to tell the
     /// user when a paired device was last seen, a display for which hour granularity is indistinguishable
     /// from exact, so the steady state writes nothing and a device that keeps talking refreshes at most

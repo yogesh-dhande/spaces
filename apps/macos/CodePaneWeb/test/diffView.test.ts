@@ -37,7 +37,7 @@ const control = vi.hoisted(() => ({
   items: new Map<string, FakeCodeViewItem>(),
   scrollCalls: [] as Array<unknown>,
   // Records every `setSelectedLines` call made against the most recently constructed `FakeCodeView`
-  // — used by the "clears the stuck gutter selection" tests below (see defect 1's doc comment on
+  // — used by the "clears the stuck gutter selection" tests below (see the doc comment on
   // `DiffView.requestNewComment`). `null` is exactly what a selection-clear call passes.
   setSelectedLinesCalls: [] as Array<unknown>,
   // The options object each `FakeCodeView` was constructed with — lets tests exercise the rendered
@@ -282,8 +282,8 @@ describe("DiffView.setComments", () => {
   // `generation` itself. After exactly one `setComments` bump, the next `setFiles` call increments
   // `generation` by 1 and reseeds to that value, which is the exact same number `setComments` already
   // issued. `CodeView.syncItemRecord`'s `if (item.version === nextItem.version) return false` then
-  // silently drops the reseeded file's fresh content. The fix makes every version assignment — both
-  // the `setFiles` reseed and the `setComments` per-file bump — draw a fresh increment of the single
+  // silently drops the reseeded file's fresh content. Every version assignment — both
+  // the `setFiles` reseed and the `setComments` per-file bump — draws a fresh increment of the single
   // `generation` counter, so no issued version can ever repeat.
   it("issues a version for a reseeded file that differs from the version setComments already assigned it (regression: reseed collision)", () => {
     const diffView = new DiffView(document.createElement("div"), "unified", makeHooks(), testContextMenu());

@@ -7,7 +7,6 @@ import systembridge
 @testable import workspacecore
 
 extension OrchestratorTests {
-    // Tests workspace window refresh interval is positive by arranging representative inputs and asserting the expected result.
     func testWorkspaceWindowRefreshIntervalIsPositive() { XCTAssertGreaterThan(PollingConstants.workspaceWindowRefreshInterval, 0) }
 
     func testUpdateProjectConfigAcceptsShellVariableSyntaxAtSaveTime() throws {
@@ -41,7 +40,6 @@ extension OrchestratorTests {
         XCTAssertEqual(settings.processes.first?.command, "PORT=$TYPO_PORT npm run dev")
     }
 
-    // Tests next window order index uses role offset and max by arranging representative inputs and asserting the expected result.
     func testNextWindowOrderIndexUsesRoleOffsetAndMax() {
         let windows = [
             WindowRecord(
@@ -159,9 +157,6 @@ extension OrchestratorTests {
         XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
     }
 
-    // Tests open workspace terminal creates a dedicated workspace terminal and tracks the new built-in terminal shell window.
-
-    // Tests that opening a terminal for a not-running workspace marks it as running so the UI shows Restart instead of Launch.
     func testRefreshWorkspaceWindowsPreservesGeneratedAdHocTerminalName() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let dbPath = root.appendingPathComponent("spaces-test.db").path
@@ -711,11 +706,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests launch workspace reuses existing browser matches and tracks all matching tabs by arranging representative inputs and asserting the expected result.
-
-    // Tests launch workspace opens missing browser sessions as tabs in one Chrome window by arranging representative inputs and asserting the expected result.
-
-    // Tests launch workspace leaves configured browser sessions unopened so they behave like lazy bookmarks.
     func testLaunchWorkspaceLeavesBrowserSessionsUnopenedUntilFocused() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let chromeOpenLog = root.appendingPathComponent("chrome-open.log")
@@ -730,13 +720,6 @@ extension OrchestratorTests {
         XCTAssertFalse(FileManager.default.fileExists(atPath: chromeOpenLog.path))
     }
 
-    // Tests focus workspace window marks stale extracted mapping invalid after direct focus failure and falls back to indexed tab focus by arranging representative inputs and asserting the expected result.
-
-    // Tests focus window navigation uses active browser tab when remembered index is stale by arranging representative inputs and asserting the expected result.
-
-    // Tests workspace id for focused chrome window uses active tab url match by arranging representative inputs and asserting the expected result.
-
-    // Tests refresh workspace windows prunes stale rows and clears running when no runtime indicators remain by arranging representative inputs and asserting the expected result.
     func testRefreshWorkspaceWindowsPrunesStaleRowsWithoutClearingRunningLifecycleState() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
@@ -744,8 +727,6 @@ extension OrchestratorTests {
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "stale", role: "terminal", orderIndex: 0, lastSeenAt: "now"))
 
-        // Why: verify refresh prunes missing/stale tracked windows without implicitly changing lifecycle state.
-        // Remaining risk: rapid concurrent open/close events can still race with a single refresh snapshot.
         var didMutate = false
         didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
 
@@ -757,7 +738,6 @@ extension OrchestratorTests {
         XCTAssertEqual(runtimeStatus.runtimeHealth, .healthy)
     }
 
-    // Tests refresh workspace windows returns false when nothing changed by arranging representative inputs and asserting the expected result.
     func testRefreshWorkspaceWindowsReturnsFalseWhenNothingChanged() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
 
@@ -769,7 +749,6 @@ extension OrchestratorTests {
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
 
-    // Tests refresh workspace windows leaves tracked browser rows alone until the user focuses them on demand.
     func testRefreshWorkspaceWindowsDoesNotPruneMissingBrowserRows() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
@@ -784,7 +763,6 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.windows(workspaceID: workspace.id).filter { $0.role == "browser" }.count, 1)
     }
 
-    // Tests updating settings does not promote stopped workspaces to running just because tracked runtime leftovers exist.
     func testUpdateWorkspaceSettingsDoesNotPromoteStoppedWorkspaceWithTrackedRuntimeLeftovers() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
@@ -801,10 +779,6 @@ extension OrchestratorTests {
         XCTAssertEqual(runtimeStatus.lifecycleState, .stopped)
         XCTAssertEqual(runtimeStatus.runtimeHealth, .partial)
     }
-
-    // Tests refresh workspace windows prunes legacy terminal rows that do not have built-in terminal identity.
-
-    // Tests refresh workspace windows prunes legacy process-backed terminal rows without built-in terminal identity.
 
     /// Bulk refresh reconciles the workspaces a project still has. A workspace archived out of the project
     /// takes its window rows with it, so it can neither be refreshed nor leave rows behind.
@@ -841,7 +815,6 @@ extension OrchestratorTests {
         XCTAssertTrue(try store.windows(workspaceID: activeWorkspace.id).isEmpty)
     }
 
-    // Tests update workspace settings leaves stopped workspaces stopped when only stale runtime leftovers exist.
     func testUpdateWorkspaceSettingsLeavesStoppedWorkspaceStoppedWhenRuntimeIndicatorsExist() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
@@ -849,8 +822,6 @@ extension OrchestratorTests {
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: nil, terminalTarget: nil,
                 pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        // Why: isolate store-state transition coverage from real window manager availability.
-        // Remaining risk: reconciliation against rapidly changing real windows remains untested here.
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { _ in }
 
         let updated = try store.workspace(id: workspace.id)
@@ -861,7 +832,6 @@ extension OrchestratorTests {
         XCTAssertEqual(runtimeStatus.runtimeHealth, .partial)
     }
 
-    // Tests update project config and read back project config by arranging representative inputs and asserting the expected result.
     func testUpdateProjectConfigAndReadBackProjectConfig() throws {
         let (orchestrator, _, project, _, _) = try makeOrchestratorWithWorkspace()
 
@@ -879,7 +849,6 @@ extension OrchestratorTests {
         XCTAssertEqual(loaded?.browserSessions.first?.url, "https://example.com")
     }
 
-    // Tests update project config using closure persists changes by arranging representative inputs and asserting the expected result.
     func testUpdateProjectConfigUsingClosurePersistsChanges() throws {
         let (orchestrator, _, project, _, _) = try makeOrchestratorWithWorkspace()
 
@@ -893,7 +862,6 @@ extension OrchestratorTests {
         XCTAssertEqual(loaded?.processes.first?.command, "echo process")
     }
 
-    // Tests update project config rejects browser sessions without configured names.
     func testUpdateProjectConfigRejectsUnnamedBrowserSession() throws {
         let (orchestrator, _, project, _, _) = try makeOrchestratorWithWorkspace()
 
@@ -907,7 +875,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests update project config leaves default workspace settings unchanged even when they match the previous template.
     func testUpdateProjectConfigDoesNotSyncDefaultWorkspaceWhenSettingsMatchPreviousTemplate() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -929,7 +896,6 @@ extension OrchestratorTests {
         XCTAssertTrue(settings?.browserSessions.isEmpty == true)
     }
 
-    // Tests update project config does not overwrite customized default workspace settings by arranging representative inputs and asserting the expected result.
     func testUpdateProjectConfigDoesNotOverwriteCustomizedDefaultWorkspaceSettings() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -1053,12 +1019,10 @@ extension OrchestratorTests {
         XCTAssertEqual(terminateCapture.sessionIDs, [sessionID])
     }
 
-    // Guards the P2 leak this was fixed for: before every terminal session was workspace-owned,
-    // a `spaces terminal create` session with no window/process/agent row and no stamped
-    // workspace resolved to no workspace at all, so `stopAdHocBuiltInTerminalSession(sessionID:)`
-    // returned false without ever asking the daemon to stop the shell — the pane closed but the
-    // process kept running. With every launch configuration always carrying a workspace id, the
-    // self-resolving stop path must now terminate that same shape of session.
+    // Guards a leak in the self-resolving stop path: a `spaces terminal create` session with no
+    // window/process/agent row and no stamped workspace must still resolve to its workspace, or
+    // `stopAdHocBuiltInTerminalSession(sessionID:)` returns false without ever asking the daemon
+    // to stop the shell — the pane closes but the process keeps running.
     func testStopAdHocBuiltInTerminalSessionTerminatesWorkspaceOwnedSessionWithNoOwnerRow() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
@@ -1393,7 +1357,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests workspace settings and accessors reflect store state by arranging representative inputs and asserting the expected result.
     func testWorkspaceSettingsAndAccessorsReflectStoreState() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         let api = ServiceDefinition(id: "port-api", name: "api")
@@ -1405,8 +1368,6 @@ extension OrchestratorTests {
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: "job", command: "echo job", terminalApp: nil, terminalTarget: nil,
                 pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        // Why: keep this test focused on persisted settings/accessor behavior.
-        // Remaining risk: browser-session behavior with real Chrome is intentionally excluded in this unit.
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
             settings.stopScript = "echo workspace-stop"
             settings.ports = [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")]
@@ -1422,7 +1383,6 @@ extension OrchestratorTests {
         XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).count, 1)
     }
 
-    // Tests update project config persists templates to db by arranging representative inputs and asserting the expected result.
     func testUpdateProjectConfigPersistsTemplatesToDB() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -1447,7 +1407,6 @@ extension OrchestratorTests {
 
     // MARK: - refreshAllWorkspaceWindows
 
-    // Tests refreshAllWorkspaceWindows iterates all projects and workspaces by arranging representative inputs and asserting the expected result.
     func testRefreshAllWorkspaceWindowsIteratesAllWorkspaces() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -1462,7 +1421,6 @@ extension OrchestratorTests {
                 id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell", role: "terminal", orderIndex: 0, lastSeenAt: "now"))
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
 
-        // Why: verify refreshAllWorkspaceWindows iterates workspaces and returns correct counts.
         var result: WorkspaceOrchestrator.RefreshResult!
         result = try orchestrator.refreshAllWorkspaceWindows()
 
@@ -1472,7 +1430,6 @@ extension OrchestratorTests {
 
     // MARK: - syncConfig / appConfig
 
-    // Tests syncConfig returns the current app config by arranging representative inputs and asserting the expected result.
     func testSyncConfigReturnsCurrentAppConfig() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -1487,7 +1444,6 @@ extension OrchestratorTests {
 
     // MARK: - updateProjectConfig workspace isolation
 
-    // Tests updateProjectConfig does not sync default workspace settings when they match the previous template.
     func testUpdateProjectConfigDoesNotSyncDefaultWorkspaceSettings() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -1501,14 +1457,12 @@ extension OrchestratorTests {
         // Set default workspace settings to match the project template (initially empty).
         try store.touchWorkspaceSettings(workspaceID: defaultWorkspace.id, updatedAt: "now")
 
-        // Update the project config with a stop script.
         try orchestrator.updateProjectConfig(projectID: project.id) { record in record.stopScript = "echo project-stop" }
 
         let workspaceScript = try store.workspaceStopScript(workspaceID: defaultWorkspace.id)
         XCTAssertNil(workspaceScript)
     }
 
-    // Tests workspaceSettings seeds and returns defaults for workspace without explicit settings by arranging representative inputs and asserting the expected result.
     func testWorkspaceSettingsReturnsDefaultsWhenNotExplicitlySet() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -1521,7 +1475,6 @@ extension OrchestratorTests {
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir.path)
         try store.upsert(workspace: workspace)
 
-        // workspaceSettings seeds defaults when no settings exist; returns an empty (non-nil) settings object.
         let settings = try orchestrator.workspaceSettings(workspaceID: workspace.id)
         XCTAssertNotNil(settings)
         XCTAssertNil(settings?.stopScript)
@@ -1542,11 +1495,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests openWorkspaceTerminal falls back to the first sorted tracked Spaces window ID when no running process provides one by arranging representative inputs and asserting the expected result.
-
-    // Tests openWorkspaceTerminal uses the window ID from a running Spaces process when the focused window is not Spaces by arranging representative inputs and asserting the expected result.
-
-    // Tests updateProjectConfig leaves missing default workspace settings missing.
     func testUpdateProjectConfigDoesNotReseedMissingDefaultWorkspaceSettings() throws {
         let store = try makeTemporaryStore()
         let root = try makeTempDirectory()
@@ -1590,7 +1538,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests updateProjectConfig throws missingProject when the project ID does not exist in the store.
     func testUpdateProjectConfigThrowsForMissingProject() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -1602,7 +1549,6 @@ extension OrchestratorTests {
 
     // MARK: - resolvedWorkspaceBrowserSessions
 
-    // Tests resolvedWorkspaceBrowserSessions returns sessions with static URLs unchanged.
     func testResolvedWorkspaceBrowserSessionsReturnsStaticURLsUnchanged() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -1622,7 +1568,6 @@ extension OrchestratorTests {
         XCTAssertEqual(resolved[1].url, "http://localhost:3000/admin")
     }
 
-    // Tests passive resolvedWorkspaceBrowserSessions resolves device-local browser display without opening SSH forwards.
     func testResolvedWorkspaceBrowserSessionsPassiveLocalDoesNotOpenForward() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -1640,7 +1585,6 @@ extension OrchestratorTests {
         XCTAssertEqual(resolved.map(\.url), ["http://localhost:3000"])
     }
 
-    // Tests resolvedWorkspaceBrowserSessions deduplicates sessions that resolve to the same URL.
     func testResolvedWorkspaceBrowserSessionsDeduplicatesSameResolvedURL() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -1662,7 +1606,6 @@ extension OrchestratorTests {
         XCTAssertEqual(resolved[0].url, "http://localhost:3000")
     }
 
-    // Tests resolvedWorkspaceBrowserSessions omits sessions with empty or nil URLs.
     func testResolvedWorkspaceBrowserSessionsOmitsSessionsWithEmptyURL() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -1678,7 +1621,6 @@ extension OrchestratorTests {
         XCTAssertEqual(resolved[0].name, "App")
     }
 
-    // Tests resolvedWorkspaceBrowserSessions resolved URLs enable longest-prefix name matching.
     func testResolvedWorkspaceBrowserSessionsEnablesLongestPrefixNameMatching() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)

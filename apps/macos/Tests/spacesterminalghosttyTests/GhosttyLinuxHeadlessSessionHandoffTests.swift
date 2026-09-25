@@ -371,13 +371,10 @@
             }
             try await resumedCore.resumeFromHandoff(handoffRecord(from: record, adopting: pty))
 
-            // Scrollback/screen rebuilt from the replayed output.log.
             let owner = Self.remoteOwnerClient(id: "remote-owner")
             try await TerminalEngineActor.run { Self.attachRemoteOwner(to: resumedCore, client: owner) }
             try await waitAsync(transcriptPath: paths.outputPath) { Self.renderedScreenText(of: resumedCore)?.contains(marker) == true }
 
-            // PTY I/O is live through the adopted fd: bytes injected on the slave land in
-            // output.log on the resumed core exactly once.
             let secondMarker = "HANDOFF_MARKER_BETA"
             #expect(write(pty.slave, "\(secondMarker)\n", secondMarker.utf8.count + 1) > 0)
             try await waitAsync(transcriptPath: paths.outputPath) { (try? String(contentsOfFile: paths.outputPath))?.contains(secondMarker) == true }

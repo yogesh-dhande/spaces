@@ -432,9 +432,9 @@ private enum StubDisconnectError: Error, Equatable { case dropped }
         #expect(SidebarController.pullSuccessStillFreshest(pushApplyGeneration: 2, currentPushApplyGeneration: 2))
     }
 
-    /// Unchanged from the rule the watchdog always had: an offline section, and equally one left at
-    /// "loading…" by an attempt whose result never arrived, are both re-probed whatever they last knew
-    /// about compatibility — the offline transition drops the verdict, so it is `nil` by then anyway.
+    /// An offline section, and equally one left at "loading…" by an attempt whose result never
+    /// arrived, are both re-probed whatever they last knew about compatibility — the offline transition
+    /// drops the verdict, so it is `nil` by then anyway.
     @Test func theWatchdogPullsEverySectionThatIsNotLoaded() {
         #expect(SidebarController.watchdogShouldPullSection(loadState: .offline("Connection refused"), compatibility: nil))
         #expect(SidebarController.watchdogShouldPullSection(loadState: .loading, compatibility: nil))
@@ -804,7 +804,7 @@ extension ProcessProfileEnvironmentSuites {
                 "the stale overview's prune was skipped, so the already-claimed pane stayed put")
         }
 
-        /// Round-4 Fix 2: the terminal-session retarget/prune above is deliberately skipped for a stale
+        /// The terminal-session retarget/prune above is deliberately skipped for a stale
         /// epoch (previous test), because retargeting or pruning against data older than a just-claimed
         /// replacement could steal or close the pane that claim installed. A code pane has no session for
         /// a replacement race to protect, so its own liveness prune (`pruneOpenCodePanes`) must keep

@@ -165,7 +165,7 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         XCTAssertGreaterThan(TerminalScrollbackBudget.liveTranscriptTrimTriggerBytes, TerminalScrollbackBudget.liveTranscriptRetainedBytes)
     }
 
-    // MARK: - State preservation (the P1a fix)
+    // MARK: - State preservation
 
     func testStatePreservedAcrossTrimForFromZeroReplay() throws {
         let (url, handle) = try makeTranscriptFile()
@@ -180,7 +180,7 @@ final class TerminalTranscriptTrimTests: XCTestCase {
 
         let trimmed = try Data(contentsOf: url)
 
-        // The fix: replaying the trimmed file from offset 0 restores the early modes via the preamble.
+        // Replaying the trimmed file from offset 0 restores the early modes via the preamble.
         let restored = try replaySession(trimmed)
         defer { spaces_ghostty_vt_session_free(restored) }
         XCTAssertTrue(modeIsSet(restored, 1049), "alt screen must survive trim+replay")
@@ -314,9 +314,8 @@ final class TerminalTranscriptTrimTests: XCTestCase {
     /// garbage. The trim must DEFER rather than cut blind — returning the caller's own handle unchanged,
     /// the offset unchanged, `output.log` byte-identical, and no `.trim` temp staged.
     ///
-    /// Red-first: the old code fell back to the nominal offset and trimmed at an arbitrary byte, so it
-    /// returned a fresh handle over a rewritten file — these identity and byte-identical assertions fail
-    /// against it.
+    /// A cut that falls back to the nominal offset and trims at an arbitrary byte returns a fresh handle
+    /// over a rewritten file — these identity and byte-identical assertions catch that.
     func testTrimDefersWhenScanWindowHasNoParserSafeBoundary() throws {
         let (url, handle) = try makeTranscriptFile()
         // retained > 1 MiB so the whole forward-scan window sits inside the run when the run ends the file.
@@ -418,7 +417,7 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         XCTAssertEqual(tail.first, 0x1B, "With an ESC in the scan window, the cut must land just before the first ESC, not mid-sequence.")
     }
 
-    /// Regression (P2): the nominal cut landing inside an OSC string whose payload carries raw LFs must
+    /// Regression: the nominal cut landing inside an OSC string whose payload carries raw LFs must
     /// NOT cut just past one of those embedded LFs. Ghostty's parser swallows LF inside `osc_string` (it
     /// exits only on BEL/ESC/CAN/SUB), so a cut just past an embedded payload LF starts the retained tail
     /// mid-payload; the from-zero replay begins in ground state after the preamble and renders the payload
@@ -426,8 +425,8 @@ final class TerminalTranscriptTrimTests: XCTestCase {
     /// ESC — here the OSC's `ESC \` (ST) terminator — so the tail begins on a clean parser boundary and the
     /// payload never surfaces.
     ///
-    /// Red-first: against the newline-preferring cut the tail begins at a fresh payload line (not ESC) and
-    /// the from-zero frame renders the payload marker as visible text.
+    /// A newline-preferring cut instead lands the tail at a fresh payload line (not ESC), and the
+    /// from-zero frame renders the payload marker as visible text.
     func testCutSkipsNewlineInsideOscPayloadAndLandsBeforeEsc() throws {
         let (url, handle) = try makeTranscriptFile()
 
@@ -524,11 +523,11 @@ final class TerminalTranscriptTrimTests: XCTestCase {
     /// write handle keeps working because its descriptor was opened before the directory was locked, so
     /// this isolates "temp staging fails" from "the transcript is inaccessible".
     ///
-    /// Red-first note: against the old in-place rewrite this seam would NOT throw — the old code created
-    /// no temp file and wrote preamble+tail straight through the already-open descriptor, so a read-only
-    /// directory left it free to rewrite the file. `XCTAssertThrowsError` plus the byte-identical
-    /// assertion is exactly the atomic-replace contract the old code violated. (True crash-mid-rewrite
-    /// injection is not practical in a unit test and is intentionally not attempted here.)
+    /// An in-place rewrite with no temp file, writing preamble+tail straight through the already-open
+    /// descriptor, would NOT throw here: a read-only directory leaves it free to rewrite the file.
+    /// `XCTAssertThrowsError` plus the byte-identical assertion is exactly the atomic-replace contract that
+    /// would violate. (True crash-mid-rewrite injection is not practical in a unit test and is
+    /// intentionally not attempted here.)
     func testFailedTrimLeavesOriginalIntactAndHandleUsable() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

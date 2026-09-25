@@ -39,7 +39,6 @@ final class ProfileBindingEntryPointTests: XCTestCase {
     /// inherited one. Asserting the order rather than mere presence is the point: a call placed after the
     /// first lookup would satisfy a `contains` check and still leave the bug.
     func testEveryEntryPointClearsBeforeItResolvesAProfile() throws {
-        // Each entry point paired with the first thing in it that resolves or acts on a profile.
         let entryPoints: [(path: String, firstProfileUse: String)] = [
             ("scripts/dev-build-and-launch.sh", "spaces_profile_field"),
             ("apps/macos/scripts/verify-prep.sh", "stop_current_profile_runtime_for_tests\n"),

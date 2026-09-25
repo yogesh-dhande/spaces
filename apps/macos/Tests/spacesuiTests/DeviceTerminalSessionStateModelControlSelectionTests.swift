@@ -10,13 +10,12 @@ import workspacecore
 @testable import spacesui
 
 extension ProcessProfileEnvironmentSuites {
-    /// Pins the fix to `DeviceTerminalSessionStateModel.sendTerminalServiceRequest`'s `.control` case: a
+    /// Pins `DeviceTerminalSessionStateModel.sendTerminalServiceRequest`'s `.control` case: a
     /// Mac mirroring a paired device's session must receive the daemon-authoritative selection text on
     /// `setSelection`/`readSelectionText`, because that text can extend past the mirror's
-    /// viewport-clipped snapshot and is otherwise unrecoverable locally. The adapter used to construct
-    /// `TerminalControlResponse(ok:message:)` directly from the Device API response and drop
-    /// `response.terminalSelectionText`, so `controlResponse` existed but its `selectionText` was always
-    /// nil.
+    /// viewport-clipped snapshot and is otherwise unrecoverable locally. Constructing
+    /// `TerminalControlResponse(ok:message:)` directly from the Device API response drops
+    /// `response.terminalSelectionText`, leaving `controlResponse`'s `selectionText` always nil.
     ///
     /// Drives the same real, in-process `SpacesDeviceAPIServer` harness as
     /// `DeviceTerminalSessionStateModelTerminalLinkTests` (see that suite's doc comment for why a fake
@@ -86,8 +85,6 @@ extension ProcessProfileEnvironmentSuites {
                     defaultSessionID: sessionID, requestClient: requestClient, authToken: pairingStore.authToken, clientApp: clientApp)
 
                 #expect(response.ok, "\(response.message)")
-                // The regression pin: before the fix `controlResponse` was constructed straight from
-                // `TerminalControlResponse(ok:message:)`, which always leaves `selectionText` nil.
                 #expect(response.controlResponse?.selectionText == expectedSelectionText)
             }
         }

@@ -371,7 +371,6 @@ class Parser {
     }
   }
 
-  /** An array inside a skipped value, skipped item by item. */
   private skipArray(): void {
     this.enterContainer();
     try {
@@ -443,7 +442,6 @@ class Parser {
     return String.fromCharCode(parseInt(digits, 16));
   }
 
-  /** A number, kept as the exact text the document wrote. */
   private parseNumber(): JSONValue {
     const start = this.index;
     this.scanNumber();
@@ -471,7 +469,6 @@ class Parser {
     }
   }
 
-  /** Consumes a run of one or more digits, reporting whether there was one. */
   private consumeDigits(): boolean {
     const start = this.index;
     while (this.index < this.text.length) {

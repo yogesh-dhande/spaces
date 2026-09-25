@@ -19,7 +19,7 @@ import Foundation
 /// `SerialExecutor` that enqueues actor jobs onto that same queue. Either way ONE queue backs both the
 /// actor's executor and the synchronous `runSynchronously` bridge, so a transport thread can enter the
 /// actor's isolation domain synchronously (`queue.sync`) — the daemon's socket workers answer live-core
-/// control/state requests without an async hop, exactly as they previously did against the main actor.
+/// control/state requests without an async hop.
 @globalActor public actor TerminalEngineActor {
     public static let shared = TerminalEngineActor()
 
@@ -67,8 +67,7 @@ import Foundation
     /// reentrancy guard). NEVER call this from the main actor — see the one-way rule; use `run(_:)`.
     ///
     /// Throwing bodies wrap their work in `Result { ... }.get()` at the call site (as the daemon's
-    /// existing bridges do), so this stays non-throwing and matches the old `runOnMainActorSynchronously`
-    /// shape.
+    /// existing bridges do), so this stays non-throwing.
     public nonisolated static func runSynchronously<T: Sendable>(_ body: @TerminalEngineActor () -> T) -> T {
         if isOnEngineQueue { return assumeIsolated(body) }
         // Enforce the one-way rule, not just document it: a main-thread caller synchronously waiting on

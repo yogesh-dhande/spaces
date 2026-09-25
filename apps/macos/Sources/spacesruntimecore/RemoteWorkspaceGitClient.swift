@@ -725,8 +725,7 @@ private struct CapturedStream {
         }
     }
 
-    /// Closes this end so the child's next write fails rather than blocking on a pipe with no reader. Used by
-    /// the byte cap, which is the one case where a capture stops reading a stream the child is still writing.
+    /// Closes this end so the child's next write fails rather than blocking on a pipe with no reader.
     mutating func close() {
         handle.closeFile()
         isClosed = true
@@ -753,8 +752,8 @@ private final class PipeDrain: @unchecked Sendable {
     /// Guards `finished`, and (by the happens-before edge any lock/unlock pair provides) orders the drain
     /// thread's final write to `data` before a caller's read of it in `waitForData(timeout:)`.
     ///
-    /// This used to be a `DispatchSemaphore(value: 0)`, signaled once by the drain thread and waited on
-    /// unconditionally by the caller. That shape cannot support a *bounded* wait safely: `DispatchSemaphore`
+    /// A `DispatchSemaphore(value: 0)`, signaled once by the drain thread and waited on unconditionally by
+    /// the caller, cannot support a *bounded* wait safely here: `DispatchSemaphore`
     /// requires every `signal()` to eventually be matched by a `wait()` before the semaphore is deallocated,
     /// or the runtime traps ("BUG IN CLIENT OF LIBDISPATCH: Semaphore object deallocated while in use"). A
     /// caller that gives up on `waitForData(timeout:)` after its deadline consumes nothing, so the drain
@@ -784,9 +783,6 @@ private final class PipeDrain: @unchecked Sendable {
         thread.start()
     }
 
-    /// Waits until the drain thread reaches EOF or `timeout` elapses, whichever comes first. Returns the captured data if the drain finished within the
-    /// window, or `nil` on expiry.
-    ///
     /// On expiry the drain thread is deliberately left running rather than torn down: it is blocked in a
     /// blocking read on the pipe's read end (`readDataToEndOfFile()`), and closing that
     /// fd out from under a thread blocked reading it is the racy alternative this rejects — a closed fd

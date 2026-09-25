@@ -339,7 +339,7 @@ describe("fileList: submodule pointer rows (PR D, nested submodules)", () => {
     // A gitlink has no patch bytes, so neither a transfer spinner nor a +/- stat ever belongs here.
     expect(dirrow.querySelector(".transfer")).toBeNull();
     expect(dirrow.querySelector(".st")).toBeNull();
-    // The pointer is no longer a leaf row at all.
+    // The pointer is not a leaf row at all.
     expect(container.querySelector(`.row[data-path="sbc_hal"]`)).toBeNull();
 
     expect(

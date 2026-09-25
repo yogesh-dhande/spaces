@@ -16,7 +16,7 @@ export const AUTOSAVE_RETRY_CAP_MS = 30_000;
 /** How often a pending retry republishes its remaining wait, so the chip counts seconds down. */
 const TICK_MS = 1000;
 
-/** Backoff for the Nth consecutive failure (failures >= 1): min(cap, floor * 2^(failures-1)). */
+/** Backoff for the Nth consecutive failure (failures >= 1). */
 export function retryDelayMs(
   failures: number,
   floorMs = AUTOSAVE_RETRY_FLOOR_MS,
@@ -88,8 +88,7 @@ export class AutosaveScheduler {
     return this.current;
   }
 
-  /** An edit happened: (re)arm the debounce, cancel any pending retry (the debounced write is the
-   *  retry), and if a write is in flight remember to run again as soon as it settles. */
+  /** An edit happened: cancels any pending retry, since the debounced write is the retry. */
   noteEdit(): void {
     if (this.cancelled) return;
     this.clearRetry();
@@ -129,9 +128,7 @@ export class AutosaveScheduler {
     this.emit(this.settledStatus());
   }
 
-  /** Save now, for ⌘S, a "Retry now" control, and teardown-adjacent flushes: drops the pending
-   *  timers, waits out any in-flight write, and runs until the host is clean, blocked, or a write
-   *  fails. Resolves rather than rejecting so callers can await it from a UI handler. */
+  /** Resolves rather than rejecting so callers can await it from a UI handler. */
   async flush(): Promise<"clean" | "blocked" | "failed"> {
     if (this.cancelled) return "clean";
     this.clearDebounce();
@@ -147,8 +144,7 @@ export class AutosaveScheduler {
   }
 
   /**
-   * Ends the current file's save session and starts a fresh one: pending work dropped, backoff
-   * forgotten, nothing to report. Called by the host when a new file takes over the pane, since
+   * Called by the host when a new file takes over the pane, since
    * every part of this scheduler's state is about the file that was open (a "Saved" belonging to the
    * previous file is not true of the new one, and its accumulated backoff is not the new file's to
    * inherit). Unlike `cancel`, the scheduler stays usable.
@@ -162,7 +158,7 @@ export class AutosaveScheduler {
     this.emit({ kind: "idle" });
   }
 
-  /** Drop all timers; no further `performSave` calls. Used at teardown. */
+  /** Drop all timers; no further `performSave` calls. */
   cancel(): void {
     this.cancelled = true;
     this.rearm = false;

@@ -220,7 +220,7 @@ extension TerminalSessionPaneViewController {
         if isTypingIntoEndedSession(event) {
             // The pane still shows the session's final render, so typing looks like it should work.
             // Pulse the banner that already explains why it doesn't, rather than swallowing the key:
-            // the event stays unconsumed exactly as before, so nothing about routing changes.
+            // the event stays unconsumed, so nothing about routing changes.
             banner.flash()
             return false
         }

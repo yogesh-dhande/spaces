@@ -107,7 +107,7 @@ struct RootTabView: View {
                 // connection independent of the store until something makes it fail over on its own (see
                 // `SpacesDeviceEndpointResolver`), which the foreground reset inside
                 // `resumeFromBackground()` triggers. That reset deliberately
-                // leaves any open terminal viewer's own stream alone — see its doc comment.
+                // leaves any open terminal viewer's own stream alone.
                 SpacesMobileDeviceStore.clearActiveHosts()
                 model.resumeTerminalWatch()
                 // The endpoint reset and the one read of the device the shell does on this transition,

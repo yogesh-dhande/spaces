@@ -1204,7 +1204,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         // A one-shot self-contained export (e.g. a Device API `.state` poll) lands between two stream
         // exports and drains rects Ghostty had queued. It never ships them itself (`forceFull` for
-        // `.selfContained`), so this is the read the fix must not let fall on the floor.
+        // `.selfContained`), so this is the read the carry must not let fall on the floor.
         let carriedRect = GhosttyRenderScrollRectOperation(rowStart: 0, rowCount: 5, columnStart: 0, columnCount: 5, deltaRows: 1, deltaColumns: 0)
         scrollRectsBox.value = [carriedRect]
         capturedSnapshotBox.value = fiveByFive("c")
@@ -1858,8 +1858,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     /// One render-update policy, both hosts: a scroll that moves the viewport ships the movement as a
     /// delta (scroll rects plus the newly revealed row), and a scroll that hits the scrollback boundary
-    /// moves nothing and so publishes nothing at all. Before this, every scroll step of a flick published
-    /// a full grid, because an unmoved snapshot left the frame revision where the baseline already was.
+    /// moves nothing and so publishes nothing at all. Without that, an unmoved snapshot leaves the frame
+    /// revision where the baseline already was, so every scroll step of a flick would publish a full grid.
     func testScrollPublishesADeltaOnlyWhenTheViewportMoves() async throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
         guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
@@ -3353,8 +3353,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
 
             host.terminate()
-            // terminate() enqueues the exited-state write off the engine and no longer blocks on its commit
-            // (finding B3); block on the persistence queue before reading the durable mirror.
+            // terminate() enqueues the exited-state write off the engine and does not block on its commit;
+            // block on the persistence queue before reading the durable mirror.
             host.debugDrainPersistenceQueue()
 
             let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
@@ -3471,8 +3471,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
 
             host.debugHandleSessionClosed()
-            // terminate() enqueues the exited-state write off the engine and no longer blocks on its commit
-            // (finding B3); block on the persistence queue before reading the durable mirror.
+            // terminate() enqueues the exited-state write off the engine and does not block on its commit;
+            // block on the persistence queue before reading the durable mirror.
             host.debugDrainPersistenceQueue()
 
             let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
@@ -3515,7 +3515,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(runtimeState.state, .exited)
         XCTAssertEqual(finalPayload.reason, TerminalRemoteSessionStateReason.terminated.rawValue)
         XCTAssertTrue(finalPayload.renderText?.contains("final-frame") == true)
-        // Finding 12 regression: terminate() detaches every client and must invalidate the cached
+        // terminate() detaches every client and must invalidate the cached
         // attachment snapshot, so the final persisted payload cannot advertise a still-active attachment
         // (owner) after all clients detached. Without the invalidation this served the stale pre-detach cache.
         let activeAttachments = finalPayload.attachmentSnapshot?.attachments.filter { $0.detachedAt == nil } ?? []
@@ -5121,7 +5121,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try TerminalSessionPersistence.transferOwnership(
                 sessionID: launchConfiguration.sessionID, newOwnerClientID: remoteClient.id, paths: paths, transferredAt: "2026-05-17T00:00:01Z")
 
-            // The local window is lease-governed like any other client now, so its pane keeps
+            // The local window is lease-governed like any other client, so its pane keeps
             // heartbeating to stay live while the remote owner above goes stale.
             try TerminalSessionPersistence.touchClient(id: localClient.id, paths: paths, touchedAt: "2026-05-17T00:01:00Z")
 
@@ -5136,7 +5136,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
-    /// The regression this closes: a `.local` owner (a Mac's own window onto its own daemon) is now
+    /// The regression this closes: a `.local` owner (a Mac's own window onto its own daemon) is
     /// judged by its lease exactly like a `.remote` one, so once it stops heartbeating (its app died
     /// without detaching) it loses ownership within the expiry window, and a still-live client attached
     /// to the same session is promoted to owner automatically and can actually type — not merely gain the
@@ -5144,8 +5144,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     /// (e.g. a relaunched window replacing a killed one) so the daemon's existing auto-transfer-to-local
     /// logic (`activeLocalWindowClientID`) completes the reclaim with no manual takeover needed — the
     /// same self-heal path that already covered a stale REMOTE owner handing back to a local window,
-    /// extended to a stale LOCAL owner now that `.local` carries no exemption. Before this fix `.local`
-    /// was excluded from `staleRemoteClients`'s SQL outright, so `expireStaleRemoteClientsIfNeeded` would
+    /// extended to a stale LOCAL owner now that `.local` carries no exemption. Without that, `.local`
+    /// would be excluded from `staleRemoteClients`'s SQL outright, so `expireStaleRemoteClientsIfNeeded` would
     /// never even consider `staleLocalOwner` a candidate: this test's first assertion would see an empty
     /// `expired` array, ownership would never move, and the waiting client's send would fail with
     /// `.ownershipRejected` forever.
@@ -5274,7 +5274,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             // what makes `staleRemoteOwner` look stale to the sweep later, independent of everything else below.
             try TerminalSessionPersistence.touchClient(id: staleRemoteOwner.id, paths: paths, touchedAt: "2000-01-01T00:00:00Z")
 
-            // The local window is lease-governed like any other client now, so its pane keeps heartbeating
+            // The local window is lease-governed like any other client, so its pane keeps heartbeating
             // (against real wall-clock time here, since the expiry check below uses `Date()`) to stay live
             // while only `staleRemoteOwner` goes stale.
             try TerminalSessionPersistence.touchClient(id: localClient.id, paths: paths, touchedAt: TerminalSessionTimestamp.string(from: Date()))
@@ -5290,7 +5290,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             // as an accepted client-initiated reclaim. The mirror write for this sits parked behind the gate.
             XCTAssertTrue(host.handleControlRequest(.init(command: "takeover", clientID: takingOverClient.id)).ok)
 
-            // Fix 2: `expireStaleRemoteClientsIfNeeded` derives the owner-transfer decision from the in-memory
+            // `expireStaleRemoteClientsIfNeeded` derives the owner-transfer decision from the in-memory
             // authority (`currentActiveAttachments()`), not the DB rows, which still show `staleRemoteOwner` as
             // owner because its parked transfer write hasn't landed yet. In memory, `staleRemoteOwner` was
             // already demoted to viewer by the takeover, so expiring its stale lease must not read the lagging
@@ -5316,9 +5316,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     /// Reproduces the ordering hole `pendingAttachmentMutations` closes: a mutation is acknowledged (its
     /// durable write goes out) while the cache is empty AND the reseeding disk read is also failing, so it has
-    /// nowhere to apply. Before the fix, `mutateAttachmentSnapshot` silently dropped the transform in that
-    /// case; a later reseed that ran ahead of the still-queued write would then cache stale, pre-mutation rows
-    /// forever, since the cache is only ever invalidated by a write-failure reconcile. This test forces that
+    /// nowhere to apply. Without `pendingAttachmentMutations`, `mutateAttachmentSnapshot` would silently drop
+    /// the transform in that case; a later reseed that ran ahead of the still-queued write would then cache
+    /// stale, pre-mutation rows forever, since the cache is only ever invalidated by a write-failure reconcile.
+    /// This test forces that
     /// exact window with the `forceAttachmentSnapshotReseedFailureForTesting` seam and a held persistence
     /// queue, then proves the detach still resolves correctly once the seam is lifted and a reseed runs.
     func testAttachmentMutationAcknowledgedDuringFailedReseedSurvivesALaggingReseed() async throws {
@@ -5354,7 +5355,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try host.detach(clientID: owner.id)
 
             // Lift the seam and force a reseed through an owner-gating read. Its disk read still shows the
-            // owner attached (the parked write hasn't committed), so this only proves the fix if the pending
+            // owner attached (the parked write hasn't committed), so this only holds if the pending
             // detach transform is replayed on top of that stale read.
             host.debugSetForceAttachmentSnapshotReseedFailureForTesting(false)
             XCTAssertNil(
@@ -5411,10 +5412,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         func release() { releaseNow.signal() }
     }
 
-    /// Finding B1: a client that just heartbeated must not be expired off a stale DB lease read while its
+    /// A client that just heartbeated must not be expired off a stale DB lease read while its
     /// coalesced durable lease touch is still blocked on the write lock. The heartbeat records the client's
     /// fresh lease in memory synchronously on the engine; expiry consults that in-memory heartbeat, not only
-    /// the committed DB row. Before the fix the timer's expiry read the pre-touch DB lease and detached the
+    /// the committed DB row. Without that, the timer's expiry would read the pre-touch DB lease and detach the
     /// freshly heartbeated owner.
     func testFreshHeartbeatSparesClientFromExpiryWhileDurableTouchIsBlocked() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -5449,7 +5450,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             expired, [], "a client that just heartbeated must not be expired while its durable lease touch is blocked on the DB write lock")
     }
 
-    /// Finding B1: once an expiry has been enqueued for a stale remote owner, later timer ticks must not
+    /// Once an expiry has been enqueued for a stale remote owner, later timer ticks must not
     /// re-enqueue the detach/ownership-transfer (or bump the owner epoch again) while that first decision's
     /// durable detach is still pending. The held write lock keeps the detach uncommitted across both ticks,
     /// so without the dedup guard the DB still shows the remote as the stale owner and the second tick
@@ -5474,7 +5475,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: launchConfiguration.sessionID, client: remoteClient, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
         try TerminalSessionPersistence.transferOwnership(
             sessionID: launchConfiguration.sessionID, newOwnerClientID: remoteClient.id, paths: paths, transferredAt: "2000-01-01T00:00:01Z")
-        // The local window is lease-governed like any other client now, so its pane heartbeats at real-now
+        // The local window is lease-governed like any other client, so its pane heartbeats at real-now
         // to stay live while the remote owner's 2000-era lease goes stale.
         try TerminalSessionPersistence.touchClient(id: localClient.id, paths: paths, touchedAt: TerminalSessionTimestamp.string(from: Date()))
 
@@ -5551,7 +5552,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     /// tells the promoted local client it owns the terminal while its control requests are `.ownershipRejected`
     /// off the stale DB owner, silently dropping keystrokes. This asserts the promoted client's epoch-carrying
     /// send is ACCEPTED before the transfer commits, and that the expired remote owner's send is now rejected.
-    /// Pre-fix (enforcement reading the DB) the promoted send failed with `.ownershipRejected`.
+    /// Enforcement that read the not-yet-committed DB instead of the cache would fail the promoted send with
+    /// `.ownershipRejected`.
     func testPromotedLocalClientControlAcceptedBeforeExpiryTransferCommits() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -5573,7 +5575,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // Remote becomes the owner (local demoted to viewer); its 2000-era lease makes it a stale owner at real-now.
         try TerminalSessionPersistence.transferOwnership(
             sessionID: launchConfiguration.sessionID, newOwnerClientID: remoteClient.id, paths: paths, transferredAt: "2000-01-01T00:00:01Z")
-        // The local window is lease-governed like any other client now, so its pane heartbeats at real-now
+        // The local window is lease-governed like any other client, so its pane heartbeats at real-now
         // to stay live while the remote owner's 2000-era lease goes stale.
         try TerminalSessionPersistence.touchClient(id: localClient.id, paths: paths, touchedAt: TerminalSessionTimestamp.string(from: Date()))
 
@@ -5604,14 +5606,14 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(outcome.expiredOwner.errorCode, .ownershipRejected)
     }
 
-    /// R7-2 (heartbeat veto): a heartbeat accepted after a stale-client expiry has been decided must supersede
+    /// (heartbeat veto): a heartbeat accepted after a stale-client expiry has been decided must supersede
     /// that expiry, not be silently detached by it. The expiry's durable detach blocks on the held write lock;
     /// the client then heartbeats — accepted in memory (ok), but its own durable lease touch is queued FIFO
     /// behind the expiry, so the committed lease row the expiry compares against still looks stale. The engine
     /// bumps the client's heartbeat generation on accept; `expireClients` re-reads that generation INSIDE its
     /// write transaction (once it finally acquires the lock, after the heartbeat) and skips detaching the client.
-    /// The client stays durably attached and the cache agrees. Pre-fix the expiry's lease CAS matched and
-    /// detached the client with `.applied`, leaving an ACK'd-but-detached zombie.
+    /// The client stays durably attached and the cache agrees. Without the generation check, the expiry's
+    /// lease CAS would match and detach the client with `.applied`, leaving an ACK'd-but-detached zombie.
     func testHeartbeatAfterExpiryDecisionVetoesDetachUnderWriteContention() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -5669,9 +5671,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     /// enqueued (parked here on the held persistence queue). Before it commits, remote viewer B takes over: B owns
     /// the session in memory the moment the takeover is ack'd, and its durable mirror is enqueued behind the
     /// parked expiry. When the queued expiry finally runs it must SKIP the transfer (B is not one of the expired
-    /// clients), only detaching the genuinely stale R, so the mirror converges on B as owner. Pre-fix
-    /// `expireClients` demoted every active owner but the target and promoted A
-    /// unconditionally, durably stomping B's ack'd takeover — a permanent inversion that survived handoff.
+    /// clients), only detaching the genuinely stale R, so the mirror converges on B as owner. Without that
+    /// check, `expireClients` would demote every active owner but the target and promote A
+    /// unconditionally, durably stomping B's ack'd takeover — a permanent inversion that would survive handoff.
     func testQueuedStaleOwnerExpiryDoesNotOverwriteSynchronousTakeover() async throws {
         try await TerminalEngineActor.run {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -5703,7 +5705,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             // The stale remote becomes the owner (2000-era lease makes it stale at real-now).
             try TerminalSessionPersistence.transferOwnership(
                 sessionID: launchConfiguration.sessionID, newOwnerClientID: staleRemoteOwner.id, paths: paths, transferredAt: "2000-01-01T00:00:01Z")
-            // The local window is lease-governed like any other client now, so its pane heartbeats at real-now
+            // The local window is lease-governed like any other client, so its pane heartbeats at real-now
             // to stay live while only the stale remote owner goes stale.
             try TerminalSessionPersistence.touchClient(id: localClient.id, paths: paths, touchedAt: TerminalSessionTimestamp.string(from: Date()))
 
@@ -6014,9 +6016,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     /// target A must not resurrect A as a durable owner if A detached in the window between the decision and the
     /// commit. The tick decides to transfer R → A and enqueues its atomic `expireClients` (parked here); A then
     /// detaches synchronously. When the expiry commits, the target has no active attachment, so the transfer is
-    /// skipped and no owner row is created. Pre-fix `expireClients` INSERTed a brand-new active owner row for A —
-    /// a ghost owner whose client row is disconnected — which pins the session open via `hasActiveAttachments`
-    /// and blocks auto-close. After the fix no active durable attachment remains, so the session can auto-close.
+    /// skipped and no owner row is created. Without that check, `expireClients` would INSERT a brand-new
+    /// active owner row for A — a ghost owner whose client row is disconnected — which pins the session open
+    /// via `hasActiveAttachments` and blocks auto-close. No active durable attachment remains, so the session
+    /// can auto-close.
     func testQueuedStaleOwnerExpiryDoesNotResurrectDetachedTransferTarget() async throws {
         try await TerminalEngineActor.run {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -6040,7 +6043,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                 sessionID: launchConfiguration.sessionID, client: staleRemoteOwner, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
             try TerminalSessionPersistence.transferOwnership(
                 sessionID: launchConfiguration.sessionID, newOwnerClientID: staleRemoteOwner.id, paths: paths, transferredAt: "2000-01-01T00:00:01Z")
-            // The local window is lease-governed like any other client now, so its pane heartbeats at real-now
+            // The local window is lease-governed like any other client, so its pane heartbeats at real-now
             // to stay live while only the stale remote owner goes stale.
             try TerminalSessionPersistence.touchClient(id: localClient.id, paths: paths, touchedAt: TerminalSessionTimestamp.string(from: Date()))
 
@@ -6065,7 +6068,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
-    /// Finding B4: a failed exited-state persist must retry, not leave the durable runtime row stuck at
+    /// A failed exited-state persist must retry, not leave the durable runtime row stuck at
     /// `.running` forever while the final payload says terminated. Termination cancels the runtime-state
     /// timer, so nothing else re-persists. Breaking the database makes terminate()'s exited write fail;
     /// restoring it lets the bounded retry land the exited state.
@@ -6106,7 +6109,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try Self.breakDatabase(at: databasePath)
 
         // terminate() enqueues the exited-state write; it fails against the broken database and schedules a
-        // bounded retry. Keep the host alive so the retry (which no longer depends on the core) still has a
+        // bounded retry. Keep the host alive so the retry (which does not depend on the core) still has a
         // live core to update its markers, matching the common non-dropped path.
         let box = TerminalEngineActor.runSynchronously { () -> Box<GhosttyEmbeddedSessionHost> in
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
@@ -6128,7 +6131,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         _ = box
     }
 
-    /// Fix 1: `drainPersistenceForShutdown` — the awaitable drain SpacesdMain runs after terminating a core in
+    /// `drainPersistenceForShutdown` — the awaitable drain SpacesdMain runs after terminating a core in
     /// `shutdown()` and the nil-quiesce handoff branch — must not return until every write `terminate()`
     /// enqueued has committed, including an exited runtime-state write the queue has not reached yet. Without
     /// it, `exit(0)`/`execv` destroys the still-queued exited write and strands the durable row at `.running`
@@ -6174,7 +6177,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // exited write commit before the drain call has even been entered — and a no-op/broken drain would
         // still observe `.exited` on read, false-passing exactly the regression this test exists to catch.
         //
-        // The fix exploits a fact stated in `TerminalEngineActor.swift`'s own doc comment: the actor's
+        // This barrier exploits a fact stated in `TerminalEngineActor.swift`'s own doc comment: the actor's
         // executor and `TerminalEngineActor.runSynchronously` share one literal `DispatchSerialQueue`, which
         // gives a hard FIFO guarantee (not a heuristic) — jobs submitted to it run in submission order, one
         // at a time, to completion or to a genuine suspension. Creating the drain task from INSIDE a
@@ -6204,13 +6207,13 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         _ = box
     }
 
-    /// Fix 4: a stale-client expiry whose durable detach write fails must be retried on a later timer tick, not
+    /// A stale-client expiry whose durable detach write fails must be retried on a later timer tick, not
     /// abandoned. The persistence queue is parked so the first tick's reads run against a healthy database and
     /// its detach is enqueued behind the park; breaking the database, then releasing the park, makes that
     /// detach fail. The failure hops back to the engine and un-marks the client in `expiredRemoteClientIDs`, so
     /// the next tick — after the database is restored — re-derives it from the still-stale DB row and
-    /// re-enqueues the (idempotent) detach, which lands. Before the fix the client stayed stuck in
-    /// `expiredRemoteClientIDs` and was skipped on every later tick forever.
+    /// re-enqueues the (idempotent) detach, which lands. Without the un-mark, the client would stay stuck in
+    /// `expiredRemoteClientIDs` and be skipped on every later tick forever.
     func testFailedStaleClientExpiryDetachRetriesOnLaterTick() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -6262,7 +6265,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         _ = box
     }
 
-    /// Fix 2 dispatch: only a failed launch-configuration write terminates the core (see
+    /// Only a failed launch-configuration write terminates the core (see
     /// `testFailedLaunchConfigurationWriteTerminatesTheCore`). A detach still has a session row to validate
     /// against, so its failure reconciles instead: it drops and reseeds the in-memory snapshot rather than
     /// terminating. No runtime-state row is written anywhere else in this test, so a runtime-state row's
@@ -6280,7 +6283,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = TerminalClient(id: "local-window", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: client, mode: .owner, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
-        // The local window is lease-governed like any other client now, so its pane heartbeats at real-now
+        // The local window is lease-governed like any other client, so its pane heartbeats at real-now
         // to stay live for `hasLiveAttachments`'s check below (which defaults to real `Date()`).
         try TerminalSessionPersistence.touchClient(id: client.id, paths: paths, touchedAt: TerminalSessionTimestamp.string(from: Date()))
 
@@ -6315,7 +6318,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         _ = box
     }
 
-    /// Fix 2: a failed launch-configuration write must terminate the core rather than merely reconciling:
+    /// A failed launch-configuration write must terminate the core rather than merely reconciling:
     /// no `terminal_sessions` row exists for later mirror writes to validate against, so reconciling would
     /// just make every later write fail as `unknownSession` forever.
     func testFailedLaunchConfigurationWriteTerminatesTheCore() async throws {
@@ -6344,7 +6347,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let databasePath = try SpacesProfile.current().databasePath
         try Self.breakDatabase(at: databasePath)
 
-        // Fix 4: `terminate()` alone never calls `onSessionClosed`, only the natural child-exit path does,
+        // `terminate()` alone never calls `onSessionClosed`, only the natural child-exit path does,
         // so a core terminated over a failed launch-configuration write must call it explicitly, or the
         // daemon's session registry keeps the dead core registered forever. Record whether it fired.
         let onSessionClosedFired = MutableBox(false)
@@ -6433,7 +6436,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     /// first runtime-state write commits to SQLite through the per-core persistence queue. With that queue
     /// parked (the first runtime-state write never reaches disk), `inMemorySessionSummary()` still reports the
     /// running session with its id and launch fields. The negative check proves DB-independence: the durable
-    /// runtime state is absent while the queue is parked, so the pre-fix disk poll (`readRuntimeState`) would
+    /// runtime state is absent while the queue is parked, so a disk poll (`readRuntimeState`) would
     /// have found nothing and, after its deadline, thrown — making a create report a ghost `ok:false` for a
     /// session that was live and running.
     func testInMemorySessionSummaryReportsRunningStateWithoutDBCommit() async throws {
@@ -6472,7 +6475,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             XCTAssertEqual(summary.runtimeState?.state, .running, "the summary must embed the in-memory runtime state")
 
             // Negative check: with the persistence queue parked, no runtime state has committed to disk, so
-            // the pre-fix disk poll would have found nothing and timed out — proving the summary above is
+            // a disk poll would have found nothing and timed out — proving the summary above is
             // served from memory, not the durable mirror.
             XCTAssertNil(
                 try? TerminalSessionPersistence.readRuntimeState(paths: paths),
@@ -6480,12 +6483,12 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
-    /// R4-5: the broadcast that follows a stale-client expiry must advertise the post-expiry attachment state
+    /// The broadcast that follows a stale-client expiry must advertise the post-expiry attachment state
     /// from the in-memory cache, not reseed the not-yet-committed pre-expiry rows from disk. The persistence
     /// queue is parked so the expiry's atomic detach/transfer stays uncommitted; the payload built right after
-    /// the tick must already exclude the expired remote owner and show the local window as the owner. Before the
-    /// fix `postAttachmentStateDidChange` invalidated the cache and the broadcast reseeded the dead owner from
-    /// disk, so every payload advertised the expired client as the attached owner until the next attach/detach.
+    /// the tick must already exclude the expired remote owner and show the local window as the owner. Without
+    /// that, `postAttachmentStateDidChange` would invalidate the cache and the broadcast would reseed the dead
+    /// owner from disk, so every payload would advertise the expired client as attached until the next attach/detach.
     func testStaleClientExpiryBroadcastReflectsPostExpiryOwnerBeforeDetachCommits() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -6506,7 +6509,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: launchConfiguration.sessionID, client: remoteClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
         try TerminalSessionPersistence.transferOwnership(
             sessionID: launchConfiguration.sessionID, newOwnerClientID: remoteClient.id, paths: paths, transferredAt: "2026-05-17T00:00:01Z")
-        // The local window is lease-governed like any other client now, so its pane keeps heartbeating to
+        // The local window is lease-governed like any other client, so its pane keeps heartbeating to
         // stay live while the remote owner above goes stale.
         try TerminalSessionPersistence.touchClient(id: localClient.id, paths: paths, touchedAt: "2026-05-17T00:01:00Z")
 
@@ -6553,7 +6556,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         _ = box
     }
 
-    /// R4-3: `expireClients` performs every detach and the ownership transfer inside ONE transaction, so a
+    /// `expireClients` performs every detach and the ownership transfer inside ONE transaction, so a
     /// statement that fails after the detaches have run rolls the whole thing back — durable state is never
     /// left with the owner detached and no transfer applied. An unknown transfer target throws only after both
     /// detaches execute; the transaction must roll back so both clients remain attached and the owner unchanged.
@@ -6618,13 +6621,13 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             "the committed expiry must transfer ownership to the local window")
     }
 
-    /// R7-1 (transfer guard keys off the actual detach): a stale owner R that synchronously re-attached with a
+    /// (transfer guard keys off the actual detach): a stale owner R that synchronously re-attached with a
     /// fresh lease keeps its active owner row (updated in place), so it remains the durable owner — and its
     /// per-client detach compare-and-set is skipped because the observed lease no longer matches. The ownership
     /// transfer must be skipped WITH it: the guard requires R's own detach to have landed in this transaction,
-    /// not merely that R was in the input candidate list. Pre-fix the guard checked only membership in the
-    /// candidate list, so it committed the transfer — demoting the re-attached owner R and promoting target A —
-    /// while returning `.superseded`, a wrong transfer that survived the race.
+    /// not merely that R was in the input candidate list. A guard that checked only membership in the
+    /// candidate list would commit the transfer — demoting the re-attached owner R and promoting target A —
+    /// while returning `.superseded`, a wrong transfer that would survive the race.
     func testExpireClientsSkipsTransferWhenStaleOwnerReattachedWithFreshLease() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

@@ -61,9 +61,9 @@ function isSubmodulePointer(file: DiffFileEntry): boolean {
 }
 
 /**
- * Builds a directory tree from a flat diff file list, for the file-list sidebar's tree presentation
- * (see docs mockup "G — Tree with compacted chains"). Sibling order mirrors `files`' own order: each
- * directory's children appear in the order their first member was encountered.
+ * Builds a directory tree from a flat diff file list, for the file-list sidebar's tree presentation.
+ * Sibling order mirrors `files`' own order: each directory's children appear in the order their
+ * first member was encountered.
  *
  * Single-child directory *chains* compact into one row, the way editors' "compact folders" mode
  * works: a run of directories where each holds only the next (`apps` -> `macos` -> `Sources`, with

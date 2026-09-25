@@ -155,7 +155,6 @@
 
         // MARK: - Fixtures
         //
-        // `makeOverview`/`makeWorkspace`/`makeAgentRow` live in `SpacesMobileOverviewFixtures.swift`,
-        // shared with `SpacesMobileAlertsTests`.
+        // `makeOverview`/`makeWorkspace`/`makeAgentRow` live in `SpacesMobileOverviewFixtures.swift`.
     }
 #endif

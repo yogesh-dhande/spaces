@@ -6,7 +6,7 @@
  */
 
 /*
- * Preview mode segmented control. Its buttons reuse the house `.seg` class name, but here `.seg` is
+ * Its buttons reuse the house `.seg` class name, but here `.seg` is
  * the segment button itself rather than app.css's wrapping wrapper div, so every rule below is
  * scoped under `.preview-mode-control` to win over app.css's plain `.seg` selector on specificity
  * regardless of stylesheet order.
@@ -52,7 +52,7 @@
 }
 
 /*
- * JSON tree. Rows are single-line flex rows; `--json-depth`, set inline per row by jsonTreeView.ts,
+ * Rows are single-line flex rows; `--json-depth`, set inline per row by jsonTreeView.ts,
  * drives the indent.
  */
 .json-row {
@@ -129,7 +129,6 @@
   color: var(--fg2);
 }
 
-/* Delimited table. */
 .preview-table-empty {
   padding: 10px;
   color: var(--fg3);
@@ -188,7 +187,6 @@
   overflow: auto;
 }
 
-/* Image / SVG stage. */
 .image-stage {
   height: 100%;
   display: flex;

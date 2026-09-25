@@ -11,7 +11,6 @@ import spacesterminalcore
 enum Theme {
     // MARK: Surfaces
 
-    /// Window background.
     static let bg = dynamic(\.background)
     /// Section card background.
     static let surface = dynamic(\.surface)
@@ -35,10 +34,8 @@ enum Theme {
 
     static let accent = dynamic(\.accent)
     static let accentStrong = dynamic(\.accentStrong)
-    /// Fill color for accented backgrounds (filter chips, type-icon tile for
-    /// browser/project, selected sidebar row, focus ring approximation).
     static let accentTint = dynamic(\.accentTint)
-    /// Foreground text/symbols on top of `accentStrong` (primary buttons, badges).
+    /// Foreground text/symbols on top of `accentStrong`.
     static let onAccent = dynamic(\.onAccent)
 
     /// Fill for primary action buttons — pairs with `primaryButtonText` in both appearances.
@@ -55,7 +52,6 @@ enum Theme {
 
     // MARK: Row states
 
-    /// Subtle background applied on hover.
     static let rowHover = dynamic(\.rowHover)
     /// Background for the selected sidebar row.
     static let rowSelected = dynamic(\.rowSelected)
@@ -63,7 +59,6 @@ enum Theme {
     static let rowSelectedCard = dynamic(\.rowSelectedCard)
     /// Subtle accent border for a selected palette row.
     static let rowSelectedCardBorder = dynamic(\.rowSelectedCardBorder)
-    /// Neutral chip background (project chip, shortcut chip, branch chip).
     static let chipBg = dynamic(\.chipBackground)
 
     // MARK: Element pairs
@@ -98,10 +93,10 @@ enum Theme {
 
     // MARK: Metrics
 
-    /// Corner radius for the transparent "card" surfaces (workspace-detail sections, script editors).
+    /// Corner radius for the transparent "card" surfaces.
     static let cardCornerRadius: CGFloat = 10
 
-    /// Standard inset for a card's content row: 14 pt horizontal padding, 10 pt vertical.
+    /// Standard inset for a card's content row.
     static let cardContentInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
 
     // MARK: Button styling

@@ -1651,7 +1651,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         await gateway.waitForDiffCallCount(1)
 
         // Hibernate for real: deactivate/activate is what actually bumps `pageGeneration`, not a
-        // simulation of it, so this exercises the exact race the fix guards against.
+        // simulation of it, so this exercises the exact race this test guards against.
         content.deactivate()
         content.activate(focus: false)
         let freshEvaluator = RecordingCodePaneScriptEvaluator()
@@ -2360,19 +2360,19 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(subscribeCount == 1, "no recovery subscribe may land for a pane that already hibernated")
     }
 
-    // MARK: - Failed scope change must not strand the old scope's live stream (P1 fix)
+    // MARK: - Failed scope change must not strand the old scope's live stream
     //
-    // `performWorkspaceDiff`'s dispatch-time generation bump used to leave `subscribedScope` and the
-    // old stream installed but generation-stale when the NEW scope's fetch failed: a later return to
-    // the old scope would find `subscribedScope` already equal to it, so both the bump's own condition
-    // and `resubscribeDiffSignature`'s guard would skip, leaving the pane's live updates dead until
-    // hibernation. The fix tears the old subscription down (`stop()`, nil the stream, clear
-    // `subscribedScope` to `.none`) in the same breath as the generation bump, so a scope change is
-    // atomic: there is never a window where a stale-but-still-installed stream can be found later.
+    // `performWorkspaceDiff`'s dispatch-time generation bump tears the old subscription down (`stop()`,
+    // nil the stream, clear `subscribedScope` to `.none`) in the same breath as the bump, so a scope
+    // change is atomic: there is never a window where a stale-but-still-installed stream can be found
+    // later. Leaving the old stream installed but generation-stale when the new scope's fetch failed
+    // would let a later return to the old scope find `subscribedScope` already equal to it, so both the
+    // bump's own condition and `resubscribeDiffSignature`'s guard would skip, leaving the pane's live
+    // updates dead until hibernation.
 
     /// Pins the regression directly: navigate away from a live scope A to a scope B whose fetch fails,
-    /// then return to A — a fresh subscription must open, not be skipped by a guard that (pre-fix)
-    /// still thought A's superseded stream was current.
+    /// then return to A — a fresh subscription must open, not be skipped by a guard that would still
+    /// think A's superseded stream was current.
     @Test func aFailedScopeChangeDoesNotStrandTheOldScopesLiveStreamOnReturn() async {
         let gateway = RecordingCodePaneDeviceGateway()
         let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
@@ -2445,7 +2445,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             handleA.stopCount == 1,
             "the old A stream must be stopped at DISPATCH time (the generation bump site), before B's fetch has resolved at all")
 
-        // Fail B's fetch for realism (matches the scenario the P1 report describes); the assertion
+        // Fail B's fetch for realism; the assertion
         // above already proved the teardown does not wait on this outcome.
         await gateway.failDiffCall(at: 1, error: SpacesDeviceClientError.requestRejected(message: "no such ref", code: .invalidArgument))
         await settle()
@@ -2454,7 +2454,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     }
 
     /// Control: an ordinary same-scope refetch (the kind a `spaces:diffSignature` frame's `refreshDiff`
-    /// triggers) must NOT trip the teardown this fix adds — the teardown rides the same
+    /// triggers) must NOT trip the teardown guarding against that race — the teardown rides the same
     /// `subscribedScope != .scope(refName)` condition the generation bump already used, which only
     /// trips for a genuine scope change. `aSameScopeRefetchDoesNotStaleTheLiveStreamsDisconnectHandler`
     /// above already pins that no second subscription opens on a same-scope refetch; this isolates the
@@ -2806,13 +2806,13 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     // above (two NAVIGATIONS, B then C — both bump the request token), here only ONE of the two
     // in-flight reads is a navigation; the other is a same-path reread of the file the pane already
     // has open (`EditorView.handleExternalChange`'s live-reload re-read, triggered by A's own
-    // still-live file-signature stream while B's slower open is in flight). Before this fix, a single
-    // `latestFileReadRequestToken` guard could not tell "a same-path reread happened to be dispatched
-    // after the navigation" apart from "a second navigation superseded the first" — it always favored
+    // still-live file-signature stream while B's slower open is in flight). Without `latestFileNavigationToken`,
+    // a single `latestFileReadRequestToken` guard could not tell "a same-path reread happened to be dispatched
+    // after the navigation" apart from "a second navigation superseded the first" — it would always favor
     // whichever read was dispatched LAST, which is always the reread (the web app only re-reads the
     // path it's currently showing, so a reread can only ever be dispatched after whatever navigation
     // most recently changed `subscribedFilePath`) — stranding the file-signature stream on the stale
-    // path regardless of completion order. `latestFileNavigationToken` fixes this by only letting
+    // path regardless of completion order. `latestFileNavigationToken` lets only
     // navigations compete for "latest wins"; a reread instead only checks it's still looking at the
     // currently-subscribed path.
 

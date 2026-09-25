@@ -209,21 +209,15 @@ describe("EditorView — open() reads and opens a file directly", () => {
   });
 });
 
-// The old third test in this block ("degrades workspaceFileList's unavailable rejection to a quiet
-// hint, and Enter-open still works") is deliberately deleted, not adapted: it exercised the live
-// search dropdown's degraded-search messaging, and that entire surface (search input, debounced
-// `workspaceFileList` suggestions, the `.msg.hint`/`.msg.error` rows) moved out of `editorView.ts`
-// with Design O — `workspaceFileList` is no longer called anywhere in this file. Coverage for how
-// quick-open degrades when file search is unavailable belongs with `quickOpen.ts`, out of scope here.
+// The live search dropdown (search input, debounced `workspaceFileList` suggestions, the
+// `.msg.hint`/`.msg.error` rows) is not part of `editorView.ts`; `workspaceFileList` is never called
+// here. Coverage for how quick-open degrades when file search is unavailable belongs with
+// `quickOpen.ts`.
 
-// The old "EditorView — save conflict banner (Fix 3)" describe block (two tests: an ordinary
-// hash-mismatch conflict latching a "File changed on disk — save disabled" banner, and a
-// fileMissing conflict latching "File deleted on disk — save disabled") is deliberately deleted,
-// not adapted: that permanent latch is exactly what this change replaces. A save-time CAS conflict
-// now routes into the same `handleExternalChange` flow a live `spaces:fileSignature` push uses —
-// see "EditorView — save() CAS conflict routes into external-change handling" below for its
-// replacement coverage, and the "EditorView — external-change handling" block for the full
-// clean-reload / auto-merge / conflict-compare-view contract this now follows.
+// A save-time CAS conflict routes into the same `handleExternalChange` flow a live
+// `spaces:fileSignature` push uses, rather than latching its own permanent banner — see "EditorView
+// — save() CAS conflict routes into external-change handling" below, and the "EditorView — external
+// change handling" block for the full clean-reload / auto-merge / conflict-compare-view contract.
 
 describe("EditorView autosave: one write per burst of typing", () => {
   let container: HTMLElement;
@@ -749,11 +743,10 @@ describe("EditorView — restoreState (round-5 hibernation fix)", () => {
     container = document.createElement("div");
   });
 
-  // Round-3 codex Fix 2: a restored dirty buffer never replaces itself from disk (that part of
-  // round-5's contract is unchanged — see the assertions on buffer/dirty state below), but it must
-  // still fire `handleExternalChange` to reconcile against whatever happened on disk during
-  // hibernation and re-arm the host's file-signature stream (only a `workspaceFileRead` re-arms it;
-  // `subscribeToFileSignature` here is just a DOM listener).
+  // A restored dirty buffer never replaces itself from disk (see the assertions on buffer/dirty
+  // state below), but it must still fire `handleExternalChange` to reconcile against whatever
+  // happened on disk during hibernation and re-arm the host's file-signature stream (only a
+  // `workspaceFileRead` re-arms it; `subscribeToFileSignature` here is just a DOM listener).
 
   it("a dirty snapshot with disk unchanged issues a reconcile read but leaves the buffer, banner, and dirty state untouched", async () => {
     const workspaceFileRead = vi.fn().mockResolvedValue({ content: "original content", sha256: "sha-dirty", size: 16 });
@@ -861,9 +854,9 @@ describe("EditorView — restoreState (round-5 hibernation fix)", () => {
     expect([...conflictBanner.querySelectorAll("button")].map((b) => b.textContent)).toContain("Close without saving");
   });
 
-  // round-16 Fix 1: the clean branch no longer routes through `open()` — it restores the snapshot
-  // directly (same shape as the dirty branches) and reconciles via `handleExternalChange`, so these
-  // three cases exercise `handleExternalChange`'s own decision instead of `open()`'s.
+  // The clean branch does not route through `open()` — it restores the snapshot directly (same
+  // shape as the dirty branches) and reconciles via `handleExternalChange`, so these three cases
+  // exercise `handleExternalChange`'s own decision instead of `open()`'s.
 
   it("a clean snapshot with disk changed reloads silently, adopting the fresh content as the new baseline", async () => {
     const result: WorkspaceFileReadResult = { content: "fresh from disk\n", sha256: "sha-fresh", size: 16 };
@@ -1145,7 +1138,7 @@ describe("EditorView: save() completion is guarded against a concurrent external
     });
 
     // If the save's late success had clobbered the reconcile, baseSHA256 would read "write-sha-a"
-    // and the merge banner/pendingMergeUndo would be gone; this is the assertion the fix is about.
+    // and the merge banner/pendingMergeUndo would be gone; this is the behavior under test.
     expect(view.collectStateForFlush()).toBe(
       JSON.stringify({
         path: "a.ts",
@@ -1221,7 +1214,8 @@ describe("EditorView: save() completion is guarded against a concurrent external
 
     // Settling the rejection here (attached after save()'s own internal await, which was attached
     // first) only resumes once save()'s catch block has already had its microtask turn — same
-    // technique the Fix 5 block above uses to prove a late arrival was a no-op.
+    // technique the "A's rejection after B already won" test above uses to prove a late arrival was
+    // a no-op.
     rejectWrite(new SpacesBridgeError("unavailable", "daemon offline"));
     await writePromise.catch(() => {});
 
@@ -1546,14 +1540,12 @@ describe("EditorView autosave: opening another file while dirty writes it first"
   });
 
   it("typing into a just-restored clean buffer while its reconcile read is in flight is merged, never silently discarded (round-16 Fix 1, reworked from round-15 Fix A)", async () => {
-    // round-16 Fix 1: restoreState's clean branch no longer routes through open(), so the
-    // protection round-15 Fix A proved (open()'s completion-time dirty recheck) no longer applies;
-    // there is no open() call in this path any more. The equivalent, still-real protection now lives
-    // in handleExternalChange's own dirty check at completion: restoreState's synchronous restore
-    // makes the buffer live (loadIntoCodeView wires up onItemEditChange) before its fire-and-forget
-    // reconcile read resolves, so a keystroke landing in that window must route to diff3/conflict,
-    // never be silently clobbered by whatever the read comes back with. This proves that property
-    // through the new path instead of the old one.
+    // restoreState's clean branch does not route through open(), so there is no open() call in this
+    // path; the protection lives in handleExternalChange's own dirty check at completion:
+    // restoreState's synchronous restore makes the buffer live (loadIntoCodeView wires up
+    // onItemEditChange) before its fire-and-forget reconcile read resolves, so a keystroke landing in
+    // that window must route to diff3/conflict, never be silently clobbered by whatever the read
+    // comes back with.
     let resolveRead!: (result: WorkspaceFileReadResult) => void;
     const workspaceFileRead = vi.fn(
       () => new Promise<WorkspaceFileReadResult>((resolve) => { resolveRead = resolve; }),
@@ -1986,7 +1978,7 @@ describe("EditorView — external-change handling: clean buffer (silent reload /
     await Promise.resolve();
 
     // `handleExternalChange` always does a fresh read (a `FileSignatureEvent` carries no content,
-    // just a hash to go check — see its doc comment), so this is 2 calls, not 1: the "no-op" is
+    // just a hash to go check), so this is 2 calls, not 1: the "no-op" is
     // about state (no reload, no banner), not about skipping the read.
     expect(workspaceFileRead).toHaveBeenCalledTimes(2);
     expect(view.collectStateForFlush()).toBe(
@@ -2278,11 +2270,11 @@ describe("EditorView — failed/refused-open reconcile (round-13 fix)", () => {
     capturedCodeViewOptions.current = undefined;
   });
 
-  /** Index-ordered deferred reads, not keyed by path: unlike the round-15 block's `makeDeferredRead`
+  /** Index-ordered deferred reads, not keyed by path: unlike the earlier `makeDeferredRead` helper
    *  (which keys by path and so can only ever hold the LATEST call for a given path), these tests need
    *  to hold two separate in-flight reads for the SAME path ("a.ts") at once — the live reconcile
-   *  triggered by a signature push, and the fix's own reconcile fired from a later failed/refused open
-   *  of a different path. Indexing by call order keeps both addressable independently. */
+   *  triggered by a signature push, and a reconcile fired from a later failed/refused open of a
+   *  different path. Indexing by call order keeps both addressable independently. */
   function makeIndexedDeferredRead(): {
     workspaceFileRead: SpacesBridge["workspaceFileRead"];
     calls: { path: string; resolve: (result: WorkspaceFileReadResult) => void; reject: (err: unknown) => void; promise: Promise<WorkspaceFileReadResult> }[];
@@ -2327,8 +2319,8 @@ describe("EditorView — failed/refused-open reconcile (round-13 fix)", () => {
     expect(calls[2]!.path).toBe("b.ts");
 
     // 4. Resolve A's held reconcile read. The existing generation guard discards it — the buffer must
-    // stay untouched. This pins the PRE-EXISTING discard behavior (not new from this fix); it is what
-    // creates the stranding the fix addresses.
+    // stay untouched. This pins the existing discard behavior; it is what creates the stranding that
+    // the fresh reconcile below (step 6) corrects.
     calls[1]!.resolve({ content: "C1\n", sha256: "H1", size: 3 });
     await calls[1]!.promise;
     await vi.waitFor(() => {
@@ -2341,7 +2333,7 @@ describe("EditorView — failed/refused-open reconcile (round-13 fix)", () => {
     calls[2]!.reject(new SpacesBridgeError("notFound", "no such file: b.ts"));
     await calls[2]!.promise.catch(() => {});
 
-    // 6. WITH THE FIX: the catch block fires a fresh reconcile for the still-current a.ts.
+    // 6. The catch block fires a fresh reconcile for the still-current a.ts.
     await vi.waitFor(() => expect(calls.length).toBe(4));
     expect(calls[3]!.path).toBe("a.ts");
     calls[3]!.resolve({ content: "C1\n", sha256: "H1", size: 3 });
@@ -2374,7 +2366,8 @@ describe("EditorView — failed/refused-open reconcile (round-13 fix)", () => {
     expect(calls[1]!.path).toBe("b.ts");
 
     // 3. While B's read is in flight, edit A — open()'s upfront dirty check ran before this happened, so
-    // only open()'s completion-time recheck can catch it (same setup as the round-15 Fix A test).
+    // only open()'s completion-time recheck can catch it (same setup as the "an edit typed while the
+    // new file's read is in flight" test above).
     capturedCodeViewOptions.current!.onItemEditChange({ file: { contents: "C0 edited\n" } }, undefined);
 
     // 4. Resolve B's held read successfully.
@@ -2390,7 +2383,7 @@ describe("EditorView — failed/refused-open reconcile (round-13 fix)", () => {
     });
     expect(banner.textContent).toBe("Save failed: daemon not reachable · retry in 1 s");
 
-    // 6. WITH THE FIX: the refusal fires a fresh reconcile for a.ts too. Resolve it with disk content
+    // 6. The refusal fires a fresh reconcile for a.ts too. Resolve it with disk content
     // identical to what's already the baseline — the common "nothing actually changed" case.
     await vi.waitFor(() => expect(calls.length).toBe(3));
     expect(calls[2]!.path).toBe("a.ts");
@@ -2532,8 +2525,8 @@ describe("EditorView — a disk read matching an in-flight save's submitted cont
       .mockResolvedValueOnce({ content: "hello\n", sha256: "sha-1", size: 6 }) // initial open
       // handleExternalChange's own read: the signature poll picked up this save's own CAS write
       // (submitted content "v1\n"), while the buffer has already moved on to "v2\n" underneath it —
-      // so this does NOT match `disk.content === this.latestContent` (the round-4 branch), only
-      // `disk.content === this.pendingSaveSubmitted` (Fix 1's branch).
+      // so this does NOT match `disk.content === this.latestContent`, only
+      // `disk.content === this.pendingSaveSubmitted`.
       .mockResolvedValueOnce({ content: "v1\n", sha256: "sha-2", size: 3 });
     let resolveWrite!: (result: WorkspaceFileWriteResult) => void;
     const writePromise = new Promise<WorkspaceFileWriteResult>((resolve) => (resolveWrite = resolve));
@@ -2633,8 +2626,8 @@ describe("EditorView — a disk read matching an in-flight save's submitted cont
     expect(conflictBanner.textContent).toContain("changed on disk");
     expect(saveState(container)).toBe("blocked");
 
-    // The save's own write for the OLD baseline now lands successfully, late — its success arm stands
-    // down on the pre-existing fetchToken guard, so the conflict this fix must still catch stays put.
+    // The save's own write for the OLD baseline lands successfully, late — its success arm stands
+    // down on the pre-existing fetchToken guard, so the conflict the guard must still catch stays put.
     resolveWrite({ ok: true, sha256: "write-sha-a" });
     await writePromise;
 
@@ -2808,16 +2801,17 @@ describe("EditorView — Keep mine's late arms stand down when a newer reconcili
     await vi.waitFor(() => expect(workspaceFileWrite).toHaveBeenCalledWith("a.ts", "edited\n", { baseSHA256: "sha-2", purpose: "editor" }));
 
     // A further external write lands while Keep mine's own write is in flight. `handleExternalChange`
-    // runs unchanged while already in conflict (see its doc comment): this reconcile re-enters
-    // conflict against the NEWEST disk snapshot before Keep mine's own write response ever returns.
+    // applies the same logic while already in conflict: this reconcile
+    // re-enters conflict against the NEWEST disk snapshot before Keep mine's own write response ever
+    // returns.
     fireFileSignature({ path: "a.ts", sha256: "sha-3", missing: false });
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(3));
     await vi.waitFor(() => expect(conflictBanner.textContent).toContain("changed on disk"));
 
-    // Keep mine's write for the OLD conflict snapshot (baseSHA256 "sha-2") now lands successfully,
-    // late. Without this fix, its success arm would overwrite the reconcile's decision with the
-    // OLDER submitted content, marking the editor clean — asserting the reconcile's outcome survives
-    // is exactly what this fix is about.
+    // Keep mine's write for the OLD conflict snapshot (baseSHA256 "sha-2") lands successfully,
+    // late. Without the fetchToken guard, its success arm would overwrite the reconcile's decision
+    // with the OLDER submitted content, marking the editor clean — asserting the reconcile's outcome
+    // survives is the behavior under test.
     resolveWrite({ ok: true, sha256: "write-sha-a" });
     await writePromise;
 
@@ -2835,12 +2829,11 @@ describe("EditorView — Keep mine's late arms stand down when a newer reconcili
     expect(saveState(container)).toBe("blocked"); // the newer conflict still blocks saving
   });
 
-  // Regression: plain Keep mine with no interleaved signature event during the write still commits
-  // the clean keep-mine state exactly as before this fix. Already covered by the existing "Keep mine
-  // force-writes the buffer over disk..." test above — its write never races a `handleExternalChange`
-  // reconcile, so `fetchToken === this.externalChangeFetchToken` holds throughout and the new guard is
-  // a pass-through. No separate test added here per the fix spec's guidance to add one only if the
-  // existing coverage is judged insufficient.
+  // Plain Keep mine with no interleaved signature event during the write still commits the clean
+  // keep-mine state. Already covered by the existing "Keep mine force-writes the buffer over disk..."
+  // test above — its write never races a `handleExternalChange` reconcile, so
+  // `fetchToken === this.externalChangeFetchToken` holds throughout and the guard is a pass-through.
+  // No separate test is added here since the existing coverage is sufficient.
 });
 
 describe("EditorView autosave: Keep mine dismisses the compare view at click time (Take-disk-after-Keep-mine race)", () => {
@@ -3371,17 +3364,16 @@ describe("EditorView — round-24 Fix 3 (P2): unreadableBannerVisible does not l
     capturedCodeViewOptions.current = undefined;
   });
 
-  // Traced against the actual source (both with and without this fix applied, run empirically):
-  // a merge-indicator-then-spurious-same-hash sequence on the switched-to file, as one might first
-  // guess, does NOT distinguish pre-fix from post-fix behavior. `handleExternalChange`'s
-  // `unreadableBannerVisible`-gated clear (around line 582) runs unconditionally on the FIRST decoded
+  // A merge-indicator-then-spurious-same-hash sequence on the switched-to file, as one might first
+  // guess, does NOT tell you whether the gated clear ran correctly. `handleExternalChange`'s
+  // `unreadableBannerVisible`-gated clear runs unconditionally on the FIRST decoded
   // outcome it reaches — and the auto-merge that establishes the merge indicator is itself that first
   // decoded outcome, so the leaked flag is consumed (harmlessly, since no banner is up yet for the new
   // file) BEFORE the merge branch runs later in that same synchronous call and sets the merge banner.
   // By the time a second, genuinely spurious same-hash event arrives, the flag is already false either
   // way. The single-file "guard: a spurious same-hash event never clears an unrelated banner" test
-  // above (round-1 Fix 1) already proves this same-call ordering is safe when the flag was never true
-  // to begin with; it is not evidence one way or the other about the leak this fix addresses.
+  // above already proves this same-call ordering is safe when the flag was never true to begin with;
+  // it is not evidence one way or the other about the leak the gated clear addresses.
   //
   // The leak is only observable when the unrelated banner is put up by a path OTHER than
   // `handleExternalChange` itself — so nothing has yet consumed the leaked-true flag — and a
@@ -3411,8 +3403,8 @@ describe("EditorView — round-24 Fix 3 (P2): unreadableBannerVisible does not l
 
     view.open("b.ts");
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(3));
-    // open()'s success arm always hides the banner unconditionally, whether or not this fix is
-    // applied -- this alone is not evidence the leaked flag was cleared.
+    // open()'s success arm always hides the banner unconditionally -- this alone is not evidence
+    // the leaked flag was cleared.
     expect((container.querySelector(".banner") as HTMLElement).style.display).toBe("none");
 
     // Dirty b.ts, then attempt to open a third file: the write that has to land first fails, so
@@ -3425,10 +3417,10 @@ describe("EditorView — round-24 Fix 3 (P2): unreadableBannerVisible does not l
     expect(refusalBanner.textContent).toBe("Save failed: daemon not reachable · retry in 1 s");
 
     // A spurious same-hash dedupe for b.ts -- this is the FIRST handleExternalChange call to run for
-    // b.ts. Pre-fix, the leaked-true flag hits the gated clear at the top of the decoded-outcome
-    // handling (before the same-hash early return a few lines below it), wiping the refusal notice it
-    // never put up. Post-fix, this fix already cleared the flag when b.ts was opened, so the gated
-    // clear block is skipped entirely and the banner is untouched.
+    // b.ts. Without open()'s success-arm clear, the leaked-true flag would hit the gated clear at the
+    // top of the decoded-outcome handling (before the same-hash early return a few lines below it),
+    // wiping the refusal notice it never put up. The flag was already cleared when b.ts was opened,
+    // so the gated clear block is skipped entirely and the banner is untouched.
     fireFileSignature({ path: "b.ts", sha256: "sha-b1", missing: false });
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(4));
 
@@ -3464,7 +3456,7 @@ describe("EditorView — a standing conflict stays latched until explicit resolu
       .mockResolvedValueOnce({ content: "line1 theirs\nline2\nline3\n", sha256: "sha-2", size: 24 })
       // disk2: keeps disk1's line1 exactly, but edits line3 -- outside H, non-overlapping with "mine"
       // relative to the FROZEN conflict base ("line1 theirs\n..."), which is exactly the shape that
-      // would fool diff3 into a false clean merge without the round-17 fix.
+      // would fool diff3 into a false clean merge if the base were not kept frozen.
       .mockResolvedValueOnce({ content: "line1 theirs\nline2\nline3 edited\n", sha256: "sha-3", size: 30 });
     const workspaceFileWrite = vi.fn().mockResolvedValue({ ok: true, sha256: "sha-4" });
     const { bridge, fireFileSignature } = makeFileSignatureCapturingBridge({ workspaceFileRead, workspaceFileWrite });
@@ -3482,8 +3474,9 @@ describe("EditorView — a standing conflict stays latched until explicit resolu
     });
     expect(saveState(container)).toBe("blocked");
 
-    // Second external change: disk2 diverges from disk1 only outside H. Without the fix, this would
-    // diff3-merge cleanly against the frozen conflict base and silently resume saving.
+    // Second external change: disk2 diverges from disk1 only outside H. Without the reconcile
+    // re-entering against the refreshed disk snapshot, this would diff3-merge cleanly against the
+    // frozen conflict base and silently resume saving.
     fireFileSignature({ path: "a.ts", sha256: "sha-3", missing: false });
     await vi.waitFor(() => expect(workspaceFileRead).toHaveBeenCalledTimes(3));
 

@@ -5,16 +5,13 @@ import { buildFileTree, FileTreeDirNode, FileTreeFileNode, FileTreeNode } from "
 import { submoduleLabel } from "./submoduleLabel";
 
 /**
- * Diff-mode file list sidebar. Not part of the picked Variant A mockup's own
- * markup (that variant renders files inline with no picker chrome), but
- * required by Phase 3's functional scope: a way to see every changed file at
- * a glance and jump to one. Borrows the mockup's Variant B `.rail` metrics
- * and tokens since that is the mockup's only other file-list treatment.
+ * Diff-mode file list sidebar. Not part of the chosen design's own markup, which renders files
+ * inline with no picker chrome, but needed as a way to see every changed file at a glance and jump
+ * to one. Borrows another design's `.rail` metrics and tokens, its only other file-list treatment.
  *
- * Renders `files` as a directory tree (docs mockup "G — Tree with compacted
- * chains" — see `buildFileTree`), rather than one flat row per file: a
- * directory row shows its (possibly chain-compacted) path once, and every
- * file under it shows only its own basename. A git submodule is one of those
+ * Renders `files` as a directory tree with compacted single-child chains (see `buildFileTree`),
+ * rather than one flat row per file: a directory row shows its (possibly chain-compacted) path
+ * once, and every file under it shows only its own basename. A git submodule is one of those
  * directory rows, carrying a chip that names the commit its pointer moved to,
  * with the submodule's own changed files nested under it. The caller supplies the current
  * workspace's expanded paths and receives expansion changes, so rebuilding
@@ -292,8 +289,7 @@ function renderDirNode(
   return group;
 }
 
-/** The chip on a submodule directory row: the pointer's commit, the whole pointer label as its
- *  tooltip, and a click that selects the pointer entry rather than disclosing the folder. */
+/** A click on the chip selects the pointer entry rather than disclosing the folder. */
 function renderSubmoduleChip(file: DiffFileEntry, callbacks: FileListCallbacks): HTMLElement {
   const chip = document.createElement("button");
   chip.type = "button";

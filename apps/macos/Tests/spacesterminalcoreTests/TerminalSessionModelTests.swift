@@ -157,7 +157,6 @@ final class TerminalSessionModelTests: XCTestCase {
 
         let sessionID = "session-automation-roundtrip"
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        // Product automation sessions carry both their workspace and run attribution.
         let configuration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, title: "nightly backup", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "backup.sh",
             createdAt: "2026-05-08T00:00:00Z", workspaceID: "workspace-1", kind: .automation, automationRunID: "run-42")
@@ -486,8 +485,8 @@ final class TerminalSessionModelTests: XCTestCase {
     /// The regression this closes: a session hosted by one device whose owner is a `.local` pane on
     /// that same device must not stay ownerless-blocking forever just because the owning client stopped
     /// heartbeating. A pane that keeps refreshing its lease across a span far longer than a single
-    /// expiry window stays live throughout — proving the fix does not merely shorten the window but
-    /// actually judges `.local` clients by it, the same way `.remote` ones always were.
+    /// expiry window stays live throughout — proving `.local` clients are judged against the expiry
+    /// window the same way `.remote` ones always were, not merely given a shorter one.
     func testIdleLocalOwnerStaysLiveAcrossRepeatedLeaseTouches() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

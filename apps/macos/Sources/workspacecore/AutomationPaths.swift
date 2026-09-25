@@ -6,19 +6,16 @@ import spacesterminalcore
 /// here: its terminal sessions survive in their own directories until the run is pruned, and those are what
 /// the Runs tab replays. Retention and automation deletion remove these directories.
 public enum AutomationPaths {
-    /// Root directory holding every run's artifacts: `<terminalRoot>/automations/runs`.
     public static func runsRootDirectory(fileManager: FileManager = .default) throws -> URL {
         let root = try TerminalServicePaths.terminalRootDirectory(fileManager: fileManager).appendingPathComponent("automations", isDirectory: true)
             .appendingPathComponent("runs", isDirectory: true)
         return root
     }
 
-    /// Artifacts directory for a single run: `<runsRoot>/<runID>`.
     public static func runDirectory(runID: String, fileManager: FileManager = .default) throws -> URL {
         try runsRootDirectory(fileManager: fileManager).appendingPathComponent(runID, isDirectory: true)
     }
 
-    /// Creates (if needed) and returns the run's artifacts directory.
     @discardableResult public static func ensureRunDirectory(runID: String, fileManager: FileManager = .default) throws -> URL {
         let directory = try runDirectory(runID: runID, fileManager: fileManager)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)

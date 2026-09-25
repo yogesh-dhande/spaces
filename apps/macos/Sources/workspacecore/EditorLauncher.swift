@@ -9,7 +9,6 @@ import systembridge
 /// forwards the request to the running instance — focusing the existing window for a
 /// folder, the editor focus mechanism — or cold-launches the app.
 public enum EditorLauncher {
-    /// Opens a local workspace directory in the editor.
     public static func open(cliExecutablePath: String, directory: String) throws { try runEditorCLI([cliExecutablePath, directory]) }
 
     /// Opens a workspace on a paired remote device in a VS Code-family editor by handing it

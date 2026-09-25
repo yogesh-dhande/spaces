@@ -195,8 +195,7 @@ export function renderToolbar(
 
   /** Whether the compare dropdown is open — a closure var (not part of `ToolbarState`) so it
    *  survives an unrelated `update()` rebuild (agent-status/draft-count changes arrive independently
-   *  of the menu), the same reason `refInputOpen` used to persist this way before the compare menu
-   *  replaced the inline ref input. */
+   *  of the menu). */
   let compareMenuOpen = false;
   /** Removes the previous build's outside-click/Escape listeners, if any were registered. `build()`
    *  fully replaces the DOM on every call (`replaceChildren`), so a listener attached to `window`

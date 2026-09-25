@@ -628,7 +628,7 @@
 
         /// These exercise the real `SpacesMobileDeviceStore`/`SpacesMobileDismissedAlertsStore`
         /// persistence — `UserDefaults.standard` and the Keychain — so each test resets that state before
-        /// and after running, matching `SpacesMobileDemoModeTests`.
+        /// and after running.
 
         /// Dismissing an event while device A is active must not leak into device B: switching to B starts
         /// from an empty bucket, its own overview is undisturbed by A's dismissal, and switching back to A
@@ -781,7 +781,6 @@
             XCTAssertEqual(events.first { $0.kind == .exited }?.detail, "Exited")
         }
 
-        /// A shell that has reported no title spends no words on the bell itself.
         func testBellEventForASilentShellCarriesNoDetail() {
             let overview = makeOverview(sessions: [
                 makeSession(id: "session-bell", title: "shell-1", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: "2026-01-01T00:10:00Z")
@@ -1150,8 +1149,7 @@
         }
 
         /// Clears the real, on-disk paired-device and dismissed-alerts state the per-device persistence
-        /// tests exercise, matching `SpacesMobileDemoModeTests`'s reset of the same `UserDefaults.standard`
-        /// keys plus the Keychain-backed device store.
+        /// tests exercise.
         private func resetDeviceScopedAlertsState() {
             for device in SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings()).devices {
                 _ = SpacesMobileDeviceStore.remove(deviceID: device.id, fallbackSettings: SpacesMobileConnectionSettings())
@@ -1184,8 +1182,7 @@
             return settings
         }
 
-        // `makeOverview`/`makeWorkspace`/`makeAgentRow` live in `SpacesMobileOverviewFixtures.swift`,
-        // shared with `SpacesMobileAgentsTests`.
+        // `makeOverview`/`makeWorkspace`/`makeAgentRow` live in `SpacesMobileOverviewFixtures.swift`.
 
         private func makeProcessRow(id: String, name: String, sessionID: String? = nil, runState: SpacesDeviceRunState, exitedAt: String?)
             -> SpacesDeviceWorkspaceProcessRow

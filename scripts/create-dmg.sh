@@ -19,10 +19,8 @@ if [[ ! -d "$APP_BUNDLE_INPUT" ]]; then
   exit 1
 fi
 
-# Create releases directory if it doesn't exist
 mkdir -p "$RELEASES_DIR"
 
-# Create temporary directory for DMG contents
 staging=$(mktemp -d)
 temp_dmg=""
 trap 'rm -rf "$staging"; [ -n "$temp_dmg" ] && rm -f "$temp_dmg"' EXIT

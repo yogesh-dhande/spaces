@@ -52,7 +52,6 @@ extension ProcessProfileEnvironmentSuites {
             return AppKitController(launchContext: context)
         }
 
-        /// One workspace's bell alert, whose detail line is the session's live title.
         private func bellGroup(liveTitle: String?) -> AppKitController.AlertsGroup {
             AppKitController.AlertsGroup(
                 projectName: "Project", workspaceID: "workspace-1", workspaceName: "feature", workspaceBranch: "feature",
@@ -80,8 +79,8 @@ extension ProcessProfileEnvironmentSuites {
                 ])
         }
 
-        /// Every alert row currently on screen, in render order. Reads the detail container itself, so a
-        /// row the pane replaced can never be mistaken for the one it replaced.
+        /// Reads the detail container itself, so a row the pane replaced can never be mistaken for the one
+        /// it replaced.
         private func renderedRows(_ controller: AppKitController) -> [ClickableRowView] {
             var found: [ClickableRowView] = []
             func walk(_ view: NSView) {

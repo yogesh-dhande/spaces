@@ -1201,10 +1201,10 @@
                 }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 
-        /// Sends one button press or release. Deliberately not coalesced the way scroll is: a click is a
-        /// discrete event whose press/release ordering the application depends on, so it rides the same
-        /// user-initiated input queue as a key, flushing any pending scroll batch first so the
-        /// application sees the two in the order the user produced them.
+        /// Deliberately not coalesced the way scroll is: a click is a discrete event whose press/release
+        /// ordering the application depends on, so it rides the same user-initiated input queue as a key,
+        /// flushing any pending scroll batch first so the application sees the two in the order the user
+        /// produced them.
         private func sendRemoteMouseButton(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) {
             guard isInteractiveRuntimeStateForControl() else { return }
             guard let client = attachedClient, attachedMode == .owner else { return }
@@ -1507,10 +1507,9 @@
             }
         }
 
-        /// Applies one scroll to the replay and paints what it produced. A gesture that runs into the
-        /// oldest row the replay holds reads the whole scrollback budget once and rebuilds from it,
-        /// carrying the rows the replay could not apply onto the deeper replay so a flick that crosses the
-        /// boundary does not lose everything past it.
+        /// A gesture that runs into the oldest row the replay holds reads the whole scrollback budget once
+        /// and rebuilds from it, carrying the rows the replay could not apply onto the deeper replay so a
+        /// flick that crosses the boundary does not lose everything past it.
         private func applyLocalScroll(deltaRows: Int, model: TerminalLocalScrollbackModel) {
             let scroll = model.scroll(deltaRows: deltaRows)
             showLocalScrollbackPosition(model, snapshot: scroll.snapshot)
@@ -1541,8 +1540,8 @@
             presentLocalScrollbackFrame(snapshot, offsetRows: model.rowsFromBottom)
         }
 
-        /// Paints one replay frame. It carries a local revision so the mirror's frame-dedupe never drops a
-        /// scrolled viewport, and the session's current owner epoch so it is applied like any other frame.
+        /// Carries a local revision so the mirror's frame-dedupe never drops a scrolled viewport, and the
+        /// session's current owner epoch so it is applied like any other frame.
         private func presentLocalScrollbackFrame(_ snapshot: GhosttyTerminalSnapshot, offsetRows: Int) {
             localScrollbackRevision &+= 1
             let frame = GhosttyRenderFrame(
@@ -1606,7 +1605,7 @@
 
         /// The jump-to-bottom control's action. A pane showing its replay jumps locally, with no request
         /// to the daemon at all; a pane whose live frame is itself scrolled back (the daemon's own
-        /// viewport, moved by whoever owns it) asks the session to jump, exactly as before.
+        /// viewport, moved by whoever owns it) asks the session to jump.
         private func handleJumpToBottom() {
             if isShowingLocalScrollbackFrame {
                 // Jumping during a flick's momentum has to end that flick too: the replay survives the
@@ -2156,9 +2155,8 @@
             }
             pendingViewportResizeTask = Task.detached(priority: .utility) {
                 // Resize runs off `inputQueue` (it must not wait behind buffered typing), so its failure
-                // cannot ride that queue's `onError` and is reported directly here instead. A `try?` here
-                // used to swallow the thrown error entirely; a resize on a dead link deserves the same
-                // prompt lost-link notice as a keystroke, not silence.
+                // cannot ride that queue's `onError` and is reported directly here instead: a resize on a
+                // dead link deserves the same prompt lost-link notice as a keystroke, not silence.
                 let response: TerminalControlResponse?
                 do {
                     response = try Self.sendControlRequest(

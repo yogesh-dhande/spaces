@@ -226,7 +226,7 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
   let diffRetryFailures = 0;
   const DIFF_RETRY_FLOOR_MS = 1000;
   const DIFF_RETRY_CAP_MS = 30000;
-  // round-16 Fix 1: coalescing state for refreshDiff's public gate (see its doc comment below).
+  // Coalescing state for refreshDiff's public gate (see its doc comment below).
   let diffPullInFlight = false;
   let trailingDiffRefreshQueued = false;
   let trailingPreserveScroll = true;
@@ -426,7 +426,7 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
     // The success-only seam (see `EditorViewCallbacks.onFileOpened`'s doc comment): fires only once
     // `loadFile()` actually replaces the buffer with `path`'s content, so a refused open (the
     // discard-consent banner) or a failed read never records a recent or moves the Files tree's
-    // selection (Finding C) — `openInEditor` below stops doing either of those itself. Restoring a
+    // selection — `openInEditor` below stops doing either of those itself. Restoring a
     // hibernated buffer never fires this either (see `EditorView.restoreState`'s doc comment), so a
     // pane that reopens straight into its last file doesn't re-record it as a fresh open.
     onFileOpened: (path) => {
@@ -841,7 +841,7 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
   let navigationGeneration = 0;
 
   /** Opens `path` in Editor mode, switching modes first if the pane isn't already there — the
-   *  common landing point for all three entry points Design O/K define (see this file's imports'
+   *  common landing point for all three entry points (see this file's imports'
    *  doc comments): the ⌘P overlay (outside the diff), the Files tree, and the Changes list's own
    *  click handler while already in Editor mode (`changesOnSelect` below). */
   function openInEditor(path: string, options?: { line?: number }): void {
@@ -850,7 +850,7 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
     // fail (an async read error) instead of actually opening `path` — recording the recent / moving
     // the tree selection here unconditionally would do so even then. Both are handled by
     // `EditorView`'s `onFileOpened` success callback instead (see this file's `EditorView`
-    // construction above), which only fires once the open has actually completed (Finding C).
+    // construction above), which only fires once the open has actually completed.
     //
     // Called BEFORE the `setMode` dispatch below, not after: `open()` starts (at most) one
     // `workspaceFileRead` and returns synchronously — the read itself only awaits — while dispatching
@@ -1040,7 +1040,6 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
     focusCodeSurface();
   }
 
-  /** Returns focus to whichever code surface is visible after the command dialog closes. */
   function focusCodeSurface(): void {
     (state.mode === "diff" ? diffAreaEl : editorContainerEl).focus();
   }
@@ -1220,8 +1219,7 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
   // constructed — would reach that callback before `toolbar`'s initializer has run, throwing
   // "Cannot access 'toolbar' before initialization" and taking down the whole pane. Every existing
   // test happened to pass an empty `pendingReviewComments`, which short-circuits before `refresh()`
-  // is ever called, which is why this TDZ hazard went uncaught until round-16 Fix 1a's test seeded
-  // a non-empty one.
+  // is ever called, which is why this TDZ hazard went uncaught until a test seeded a non-empty one.
   comments.restorePendingState(initPayload.workspaceState.pendingReviewComments ?? []);
 
   // Wired once against `body` (the flex row both panels live in), independent of `renderBody`'s
@@ -1231,10 +1229,9 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
   // end to end: restore-on-attach, drag, persist, and re-clamp on pane resize.
   attachFileListDivider(fileListDividerEl, fileListEl, body);
 
-  /** Both modes share one physical `fileListEl`/`fileListDividerEl` pair (Design K: "same left tree
-   *  area as diff mode"), so the resizable divider stays wired in either mode — only `fileListEl`'s
-   *  single child and the main content pane change. Diff mode's child is `changesListEl` directly
-   *  (no header, unchanged from before Design K); Editor mode's is `editorSidebar.el`, whose own
+  /** Both modes share one physical `fileListEl`/`fileListDividerEl` pair, so the resizable divider
+   *  stays wired in either mode — only `fileListEl`'s single child and the main content pane change.
+   *  Diff mode's child is `changesListEl` directly (no header); Editor mode's is `editorSidebar.el`, whose own
    *  Files/Changes toggle either shows the full workspace listing or reparents this same
    *  `changesListEl` node into its own list host (see `EditorSidebar`'s doc comment). */
   function renderBody(): void {
@@ -2530,7 +2527,7 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
    * Public-facing gate every caller below keeps calling unchanged: at most one `doRefreshDiff`
    * pull is ever in flight, with at most one more coalesced trailing pull queued behind it. The
    * daemon serializes `workspaceFileRead`/`workspaceFileWrite`/`workspaceDiffManifestChunk` pulls on one per-workspace
-   * queue (round-16 Fix 1), so issuing a fresh request for every signature event during an active
+   * queue, so issuing a fresh request for every signature event during an active
    * agent's churn just piles up pulls nobody will see rendered — each one delays the next, and
    * delays any editor save queued behind them too.
    *
@@ -2651,7 +2648,6 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
     });
   }
 
-  /** Shows or hides the persistent notice from `liveRefreshError`'s current value. */
   function updateLiveRefreshNotice(): void {
     if (liveRefreshError === undefined) {
       liveRefreshNotice.hide();
@@ -2767,7 +2763,7 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
   // snapshot the host was holding: a permanent loss of an unsaved edit. `restoreState`'s
   // dirty-restoration branch is pure synchronous computation over the snapshot (no network round
   // trip); only the clean-restoration branch does one `workspaceFileRead` call, an accepted extra
-  // cost of moving this earlier. `initPayload.initialMode` already carries the host's live (not
+  // cost of moving this earlier. `initPayload.workspaceState.mode` already carries the host's live (not
   // original) mode — so a pane that hibernated in Editor mode
   // has already loaded back into Editor mode above; this call is what puts its buffer back too,
   // regardless of which mode ends up on screen.
@@ -2802,7 +2798,7 @@ export async function mountRoot(container: HTMLElement): Promise<CodePaneRootHan
   });
   // Every OTHER path into editor mode reaches `editorSidebar.reattach()` through dispatch's
   // "setMode" branch, which is what makes the Files tab's first listing fetch happen lazily on
-  // "show" rather than in EditorSidebar's own constructor (see its doc comment: a diff-only pane
+  // "show" rather than in EditorSidebar's own constructor (a diff-only pane
   // must not pay for a hidden `workspaceFileList` on the daemon's shared per-workspace git queue).
   // A pane that starts, or is rehydrated, directly into editor mode never goes through that
   // dispatch — `renderBody()` above already mounted the sidebar straight from `state.mode`, not via

@@ -308,8 +308,8 @@ export class DiffView {
     if (preservedFocusedPosition !== undefined && this.filesByPath.has(preservedFocusedPosition.path)) {
       this.pendingFocusedPosition = preservedFocusedPosition;
     }
-    // A prior `setError` call (see its doc comment) repurposes `emptyEl` for a factual error
-    // message; any successful refresh — including one that lands on a genuinely empty diff —
+    // A prior `setError` call repurposes `emptyEl` for a factual error message; any successful
+    // refresh — including one that lands on a genuinely empty diff —
     // supersedes that, so restore the plain "No changes" wording every time this runs rather than
     // only when `files.length === 0` happens to be true again below.
     this.emptyEl.textContent = "No changes";

@@ -17,7 +17,6 @@ final class DatabaseLocatorTests: XCTestCase {
         tempHomeURL = nil
     }
 
-    // Tests default path uses spaces directory and creates parent by arranging representative inputs and asserting the expected result.
     func testDefaultPathUsesSpacesDirectoryAndCreatesParent() throws {
         let path = try DatabaseLocator.defaultPath(homeDirectoryURL: tempHomeURL)
         let url = URL(fileURLWithPath: path)
@@ -29,16 +28,14 @@ final class DatabaseLocatorTests: XCTestCase {
         XCTAssertTrue(isDirectory.boolValue)
     }
 
-    // Tests default path is stable across calls by arranging representative inputs and asserting the expected result.
     func testDefaultPathIsStableAcrossCalls() throws {
         let first = try DatabaseLocator.defaultPath(homeDirectoryURL: tempHomeURL)
         let second = try DatabaseLocator.defaultPath(homeDirectoryURL: tempHomeURL)
         XCTAssertEqual(first, second)
     }
 
-    // Tests the public defaultPath() overload succeeds and returns a path ending in spaces.db. `HOME` is
-    // redirected along with the cleared override because resolution refuses the installed profile under a
-    // test host; a redirected home is the isolated profile this exercises.
+    // `HOME` is redirected along with the cleared override because resolution refuses the installed
+    // profile under a test host; a redirected home is the isolated profile this exercises.
     func testPublicDefaultPathReturnsValidPath() throws {
         let path = try withEnvironmentValues([DatabaseLocator.databasePathEnvironmentVariable: nil, "HOME": tempHomeURL.path]) {
             try DatabaseLocator.defaultPath()
@@ -46,7 +43,6 @@ final class DatabaseLocatorTests: XCTestCase {
         XCTAssertEqual(path, tempHomeURL.appendingPathComponent(".spaces/spaces.db").path)
     }
 
-    // Tests the public defaultPath() overload honors the explicit DB-path override used by manual E2E runs.
     func testPublicDefaultPathHonorsEnvironmentOverride() throws {
         let overrideURL = tempHomeURL.appendingPathComponent("isolated/state/spaces-test.db")
         let previous = getenv(DatabaseLocator.databasePathEnvironmentVariable).map { String(cString: $0) }

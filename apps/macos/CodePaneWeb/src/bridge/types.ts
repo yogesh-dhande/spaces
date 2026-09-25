@@ -372,7 +372,7 @@ export interface ReviewCommentUpsertInput {
   body: string;
 }
 
-/** round-16 Fix 1a: one entry in a teardown comment-state snapshot — see
+/** One entry in a teardown comment-state snapshot — see
  *  `CommentsController.collectStateForFlush`/`restorePendingState` and `CodePaneInitPayload`'s
  *  `pendingReviewComments` field. `provisional` distinguishes a never-persisted local-only draft
  *  (recreated as a fresh local card on rehydrate) from a persisted draft whose live, unsaved text is

@@ -122,11 +122,11 @@ body {
  * repaint automatically whenever `data-theme` changes, with no separate
  * light/dark theme registration.
  *
- * A `--shiki-*` mapping shipped here previously: shiki's own default
+ * A `--shiki-*` mapping here would resolve to nothing: shiki's own default
  * variable prefix is `--shiki-`, but `@pierre/diffs` overrides it to
  * `--diffs-` before constructing the theme, so every token span's inline
- * `color: var(--diffs-token-keyword)` (etc.) resolved to nothing and fell
- * back to plain inherited text color — flat, monochrome diffs.
+ * `color: var(--diffs-token-keyword)` (etc.) needs the `--diffs-` prefix, or
+ * it falls back to plain inherited text color — flat, monochrome diffs.
  */
 :root {
   --diffs-foreground: var(--fg);

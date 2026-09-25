@@ -163,8 +163,8 @@
         // MARK: - Tests
 
         /// Corrupts `output.log` with content that does not contain the rendered marker, then resizes.
-        /// In-place resize keeps the live screen; the pre-fix recreate-and-replay path would rebuild
-        /// the screen from the corrupted bytes and lose the marker, and a wide line would re-wrap from
+        /// In-place resize keeps the live screen; a recreate-and-replay approach would rebuild the
+        /// screen from the corrupted bytes and lose the marker, and a wide line would re-wrap from
         /// garbage rather than from its live content.
         @Test func resizeReflowsInPlaceWithoutReplayingTranscript() async throws {
             let paths = try makeTemporaryPaths()
@@ -209,8 +209,8 @@
         }
 
         /// Deletes `output.log` before resizing. In-place resize never touches the file, so it
-        /// succeeds and the live screen is preserved; the pre-fix recreate-and-replay path opens the
-        /// (now missing) file, fails the replay, and returns a resize error.
+        /// succeeds and the live screen is preserved; a recreate-and-replay approach would open the
+        /// (now missing) file, fail the replay, and return a resize error.
         @Test func resizeSucceedsWhenTranscriptDeleted() async throws {
             let paths = try makeTemporaryPaths()
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }

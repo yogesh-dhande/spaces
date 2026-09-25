@@ -184,7 +184,6 @@ struct BrowserProxyHTTPHeadParser {
         }
     }
 
-    /// Drops the `:port` suffix from a `Host` header value, handling bracketed IPv6 literals.
     private static func stripPort(_ value: String) -> String {
         if value.hasPrefix("[") {
             if let close = value.firstIndex(of: "]") { return String(value[value.index(after: value.startIndex)..<close]) }

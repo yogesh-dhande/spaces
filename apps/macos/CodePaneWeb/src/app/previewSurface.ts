@@ -152,12 +152,10 @@ export class PreviewSurface {
     });
   }
 
-  /** The source line the Markdown preview is scrolled to, or null for every other surface. */
   visibleSourceLine(): number | null {
     return this.markdownVisible ? (this.markdown?.visibleSourceLine() ?? null) : null;
   }
 
-  /** Scrolls the Markdown preview to the block covering `line`; a no-op for every other surface. */
   scrollToSourceLine(line: number): void {
     if (this.markdownVisible) this.markdown?.scrollToSourceLine(line);
   }
@@ -201,7 +199,6 @@ export class PreviewSurface {
     this.markdown.render(path, source);
   }
 
-  /** The preview's own content element, emptied for a fresh render. */
   private host(): HTMLElement {
     this.imageToken += 1;
     this.markdownVisible = false;
@@ -221,7 +218,7 @@ export class PreviewSurface {
 
 /** Renders `text` as the muted standalone note the table shows for an empty file
  *  (`preview-table-empty`), reused here for a surface that has nothing to render in place of its
- *  usual content rather than a truncated tail of it. Replaces whatever `host` held. */
+ *  usual content rather than a truncated tail of it. */
 function renderPreviewNote(host: HTMLElement, text: string): void {
   host.textContent = "";
   const note = document.createElement("div");

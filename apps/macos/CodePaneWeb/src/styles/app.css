@@ -668,7 +668,7 @@
   overflow-wrap: anywhere;
 }
 
-/* Editor mode's Files/Changes sidebar (Design K) — the sole child `.file-list` shows in Editor
+/* Editor mode's Files/Changes sidebar — the sole child `.file-list` shows in Editor
    mode, in place of the plain changed-files list (`.file-list`'s own `overflow-y: auto` is
    harmless here: this fills its exact-fit flex parent, so it never actually overflows). Reuses
    `.file-list .row`/`.dirrow`/etc above for its own rows — both the Files tree (filesTree.ts) and
@@ -737,7 +737,6 @@
   color: var(--orange);
 }
 
-/* Editor mode */
 .editor-open-bar {
   flex: 0 0 auto;
   display: flex;
@@ -748,7 +747,7 @@
   background: var(--surface2);
 }
 
-/* The open file's path (Design O) — plain text, not an input: there is nothing to type into it,
+/* The open file's path — plain text, not an input: there is nothing to type into it,
    only to read. Opening happens exclusively through the ⌘P overlay (`.quick-open` below), the
    Files tree, or the Changes list. */
 .editor-open-bar .editor-path {
@@ -824,7 +823,7 @@
   min-height: 0;
 }
 
-/* ⌘P quick-open overlay (Design O) — a centered floating panel over the whole pane, available in
+/* ⌘P quick-open overlay — a centered floating panel over the whole pane, available in
    both Diff and Editor mode. See quickOpen.ts's doc comment for the open semantics; this only
    covers layout/paint. */
 .quick-open-backdrop {

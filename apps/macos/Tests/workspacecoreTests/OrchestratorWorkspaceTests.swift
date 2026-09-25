@@ -96,7 +96,6 @@ extension OrchestratorTests {
         XCTAssertTrue(workspaceRootContents.isEmpty)
     }
 
-    // Tests create workspace for non git project allocates ports by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceForNonGitProjectAllocatesPorts() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -320,7 +319,6 @@ extension OrchestratorTests {
         XCTAssertNotNil(try store.automationRun(id: run.id), "a failed worktree removal keeps Runs history")
     }
 
-    // Tests create workspace rejects directory name override for non git project by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceRejectsDirectoryNameOverrideForNonGitProject() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -334,7 +332,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests create workspace uses provided directory name for git project by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceUsesProvidedDirectoryNameForGitProject() throws {
         let repo = try makeTempGitRepo(name: "workspace-name-override")
         let root = try makeTempDirectory()
@@ -349,7 +346,6 @@ extension OrchestratorTests {
         XCTAssertTrue(workspace.dir.hasSuffix("/feature_branch_1"))
     }
 
-    // Tests create workspace rejects directory name with invalid characters by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceRejectsDirectoryNameWithInvalidCharacters() throws {
         let repo = try makeTempGitRepo(name: "workspace-name-invalid-dirname")
         let root = try makeTempDirectory()
@@ -363,7 +359,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests create workspace rejects directory name with spaces by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceRejectsDirectoryNameWithSpaces() throws {
         let repo = try makeTempGitRepo(name: "workspace-name-space-dirname")
         let root = try makeTempDirectory()
@@ -377,7 +372,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests create workspace uses selected base branch as base for new branch by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceUsesSelectedBaseBranchAsBaseForNewBranch() throws {
         let repo = try makeTempGitRepo(name: "workspace-target-branch")
         try runGit(["checkout", "-b", "develop"], cwd: repo.path)
@@ -398,7 +392,6 @@ extension OrchestratorTests {
         XCTAssertEqual(workspace.baseBranch, "develop")
     }
 
-    // Tests create workspace defaults base branch to project default when omitted by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceDefaultsBaseBranchToProjectDefaultBranch() throws {
         let repo = try makeTempGitRepo(name: "workspace-default-target")
         let root = try makeTempDirectory()
@@ -414,7 +407,6 @@ extension OrchestratorTests {
         XCTAssertEqual(workspace.baseBranch, project.defaultBranch)
     }
 
-    // Tests archive workspace removes git worktree registration by arranging representative inputs and asserting the expected result.
     func testArchiveWorkspaceRemovesGitWorktreeRegistration() throws {
         let repo = try makeTempGitRepo(name: "workspace-archive-git-worktree-remove")
         let root = try makeTempDirectory()
@@ -437,7 +429,6 @@ extension OrchestratorTests {
         XCTAssertFalse(FileManager.default.fileExists(atPath: workspace.dir))
     }
 
-    // Tests archive workspace gracefully handles missing worktree directory by arranging representative inputs and asserting the expected result.
     func testArchiveWorkspaceGracefullyHandlesMissingWorktreeDirectory() throws {
         let repo = try makeTempGitRepo(name: "workspace-archive-missing-worktree")
         let root = try makeTempDirectory()
@@ -678,9 +669,6 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.branch, "qa-rename-target")
     }
 
-    // Tests built-in terminal runtime sync revives an exited managed process when the tracked pane is still alive by arranging representative inputs and asserting the expected result.
-
-    // Tests create workspace throws for unknown project by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceThrowsForUnknownProject() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -688,7 +676,6 @@ extension OrchestratorTests {
         XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: "missing"))
     }
 
-    // Tests create workspace for git project requires branch by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceForGitProjectRequiresBranch() throws {
         let repo = try makeTempGitRepo(name: "workspace-requires-branch")
         let root = try makeTempDirectory()
@@ -721,13 +708,11 @@ extension OrchestratorTests {
         XCTAssertTrue(try store.projects().isEmpty)
     }
 
-    // Tests create workspace allows duplicate active titles by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceAllowsDuplicateActiveWorkspaceTitles() throws {
         let (orchestrator, _, project, _, _) = try makeOrchestratorWithWorkspace()
         XCTAssertNoThrow(try orchestrator.createWorkspace(projectID: project.id))
     }
 
-    // Tests create workspace from worktree infers project and branch by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceFromWorktreeInfersProjectAndBranch() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let store = try makeTemporaryStore()
@@ -748,7 +733,6 @@ extension OrchestratorTests {
         XCTAssertEqual(stored?.displayName, "feature-branch")
     }
 
-    // Tests create workspace from worktree fails if project not registered by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceFromWorktreeFailsIfProjectNotRegistered() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
@@ -764,7 +748,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests create workspace from worktree fails if already exists by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceFromWorktreeFailsIfAlreadyExists() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
@@ -781,7 +764,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests scan and create workspaces from worktrees finds all worktrees by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesFindsAllWorktrees() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
@@ -802,7 +784,6 @@ extension OrchestratorTests {
         XCTAssertEqual(allWorkspaces.count, 3)
     }
 
-    // Tests scan and create workspaces from worktrees skips existing workspaces by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesSkipsExistingWorkspaces() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
@@ -823,7 +804,6 @@ extension OrchestratorTests {
         XCTAssertFalse(names.contains("main"))
     }
 
-    // Tests scan and create workspaces from worktrees runs setup script for created workspace by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesRunsSetupScriptForCreatedWorkspace() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
@@ -946,7 +926,6 @@ extension OrchestratorTests {
         XCTAssertTrue(try XCTUnwrap(store.project(id: project.id)).isHidden, "discovery leaves the project's hidden flag alone")
     }
 
-    // Tests scan and create workspaces from worktrees skips missing worktree directories by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesSkipsMissingWorktreeDirectories() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
@@ -965,7 +944,6 @@ extension OrchestratorTests {
         XCTAssertNil(try store.workspace(dir: missingWorktree.path))
     }
 
-    // Tests scan and create workspaces from worktrees archives existing workspace when worktree is removed by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesRemovesWorkspaceWhenWorktreeIsRemoved() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
@@ -1107,7 +1085,7 @@ extension OrchestratorTests {
         XCTAssertNil(storedA.branch, "the detached workspace's stale claim is released so the new live worktree can take the branch")
     }
 
-    /// The same corrupt-gitdir shape the scan's collision-release step now also handles
+    /// The same corrupt-gitdir shape the scan's collision-release step handles
     /// (`testScanReleasesCorruptGitdirWorkspacesStaleBranchClaimWhenAnotherWorktreeClaimsIt`) must not
     /// refuse this create either: a workspace whose worktree git omits from the listing entirely, while its
     /// directory remains, is not "confirmed still checked out on the branch" any more than a listed,
@@ -1285,11 +1263,11 @@ extension OrchestratorTests {
     /// A corrupt administrative `gitdir` link makes `git worktree list` omit an otherwise present checkout
     /// (`testScanKeepsWorkspaceWhenCorruptGitdirOmitsPresentWorktreeFromList`) — a different way for a
     /// workspace's claim to go stale than the listed-and-detached case above, but the same kind of claim.
-    /// The release step used to look only at rows whose own worktree was listed and detached, so a
-    /// workspace stuck this way kept blocking every future worktree on its last-known branch forever, on
-    /// every scan, with the collision erroring the whole scan out instead of self-healing. The generalized
-    /// rule releases any workspace row holding a branch that a live worktree elsewhere now holds, whether
-    /// that row's own worktree is listed as detached or not listed at all.
+    /// A release step that looked only at rows whose own worktree was listed and detached would leave a
+    /// workspace stuck this way blocking every future worktree on its last-known branch forever, on every
+    /// scan, with the collision erroring the whole scan out instead of self-healing. The generalized rule
+    /// releases any workspace row holding a branch that a live worktree elsewhere now holds, whether that
+    /// row's own worktree is listed as detached or not listed at all.
     func testScanReleasesCorruptGitdirWorkspacesStaleBranchClaimWhenAnotherWorktreeClaimsIt() throws {
         let repo = try makeTempGitRepo(name: "corrupt-gitdir-releases-stale-claim")
         let root = repo.deletingLastPathComponent()
@@ -1551,8 +1529,8 @@ extension OrchestratorTests {
         XCTAssertTrue(terminated.sessionIDs.isEmpty)
 
         // Negative: clear the override, then build a fresh scan orchestrator (again mirroring the per-scan
-        // construction) so it resolves the `{ false }` default. The same scan now archives the workspace and
-        // deletes its rows — the behavior this fix must leave intact when no handoff is active.
+        // construction) so it resolves the `{ false }` default. The same scan archives the workspace and
+        // deletes its rows — behavior that must stay intact when no handoff is active.
         WorkspaceOrchestrator.setProcessWideDaemonHandoffInProgress(nil)
         let normalScanOrchestrator = makeTestOrchestrator(store: store, builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
         let created = try normalScanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
@@ -1562,7 +1540,6 @@ extension OrchestratorTests {
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
 
-    // Tests scan and create workspaces from worktrees refreshes stored branch names by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesRefreshesBranchNamesFromDisk() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
@@ -1583,7 +1560,6 @@ extension OrchestratorTests {
         XCTAssertEqual(refreshedWorkspace?.branch, "feature-renamed-on-disk")
     }
 
-    // Tests scan and create workspaces from worktrees scans all projects when no project id provided by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesScansAllProjectsWhenNoProjectIDProvided() throws {
         let repo1 = try makeTempGitRepo(name: "repo1")
         let repo2 = try makeTempGitRepo(name: "repo2")
@@ -1664,7 +1640,6 @@ extension OrchestratorTests {
         XCTAssertNil(try store.workspace(id: workspace.id), "a rerun once the gate is free retires the workspace normally")
     }
 
-    // Tests createWorkspace seeds per-workspace process IDs so multiple workspaces can inherit the same project template without collisions.
     func testCreateWorkspaceSeedsUniqueProcessIDsPerWorkspace() throws {
         let repo = try makeTempGitRepo(name: "unique-process-ids")
         let root = try makeTempDirectory()
@@ -1824,7 +1799,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests that attaching to an existing branch needs no base branch and records none.
     func testCreateWorkspaceOnExistingBranchRecordsNoBaseBranch() throws {
         let repo = try makeTempGitRepo(name: "existing-branch-no-base")
         try runGit(["checkout", "-b", "existing-branch"], cwd: repo.path)
@@ -1842,7 +1816,6 @@ extension OrchestratorTests {
         XCTAssertNil(try store.workspace(id: workspace.id)?.baseBranch)
     }
 
-    // Tests that a base branch supplied while attaching to an existing branch is ignored.
     func testCreateWorkspaceOnExistingBranchIgnoresSuppliedBaseBranch() throws {
         let repo = try makeTempGitRepo(name: "existing-branch-ignores-base")
         try runGit(["checkout", "-b", "existing-branch"], cwd: repo.path)
@@ -1908,7 +1881,6 @@ extension OrchestratorTests {
         XCTAssertEqual(created.branch, "remote-only")
     }
 
-    // Tests createWorkspaceFromWorktree throws when the path does not exist by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceFromWorktreeThrowsWhenPathMissing() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -1917,7 +1889,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests createWorkspaceFromWorktree throws when the path is not a git repository by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceFromWorktreeThrowsWhenNotGitRepo() throws {
         let dir = try makeTempDirectory()
         let store = try makeTemporaryStore()
@@ -1927,9 +1898,7 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests createWorkspace throws when base branch cannot be resolved for a git project with no main/master by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceThrowsWhenBaseBranchCannotBeResolved() throws {
-        // Create a git repo with a non-standard initial branch (not main or master)
         let repo = try makeTempGitRepo(name: "no-main-or-master", initialBranch: "develop")
         let store = try makeTemporaryStore()
         // Insert the project directly with defaultBranch = nil to force the main/master branch check
@@ -1943,10 +1912,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests handleProcessExit with onExit .restart restarts the process via openWindowAndRun by arranging representative inputs and asserting the expected result.
-    // Tests createWorkspaceFromWorktree throws when the worktree directory matches an archived workspace by arranging representative inputs and asserting the expected result.
-
-    // Tests createWorkspace rejects a non-ASCII directory name by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceRejectsNonAsciiDirectoryName() throws {
         let repo = try makeTempGitRepo(name: "non-ascii-dirname-repo")
         let root = try makeTempDirectory()
@@ -1961,7 +1926,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests archiveWorkspace suppresses isMissingWorktreeError when the worktree directory is not registered in git by arranging representative inputs and asserting the expected result.
     func testArchiveWorkspaceSuppressesIsMissingWorktreeErrorForUnregisteredPath() throws {
         let repo = try makeTempGitRepo(name: "archive-git-missing-worktree-path")
         let root = try makeTempDirectory()
@@ -1985,7 +1949,6 @@ extension OrchestratorTests {
         XCTAssertNil(archived)
     }
 
-    // Tests scanAndCreateWorkspacesFromWorktrees throws missingProject when a specific projectID is not found.
     func testScanAndCreateWorkspacesFromWorktreesThrowsForMissingProjectID() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -1995,7 +1958,7 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests createWorkspace throws when the requested directoryName is already in use by another workspace (covers makeWorkspaceDirname line 2503).
+    // Covers `makeWorkspaceDirname`'s conflict guard.
     func testCreateWorkspaceDirnameConflictThrows() throws {
         let repo = try makeTempGitRepo(name: "dirname-conflict-repo")
         let root = try makeTempDirectory()
@@ -2033,7 +1996,6 @@ extension OrchestratorTests {
         XCTAssertNotNil(try store.workspace(id: workspace.id), "a refused archive leaves the workspace in place")
     }
 
-    // Tests create workspace from worktree derives its display name from the branch by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceFromWorktreeUsesBranchAsDisplayName() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
@@ -2048,7 +2010,6 @@ extension OrchestratorTests {
         XCTAssertEqual(workspace.branch, "fix/bug-123")
     }
 
-    // Tests createWorkspaceFromWorktree registers workspaces for distinct branches.
     func testCreateWorkspaceFromWorktreeRegistersDistinctBranches() throws {
         let repo = try makeTempGitRepo(name: "workspace-duplicate-name")
         let root = try makeTempDirectory()
@@ -2065,12 +2026,10 @@ extension OrchestratorTests {
         try runGit(["worktree", "add", "-b", "feature-branch-2", worktree2.path], cwd: repo.path)
         let second = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree2.path)
 
-        // The display name of a git workspace is its branch.
         XCTAssertEqual(second.displayName, "feature-branch-2")
         XCTAssertEqual(second.branch, "feature-branch-2")
     }
 
-    // Tests creating a workspace in a non-git project returns the existing single workspace instead of inserting a duplicate.
     func testCreateWorkspaceForNonGitProjectReturnsExistingWorkspace() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -2081,7 +2040,6 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let existing = try XCTUnwrap(orchestrator.listWorkspaces(projectID: project.id).first)
 
-        // A non-git project owns exactly one workspace; a second create returns it, not a duplicate.
         let created = try orchestrator.createWorkspace(projectID: project.id)
         XCTAssertEqual(created.id, existing.id)
         XCTAssertEqual(try orchestrator.listWorkspaces(projectID: project.id).count, 1)

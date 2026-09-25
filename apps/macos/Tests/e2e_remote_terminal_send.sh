@@ -115,8 +115,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Opens a fresh one-time pairing window on the remote E2E daemon and prints its link, code, nonce, and
-# the daemon's certificate fingerprint (stable across windows — it is the daemon's TLS identity). The
+# The certificate fingerprint is stable across pairing windows: it is the daemon's TLS identity. The
 # code and nonce are redeemed directly through the Device API below; the link is what the CLI redeems.
 open_remote_pairing_window() {
   local pair_json parsed
@@ -147,8 +146,6 @@ PY
   [[ -n "$CERTIFICATE_FINGERPRINT" ]] || fail "remote pairing JSON missing certificateFingerprint"
 }
 
-# Sends one authenticated Device API request to the remote daemon over pinned TLS and prints the
-# validated (ok) JSON response.
 device_request() {
   local request_json="$1" response_file
   response_file="$TMP_ROOT/response.json"

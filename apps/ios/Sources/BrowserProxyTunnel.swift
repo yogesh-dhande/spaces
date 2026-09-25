@@ -93,7 +93,7 @@ struct SpacesMobileBrowserTunnelDialer: BrowserTunnelDialing {
 }
 
 /// Async wrappers over `NWConnection`'s callback API, shared by the tunnel dialer and the proxy's
-/// splice loop. Mirrors the continuation-hop style used by `SpacesDeviceAPICommandChannel`.
+/// splice loop.
 enum BrowserProxyConnectionIO {
     enum IOError: Error, Equatable {
         case cancelled
@@ -167,7 +167,6 @@ enum BrowserProxyConnectionIO {
         }
     }
 
-    /// Reads one chunk of bytes, reporting stream completion. Used by the head reader and splice loop.
     static func receiveChunk(from connection: NWConnection) async throws -> (data: Data, isComplete: Bool) {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(data: Data, isComplete: Bool), any Error>) in
             let resume = BrowserProxyOneShot(continuation)

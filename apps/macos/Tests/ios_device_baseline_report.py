@@ -156,11 +156,6 @@ def markdown_table(headers, rows):
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Loading
-# ---------------------------------------------------------------------------
-
-
 def event_time(event):
     if not event:
         return None
@@ -213,11 +208,6 @@ def load_sessions(run_root: Path):
     data.setdefault("target", None)
     data.setdefault("scenarios", [])
     return data
-
-
-# ---------------------------------------------------------------------------
-# Scenario windows
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -331,11 +321,6 @@ def build_scenario_windows(device_events, shaper_events):
             window.app_launch_event = candidates[-1] if candidates else None
             windows[key] = window
     return windows
-
-
-# ---------------------------------------------------------------------------
-# Shared metric helpers
-# ---------------------------------------------------------------------------
 
 
 def first_named(events, name, predicate=None):
@@ -939,10 +924,6 @@ def metric_idle(window):
         "connection_events": len(connection_events),
     }
 
-
-# ---------------------------------------------------------------------------
-# Rendering
-# ---------------------------------------------------------------------------
 
 COLD_OPEN_COLUMNS = [
     ("launch_to_list_ms", "launch to list ms", fmt_ms),

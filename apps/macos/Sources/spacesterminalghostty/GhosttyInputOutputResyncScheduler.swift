@@ -10,7 +10,6 @@
     /// engine-queue `asyncAfter` structure are load-bearing and must not change.
     @TerminalEngineActor final class GhosttyInputOutputResyncScheduler {
         /// Delay before re-broadcasting a full render frame so local echo settles.
-        /// This is the local-echo resync delay.
         private static let localEchoResyncDelay: TimeInterval = 0.02
 
         private let onResync: @TerminalEngineActor () -> Void
@@ -22,7 +21,6 @@
         ///   surface refresh, app-service tick, and `input_output` state broadcast.
         init(onResync: @escaping @TerminalEngineActor () -> Void) { self.onResync = onResync }
 
-        /// True while a delayed resync is scheduled but has not yet fired.
         var hasScheduledResync: Bool { resyncWorkItem != nil }
 
         /// The local-window owner produced interactive input; a later bulk output
@@ -33,15 +31,6 @@
         /// even interactive output should keep the delayed resync alive.
         func noteLocalOwnerCommand() { commandResyncPending = true }
 
-        /// Applies the resync transition table for freshly drained output.
-        ///
-        /// - interactive output with a pending command or an in-flight work item:
-        ///   clear both pending flags and (re)schedule the delayed resync.
-        /// - plain interactive output: clear the input-pending flag and cancel any
-        ///   work item without rescheduling (the work item is already `nil` here).
-        /// - bulk output with a pending input flag or an in-flight work item:
-        ///   clear both pending flags and (re)schedule.
-        /// - bulk output with nothing pending: no-op.
         func handleOutputDidChange(interactive: Bool) {
             if interactive {
                 if commandResyncPending || resyncWorkItem != nil {
@@ -60,11 +49,6 @@
             }
         }
 
-        /// Cancels a pending resync while the session terminates.
-        ///
-        /// Deliberately clears only the command flag, matching the host's original
-        /// `terminate()`, which left the input-pending flag untouched. Preserving
-        /// that keeps the existing behavior exactly.
         func cancelForTermination() {
             resyncWorkItem?.cancel()
             resyncWorkItem = nil
@@ -88,9 +72,7 @@
         }
     }
 
-    /// Coalesces repeated requests into a single body invocation on the next terminal-engine-actor turn:
-    /// the first call schedules a `Task { @TerminalEngineActor }`, further calls before it runs are
-    /// dropped, and the flag is cleared before the body runs.
+    /// Coalesces repeated requests into a single body invocation on the next terminal-engine-actor turn.
     @TerminalEngineActor final class TerminalEngineNextTurnCoalescer {
         private var scheduled = false
 

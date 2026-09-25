@@ -116,15 +116,14 @@ import Foundation
                 }
             }
 
-            // Serialize the spawn across processes and threads. Concurrent callers (app startup
-            // threads, the CLI, harnesses) previously each launched a spacesd; the instance-lock
-            // loser exited, but both raced TerminalServiceTLSIdentityStore generation, which can
-            // leave the surviving listener serving a certificate that no longer matches the
-            // fingerprint pairing advertised — after which every pinned Device API connect hangs
-            // to its timeout. One launcher holds the flock; everyone else waits on it, then
-            // adopts the daemon the winner started. Lock wait is intentionally outside the
-            // startup timeout because a profile migration may hold this same lock while it
-            // creates a database backup.
+            // Serialize the spawn across processes and threads. Without this lock, concurrent callers
+            // (app startup threads, the CLI, harnesses) each launch a spacesd; the instance-lock loser
+            // exits, but both race TerminalServiceTLSIdentityStore generation, which can leave the
+            // surviving listener serving a certificate that no longer matches the fingerprint pairing
+            // advertised — after which every pinned Device API connect hangs to its timeout. One
+            // launcher holds the flock; everyone else waits on it, then adopts the daemon the winner
+            // started. Lock wait is intentionally outside the startup timeout because a profile
+            // migration may hold this same lock while it creates a database backup.
             let launchLockPath = try TerminalServicePaths.launchLockPath()
             let lockDescriptor = open(launchLockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
             guard lockDescriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
@@ -916,8 +915,8 @@ import Foundation
 
             // Linux is the only platform that hosts a daemon under user systemd. This half of the file is
             // everything that is not macOS, which includes iOS — a platform with no daemon of its own, no
-            // systemd, and no `Process` to reach one with — so the start attempt is Linux-only and iOS waits
-            // for a socket exactly as it did before, then reports the same unavailability.
+            // systemd, and no `Process` to reach one with — so the start attempt is Linux-only; iOS simply
+            // waits for a socket, then reports the same unavailability.
             #if os(Linux)
                 let startedUnit = startSystemdUnit(for: try SpacesProfile.current(), deadline: deadline)
             #else

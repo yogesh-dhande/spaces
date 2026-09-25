@@ -121,7 +121,7 @@ extension OrchestratorTests {
             "Once the workspace stops, its pinned ports must be held again rather than blocked by the failed launch's hold.")
     }
 
-    /// Codex round 4 (P2b) on issue #438: `launchMissingConfiguredProcesses` launches every missing
+    /// Issue #438: `launchMissingConfiguredProcesses` launches every missing
     /// configured process in one batch under a single `workspace.isRunning == false` snapshot taken
     /// before the batch starts (the workspace is not marked running until after the whole batch
     /// finishes). Without threading batch progress into `launchConfiguredProcess`, a later process
@@ -131,7 +131,7 @@ extension OrchestratorTests {
     /// reservation's port. This is the batch counterpart to
     /// `testRunConfiguredProcessDoesNotRestorePortReservationWhenAlreadyRunningLaunchFails`.
     ///
-    /// Codex round 5 (P2) extends this with a retry: calling `launchMissingConfiguredProcesses` again
+    /// A retry extends this: calling `launchMissingConfiguredProcesses` again
     /// after this same partial failure (A stayed live, B is still missing) filters A out of
     /// `missingTemplates` entirely on the second call, so it never gets a turn in that call's own loop to
     /// mark the batch as having a live launch; the seed has to come from `running` itself.
@@ -229,7 +229,6 @@ extension OrchestratorTests {
             try orchestrator.validateProcessTemplate(ProcessTemplate(name: "web", command: "PORT=$FRONTEND_PORT npm run dev | tee log.txt")))
     }
 
-    // Tests check and update process statuses marks dead process as exited by arranging representative inputs and asserting the expected result.
     func testCheckAndUpdateProcessStatusesMarksDeadProcessAsExited() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -239,7 +238,6 @@ extension OrchestratorTests {
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        // Create a process with a PID that doesn't exist
         let deadProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces",
             terminalTrackingID: "workspace-session", pid: 99999, status: .running, logPath: nil, lastOutputAt: nil,
@@ -317,7 +315,6 @@ extension OrchestratorTests {
         XCTAssertNil(reconciled.exitedAt)
     }
 
-    // Tests check and update process statuses skips newly started processes by arranging representative inputs and asserting the expected result.
     func testCheckAndUpdateProcessStatusesSkipsNewlyStartedProcesses() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -339,9 +336,8 @@ extension OrchestratorTests {
         XCTAssertNil(unchanged?.exitedAt)
     }
 
-    // Tests that a process which dies inside the startup grace window is still
-    // reconciled when grace is ignored — the path the DispatchSourceProcess exit
-    // observer uses, since the kernel has authoritatively reported the exit.
+    // The DispatchSourceProcess exit observer ignores the startup grace window: the kernel has
+    // authoritatively reported the exit, so there is nothing left to debounce.
     func testCheckAndUpdateProcessStatusesMarksRecentDeadProcessWhenIgnoringGrace() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -484,7 +480,6 @@ extension OrchestratorTests {
         XCTAssertNotNil(updated?.exitedAt)
     }
 
-    // Tests check and update process statuses skips processes without pid by arranging representative inputs and asserting the expected result.
     func testCheckAndUpdateProcessStatusesSkipsProcessesWithoutPID() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -494,7 +489,6 @@ extension OrchestratorTests {
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        // Create a process without a PID (still starting up)
         let noPidProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces",
             terminalTrackingID: "workspace-session", pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
@@ -505,8 +499,6 @@ extension OrchestratorTests {
         XCTAssertEqual(unchanged?.status, .running)
     }
 
-    // Tests check and update process statuses refreshes a stale tracked pid from the live built-in terminal session for managed terminals.
-    // Tests check and update process statuses only checks running processes by arranging representative inputs and asserting the expected result.
     func testCheckAndUpdateProcessStatusesOnlyChecksRunningProcesses() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -516,7 +508,6 @@ extension OrchestratorTests {
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        // Create an already-exited process
         let exitedProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces",
             terminalTrackingID: "workspace-session", pid: 99999, status: .exited, logPath: nil, lastOutputAt: nil,
@@ -669,7 +660,6 @@ extension OrchestratorTests {
         XCTAssertEqual(windows.map(\.id), ["process-api"])
     }
 
-    // Tests restarting a process recreates a tracked terminal window row even if the stale window row was already pruned.
     func testRestartWorkspaceProcessUsesConfiguredSpacesHostEvenWhenStoredProcessHostDiffers() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
@@ -784,7 +774,6 @@ extension OrchestratorTests {
         XCTAssertEqual(restartedProcess.terminalTrackingID, openCapture.sessionIDs.first)
     }
 
-    // Tests configured-but-missing processes can be recovered directly without restarting unrelated running processes.
     func testRecoverMissingConfiguredProcessMarksStoppedWorkspaceRunning() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
@@ -1411,7 +1400,6 @@ extension OrchestratorTests {
             unreachedCloses, [.awaitReplacement, .teardown], "the hold is placed by the stop and released when the relaunch never reaches it")
     }
 
-    // Tests no-op settings saves do not restart a recovered named process.
     func testUpdateWorkspaceSettingsDoesNotRestartRecoveredNamedProcess() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
@@ -1609,7 +1597,6 @@ extension OrchestratorTests {
         XCTAssertEqual(Set(windows.map(\.name)), ["web", "worker"])
     }
 
-    // Tests stopped workspaces with tracked runtime leftovers remain stopped but surface degraded runtime health.
     func testWorkspaceRuntimeStatusMarksStoppedWorkspaceWithTrackedRuntimeLeftoversAsPartial() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
@@ -1624,7 +1611,7 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
     }
 
-    /// Codex round 7 (P1) on issue #438: an exited configured process still has a live-launchable Start
+    /// Issue #438: an exited configured process still has a live-launchable Start
     /// action (`restartExitedProcesses` revives it), so it must count as missing for Start-visibility
     /// purposes even though `exitedProcessCount` separately reports it as exited rather than absent.
     func testWorkspaceRuntimeStatusCountsExitedTrackedProcessAsMissing() throws {
@@ -1645,7 +1632,8 @@ extension OrchestratorTests {
         XCTAssertEqual(runtimeStatus.warningSummary, "1 exited process")
     }
 
-    /// Codex round 7 (P1/consistency) on issue #438: a stale-templateID live row (round-6 P2a's scenario)
+    /// Issue #438: a stale-templateID live row
+    /// (`testLaunchWorkspaceLaunchesNewlyConfiguredProcessWhenAStaleRowReusesItsName`'s scenario)
     /// must not satisfy a *different*, newly configured process that reused its old name, in the
     /// Start-visibility count either, matching `matchingConfiguredTemplateForMissingCheck` (the same rule
     /// `launchMissingConfiguredProcesses` uses to decide it must launch the new template).
@@ -1665,7 +1653,6 @@ extension OrchestratorTests {
         XCTAssertEqual(runtimeStatus.missingConfiguredProcessCount, 1, "the stale row must not satisfy the newly configured process by name alone")
     }
 
-    // Tests configured process names that literally start with key prefixes still match their live runtime records.
     func testWorkspaceRuntimeStatusMatchesLiteralPrefixedProcessNames() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
@@ -1682,7 +1669,6 @@ extension OrchestratorTests {
         XCTAssertNil(runtimeStatus.warningSummary)
     }
 
-    // Tests recovered runtime records stored under the configured raw name clear the missing-process warning immediately.
     func testWorkspaceRuntimeStatusMatchesRecoveredProcessNamesByRawName() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
@@ -1702,7 +1688,6 @@ extension OrchestratorTests {
         XCTAssertNil(runtimeStatus.warningSummary)
     }
 
-    // Tests running workspaces do not surface warnings just because configured browser sessions remain unopened.
     func testWorkspaceRuntimeStatusIgnoresUnopenedBrowserSessionsForRunningWorkspace() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
@@ -1750,7 +1735,6 @@ extension OrchestratorTests {
         XCTAssertNil(runtimeStatus.warningSummary)
     }
 
-    // Tests update project config rejects processes without configured names.
     func testUpdateProjectConfigRejectsUnnamedProcess() throws {
         let (orchestrator, _, project, _, _) = try makeOrchestratorWithWorkspace()
 
@@ -1764,7 +1748,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests stop workspace updates running state and cleans runtime records by arranging representative inputs and asserting the expected result.
     func testStopWorkspaceUpdatesRunningStateAndCleansRuntimeRecords() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
@@ -1777,16 +1760,12 @@ extension OrchestratorTests {
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces",
                 terminalTarget: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        // Mocked dependency: Spaces cleanup via `osascript`.
-        // Why: verify cleanup semantics without touching real windows/processes.
-        // Remaining risk: real process/window teardown can fail or race differently than this mocked path.
         try withMockCommands(["osascript": Self.orchestratorOsaScriptMock]) { try orchestrator.stopWorkspace(workspaceID: workspace.id) }
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
         XCTAssertTrue(try orchestrator.windows(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
 
-    // Tests stop workspace handles missing workspace directory and returns outcome by arranging representative inputs and asserting the expected result.
     func testStopWorkspaceHandlesMissingWorkspaceDirectoryAndReturnsOutcome() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let marker = root.appendingPathComponent("stop-script-marker.txt")
@@ -1803,7 +1782,6 @@ extension OrchestratorTests {
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
 
-    // Tests stop workspace terminates each tracked Spaces terminal session once.
     func testStopWorkspaceClosesManagedTerminalWindowOnlyOnce() throws {
         let store = try makeTemporaryStore()
         let closeCapture = TerminalCloseCapture()
@@ -2006,7 +1984,6 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.windows(workspaceID: workspace.id).map(\.terminalTrackingID), [sessionID])
     }
 
-    // Tests launch workspace without processes does not require terminal runtime.
     func testLaunchWorkspaceWithoutProcessesDoesNotRequireTerminalRuntime() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
 
@@ -2086,7 +2063,7 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
     }
 
-    /// Codex round 4 (P2a) on issue #438: a configured process's live runtime row can carry no `templateID`
+    /// Issue #438: a configured process's live runtime row can carry no `templateID`
     /// (a legacy row from before per-process identity existed, or any row otherwise written without one),
     /// matched only by `template_name`. `launchMissingConfiguredProcesses`'s missing-check has to fall back
     /// to that name match for such a row, or a still-running process looks missing and Start launches a
@@ -2111,7 +2088,7 @@ extension OrchestratorTests {
         XCTAssertEqual(processes.map(\.id), ["legacy-live-row"], "Start must not launch a duplicate of an already-live process")
     }
 
-    /// Codex round 6 (P2a) on issue #438: a configured process is removed while its runtime row remains
+    /// Issue #438: a configured process is removed while its runtime row remains
     /// (removal never deletes tracked rows, so the row keeps its old, now-unmatched templateID), and a
     /// later edit reuses that same name for a *different*, newly configured process under a fresh id. The
     /// missing-check must not let the stale row's name match satisfy the new template (that fallback is
@@ -2147,9 +2124,10 @@ extension OrchestratorTests {
         XCTAssertEqual(processes.count, 2, "the new process launches alongside the stale one, not in place of it")
     }
 
-    /// Codex round 8 (P2) on issue #438: a follow-on to round 6/7's stale-templateID scenario. The stale
-    /// row from that scenario later exits (instead of staying live), and the replacement template already
-    /// has its own live row (round 6's own fix launched it separately). `restartExitedProcesses` resolves
+    /// Issue #438: a follow-on to
+    /// `testLaunchWorkspaceLaunchesNewlyConfiguredProcessWhenAStaleRowReusesItsName`'s stale-templateID
+    /// scenario. The stale row from that scenario later exits (instead of staying live), and the
+    /// replacement template already has its own live row, launched separately. `restartExitedProcesses` resolves
     /// the exited stale row via `matchingConfiguredTemplate`'s unconditional name fallback to the
     /// replacement template, the same as before; without checking whether that template already has a live
     /// row elsewhere, it would restart the stale row too, producing a second, duplicate row for a template
@@ -2185,7 +2163,7 @@ extension OrchestratorTests {
     }
 
     /// Companion to the test above: the same stale-templateID exited row, but the replacement template has
-    /// no live row anywhere yet. This is round 6/7's documented self-healing case and must still work: the
+    /// no live row anywhere yet. This is the documented self-healing case and must still work: the
     /// exited row is the one live-launchable path back to the replacement, so it revives, tagged with the
     /// replacement's own templateID and command.
     func testLaunchWorkspaceRevivesStaleExitedRowAsReplacementTemplateWhenReplacementHasNoLiveRow() throws {
@@ -2212,7 +2190,7 @@ extension OrchestratorTests {
         XCTAssertEqual(revived.command, "echo new", "revived using the replacement's command, not the stale one")
     }
 
-    /// Codex-review follow-up to issue #438: the setup recovery screen keeps ad hoc terminal access open
+    /// Issue #438: the setup recovery screen keeps ad hoc terminal access open
     /// while setup is pending, running, or failed, so a workspace can reach `upWorkspace`'s tracked-runtime
     /// convergence branch (an ad hoc terminal already tracked) with setup never having run. That branch has
     /// to run the same deferred-setup sequence `launchWorkspaceUnlocked` runs, and only launch configured
@@ -2244,7 +2222,7 @@ extension OrchestratorTests {
         XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).map(\.templateName), ["api"])
     }
 
-    /// Codex-review follow-up to issue #438: with no configured process to launch (or restart), neither
+    /// Issue #438: with no configured process to launch (or restart), neither
     /// `restartExitedProcesses` nor `launchMissingConfiguredProcesses` ever calls a process launcher, so
     /// neither has a chance to raise the setup-failed error internally (`launchConfiguredProcess` and
     /// `restartProcessInTerminal` each check `requireWorkspaceSetupSucceeded` themselves, but only when
@@ -2314,7 +2292,7 @@ extension OrchestratorTests {
         XCTAssertEqual(processes.map(\.id), ["already-running-api"], "an already-running configured process is neither relaunched nor restarted")
     }
 
-    /// Codex round 2 (P1) on issue #438: a process removed from workspace settings while it was running
+    /// Issue #438: a process removed from workspace settings while it was running
     /// keeps its `.exited` runtime row with no matching template. Start (via the tracked-runtime convergence
     /// branch, reached here because of the ad hoc terminal) must restart only the still-configured process
     /// and leave the removed one's stale row alone, rather than falling back to relaunching it from the row
@@ -2345,7 +2323,6 @@ extension OrchestratorTests {
         XCTAssertEqual(restarted.status, .running, "the explicit per-process restart action still relaunches a removed process via the fallback")
     }
 
-    // Tests restart workspace stops then launches by arranging representative inputs and asserting the expected result.
     func testRestartWorkspaceStopsThenLaunches() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
@@ -2394,7 +2371,6 @@ extension OrchestratorTests {
         XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty, "restart also ends coding-agent sessions")
     }
 
-    // Tests up workspace launches when stopped by arranging representative inputs and asserting the expected result.
     func testUpWorkspaceLaunchesWhenStopped() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
 
@@ -2404,9 +2380,6 @@ extension OrchestratorTests {
         XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
 
-    // Tests up workspace launches multiple configured processes in one Spaces window using separate tabs.
-
-    // Tests up workspace does nothing to running processes when runtime indicators exist and restart is disabled by arranging representative inputs and asserting the expected result.
     func testUpWorkspaceDoesNothingWhenRuntimeIndicatorsExistByDefault() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
@@ -2420,7 +2393,6 @@ extension OrchestratorTests {
         XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).count, 1)
     }
 
-    // Tests up workspace restarts exited processes when workspace is running by arranging representative inputs and asserting the expected result.
     func testUpWorkspaceRestartsExitedProcessesWhenRunning() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "web", command: "echo web")])
@@ -2438,7 +2410,7 @@ extension OrchestratorTests {
         XCTAssertEqual(processes.first?.templateName, "web")
     }
 
-    /// Codex round 2 (P1): a process removed from workspace settings while it was running keeps its
+    /// Issue #438: a process removed from workspace settings while it was running keeps its
     /// `.exited` runtime row (removal never deletes tracked rows), with no configured template matching it
     /// anymore. Bulk convergence (Start) must leave that stale row alone rather than falling back to an ad
     /// hoc template built from the row itself, or Start would silently relaunch a command the user removed
@@ -2458,8 +2430,6 @@ extension OrchestratorTests {
         XCTAssertEqual(processes.first?.status, .exited, "Start must not relaunch a process no longer in workspace settings")
     }
 
-    // Tests explicit up workspace bypasses startup grace for a dead managed process so recovery can happen immediately.
-    // Tests up workspace restarts when runtime indicators exist and restart is enabled by arranging representative inputs and asserting the expected result.
     func testUpWorkspaceRestartsWhenRuntimeIndicatorsExistWithRestartEnabled() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
@@ -2530,7 +2500,6 @@ extension OrchestratorTests {
 
     // MARK: - stopWorkspace
 
-    // Tests stopWorkspace with running processes clears all runtime state by arranging representative inputs and asserting the expected result.
     func testStopWorkspaceClearsAllRuntimeState() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -2558,7 +2527,6 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
     }
 
-    // Tests stopWorkspace with stop script that runs by arranging representative inputs and asserting the expected result.
     func testStopWorkspaceWithStopScriptRuns() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -2579,7 +2547,6 @@ extension OrchestratorTests {
         XCTAssertTrue(FileManager.default.fileExists(atPath: markerFile.path))
     }
 
-    // Tests stopWorkspace skips stop script when workspace directory is missing by arranging representative inputs and asserting the expected result.
     func testStopWorkspaceSkipsStopScriptWhenDirectoryMissing() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -2598,8 +2565,6 @@ extension OrchestratorTests {
 
     // MARK: - upWorkspace restart-exited-processes path
 
-    // Tests upWorkspace with no runtime indicators launches workspace fresh by arranging representative inputs and asserting the expected result.
-    // Tests upWorkspace with restartIfRunning stops then restarts workspace by arranging representative inputs and asserting the expected result.
     func testUpWorkspaceWithRestartIfRunningStopsThenRestarts() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -2610,21 +2575,17 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
-        // Mark workspace as running with a tracked process.
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, terminalTarget: nil,
                 pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        // Why: exercise the restartIfRunning=true branch which calls stop then launch.
         try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: true)
 
-        // After restart, process list is cleared and workspace re-launched.
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
 
-    // Tests upWorkspace allocates ports when port definitions exist but no ports are allocated by arranging representative inputs and asserting the expected result.
     func testUpWorkspaceAllocatesPortsWhenDefinitionsExistButNoPortsAllocated() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -2634,19 +2595,16 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
-        // Add port definitions so that portDefinitions.count > 0 with no ports allocated yet.
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
             settings.ports = [ServiceDefinition(name: "web"), ServiceDefinition(name: "api")]
         }
 
         try orchestrator.upWorkspace(workspaceID: workspace.id)
 
-        // Ports should now be allocated.
         let allocatedPorts = try store.workspacePorts(workspaceID: workspace.id)
         XCTAssertEqual(allocatedPorts.count, 2)
     }
 
-    // Tests stopWorkspace skips stop script when workspace directory is missing by arranging representative inputs and asserting the expected result.
     func testStopWorkspaceSkipsStopScriptWhenWorkspaceDirMissing() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -2661,7 +2619,6 @@ extension OrchestratorTests {
         // Set a stop script that would fail if the directory doesn't exist.
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in settings.stopScript = "echo stopped" }
 
-        // Mark workspace as running so stop can proceed.
         var runningWorkspace = workspace
         runningWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, dir: "/nonexistent/workspace-\(UUID().uuidString)", dirname: workspace.dirname,
@@ -2669,12 +2626,10 @@ extension OrchestratorTests {
             lastLaunchedAt: nil, notes: nil)
         try store.upsert(workspace: runningWorkspace)
 
-        // Stop should succeed (skip script because dir is missing) rather than throw.
         let outcome = try orchestrator.stopWorkspace(workspaceID: workspace.id)
         XCTAssertTrue(outcome.skippedStopScriptBecauseWorkspaceDirectoryMissing)
     }
 
-    // Tests stopWorkspace removes non-Spaces tracked window records by arranging representative inputs and asserting the expected result.
     func testStopWorkspaceClosesNonSpacesTrackedWindows() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -2684,23 +2639,20 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
-        // Insert a tracked "editor" window (non-browser, non-Spaces) so lines 702-705 are reached.
+        // Insert a tracked "editor" window (non-browser, non-Spaces) so that branch of the cleanup is reached.
         let editorWindow = WindowRecord(
             id: UUID().uuidString, workspaceID: workspace.id, app: "Cursor", title: "editor", role: "editor", orderIndex: 100,
             lastSeenAt: "2024-01-01T00:00:00Z")
         try store.upsert(window: editorWindow)
 
-        // Mark workspace as running.
         let runningWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, dir: projectDir.path, dirname: workspace.dirname, branch: workspace.branch,
             baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil,
             notes: nil)
         try store.upsert(workspace: runningWorkspace)
 
-        // Stop workspace: removes the tracked editor window record.
         _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
 
-        // The window records should be deleted after stop.
         let remainingWindows = try store.windows(workspaceID: workspace.id)
         XCTAssertTrue(remainingWindows.isEmpty)
     }
@@ -2720,9 +2672,6 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests checkAndUpdateProcessStatuses marks a dead process as exited and calls handleProcessExit .none case by arranging representative inputs and asserting the expected result.
-
-    // Tests checkAndUpdateProcessStatuses skips recently started processes within the 10-second grace window by arranging representative inputs and asserting the expected result.
     func testCheckAndUpdateProcessStatusesSkipsRecentlyStartedProcess() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)

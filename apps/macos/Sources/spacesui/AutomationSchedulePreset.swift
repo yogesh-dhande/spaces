@@ -90,11 +90,9 @@ enum AutomationSchedulePreset: Equatable, Sendable {
         if hourField == "*", dowField == "*", let step = stepValue(minuteField), everyNMinutesChoices.contains(step) {
             return .everyNMinutes(minutes: step)
         }
-        // The remaining presets pin a single minute (0...59).
         guard let minute = singleValue(minuteField, range: 0...59) else { return .advanced(expression: expression) }
         // Hourly at minute: `M * * * *`.
         if hourField == "*", dowField == "*" { return .hourlyAtMinute(minute: minute) }
-        // The day/week presets pin a single hour (0...23).
         guard let hour = singleValue(hourField, range: 0...23) else { return .advanced(expression: expression) }
         // Daily at time: `M H * * *`.
         if dowField == "*" { return .dailyAtTime(hour: hour, minute: minute) }

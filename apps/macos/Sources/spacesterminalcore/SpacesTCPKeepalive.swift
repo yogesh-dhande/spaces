@@ -23,11 +23,8 @@ import Foundation
 /// Sizing: `idleSeconds` before the first probe, then `probeCount` probes `intervalSeconds` apart,
 /// so a dead path surfaces roughly 60–90 seconds after the last byte.
 public enum SpacesTCPKeepalive {
-    /// Seconds a connection may sit idle before the first keepalive probe.
     public static let idleSeconds = 60
-    /// Seconds between keepalive probes once probing starts.
     public static let intervalSeconds = 10
-    /// Unanswered probes before the connection is reported as failed.
     public static let probeCount = 3
 }
 

@@ -130,7 +130,7 @@ import XCTest
             XCTAssertLessThan(Date().timeIntervalSince(start), 1, "a dead owner pid must not incur the full shutdownExitTimeout wait")
         }
 
-        /// Reproduces the bug this gate exists to fix (P1 follow-up to #325/#334): a live instance-lock
+        /// Reproduces the bug this gate exists to fix (follow-up to #325/#334): a live instance-lock
         /// owner is not proof the daemon is reachable — its accept source may already be cancelled and
         /// answering no ping at all while it drains persistence, so this gate must not depend on a ping
         /// response the daemon might never send. It reads the lock directly and waits for the owner pid
@@ -173,7 +173,7 @@ import XCTest
             XCTAssertLessThan(elapsed, 3, "must return once the owner actually exits, not wait out the full shutdownExitTimeout")
         }
 
-        /// Reproduces the exec-in-place handoff case (P2 follow-up to #325/#334/#341): the successor keeps
+        /// Reproduces the exec-in-place handoff case (follow-up to #325/#334/#341): the successor keeps
         /// the outgoing process's pid, so the lock's recorded owner pid stays alive even once a healthy
         /// daemon is answering on the socket. The gate must not treat that pid-alive signal as "still
         /// going" and burn the full `shutdownExitTimeout` — a live `ok: true` pong settles it immediately.

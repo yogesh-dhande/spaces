@@ -354,9 +354,9 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
     /// slot on the serial queue, which is what makes the writes a core's `terminate()` enqueues behind it —
     /// detach-all, terminated payload, durable-end notification — run only once it commits. The detach has no
     /// retry of its own, so it lands durably only if it waited behind the retrying exited write until the
-    /// database recovered. Before the fix the failed write surrendered its FIFO slot via `asyncAfter`, so the
-    /// detach ran immediately against the broken database and was lost while the (deferred) exited retry still
-    /// landed.
+    /// database recovered. Without the in-place retry, the failed write would surrender its FIFO slot via
+    /// `asyncAfter`, so the detach would run immediately against the broken database and be lost while the
+    /// (deferred) exited retry still landed.
     ///
     /// The `RetryGate` is what makes this an ordering test rather than a timing one: the database is restored
     /// while the retry loop is parked inside the gate, so the restore cannot race an attempt opening the

@@ -224,8 +224,8 @@ extension OrchestratorTests {
         XCTAssertFalse(try fixture.store.windows(workspaceID: fixture.workspace.id).isEmpty)
     }
 
-    /// With no prober installed (the default `nil`), the close decision falls back to the durable read
-    /// exactly as it did before the prober existed.
+    /// With no prober installed (the default `nil`), the close decision falls back to the durable read,
+    /// the only signal available without one.
     func testConditionalCloseFallsBackToDurableReadWithNoProberInstalled() throws {
         let fixture = try makeAdHocCloseFixture(
             sessionID: "ad-hoc-no-prober-installed", foreground: bareShellForeground(), builtInTerminalLiveOwnerAttachmentProber: nil)

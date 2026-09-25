@@ -1,7 +1,6 @@
 import { fuzzyMatch } from "./fuzzyMatch";
 import { PickerContent, PickerOverlay, PickerRow } from "./pickerOverlay";
 
-/** One destination row: the folder it names, plus the `PickerRow` shape the overlay renders. */
 interface FolderRow extends PickerRow {
   /** Workspace-relative; `""` is the workspace root, which the row shows as `/`. */
   folder: string;

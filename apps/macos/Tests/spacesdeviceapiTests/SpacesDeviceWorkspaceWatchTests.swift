@@ -860,8 +860,8 @@ private func makeWorkspaceRepositoryWithSubmoduleIgnoringBuildDirectory() throws
         await waitUntil { !firings.all.isEmpty }
         #expect(firings.all.count == 1)
 
-        // Rewriting the shared commonDir exclude file to cover `build/` must itself be accepted (the
-        // acceptance-layer half of the fix) and refresh the ignore set for the very same event.
+        // Rewriting the shared commonDir exclude file to cover `build/` must itself be accepted by the
+        // acceptance layer and refresh the ignore set for the very same event.
         let excludeFile = commonDir.appendingPathComponent("info").appendingPathComponent("exclude")
         try "build/\n".write(to: excludeFile, atomically: true, encoding: .utf8)
         box.watcher?.onChange([excludeFile.path], false)
@@ -989,7 +989,7 @@ private func makeWorkspaceRepositoryWithSubmoduleIgnoringBuildDirectory() throws
         let buildDir = submoduleWorkingDir.appendingPathComponent("build", isDirectory: true)
         try FileManager.default.createDirectory(at: buildDir, withIntermediateDirectories: true)
         box.watcher?.onChange([buildDir.path], false)
-        // Classification (against the submodule's own ignore rules, once the fix resolves the deepest
+        // Classification (against the submodule's own ignore rules, resolved via the deepest working-dir
         // match) runs before acceptance judges this same event, so the creation may or may not fire; only
         // the count is pinned here, before the write below.
         try await Task.sleep(for: .milliseconds(250))

@@ -97,7 +97,7 @@ import Foundation
         }
 
         /// Regenerates the Spaces theme config for the active profile and re-points the running app at
-        /// it, replacing the previously loaded config handle.
+        /// it, replacing the loaded config handle.
         ///
         /// The generated root config references the light/dark theme files by absolute path, so
         /// `applyColorScheme(_:)`'s `ghostty_app_update_config` re-reads them from disk. Tests run each

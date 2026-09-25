@@ -87,9 +87,6 @@ else:
 PY
 }
 
-# The pane's currently rendered text: prefer the ghostty surface's visible grid
-# (visibleSurfaceOutput) and fall back to renderedOutput, matching the ended-session and
-# edit-shortcut e2e scripts' way of reading terminal content out of the window state dump.
 dump_visible_text() {
   python3 - "$DUMP_PATH" <<'PY'
 import json
@@ -120,8 +117,7 @@ focus_pane() {
 }
 
 # `send` is owner-gated (TerminalControlCommand.requiresOwnerClientID), so typing into the
-# session while the app owns it must present the owner attachment's client ID. The ID is read
-# from the profile database the same way e2e_mobile.sh does.
+# session while the app owns it must present the owner attachment's client ID.
 owner_client_id() {
   # Match the session root by suffix: the daemon canonicalizes the stored root_directory
   # (e.g. /private/tmp becomes /tmp), so an exact match against this script's RUNTIME_DIR
@@ -151,9 +147,8 @@ send_line() {
   }
 }
 
-# Polls the pane dump until the visible surface contains `include` and (when given) no longer
-# contains `exclude`, refreshing `last_visible_text` with the last-observed value so the caller
-# can inspect it after the wait (matching how the ended-session lane keeps `last_text` around).
+# Refreshes `last_visible_text` with the last-observed value so the caller can inspect it
+# after the wait.
 wait_for_visible_text() {
   local include="$1"
   local exclude="${2:-}"
@@ -260,8 +255,7 @@ focus_pane
 wait_for_terminal_surface_ready
 OWNER_CLIENT_ID="$(owner_client_id)"
 
-# Step 1: type five uniquely numbered lines. The fresh grid has no scrollback yet, so every
-# line lands within the visible viewport.
+# Step 1: the fresh grid has no scrollback yet, so every line lands within the visible viewport.
 send_line "seq -f selline-%03g 1 5"
 wait_for_visible_text "selline-005"
 selline_text="$last_visible_text"
@@ -285,7 +279,6 @@ set_response="$(control_command --command setSelection \
   fail "setSelection returned an unexpected selectionText"
 }
 
-# Step 3: reading the selection right back must agree.
 read_response="$(control_command --command readSelectionText)"
 [[ "$(json_field "$read_response" ok)" == "true" ]] || {
   printf '%s\n' "$read_response" >&2
@@ -296,7 +289,6 @@ read_response="$(control_command --command readSelectionText)"
   fail "readSelectionText returned an unexpected selectionText before scrolling"
 }
 
-# Step 4: push selline-003 into scrollback with 200 more lines.
 send_line "seq -f fillline-%03g 1 200"
 wait_for_visible_text "fillline-200" "selline-003"
 

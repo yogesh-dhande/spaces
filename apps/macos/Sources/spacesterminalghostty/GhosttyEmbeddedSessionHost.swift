@@ -77,9 +77,9 @@
 
     /// The daemon-side embedded renderer host, run on the terminal engine actor. It deliberately does
     /// NOT conform to the app-facing `TerminalGhosttyRendererHosting` protocol (which stays `@MainActor`
-    /// for `RemoteGhosttySessionHost` and the app UI): the daemon drives it through concrete methods, so
-    /// the window-focus / `NSEvent` key-handling members that existed only to satisfy that protocol are
-    /// gone (those are the app's responsibility and cannot run on the engine actor).
+    /// for `RemoteGhosttySessionHost` and the app UI): the daemon drives it through concrete methods, without
+    /// the window-focus / `NSEvent` key-handling members conformance would require (those are the app's
+    /// responsibility and cannot run on the engine actor).
     @TerminalEngineActor public final class GhosttyHeadlessRendererHost {
         private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
         private let clearScreenAndScrollbackAction: @TerminalEngineActor () -> Bool
@@ -332,13 +332,13 @@
 
         private let controlQueue: DispatchQueue
         private let stateStreamQueue: DispatchQueue
-        /// Serial background executor for this core's durable SQLite writes. Every mutation the engine used to
-        /// perform synchronously on its critical path — per-request client lease touches, the runtime-state
-        /// timer's persist, stale-client expiry detaches, the final terminated payload — is enqueued here
-        /// instead. SQLite runs in WAL mode with a 5s busy timeout: a competing writer (e.g. an agent hook's
-        /// `spaces agent signal` burst) makes any WRITE block on the write lock up to that timeout, which on
-        /// the engine executor froze all terminal I/O; WAL READS never block on a writer, so reads stay inline
-        /// on the engine. Writes commit in enqueue order (serial queue); the DB is a durable mirror that
+        /// Serial background executor for this core's durable SQLite writes: per-request client lease touches,
+        /// the runtime-state timer's persist, stale-client expiry detaches, and the final terminated payload
+        /// are all enqueued here rather than performed inline on the engine's critical path. SQLite runs in WAL
+        /// mode with a 5s busy timeout: a competing writer (e.g. an agent hook's `spaces agent signal` burst)
+        /// makes any WRITE block on the write lock up to that timeout, which would freeze all terminal I/O on
+        /// the engine executor; WAL READS never block on a writer, so reads stay inline on the engine. Writes
+        /// commit in enqueue order (serial queue); the DB is a durable mirror that
         /// converges while the engine's in-memory state (`latestRuntimeState`, `cachedAttachmentSnapshot`)
         /// stays authoritative for reads and broadcasts. Handoff drains this queue before `execv` so the staged
         /// daemon reads a complete mirror; termination enqueues its final writes last so FIFO ordering lands
@@ -352,8 +352,8 @@
         private lazy var rendererHostStorage = GhosttyHeadlessRendererHost(
             sessionDriver: sessionDriver, clearScreenAndScrollbackAction: { [weak self] in self?.clearScreenAndScrollback() ?? false })
         private let requestSurfaceRefreshAction: @TerminalEngineActor () -> Void
-        /// Per-session 1s runtime-state timer. A `DispatchSourceTimer` on the engine queue replaces the
-        /// old `Timer`/`RunLoop.main` pairing — the engine actor's queue has no run loop.
+        /// Per-session 1s runtime-state timer, a `DispatchSourceTimer` on the engine queue rather than a
+        /// `Timer`/`RunLoop.main` pairing — the engine actor's queue has no run loop.
         private var runtimeStateTimer: DispatchSourceTimer?
         private var controlServer: TerminalControlServer?
         private var stateStreamServer: GhosttyRemoteSessionStateStreamServer?
@@ -680,11 +680,9 @@
         ///
         /// The exclusion is a SET rather than one id because both callers are mid-detach and the detach has
         /// not been applied to the snapshot yet: a stale-client expiry removes every id in its stale set at
-        /// once. Every `.local` client used to be exempt from lease expiry, so a stale set could never
-        /// contain one and picking the first `.local` attachment was always safe; now that `.local` clients
-        /// expire on their lease exactly like `.remote` ones (see `TerminalClientKind`), the client being
-        /// expired is itself still in `snapshot.attachments` here and is typically FIRST in it, being the
-        /// older attachment. Excluding only a single id would hand ownership straight back to the client
+        /// once. `.local` clients expire on their lease exactly like `.remote` ones (see `TerminalClientKind`),
+        /// so the client being expired is itself still in `snapshot.attachments` here and is typically FIRST in
+        /// it, being the older attachment. Excluding only a single id would hand ownership straight back to the client
         /// this expiry is detaching, and the atomic `expireClients` write then refuses a transfer to a
         /// client it is detaching in the same transaction — leaving the session with no owner at all.
         private func activeLocalWindowClientID(excluding excludedClientIDs: Set<String>) -> String? {
@@ -2208,7 +2206,7 @@
         /// committed. Without this second condition, the very first tick after an expiry decision would see
         /// no lease-governed attached client and take the fast path below, which clears `expiredRemoteClientIDs`.
         /// That erases the pending marker `isClientDurablyDisconnected` depends on to veto a rescuing heartbeat
-        /// (see its doc comment) while the expiry write can still be sitting in the queue — e.g. behind a
+        /// while the expiry write can still be sitting in the queue — e.g. behind a
         /// contended SQLite write lock — so a heartbeat arriving in that window would be rejected instead of
         /// vetoing the pending detach, disconnecting a client that was actually still alive. Keeping the ids
         /// around costs nothing while nothing is pending; it only routes ticks with an in-flight decision
@@ -2600,11 +2598,11 @@
         }
 
         /// Set when a metadata change (title, working directory) still owes overview subscribers a rebuild,
-        /// cleared by the 1 Hz tick that posts it. Overview pushes used to ride the durable runtime-state
-        /// write, so dropping `title` from the persist signature would otherwise leave the sidebar showing a
-        /// stale title until some unrelated field changed. Posting per change instead would push an overview
-        /// rebuild — and a cross-process distributed notification — per spinner frame, which is the cost this
-        /// whole change exists to remove, so the signal is coalesced onto the tick every live session already
+        /// cleared by the 1 Hz tick that posts it. Overview pushes ride the durable runtime-state write's
+        /// change notification, which is signature-gated and excludes `title`, so without this flag a title
+        /// change would leave the sidebar showing a stale title until some unrelated field changed. Posting per
+        /// change instead would push an overview rebuild — and a cross-process distributed notification — per
+        /// spinner frame, so the signal is coalesced onto the tick every live session already
         /// runs. Subscribers converge within a second; live subscribers are unaffected either way, since
         /// `broadcastCurrentState` below still goes out on every change.
         private var owesOverviewSignalForMetadata = false
@@ -2876,10 +2874,6 @@
             return snapshot
         }
 
-        /// Active (non-detached) attachments served from `currentAttachmentSnapshot()` — the in-memory cache,
-        /// reseeded from disk on a miss. Every owner-gating enforcement read (`isOwner`, `activeOwnerClientID`,
-        /// `hasActiveAttachments`, attach/detach mode-change checks) resolves through this so gating agrees with
-        /// the cache the broadcasts advertise. See `cachedAttachmentSnapshot`.
         /// The attachment snapshot a broadcast carries: `currentAttachmentSnapshot()` reduced by
         /// `TerminalSessionAttachmentSnapshot.liveWireProjection`, served from `cachedLiveWireAttachmentSnapshot`.
         private func currentLiveWireAttachmentSnapshot() -> TerminalSessionAttachmentSnapshot? {
@@ -2909,6 +2903,10 @@
             return projection
         }
 
+        /// Active (non-detached) attachments served from `currentAttachmentSnapshot()` — the in-memory cache,
+        /// reseeded from disk on a miss. Every owner-gating enforcement read (`isOwner`, `activeOwnerClientID`,
+        /// `hasActiveAttachments`, attach/detach mode-change checks) resolves through this so gating agrees with
+        /// the cache the broadcasts advertise. See `cachedAttachmentSnapshot`.
         private func currentActiveAttachments() -> [TerminalAttachment] {
             (currentAttachmentSnapshot()?.attachments ?? []).filter { $0.detachedAt == nil }
         }
@@ -3519,7 +3517,7 @@
         }
         func debugPersistRuntimeState(force: Bool = true) {
             refreshRuntimeState(force: force)
-            // Persistence is now off-engine; block until it commits so tests can read the durable state.
+            // Persistence is off-engine; block until it commits so tests can read the durable state.
             drainPersistenceQueue()
         }
         /// Blocks until all enqueued durable writes have committed. Test-only fence for the off-engine

@@ -105,14 +105,14 @@ extension ProcessProfileEnvironmentSuites {
         /// Pins the cold-launch bug (#621) in its exact form: `SidebarController.applyLocalDeviceSidebarSnapshot`
         /// triggers this prune (line ~626) *before* `loadRemoteDeviceSections` has run even once (line
         /// ~710), so a paired remote device has no `DeviceSection` at all yet, not merely a `.loading`
-        /// one. Against the pre-fix `retainedDismissedAttentionItemIDs(_:sections:)` (grouping dismissals
-        /// by device and keeping only buckets whose device has a matching section), a bucket with no
-        /// matching section takes the "no matching section, drop" path unconditionally, so this exact
-        /// setup deletes the remote dismissal outright, permanently, on the very first snapshot apply -
-        /// which is what made the alert resurrect on relaunch. The fix reads paired device ids off the
-        /// injected database and keeps a section-less bucket only while its device is still paired, so
-        /// this seeds the remote device as a paired row (via `database.upsert(device:)`, the write pairing
-        /// itself uses) without ever installing a `DeviceSection` for it.
+        /// one. Without keying on paired device ids, `retainedDismissedAttentionItemIDs(_:sections:)`
+        /// (grouping dismissals by device and keeping only buckets whose device has a matching section)
+        /// would take the "no matching section, drop" path unconditionally for any section-less bucket, so
+        /// this exact setup would delete the remote dismissal outright, permanently, on the very first
+        /// snapshot apply - which is what made the alert resurrect on relaunch. Reading paired device ids
+        /// off the injected database and keeping a section-less bucket only while its device is still
+        /// paired avoids that, so this seeds the remote device as a paired row (via `database.upsert(device:)`,
+        /// the write pairing itself uses) without ever installing a `DeviceSection` for it.
         @Test func remoteDeviceDismissalsSurviveAColdLaunchPruneWithNoRemoteSectionAtAll() throws {
             let host = makeHost()
             let database = try makeInjectedDatabase()
@@ -214,7 +214,6 @@ extension ProcessProfileEnvironmentSuites {
             alerts.dismissAlertsAttentionItem(orphanAttentionID)
             #expect(alerts.dismissedAlertsAttentionItemIDs == [orphanAttentionID])
 
-            // No paired-device row for "unpaired-device", and no section for it either.
             host.deviceModel.deviceSections = [
                 AppKitController.DeviceSection(
                     deviceID: SpacesPairedDeviceRecord.localDeviceID, deviceName: "This Mac", isLocal: true, loadState: .loaded,

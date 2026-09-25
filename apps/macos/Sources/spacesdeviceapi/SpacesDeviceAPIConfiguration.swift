@@ -386,8 +386,8 @@ public enum SpacesDeviceAPINetworkInterfaces {
         return addresses
     }
 
-    /// Point-to-point and virtual/peer (tunnel) interfaces are penalized here, but that is no longer an
-    /// exclusion — it expresses fallback preference. `pairingLinkHosts` deliberately offers the
+    /// Point-to-point and virtual/peer (tunnel) interfaces are penalized here rather than excluded: this
+    /// expresses fallback preference, not disqualification. `pairingLinkHosts` deliberately offers the
     /// top-ranked tailnet address as a secondary candidate, so pushing tunnel interfaces to the bottom
     /// of this ranking is exactly what makes the LAN address the first choice and the tailnet address
     /// the fallback.

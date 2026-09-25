@@ -116,7 +116,7 @@ public enum TerminalSessionCatalog {
     {
         let inMemoryByID = Dictionary(inMemory.map { ($0.sessionID, $0) }, uniquingKeysWith: { first, _ in first })
         // A live session's reported title is owned by its in-memory core, which advances `currentTitle` the
-        // moment the program reports one. The DB row is a mirror that no longer tracks title changes (see
+        // moment the program reports one. The DB row is a mirror that does not track title changes (see
         // `runtimeStateSignature`), so a session present in both takes its live title from the core. Only the
         // title is overlaid: the DB entry's other fields are derived alongside filesystem state (attachment
         // snapshot, control/subscription socket presence) that the in-memory entry does not recompute.

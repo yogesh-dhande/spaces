@@ -112,8 +112,8 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
     /// closed no exit hook fires. The sweep must still finalize such a `.done` row — `.done` is not a
     /// finalized fact without a recorded exit event — delivering the exited notice its subscribers are owed
     /// and clearing its edges before deleting the dead row, and a second pass over the now-gone row stays
-    /// silent. Before the finalized-fact change the sweep skipped every `.done` row, leaving this one stale
-    /// forever and its watchers never told it exited.
+    /// silent. Skipping every `.done` row here would leave this one stale forever, its watchers never told
+    /// it exited.
     func testExitedHooklessDoneAgentRowIsFinalizedAndSubscriberToldItExited() throws {
         let store = try makeTemporaryStore()
         let recorder = DeliveryRecorder()

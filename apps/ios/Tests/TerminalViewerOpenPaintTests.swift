@@ -125,8 +125,7 @@
             let otherOwner = TerminalClient(
                 id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "mac"), connectedAt: "2026-06-04T14:23:31Z")
 
-            // First lifecycle: this viewer never takes ownership, but `latestState` still gets a frame at
-            // grid G (40x30) — attachment_state is a barrier, so it applies even while the open hold is on.
+            // attachment_state is a barrier, so it applies even while the open hold is on.
             model.start()
             await model.applyLatestState(
                 try Self.framedState(
@@ -140,15 +139,12 @@
             model.start()
             XCTAssertTrue(model.isHoldingOpenScreenUpdatesForTesting, "the restarted lifecycle re-arms the hold")
 
-            // The surface reports grid G again before this lifecycle's own subscription has delivered
-            // anything at all. Only the leftover frame from the first lifecycle matches it.
+            // Only the leftover frame from the first lifecycle matches it.
             model.updateViewportSize(columns: 40, rows: 30)
             XCTAssertTrue(
                 model.isHoldingOpenScreenUpdatesForTesting,
                 "a frame stored by a previous lifecycle must not release this lifecycle's hold just because its grid matches")
 
-            // The restarted subscription then delivers its own frame at G, this time making the viewer the
-            // owner: the hold releases on this frame, and it paints exactly once.
             await model.applyLatestState(
                 try Self.framedState(
                     columns: 40, rows: 30, revision: 2, emittedAt: "2026-06-04T14:23:35Z", owner: model.remoteClientForTesting,
@@ -176,8 +172,7 @@
             let otherOwner = TerminalClient(
                 id: "mac-owner", kind: .local, identity: TerminalClientIdentity(label: "mac"), connectedAt: "2026-06-04T14:23:31Z")
 
-            // First lifecycle: this viewer never takes ownership, but `latestState` still gets a frame at
-            // grid G (40x30) — attachment_state is a barrier, so it applies even while the open hold is on.
+            // attachment_state is a barrier, so it applies even while the open hold is on.
             model.start()
             await model.applyLatestState(
                 try Self.framedState(
@@ -197,15 +192,12 @@
             await model.applyLatestState(Self.otherOwnerState(emittedAt: "2026-06-04T14:23:36Z", state: .running), isOutOfBand: false)
             XCTAssertFalse(model.isOwner, "the frameless payload names the same non-owning attachment")
 
-            // The surface reports grid G. Before the fix this frameless apply had already stamped the
-            // restarted lifecycle onto the leftover frame from the first lifecycle, so this match would
-            // wrongly release the hold on a grid the restarted subscription never delivered.
+            // Stamping the lifecycle only when a reduce contributes a frame keeps this match from
+            // wrongly releasing the hold on a grid the restarted subscription never delivered.
             model.updateViewportSize(columns: 40, rows: 30)
             XCTAssertTrue(
                 model.isHoldingOpenScreenUpdatesForTesting, "a frameless reduce must not refresh the stamp on a previous lifecycle's stale frame")
 
-            // The restarted subscription then delivers its own frame at G, this time making the viewer the
-            // owner: the hold releases on this frame, and it paints exactly once.
             await model.applyLatestState(
                 try Self.framedState(
                     columns: 40, rows: 30, revision: 2, emittedAt: "2026-06-04T14:23:37Z", owner: model.remoteClientForTesting,
@@ -273,8 +265,8 @@
         /// resize to, so no resize was sent — and the report, the sync it triggers, and the frame that
         /// would match it are all still coming. Releasing here is exactly the replay this hold exists to
         /// close: the daemon's pre-resize grid paints, then the viewport reports, then the real resize
-        /// repaints. Regression test for `runOwnershipSynchronization`'s defer, which used to release
-        /// unconditionally whenever a run ended without a frame at the viewer's own grid.
+        /// repaints. Regression test for `runOwnershipSynchronization`'s defer, which must not release
+        /// unconditionally whenever a run ends without a frame at the viewer's own grid.
         func testSyncWithNoViewportReportedYetDoesNotReleaseTheHold() async throws {
             let model = makeModel()
             defer { model.stop() }
@@ -293,8 +285,6 @@
             XCTAssertTrue(model.isHoldingOpenScreenUpdatesForTesting, "a sync with no viewport to test must not release the hold")
             XCTAssertNil(model.ownerRenderEpoch, "nothing must paint while the hold is on")
 
-            // The surface measures itself and the matching frame lands: the hold releases and paints once,
-            // at the reported grid, exactly as an ordinary open does.
             model.updateViewportSize(columns: 49, rows: 37)
             await model.applyLatestState(
                 try Self.framedState(columns: 49, rows: 37, revision: 2, emittedAt: "2026-06-04T14:23:33Z", owner: model.remoteClientForTesting),
@@ -312,7 +302,7 @@
         /// so the run must not release the hold either — releasing paints the pre-resize grid the resize
         /// was sent to replace. This test never delays the frame directly (no seam does that
         /// deterministically); instead it withholds it past the wait's fixed bound and lets the wait time
-        /// out on its own, which is the same condition the fix classifies as `.resizedAwaitingFrame`.
+        /// out on its own, which is the same condition classified as `.resizedAwaitingFrame`.
         func testResizeSucceedsButItsFrameArrivesAfterTheStreamWaitDoesNotReleaseTheHold() async throws {
             let model = makeModel()
             defer { model.stop() }
@@ -336,7 +326,6 @@
             XCTAssertTrue(model.isHoldingOpenScreenUpdatesForTesting, "a resize awaiting its frame must not release the hold")
             XCTAssertNil(model.ownerRenderEpoch)
 
-            // The resized frame lands late: it must still paint, and paint only once, at the resized grid.
             await model.applyLatestState(
                 try Self.framedState(columns: 49, rows: 37, revision: 2, emittedAt: "2026-06-04T14:23:34Z", owner: model.remoteClientForTesting),
                 isOutOfBand: false)
@@ -481,8 +470,8 @@
             XCTAssertTrue(reopened.showsTerminalSurface)
         }
 
-        /// A first open of a session the app has never painted is unchanged: nothing to paint from, so the
-        /// hold is armed exactly as before.
+        /// A first open of a session the app has never painted has nothing to paint from, so the hold is
+        /// still armed.
         func testAFirstOpenWithNoRetainedScreenStillHoldsItsFirstPaint() {
             let model = makeModel(retainedScreens: TerminalRetainedScreenStore())
             defer { model.stop() }
@@ -726,11 +715,11 @@
         /// Integration coverage through the real pipeline, wired exactly like `TerminalViewerModel`:
         /// `shouldUseFrame` marks the hold, `didSubmit` confirms it once that frame's own output is
         /// queued, and the hold's release closure flips `setHoldsScreenUpdates(false)`. With the mailbox
-        /// holding, an older frame submitted ahead of the matching one must never apply on its own: the
-        /// fix's ordering only lets the release run after the matching frame's output has already reached
+        /// holding, an older frame submitted ahead of the matching one must never apply on its own: this
+        /// ordering only lets the release run after the matching frame's output has already reached
         /// the mailbox, where it collapses onto the older held one before the resulting drain can apply
-        /// anything, so the drain the release triggers finds one merged entry at the viewport grid. Before
-        /// the fix, marking-and-releasing from `shouldUseFrame` could flip the hold off while the older
+        /// anything, so the drain the release triggers finds one merged entry at the viewport grid. Without
+        /// that ordering, marking-and-releasing from `shouldUseFrame` could flip the hold off while the older
         /// frame was still the only thing queued, letting it drain and apply on its own ahead of the
         /// matching frame. Looped because that race depends on how the reduce loop's synchronous
         /// continuation interleaves with the asynchronous main-actor drain it schedules, which does not
@@ -1209,8 +1198,6 @@
             }
         }
 
-        /// Counts how many times a `TerminalViewerOpenScreenHold` release closure has run, from whichever
-        /// path claims it.
         private final class ReleaseCounter: @unchecked Sendable {
             private let lock = NSLock()
             private var runCount = 0
@@ -1228,9 +1215,9 @@
             }
         }
 
-        /// Records the grid of every frame a pipeline apply carries, in apply order. Used by the
-        /// held-mailbox ordering test, which cares only about how many times the drain applied something
-        /// and what grid the surviving frame was at, not the rest of the output.
+        /// Records the grid of every frame a pipeline apply carries, in apply order. The held-mailbox
+        /// ordering test cares only about how many times the drain applied something and what grid the
+        /// surviving frame was at, not the rest of the output.
         private final class HoldOrderingApplyCollector: @unchecked Sendable {
             private let lock = NSLock()
             private var applies: [(columns: Int, rows: Int)] = []

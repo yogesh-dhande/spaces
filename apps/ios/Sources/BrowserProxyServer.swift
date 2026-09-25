@@ -34,7 +34,6 @@ actor SpacesMobileBrowserProxy {
     /// mints resolve to this proxy regardless of which daemon owns the service.
     static let fixedPort: UInt16 = 47_898
 
-    /// Budget for reading a connection's HTTP head before giving up on it.
     private static let headReadTimeout: Duration = .seconds(10)
     private static let bindRetryLimit = 5
     private static let bindRetryBackoff: Duration = .milliseconds(200)
@@ -57,7 +56,6 @@ actor SpacesMobileBrowserProxy {
     ///   - installationID: this app installation's paired identity, used to build the real dialer's tunnel requests.
     ///   - deviceName: this device's display name, forwarded to the real dialer's tunnel requests.
     ///   - dialer: tunnel opener; defaults to the production pinned-TLS dialer. Injected as a fake in tests.
-    ///   - runtimeState: observable status object; defaults to a fresh one.
     init(
         port: UInt16 = SpacesMobileBrowserProxy.fixedPort, installationID: String, deviceName: String = "iOS Device",
         dialer: (any BrowserTunnelDialing)? = nil, runtimeState: BrowserProxyRuntimeState = BrowserProxyRuntimeState()
@@ -70,7 +68,6 @@ actor SpacesMobileBrowserProxy {
     /// Replaces the routing table used for subsequent connections. In-flight tunnels are unaffected.
     func updateRoutes(_ table: BrowserProxyRoutingTable) { routingTable = table }
 
-    /// Looks up the route the proxy would use for a browser `Host`.
     func routeTarget(forHost host: String) -> BrowserProxyRouteTarget? { routingTable.target(forHost: host) }
 
     /// Binds the loopback listener, retrying a bind failure a few times with backoff before exposing
@@ -119,7 +116,6 @@ actor SpacesMobileBrowserProxy {
         await setStatus(.failed(message: message))
     }
 
-    /// Cancels the listener and tears down every live tunnel pair.
     func stop() {
         startToken += 1
         listener?.cancel()
@@ -256,8 +252,6 @@ actor SpacesMobileBrowserProxy {
         }
 
         do {
-            // Forward any early service bytes the daemon already delivered, then replay the consumed
-            // request head (and any body bytes read with it) to the service.
             if !opened.residual.isEmpty { try await BrowserProxyConnectionIO.send(opened.residual, on: client) }
             try await BrowserProxyConnectionIO.send(
                 parser.consumedBytes(
@@ -271,7 +265,6 @@ actor SpacesMobileBrowserProxy {
         if parser.isUpgradeRequest { splice(session) } else { relaySingleRequestResponse(session, requestBodyRelay: requestBodyRelay) }
     }
 
-    /// Reads the HTTP head off a freshly accepted client connection.
     private static func readHead(from client: NWConnection) async throws -> BrowserProxyHTTPHeadParser {
         var parser = BrowserProxyHTTPHeadParser()
         while !parser.isComplete {
@@ -283,9 +276,8 @@ actor SpacesMobileBrowserProxy {
         return parser
     }
 
-    /// Writes a complete error response, then tears the connection down. The response is sent with
-    /// stream completion so the FIN is queued behind the bytes before `teardown` cancels the socket,
-    /// which keeps the browser from seeing a truncated error page.
+    /// The response is sent with stream completion so the FIN is queued behind the bytes before
+    /// `teardown` cancels the socket, which keeps the browser from seeing a truncated error page.
     private func respondAndClose(_ session: BrowserProxySession, _ response: Data) async {
         let client = session.client
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -311,9 +303,8 @@ actor SpacesMobileBrowserProxy {
         Self.pump(from: tunnel, to: client, coordinator: coordinator)
     }
 
-    /// Finishes the first request body, closes the service-facing write side, and relays the single
-    /// response back to the client. Normal HTTP browser connections use this instead of a raw
-    /// client->service splice so a keep-alive follow-up request cannot leak the proxy auth cookie.
+    /// Normal HTTP browser connections use this instead of a raw client->service splice so a
+    /// keep-alive follow-up request cannot leak the proxy auth cookie.
     private func relaySingleRequestResponse(_ session: BrowserProxySession, requestBodyRelay: BrowserProxyRequestBodyRelay) {
         guard let tunnel = session.tunnel else {
             teardown(session.id)
@@ -362,9 +353,8 @@ actor SpacesMobileBrowserProxy {
         }
     }
 
-    /// Sends the remaining bytes of a known-length request body, then half-closes the service-facing
-    /// write side. If the client stops before the declared body is complete, the tunnel is aborted
-    /// rather than forwarding a truncated request.
+    /// If the client stops before the declared body is complete, the tunnel is aborted rather than
+    /// forwarding a truncated request.
     private static func finishSingleRequestBody(
         from source: NWConnection, to dest: NWConnection, remainingBytes: Int, coordinator: BrowserProxyRelayCoordinator
     ) {
@@ -408,10 +398,8 @@ actor SpacesMobileBrowserProxy {
         }
     }
 
-    /// Continues a chunked request body until the terminating chunk and trailer terminator have been
-    /// forwarded, then half-closes the service-facing write side. Bytes after that terminator are a
-    /// pipelined request on the browser connection and are intentionally not forwarded because they
-    /// would still carry the proxy auth cookie.
+    /// Bytes after that terminator are a pipelined request on the browser connection and are
+    /// intentionally not forwarded because they would still carry the proxy auth cookie.
     private static func finishChunkedRequestBody(
         from source: NWConnection, to dest: NWConnection, bufferedBody: Data, coordinator: BrowserProxyRelayCoordinator
     ) {

@@ -8,7 +8,7 @@
         /// handling) to an openable URL. Relative filesystem paths (anything that isn't `~`-prefixed
         /// or absolute) only resolve when `workingDirectory` is supplied — the session's current
         /// working directory, tracked separately from this parsing layer — and are rejected
-        /// otherwise, matching the historical behavior for a link with no directory context.
+        /// otherwise.
         ///
         /// Public so the per-pane `TerminalLinkOpenCoordinator` (in `spacesui`) can reuse the exact
         /// tilde/absolute/relative expansion for local file links instead of re-deriving it.
@@ -37,7 +37,7 @@
             return URL(fileURLWithPath: workingDirectory, isDirectory: true).appendingPathComponent(expandedPath).standardizedFileURL
         }
 
-        /// Resolves and opens `value`. `openURL`, when supplied, replaces the real opening layer
+        /// `openURL`, when supplied, replaces the real opening layer
         /// entirely (used by debug/test hooks such as `GhosttyMirrorTerminalView.debugOpenURLHandler`
         /// to intercept opens without touching `NSWorkspace`). Otherwise a web URL is forced through
         /// the default-browser handler and everything else is treated as a local file and

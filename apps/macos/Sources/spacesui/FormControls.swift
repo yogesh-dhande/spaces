@@ -8,8 +8,6 @@ import systembridge
 /// button's `target` and any host-owned color (the sidebar's theme-reactive card colors) are
 /// passed in explicitly rather than reached for through a host reference.
 
-/// A titled control row: a name label, an optional wrapping hint, then the control itself,
-/// stacked vertically and constrained to the stack's width.
 @MainActor func settingsLabeledField(name: String, hint: String, control: NSView) -> NSView {
     let nameLabel = NSTextField(labelWithString: name)
     nameLabel.font = Typography.rowLabel
@@ -36,9 +34,6 @@ import systembridge
     return stack
 }
 
-/// A form section card: an optional icon, a title/subtitle header, an optional trailing view,
-/// the given content views, and a bottom divider.
-///
 /// `defaultAccentColor` and `dividerColor` are the sidebar's theme-reactive colors
 /// (`sidebarThemeColor`/`sidebarCardBorderColor`), resolved by the caller and passed in as plain
 /// `NSColor` values rather than as a host reference. Both colors carry their own dynamic
@@ -128,8 +123,7 @@ import systembridge
     return section
 }
 
-/// A form window's header row: symbol, title, and a trailing close button. `target` is the
-/// close button's action target — every caller passes the host that owns `closeAction`.
+/// `target` is the close button's action target — every caller passes the host that owns `closeAction`.
 @MainActor func buildFormWindowHeader(symbol: String, title: String, closeAction: Selector, target: AnyObject?) -> NSView {
     let header = NSView()
 
@@ -224,9 +218,7 @@ import systembridge
     return row
 }
 
-/// Embeds `stack` in a vertically scrolling container filling `container`. `container` was
-/// previously an optional that fell back to the host's `detailContainer`; callers that relied on
-/// that default now pass it explicitly.
+/// Embeds `stack` in a vertically scrolling container filling `container`.
 @MainActor func showScrollableDetailStack(_ stack: NSStackView, in container: NSView) {
     let scroll = NSScrollView()
     scroll.translatesAutoresizingMaskIntoConstraints = false

@@ -182,7 +182,7 @@ enum SpacesDeviceWorkspaceGitHashing {
     /// Streams `atPath` through an incremental SHA-256 hasher in fixed chunks rather than materializing
     /// the whole file as one `Data` (unlike `sha256Hex`, used by `workspaceFileRead`/`workspaceFileWrite`,
     /// which cap at 10 MiB because they return content over the wire). The file-signature poll only needs
-    /// the hash, never the content, so per the phase 5 spec it is not subject to that cap — this hashes a
+    /// the hash, never the content, so it is not subject to that cap — this hashes a
     /// file of any size a chunk at a time. Returns nil on any read error (the poll's provider-failure /
     /// skip-tick signal), never throws.
     static func streamingSHA256Hex(atPath path: String) -> String? {
@@ -246,7 +246,7 @@ enum SpacesDeviceWorkspaceBinaryGuess {
 /// `recomputeAll` is also what every one-shot caller (`buildDiffPlanSnapshot`, the connect-time frame)
 /// gets by default, paired with a fresh `RepositoryContributionCache()`: a fresh cache never has
 /// anything to reuse regardless of what `touched` says, so those callers keep computing every
-/// repository's contribution fresh, exactly as before this cache existed.
+/// repository's contribution fresh, the same as without a cache.
 struct RepositoryTouchedSet: Sendable {
     let all: Bool
     let directories: Set<String>
@@ -304,8 +304,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// Upper bound on the wall-clock time a manifest or initial file-patch request spends validating and
     /// building its immediate git work. It is measured from `deadlineStart`, a clock the caller starts
     /// BEFORE repository/ref validation even runs, and threads through both `assertRefIsResolvable` and
-    /// `buildDiffPlanSnapshot` unchanged. Before this, `assertRefIsResolvable` and the plan builder each started their own
-    /// fresh `Date()`, so validation and patch-building silently stacked into a COMBINED wall-clock time
+    /// `buildDiffPlanSnapshot` unchanged. Starting a fresh `Date()` separately in `assertRefIsResolvable` and the plan
+    /// builder would let validation and patch-building silently stack into a COMBINED wall-clock time
     /// that could exceed this deadline several times over (repo probe + ref validation + a full fresh
     /// manifest/patch budget) while the client had already abandoned the request at its own ~60s timeout —
     /// holding the workspace's serial git queue for work nobody would read the answer to, with the client's
@@ -402,7 +402,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// what `merge-base` itself needs of it; `--quiet` suppresses git's own stderr chatter for a bad ref,
     /// since this call's only signal to its caller is throw-vs-not-throw.
     ///
-    /// round-14 Fix 1: exit code, not throw-vs-not-throw, is the signal that actually distinguishes "bad ref"
+    /// Exit code, not throw-vs-not-throw, is the signal that actually distinguishes "bad ref"
     /// from "daemon trouble" here. `git rev-parse --verify --quiet <ref>^{commit}` exits 0 with the resolved
     /// SHA on stdout when the ref resolves, and exits 1 with EMPTY stdout when it does not — that is exactly
     /// what `--quiet` is for, a clean two-way signal instead of stderr text. Passing `allowedExitCodes: [0,
@@ -451,7 +451,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// per-submodule calls below consult the cache, which is where a workspace with many repositories
     /// actually saves git spawns: an untouched submodule's whole subtree returns from
     /// `RepositoryContributionCache` without recursing further. A one-shot caller's default fresh cache
-    /// never has anything cached, so it recomputes every repository exactly as before this cache existed.
+    /// never has anything cached, so it recomputes every repository.
     static func scopeSignature(
         workspaceDir: String, refName: String? = nil, lastCommit: Bool = false, gitClient: RemoteWorkspaceGitClient, deadlineStart: Date? = nil,
         contributionCache: RepositoryContributionCache = RepositoryContributionCache(), touched: RepositoryTouchedSet = .recomputeAll
@@ -531,7 +531,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
         // by the time `scopeSignature` runs, so this probe should never legitimately fail — a genuine
         // failure here must propagate as a normal thrown error rather than being folded into an empty
         // prefix, which git also produces on a plain SUCCESS (a workspace rooted exactly at its repo root).
-        // Those are two different outcomes; collapsing them together previously let a transient failure
+        // Those are two different outcomes; collapsing them together would let a transient failure
         // here silently blend into the "no scoping needed" case rather than surfacing as a retryable error.
         // Only the trailing newline git appends is stripped here — see `strippingTrailingNewline`'s doc
         // comment for why a leading space/tab must survive.
@@ -580,7 +580,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
                 // line. Without `mode` here, that change would be invisible to a subscribed client's poll.
                 let mode = attributes[.posixPermissions] as? Int ?? -1
                 input.append(Data("\(entry.path)|\(size)|\(modified.timeIntervalSince1970)|\(mode)\n".utf8))
-                // round-16 Fix 3, accepted risk: an already-dirty file rewritten with DIFFERENT content of
+                // Accepted risk: an already-dirty file rewritten with DIFFERENT content of
                 // the exact SAME byte size, whose mtime is then deliberately restored to its original value
                 // (e.g. `rsync --times`, `touch -r`, or any other timestamp-preserving copy), changes none of
                 // this signature's inputs — HEAD, the porcelain status letter, `size`, `modified`, and `mode`
@@ -905,7 +905,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
         /// the submodule the row itself points at.
         let submodulePath: String?
 
-        /// True when `gitlink` is present, i.e. `path` is a submodule pointer rather than file content.
+        /// `path` is a submodule pointer, not file content, when `gitlink` is present.
         var isSubmodule: Bool { gitlink != nil }
 
         /// `path` as `repoDir`'s own repository names it. Per-file pathspecs and patch prefixes need this
@@ -1634,8 +1634,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
         return parsePatchMetadata(String(decoding: prefix, as: UTF8.self), gitlink: gitlink)
     }
 
-    /// The transfer path retains the old untracked safety rules but intentionally removes the old visible
-    /// patch-size cap: its output goes to a private file and reaches the client only through 4 MiB chunks.
+    /// The transfer path keeps the untracked safety rules but applies no patch-size cap: its output goes
+    /// to a private file and reaches the client only through 4 MiB chunks.
     private static func writeUntrackedPatch(for plan: DiffFilePlan, outputURL: URL, gitClient: RemoteWorkspaceGitClient, timeout: TimeInterval) throws
         -> Bool
     {
@@ -1796,7 +1796,7 @@ enum SpacesDeviceWorkspaceDiffEngine {
     /// enumeration reports for the same files. `git status` has no `--relative` of its own (confirmed
     /// against real git: `error: unknown option 'relative'`), so this is the client-side equivalent, shared
     /// by both `scopeSignature` and the manifest plan's untracked-file discovery — the one definition both must
-    /// use, per the fix this implements.
+    /// use.
     ///
     /// An entry is kept when its current path (`path` — the *new* path for a rename, see `changedEntries`'s
     /// doc) lies under `prefix`; `origPath` is stripped too when it also falls under `prefix`, and left
@@ -2000,9 +2000,8 @@ enum SpacesDeviceWorkspaceDiffEngine {
 /// Enumerates every path inside a workspace's checkout the user would consider part of the workspace.
 /// Backs the `workspaceFileList` Device API command (the Editor pane's file tree and quick-open), which
 /// — unlike the manifest/chunk diff API — must serve BOTH product workspace types (see docs/spec.md on non-git
-/// projects): a non-git workspace's Editor has no other way to open a file now that the old direct-path
-/// input is gone, so this engine picks one of two listing strategies per call rather than refusing the
-/// non-git case:
+/// projects): a non-git workspace's Editor has no other way to open a file, so this engine picks one of
+/// two listing strategies per call rather than refusing the non-git case:
 ///  - Git checkout: tracked files plus untracked, non-ignored files, excluding a tracked file that has
 ///    been deleted on disk (`listGitFiles`).
 ///  - Plain directory: every regular file on disk, recursively (`listFilesystemFiles`), since there is no
@@ -2754,11 +2753,6 @@ enum SpacesDeviceWorkspaceFileListEngine {
         return (result.sorted(), truncated)
     }
 
-    /// `relativePath`'s immediate on-disk subdirectories, relative to the same `repoDir` the caller's git
-    /// calls are scoped to, skipping a symlink: lstat-style `attributesOfItem` reports a symlink's own
-    /// type, never `.typeDirectory`, so a symlinked child is excluded without a separate check. Used only
-    /// to narrow the next `gitUntrackedDirectories` pathspec expansion; unreadable or missing entries are
-    /// silently skipped.
     /// Whether `relativePath` is a real directory on disk under `repoDir`. Same lstat-style rule
     /// `immediateSubdirectories` applies: a symbolic link reports its own type rather than
     /// `.typeDirectory`, so a link left standing where a directory used to be is never reported as an
@@ -2769,6 +2763,11 @@ enum SpacesDeviceWorkspaceFileListEngine {
         return attributes[.type] as? FileAttributeType == .typeDirectory
     }
 
+    /// `relativePath`'s immediate on-disk subdirectories, relative to the same `repoDir` the caller's git
+    /// calls are scoped to, skipping a symlink: lstat-style `attributesOfItem` reports a symlink's own
+    /// type, never `.typeDirectory`, so a symlinked child is excluded without a separate check. Used only
+    /// to narrow the next `gitUntrackedDirectories` pathspec expansion; unreadable or missing entries are
+    /// silently skipped.
     private static func immediateSubdirectories(of relativePath: String, repoDir: String) -> [String] {
         let fullPath = (repoDir as NSString).appendingPathComponent(relativePath)
         guard let entries = try? FileManager.default.contentsOfDirectory(atPath: fullPath) else { return [] }
@@ -2954,7 +2953,7 @@ enum SpacesDeviceWorkspaceFileListEngine {
     /// tracks dotfiles too, so the git branch above lists them the same way) and does not itself descend
     /// into a symlinked directory. `isOpenableFile` then decides each entry exactly as the git branch
     /// does: a symlink to a regular file inside the workspace is listed (it is openable through
-    /// `workspaceFileRead`, so it is no longer excluded merely for being a symlink), while a symlink to a
+    /// `workspaceFileRead`, so being a symlink alone does not exclude it), while a symlink to a
     /// directory or to anywhere outside the workspace is not.
     ///
     /// Unlike `listGitFiles`, this cannot stop early once it has `maxPaths` openable entries: the

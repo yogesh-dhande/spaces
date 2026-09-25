@@ -228,7 +228,7 @@ spaces_profile_stop_terminal_service_if_idle "$CLI"
 # Relaunch detached and keep logs so launch failures are visible.
 app_pid="$(launch_app_detached)"
 
-# Bring app to front when possible.
+# Wait briefly for the launch to survive past an immediate crash before continuing.
 for _ in $(seq 1 12); do
   if kill -0 "$app_pid" 2>/dev/null; then
     break

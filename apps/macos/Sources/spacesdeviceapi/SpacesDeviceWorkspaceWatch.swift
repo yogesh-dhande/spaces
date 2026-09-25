@@ -146,10 +146,8 @@ final class WorkspaceWatch: @unchecked Sendable {
         }
     }
 
-    /// Runs the whole install pipeline: discover the repository map, read each repository's ignore set,
-    /// build the platform watch-path list, and start the underlying `FileSystemWatcher`. On any failure
-    /// (a git spawn, or the watcher's own `start()`) leaves `watcher` nil (so the next `subscribe` retries)
-    /// and records the failure's text. Must run on `queue`.
+    /// On any failure (a git spawn, or the watcher's own `start()`) leaves `watcher` nil (so the next
+    /// `subscribe` retries) and records the failure's text. Must run on `queue`.
     private func attemptInstallLocked() {
         // Captured before the attempt mutates `lastStartErrorText`: this is a RECOVERY (some earlier
         // subscriber, or an earlier attempt of this same subscriber, left the watch in a failed state) if
@@ -254,13 +252,7 @@ final class WorkspaceWatch: @unchecked Sendable {
         if let error = box.error { throw error }
     }
 
-    /// Runs on `queue` (dispatched there by the watcher's own onChange closure). On Linux, first registers
-    /// any newly created directory under a repository's `refs/` tree directly (no classification: a
-    /// git-dir path is never gitignored). Classifies any newly created WORKING-tree directory against its
-    /// repository's ignore rules next, then resolves each reported path against the event-acceptance rules
-    /// (refreshing an affected repository's ignore set first when the path names its
-    /// `.gitignore`/`.git/info/exclude`), then arms or extends the debounce once at least one path was
-    /// accepted (or the backend reported a rescan).
+    /// Runs on `queue` (dispatched there by the watcher's own onChange closure).
     ///
     /// Classification must precede acceptance, not follow it: a directory born after install (a build
     /// output tree a `.gitignore` rule covers, say) has no entry in the install time `ignoreSets`
@@ -594,9 +586,9 @@ final class WorkspaceWatch: @unchecked Sendable {
     }
 
     /// Classifies newly created directories against their repository's ignore rules, on every platform:
-    /// macOS never ran this before (FSEvents needs no per-directory watch registration, so nothing forced
-    /// the classification to happen), which let a build directory created after install go unclassified
-    /// forever and accept every event under it. Grouped by repository (same matching
+    /// skipping this on macOS (where FSEvents needs no per-directory watch registration, so nothing else
+    /// forces the classification to happen) would let a build directory created after install go
+    /// unclassified forever and accept every event under it. Grouped by repository (same matching
     /// `handleFileSystemEvent`'s acceptance pass uses) and run once per batch per repository, never once
     /// per candidate: only a directory-creation event ever carries a directory path in the first place,
     /// the (typically far more numerous) file-write events that follow inside it never do, so this never

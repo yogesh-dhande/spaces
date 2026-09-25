@@ -169,7 +169,8 @@ extension ProcessProfileEnvironmentSuites {
 
             // The mutation response is authoritative and installs the workspace while the older
             // sidebar read is still in flight. Releasing that read afterward reproduces the stale
-            // `liveWorkspaceIDs`/`previousLocalSection` ordering that used to delete valid state.
+            // `liveWorkspaceIDs`/`previousLocalSection` ordering, which deletes valid state if applied
+            // after the mutation response without a guard against it.
             let currentOverview = overview(staleOverview, addingWorkspaceID: createdWorkspaceID)
             let response = SpacesDeviceAPIResponse(ok: true, message: "ok", result: .mutation(SpacesDeviceMutationResult(overview: currentOverview)))
             controller.applyDeviceMutationResponse(

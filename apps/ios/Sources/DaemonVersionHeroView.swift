@@ -1,9 +1,8 @@
 import SwiftUI
 
 /// The screen a device gets while this app cannot use it. The situation is a version gap, so the gap
-/// itself is the layout: an orange eyebrow naming the state, the two versions the gap spans, a quiet
-/// line saying whose versions those are, one sentence of pitch, and at most one action. Mirrors the Mac
-/// app's compatibility block so both clients present the same situation the same way.
+/// itself is the layout. Mirrors the Mac app's compatibility block so both clients present the same
+/// situation the same way.
 ///
 /// No card and no warning icon: this owns the whole screen, so a border around content with nothing
 /// beside it would be chrome for its own sake, and the eyebrow carries the severity by itself.

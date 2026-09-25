@@ -48,7 +48,6 @@ extension WorkspaceOrchestrator {
 
     public func runningProcesses(workspaceID: String) throws -> [RunningProcessRecord] { try store.runningProcesses(workspaceID: workspaceID) }
 
-    /// Recorded pids of currently-running processes across all active workspaces.
     /// Used to install per-process exit observers in place of status polling.
     public func runningOwnedProcessPIDs() throws -> Set<Int> {
         var pids: Set<Int> = []
@@ -144,7 +143,6 @@ extension WorkspaceOrchestrator {
     }
 
     func handleProcessExit(workspaceID: String, process: RunningProcessRecord, project: ProjectRecord, workspace: WorkspaceRecord) throws {
-        // Find the process template to get the on-exit behavior
         guard let config = try loadWorkspaceSettings(project: project, workspace: workspace) else { return }
         guard
             let processTemplate = config.processes.first(where: { template in
@@ -156,7 +154,6 @@ extension WorkspaceOrchestrator {
         else { return }
         switch processTemplate.onExit {
         case .none:
-            // Do nothing - just log the exit
             break
         case .notify: notificationDeliverer("Process Exited", "Process '\(process.templateName)' has exited", nil)
         case .restart:
@@ -213,8 +210,8 @@ extension WorkspaceOrchestrator {
             // `matchingConfiguredTemplate`'s unconditional name fallback to that new template, the same
             // resolution `configuredProcessTemplate`/the explicit restart action uses, deliberately, because
             // there the row IS the thing being restarted. Bulk convergence has to ask a second question this
-            // stale row's identity does not answer: is the new template already live somewhere else (round-6
-            // launched it as its own row, separately)? If so, restarting this row under the new template's
+            // stale row's identity does not answer: is the new template already live somewhere else (already
+            // launched as its own row, separately)? If so, restarting this row under the new template's
             // command would produce a second, duplicate row for a template meant to have exactly one; the
             // stale row stays exited, as documented, rather than being revived into a duplicate. If the new
             // template has no live row anywhere yet, this exited row is the one live-launchable path back to
@@ -651,11 +648,9 @@ extension WorkspaceOrchestrator {
         _ = try? Shell.run(["kill", "-INT", "--", processGroupID])
         waitForProcessExit(pid: pid, timeout: 2.0)
         guard isProcessAlive(pid: pid) else { return }
-        // Follow with TERM only if interrupt did not stop the process.
         _ = try? Shell.run(["kill", "-TERM", "--", processGroupID])
         waitForProcessExit(pid: pid, timeout: 2.0)
         guard isProcessAlive(pid: pid) else { return }
-        // Fallback: target the tracked shell process directly.
         _ = try? Shell.run(["kill", "-TERM", "\(pid)"])
     }
 
@@ -674,7 +669,6 @@ extension WorkspaceOrchestrator {
             if let first = trimmed.first, first == "Z" { return false }
             return !trimmed.isEmpty
         }
-        // If the PID is dead, check if any child processes are still alive.
         // This handles cases where the shell exits but the actual command continues.
         guard let output = try? Shell.runAndCapture(["pgrep", "-P", "\(pid)"]) else { return false }
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)

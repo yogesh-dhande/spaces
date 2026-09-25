@@ -122,8 +122,8 @@ final class CodePaneWorkspaceStatePersistence: @unchecked Sendable {
         self.write = write
     }
 
-    /// Enqueues the current complete document. This method does no encoding, allocation proportional
-    /// to the editor contents, or I/O on its caller's executor.
+    /// This method does no encoding, allocation proportional to the editor contents, or I/O on its
+    /// caller's executor.
     func enqueue(_ state: CodePaneWorkspaceState, workspaceID: String) {
         CodePaneWorkspaceStatePersistenceCoordinator.shared.enqueue(
             state, storageKey: storageKey, workspaceID: workspaceID, write: write)

@@ -80,10 +80,9 @@ public struct GhosttyTerminalCellMetricsCache {
         return CellPixelSize(width: match.width, height: match.height)
     }
 
-    /// Records the cell size a live surface just measured, overwriting any stale entry for the
-    /// same (font size, scale). A stamp mismatch (an app update, or the generated Ghostty config's
-    /// content changing) drops every existing entry first, so a previous build's or a previous
-    /// theme's measurements never mix with the current one's.
+    /// A stamp mismatch (an app update, or the generated Ghostty config's content changing) drops
+    /// every existing entry first, so a previous build's or a previous theme's measurements never mix
+    /// with the current one's.
     public func recordCellPixelSize(fontSizePoints: Int, scale: Double, width: Int, height: Int) {
         var storage = loadStorage()
         if storage.stamp != stamp { storage = Storage(stamp: stamp, entries: []) }
@@ -128,7 +127,7 @@ public struct GhosttyTerminalCellMetricsCache {
 
     /// Ghostty's non-macOS DPI baseline: `font/face.zig` defines `default_dpi` as `72` when the
     /// build target is macOS and `96` otherwise, and the iOS `GhosttyKit` slice takes the `else`
-    /// branch. `Surface.zig` (~line 465, `scaledPadding`) turns a `window-padding-x`/`-y` config
+    /// branch. `Surface.zig`'s `scaledPadding` turns a `window-padding-x`/`-y` config
     /// value (2pt by default, and the Spaces-generated config never overrides it) into device
     /// pixels as `floor(configPoints * scale * defaultDPI / 72)` per side. Confirmed against a live
     /// iOS surface at `.nine`/`.default`/`.twelve` font sizes (padding does not depend on font

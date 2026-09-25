@@ -22,33 +22,33 @@ function makeBridge(): SpacesBridge & {
   sendCalls: Array<{ sessionId: string; text: string; comments: ReviewCommentSendEntry[] }>;
   failNextSend: SpacesBridgeError | undefined;
   failNextUpsert: SpacesBridgeError | undefined;
-  /** round-16 Fix 2: mirrors `failNextUpsert`'s one-shot check-then-clear-then-throw pattern, for
-   *  `reviewCommentDelete` — used by the Fix 2 tests to force a typed rejection distinct from the
+  /** Mirrors `failNextUpsert`'s one-shot check-then-clear-then-throw pattern, for
+   *  `reviewCommentDelete`, forcing a typed rejection distinct from the
    *  RPC's own `notFound`-for-unknown-id behavior. */
   failNextDelete: SpacesBridgeError | undefined;
-  /** Round-3 codex Fix 3: same one-shot check-then-clear-then-throw pattern, for `reviewCommentList`
-   *  — used by the `loadInitial` retry tests to simulate a transient failure distinct from a
+  /** Same one-shot check-then-clear-then-throw pattern, for `reviewCommentList`,
+   *  to simulate a transient failure distinct from a
    *  parked/held call. Unlike `failNextUpsert`/`failNextDelete` this is settable to reject more than
    *  once in a row (tests reassign it between attempts) to exercise the retry backoff itself. */
   failNextList: SpacesBridgeError | undefined;
   upsertCallCount: number;
   /** When true, the next `reviewCommentUpsert` call parks on an internally-created promise instead
-   *  of resolving immediately, and stashes that promise's `resolve` on `releaseHeldUpsert` — set by
-   *  Fix 1's tests to simulate a blur's fire-and-forget persist still being in flight when a card
+   *  of resolving immediately, and stashes that promise's `resolve` on `releaseHeldUpsert`, to
+   *  simulate a blur's fire-and-forget persist still being in flight when a card
    *  action (Send/Delete) fires. Reset to `false` as soon as the held call is made (a *later*
    *  upsert call within the same test resolves normally unless this is set again). */
   holdNextUpsert: boolean;
   releaseHeldUpsert: (() => void) | undefined;
-  /** Same mechanism as `holdNextUpsert`, for `reviewCommentList` — used by Fix 4's tests to hold
+  /** Same mechanism as `holdNextUpsert`, for `reviewCommentList`, to hold
    *  `loadInitial`'s RPC open while a provisional draft is created locally. */
   holdNextList: boolean;
   releaseHeldList: (() => void) | undefined;
-  /** Same one-shot mechanism as `holdNextUpsert`, for `reviewCommentDelete` — used by round-13's
-   *  Fix 2 tests to hold a blur-time auto-discard's delete RPC open while `sendBatch` is invoked. */
+  /** Same one-shot mechanism as `holdNextUpsert`, for `reviewCommentDelete`, to hold a
+   *  blur-time auto-discard's delete RPC open while `sendBatch` is invoked. */
   holdNextDelete: boolean;
   releaseHeldDelete: (() => void) | undefined;
-  /** Same one-shot mechanism as `holdNextUpsert`, for `reviewCommentsSend` — used by Fix 1 (P2)'s
-   *  tests to hold a send open while simulating text typed into the card after the click (`sendOne`)
+  /** Same one-shot mechanism as `holdNextUpsert`, for `reviewCommentsSend`, to
+   *  hold a send open while simulating text typed into the card after the click (`sendOne`)
    *  or into a still-focused card mid-batch (`sendBatch`). */
   holdNextSend: boolean;
   releaseHeldSend: (() => void) | undefined;
@@ -129,8 +129,8 @@ function makeBridge(): SpacesBridge & {
       // Mirrors the real daemon (see `reviewCommentUpsert`'s JSDoc in ../src/bridge/types.ts): an
       // explicit id that doesn't already name a row is rejected, never recreated. Without this, a
       // stale post-delete upsert would silently resurrect the deleted row instead of failing the way
-      // the real daemon does, making the round-23 divergent-commit-loop regression test impossible to
-      // write correctly.
+      // the real daemon does, making a divergent-commit-loop regression impossible to
+      // test correctly.
       if (input.id !== undefined && !drafts.has(input.id)) {
         throw new SpacesBridgeError("notFound", `no such draft: ${input.id}`);
       }
@@ -185,8 +185,8 @@ function makeBridge(): SpacesBridge & {
   return bridge;
 }
 
-/** Reads the first anchored comment out of the latest `setComments` call — used by the Fix 1/2/3/4
- *  describe blocks below, each of which builds its own bridge/controller/diffViewFake rather than
+/** Reads the first anchored comment out of the latest `setComments` call. Each describe block below
+ *  builds its own bridge/controller/diffViewFake rather than
  *  sharing the first describe block's `beforeEach` state. */
 function firstAnchoredComment(diffViewFake: ReturnType<typeof makeFakeDiffView>): SpacesReviewComment {
   const calls = diffViewFake.setComments.mock.calls;
@@ -210,8 +210,8 @@ index 1111111..2222222 100644
 `,
 };
 
-/** Same file, one line shifted: `const x = compute();` sits at new-side line 2 instead of 1 — used
- *  by the Fix 3 tests below to prove a comment's re-anchored position (not its original stored
+/** Same file, one line shifted: `const x = compute();` sits at new-side line 2 instead of 1, to
+ *  prove a comment's re-anchored position (not its original stored
  *  `lineNumber`) is what gets sent. */
 const SHIFTED_FILE: DiffFileEntry = {
   path: "src/foo.ts",
@@ -586,16 +586,14 @@ describe("CommentsController — Fix 1 (P2): text typed into a card while its se
     expect(anchoredAfter).toHaveLength(0); // no leftover live text — no new card appears
   });
 
-  // round-19 Fix 1 (P1): this test used to assert the OLD pre-commit-loop behavior — a still-focused
-  // card's un-blurred live text was excluded from the batch payload and survived send as a new
-  // provisional card. docs/spec.md:156 makes a send itself a commit point ("A draft's text is
-  // durable as of its last commit point (its card losing focus, or a send)"), and `doSendBatch`'s
-  // drain loop now commits any live-divergent draft via `persistBody` before building the batch
-  // payload — see its doc comment's Fix 1 (P1) paragraph. This scenario (an `input` event with no
+  // docs/spec.md makes a send itself a commit point ("A draft's text is
+  // durable as of its last commit point (its card losing focus, or a send)"), so `doSendBatch`'s
+  // drain loop commits any live-divergent draft via `persistBody` before building the batch
+  // payload (see `doSendBatch`'s own doc comment). This scenario (an `input` event with no
   // `blur`, then a direct `sendBatch()` call) is exactly what that commit loop is meant to catch: from
   // the controller's point of view it is indistinguishable from a hibernation-restored draft that will
-  // never blur (the code has no DOM-focus awareness), so the fix necessarily also covers a genuinely
-  // still-focused card in this harness. Updated to assert the new, correct behavior: B's live edit is
+  // never blur (the code has no DOM-focus awareness), so the commit loop necessarily also covers a genuinely
+  // still-focused card in this harness. B's live edit is
   // committed (an upsert fires) before the send, its full text is delivered, and no leftover
   // provisional card is created since nothing was left uncommitted.
   it("sendBatch: commits a still-focused card's live-divergent text before building the payload, then delivers it", async () => {
@@ -820,8 +818,8 @@ describe("CommentsController — Fix 1 (round-2): persistBody re-resolves a stal
     expect(bridge.drafts.size).toBe(1); // no orphaned duplicate row
     const [persisted] = [...bridge.drafts.values()];
     expect(persisted!.id).not.toBe(provisionalDraft.id); // re-keyed to the server id, as usual
-    // Before this fix, doPersistBody looked up the STALE provisional id (never re-resolved after the
-    // await), found nothing, and returned `true` without persisting — silently dropping this edit.
+    // Without re-resolving, doPersistBody would look up the STALE provisional id (never re-resolved
+    // after the await), find nothing, and return `true` without persisting — silently dropping this edit.
     expect(persisted!.body).toBe("second body");
   });
 
@@ -1004,12 +1002,12 @@ describe("CommentsController — Fix 2: live text and focus survive a wholesale 
 });
 
 describe("CommentsController — round-17 Fix 2: keyboard activation of a card action button survives a persist-driven rebuild", () => {
-  // Uses an already-persisted draft (created via `reviewCommentUpsert` + `loadInitial`, like the
-  // round-11 blocks below) rather than a still-provisional one: a provisional draft's *first*
+  // Uses an already-persisted draft (created via `reviewCommentUpsert` + `loadInitial`)
+  // rather than a still-provisional one: a provisional draft's *first*
   // persist re-keys its id (`doPersistBody`'s `idAliases` swap), and `captureFocusedCard` reads the
   // focused button's `dataset.commentId` straight off the DOM — which still names the OLD id at
   // capture time, since the rebuild that would carry the new id hasn't happened yet. That ordering
-  // question is orthogonal to this fix (button-focus restore itself) and is exercised by the
+  // question is orthogonal to button-focus restore itself and is exercised by the
   // existing provisional-to-server id-swap coverage elsewhere in this file; keeping the id stable
   // here isolates the mechanism this test is actually proving.
   it("Tab-to-Send then a blur-triggered persist's rebuild still lands keyboard focus on the new, connected Send button, and it is clickable", async () => {
@@ -1198,12 +1196,12 @@ describe("CommentsController — round-11 Fix 3: 'Add to batch' coordinates agai
     await new Promise((resolve) => setTimeout(resolve, 0)); // flush the catch → addToBatch's no-op chain
 
     expect(bridge.drafts.size).toBe(0); // the persist never actually landed server-side
-    // round-18 Fix 2: `doPersistBody`'s catch now always calls `refresh()` after
+    // `doPersistBody`'s catch always calls `refresh()` after
     // `reconcileMirrorAfterRejection` — the same unconditional shape `handleSendFailure` already
     // uses for a send failure — regardless of whether the rejection was a typed one the reconcile
     // actually acts on (this `internalError` isn't, so the mirror itself is untouched; only the
-    // render count changes). So exactly one more render happens here versus the old surfaceError-only
-    // catch, even though the card is still keyed by the same (never re-keyed) provisional id.
+    // render count changes). So exactly one more render happens here than the persist alone would
+    // produce, even though the card is still keyed by the same (never re-keyed) provisional id.
     expect(diffViewFake.setComments.mock.calls.length).toBe(rendersBeforeFailure + 1);
   });
 });
@@ -1413,9 +1411,10 @@ describe("CommentsController — Fix 4 (round-2): loadInitial drops a response r
   });
 
   // `makeBridge`'s `reviewCommentList` snapshots `drafts.values()` at *release* time, not at the
-  // moment the call was dispatched (see its doc comment) — so a delete/send that fully lands before
+  // moment the call was dispatched — so a delete/send that fully lands before
   // release already leaves the row out on its own, which would make these tests pass whether or not
-  // the fix exists. Each test below restores the row into `bridge.drafts` right before releasing (or
+  // the `removedWhileListInFlight` guard exists. Each test below restores the row into
+  // `bridge.drafts` right before releasing (or
   // before letting a retry attempt call through), standing in for a response the daemon had already
   // serialized *before* the removal committed — the actual race `removedWhileListInFlight` guards
   // against, and the only case in which this bug can manifest.
@@ -1592,8 +1591,8 @@ describe("CommentsController — round-2b: reconcileMirrorAfterRejection's own r
     await controller.loadInitial();
 
     // A's delete is rejected with a typed error, triggering reconcileMirrorAfterRejection's own
-    // relist — held open via the same `holdNextList`/`releaseHeldList` machinery the Fix 4 tests use
-    // for `loadInitial`, since both methods call the same `reviewCommentList` RPC.
+    // relist — held open via the same `holdNextList`/`releaseHeldList` machinery the `loadInitial`
+    // tests above use, since both methods call the same `reviewCommentList` RPC.
     bridge.failNextDelete = new SpacesBridgeError("notFound", "already sent");
     bridge.holdNextList = true;
     const cardA = controller.hooks.renderCard({ comment: a, position: { lineNumber: 1, outdated: false } });
@@ -1610,7 +1609,7 @@ describe("CommentsController — round-2b: reconcileMirrorAfterRejection's own r
     const rendersBeforeRelease = diffViewFake.setComments.mock.calls.length;
 
     // Stand in for the daemon's already-serialized stale response to reconcile's relist, still
-    // carrying B — same technique the Fix 4 (round-2) tests above use for `loadInitial`'s response.
+    // carrying B — same technique the `loadInitial` tests above use for its response.
     bridge.drafts.set(b.id, b);
     bridge.releaseHeldList?.();
 
@@ -1646,8 +1645,8 @@ describe("CommentsController — round-2b: reconcileMirrorAfterRejection's own r
     const cardB = controller.hooks.renderCard({ comment: b, position: { lineNumber: 1, outdated: false } });
 
     // Park a SECOND `loadInitial` call (e.g. a retry) on a manually-controlled promise — the same
-    // technique the round-3 codex Fix 3 tests above use — since the built-in `holdNextList` flag is
-    // one-shot and reconcile's own relist below needs that mechanism for itself.
+    // technique used above — since the built-in `holdNextList` flag is one-shot and reconcile's
+    // own relist below needs that mechanism for itself.
     const listSpy = vi.spyOn(bridge, "reviewCommentList");
     let resolveLoadList!: (response: SpacesReviewComment[]) => void;
     listSpy.mockImplementationOnce(() => new Promise((resolve) => (resolveLoadList = resolve)));
@@ -1726,7 +1725,7 @@ describe("CommentsController — Fix 3 (P2): list-response merges keep the local
     expect(newlyPersisted.body).toBe("new body");
 
     // Stand in for the daemon's already-serialized stale response the held list call carries — same
-    // technique the Fix 4 (round-2) tests above use, here to make the release-time snapshot reflect
+    // technique used elsewhere in this file, here to make the release-time snapshot reflect
     // the OLD revision/body instead of the just-persisted one.
     bridge.drafts.set(original.id, original);
     bridge.releaseHeldList?.();
@@ -1808,7 +1807,7 @@ describe("CommentsController — Fix 3 (P2): list-response merges keep the local
     await controller.loadInitial();
 
     // A's delete is rejected with a conflict, triggering reconcileMirrorAfterRejection's own relist —
-    // held open the same way the round-2b tests above hold it.
+    // held open the same way the tests above hold it.
     bridge.failNextDelete = new SpacesBridgeError("conflict", "stale revision");
     bridge.holdNextList = true;
     const cardA = controller.hooks.renderCard({ comment: a, position: { lineNumber: 1, outdated: false } });
@@ -1994,7 +1993,7 @@ describe("CommentsController — round-11 Fix: a repeat teardown inside the rest
     ]);
 
     // Hold reviewCommentList open so loadInitial() has not merged the real draft object into
-    // this.drafts yet — this is exactly the restore→list-merge window the fix bridges.
+    // this.drafts yet — this is exactly the restore→list-merge window `restoredPendingById` bridges.
     bridge.holdNextList = true;
     const loadPromise = controller.loadInitial();
 
@@ -2045,7 +2044,7 @@ describe("CommentsController — round-11 Fix: a repeat teardown inside the rest
     await controller.loadInitial(); // response is empty — "c-gone" was deleted/sent while torn down
 
     // The old id is gone, but the typed text was never part of that completed send, so it is not
-    // lost: loadInitial's leftover-restoredPendingById conversion (Fix 1, P2) recreates it as a fresh
+    // lost: loadInitial's leftover-restoredPendingById conversion recreates it as a fresh
     // provisional draft at the same anchor — collectStateForFlush recovers it under a new id, not null.
     const flushedAfter = controller.collectStateForFlush();
     expect(flushedAfter).not.toBeNull();
@@ -2067,7 +2066,8 @@ describe("CommentsController — round-19 Fix 1 (P1): sendBatch commits live-div
 
     // Simulates a hibernation-restored provisional card: recreated locally with an empty stored body
     // and its typed text seeded only into liveBodies — no blur has ever fired for it this session, so
-    // (pre-fix) doSendBatch's drain never touches it and the send payload would carry "provisional-N".
+    // without the commit loop below, doSendBatch's drain would never touch it and the send payload
+    // would carry "provisional-N".
     controller.restorePendingState([
       {
         id: "provisional-9", // the pre-teardown id — irrelevant here, restorePendingState mints a fresh one
@@ -2108,7 +2108,7 @@ describe("CommentsController — round-19 Fix 1 (P1): sendBatch commits live-div
       body: "old",
     });
 
-    // Same restore shape as the round-16 Fix 1 test above: restorePendingState seeds liveBodies ahead
+    // Same restore shape as the test above: restorePendingState seeds liveBodies ahead
     // of loadInitial's merge, which lands the listed (stale) body into this.drafts.
     controller.restorePendingState([
       {
@@ -2589,7 +2589,7 @@ describe("CommentsController — round-16 Fix 3: a blur auto-discard and a click
 });
 
 describe("CommentsController: a Delete click reaching a draft the blur auto-discard already settled must not RPC", () => {
-  /** Unlike the round-16 Fix 3 coalescing above (which catches a click landing while the blur's
+  /** Unlike the blur/click coalescing above (which catches a click landing while the blur's
    *  delete run is still IN FLIGHT), a provisional's blur delete resolves synchronously, nothing to
    *  await, so `pendingDeleteById` is already empty by the time a press-gate-deferred click
    *  (`pointerPressActive`'s `setTimeout(0)`, see `renderCard`'s doc comment) reaches `deleteDraft`.
@@ -2623,7 +2623,7 @@ describe("CommentsController: a Delete click reaching a draft the blur auto-disc
     // `pointerPressActive`'s doc comment), which lands after blur's fire-and-forget delete has
     // fully settled, including `deleteDraft`'s `finally` clearing `pendingDeleteById`, not while
     // it is still in flight. Without this wait, the click would land in the SAME tick as the blur
-    // and get caught by round-16 Fix 3's in-flight coalescing instead, masking the bug this test
+    // and get caught by the in-flight coalescing above instead, masking the bug this test
     // exists to catch.
     await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -2655,7 +2655,7 @@ describe("CommentsController: a Delete click reaching a draft the blur auto-disc
     // provisional's synchronous local-only branch, a persisted draft's auto-discard runs a real
     // `reviewCommentDelete` RPC. Let it run to completion (nothing held) before the click lands, the
     // same as a press-gate `setTimeout(0)` deferring the click past the delete's own natural
-    // completion rather than past an explicitly held-open one (round-16 Fix 3's coalescing tests
+    // completion rather than past an explicitly held-open one (the coalescing tests
     // above hold the RPC open so the click's `pendingDeleteById` lookup still finds it in flight;
     // this test instead lets it fully settle first, closing that coalescing window).
     textarea.value = "";
@@ -3096,10 +3096,10 @@ describe("CommentsController — Fix 3 (round-13): rejection relist merges, keep
   });
 
   it("round-16 Fix 2's regression guard still passes unmodified: sendOne rejected with a typed error drops an already-archived row", async () => {
-    // This is a duplicate-in-spirit smoke check, not a replacement for the original test above
-    // (describe block "CommentsController — round-16 Fix 2") — that exact test is left untouched
-    // and re-run as part of the full suite; this confirms the same scenario under Fix 3's new merge
-    // logic once more, colocated with the other Fix 3 tests for readability.
+    // This is a duplicate-in-spirit smoke check, not a replacement for the original test above —
+    // that exact test is left untouched and re-run as part of the full suite; this confirms the same
+    // scenario still passes under the merge logic the tests below exercise, colocated with them for
+    // readability.
     const bridge = makeBridge();
     const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
     const diffViewFake = makeFakeDiffView();
@@ -3138,13 +3138,12 @@ describe("CommentsController — Fix 3 (round-13): rejection relist merges, keep
   });
 });
 
-// Round-3 codex Fix 3: `loadInitial`'s third requirement — "a provisional draft created before the
-// retry lands survives the merge" — is already covered by the "Fix 4" describe block above, not
-// re-tested here. A retry re-invokes the exact same `loadInitial` body, including the
-// `stillLocalOnly` merge below the RPC call, as the very first attempt; it adds no merge logic of
-// its own. Fix 4's "keeps a provisional draft created while reviewCommentList is still in flight"
-// test already proves a provisional draft survives a `reviewCommentList` call resolving after it
-// was created, which is the same code path a retry's eventual successful call exercises.
+// A provisional draft created before the retry lands surviving the merge is not re-tested here. A
+// retry re-invokes the exact same `loadInitial` body, including the `stillLocalOnly` merge below
+// the RPC call, as the very first attempt; it adds no merge logic of its own. The "keeps a
+// provisional draft created while reviewCommentList is still in flight" test above already proves a
+// provisional draft survives a `reviewCommentList` call resolving after it was created, which is the
+// same code path a retry's eventual successful call exercises.
 describe("CommentsController — Fix 3 (round-3 codex): loadInitial retries a transient reviewCommentList failure", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -3504,9 +3503,9 @@ describe("CommentsController — Fix (P2): overlapping sends serialize instead o
     sendBtn.click(); // first sendOne: reaches the (held) send RPC and publishes itself into `sendInFlight`
     await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
 
-    // Second click lands while the first send is still in flight — without the fix this races the
-    // daemon's single-writer queue and comes back a false "not a draft" failure once the first send
-    // wins. With the fix it queues behind `sendInFlight` instead.
+    // Second click lands while the first send is still in flight — without the `sendInFlight` queue
+    // this would race the daemon's single-writer queue and come back a false "not a draft" failure
+    // once the first send wins. It queues behind `sendInFlight` instead.
     sendBtn.click();
 
     bridge.releaseHeldSend?.(); // one-shot hold: only the first send was ever parked open
@@ -3613,8 +3612,8 @@ describe("CommentsController — Fix 1 (round-9 P1): captures the send-target ag
     // starts), then queues behind A via `sendInFlight` — B's send RPC has not been reached yet.
     sendBtnB.click();
 
-    // Switch the selection while B is queued behind A. Without the fix (capturing after the
-    // `sendInFlight` wait), B would resolve `agent` from `selectedAgentId` only once it resumes,
+    // Switch the selection while B is queued behind A. Without capturing `agent` before the
+    // `sendInFlight` wait, B would resolve `agent` from `selectedAgentId` only once it resumes,
     // targeting AGENT_2 instead of the agent shown when B was actually clicked.
     controller.onAgentSelected(AGENT_2.id);
 
@@ -3656,8 +3655,8 @@ describe("CommentsController — Fix 1 (round-9 P1): captures the send-target ag
     // queues behind A's still-held send.
     const batchPromise = controller.sendBatch();
 
-    // Selection changes while the batch is queued — without the fix, the batch would target AGENT_2
-    // once it resumes and re-reads `selectedAgentId`.
+    // Selection changes while the batch is queued — without capturing the agent before the
+    // `sendInFlight` wait, the batch would target AGENT_2 once it resumes and re-reads `selectedAgentId`.
     controller.onAgentSelected(AGENT_2.id);
 
     bridge.releaseHeldSend?.(); // release A's held send; the queued batch then runs and sends B
@@ -3701,7 +3700,7 @@ describe("CommentsController — Fix 2 (P2): doSendOne's provisional-to-server i
 
     // The upsert (the swap) resolves normally; the subsequent send is parked on a manually-controlled
     // promise so it can be rejected deterministically once the swap's state is inspected — mirrors the
-    // Y-reject pattern in the round-11 Fix 2 drain-loop test above.
+    // Y-reject pattern in the drain-loop test above.
     let rejectSend: ((err: unknown) => void) | undefined;
     bridge.reviewCommentsSend = () =>
       new Promise<void>((_resolve, reject) => {
@@ -3713,15 +3712,15 @@ describe("CommentsController — Fix 2 (P2): doSendOne's provisional-to-server i
 
     await vi.waitFor(() => expect(rejectSend).toBeDefined());
 
-    // The swap's refresh (before the send await) rebuilt the card under the server-assigned id — this
-    // is what the fix adds: without it, the latest render would still show the stale provisional id.
+    // The swap's refresh (before the send await) rebuilt the card under the server-assigned id:
+    // without that refresh, the latest render would still show the stale provisional id.
     const persisted = firstAnchoredComment(diffViewFake);
     expect(persisted.id).not.toBe(provisionalDraft.id);
     const rebuiltCard = controller.hooks.renderCard({ comment: persisted, position: { lineNumber: 1, outdated: false } });
     const rebuiltTextarea = rebuiltCard.querySelector("textarea")!;
 
     // Additional typing during the held send lands in `liveBodies` under the server id (the rebuilt
-    // card's `dataset.commentId`) — this is the window Fix 2 protects.
+    // card's `dataset.commentId`) — this is the window the swap-then-refresh protects.
     rebuiltTextarea.value = "first draft, plus more typed while the send is in flight";
     rebuiltTextarea.dispatchEvent(new Event("input"));
 
@@ -3787,8 +3786,8 @@ describe("CommentsController — round-15: press-scoped rebuild gate", () => {
     return { bridge, controller, diffViewFake };
   }
 
-  /** Types a body into a freshly-opened draft's card, connects the card to `document` (existing
-   *  round-2 Fix 2 tests do the same — jsdom only tracks `document.activeElement`/live nodes for a
+  /** Types a body into a freshly-opened draft's card, connects the card to `document`
+   *  (jsdom only tracks `document.activeElement`/live nodes for a
    *  connected element), and returns the card, its textarea, and its Send button. */
   function openDraftWithText(controller: CommentsController, diffViewFake: ReturnType<typeof makeFakeDiffView>, body: string) {
     controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" });
@@ -3950,9 +3949,9 @@ describe("CommentsController — round-18 Fix 1 (P2): a failed blur persist stay
     textarea.value = "edited text";
     textarea.dispatchEvent(new Event("input"));
 
-    // A transport-shaped rejection (not a typed `SpacesBridgeError`) — isolates this test to Fix 1's
-    // rollback mechanism, keeping it clear of Fix 2's reconcile (which must NOT fire here — see the
-    // control test below).
+    // A transport-shaped rejection (not a typed `SpacesBridgeError`) — isolates this test to the
+    // retry-eligibility rollback mechanism, keeping it clear of the typed-rejection reconcile (which
+    // must NOT fire here — see the control test below).
     const upsertSpy = vi.spyOn(bridge, "reviewCommentUpsert").mockImplementationOnce(() => Promise.reject(new Error("network hiccup")));
 
     textarea.dispatchEvent(new Event("blur"));
@@ -3962,15 +3961,15 @@ describe("CommentsController — round-18 Fix 1 (P2): a failed blur persist stay
       expect(banner.style.display).toBe("flex");
     });
     expect(upsertSpy).toHaveBeenCalledTimes(1);
-    // The row survives — an untyped rejection must not trigger Fix 2's reconcile/removal.
+    // The row survives — an untyped rejection must not trigger the typed-rejection reconcile/removal.
     const renderedAfterFailure = (diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[])[0]!.comment;
     expect(renderedAfterFailure.body).toBe("original");
 
     // Refocus + re-blur with the SAME (still-unsaved) text. jsdom doesn't require a literal focus
     // cycle to prove the retry — dispatching `blur` again is enough, matching this file's other
-    // blur-driven tests. Without Fix 1, `lastSavedBody` would have already been eagerly advanced to
-    // "edited text" by the first (failed) blur, so this second blur's `body === lastSavedBody` check
-    // would silently no-op — no second RPC, forever.
+    // blur-driven tests. Without the rollback, `lastSavedBody` would have already been eagerly
+    // advanced to "edited text" by the first (failed) blur, so this second blur's
+    // `body === lastSavedBody` check would silently no-op — no second RPC, forever.
     textarea.dispatchEvent(new Event("blur"));
 
     await vi.waitFor(() => expect(upsertSpy).toHaveBeenCalledTimes(2));
@@ -4002,7 +4001,7 @@ describe("CommentsController — round-18 Fix 1 (P2): a failed blur persist stay
     await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
     expect(bridge.upsertCallCount).toBe(upsertCallsBeforeBlur + 1);
 
-    // Re-blur the SAME text while the first persist is still parked — the eager-advance in Fix 1's
+    // Re-blur the SAME text while the first persist is still parked — the eager-advance in the
     // rollback logic must still suppress this as a duplicate in-flight persist.
     textarea.dispatchEvent(new Event("blur"));
     expect(bridge.upsertCallCount).toBe(upsertCallsBeforeBlur + 1);
@@ -4043,8 +4042,7 @@ describe("CommentsController — round-18 Fix 2 (P2): a typed upsert rejection r
     textarea.dispatchEvent(new Event("input"));
 
     // Simulates another surface having already sent/deleted this draft server-side since the last
-    // list — the same setup round-16 Fix 2's tests use. `reviewCommentList` (used by the reconcile's
-    // relist) now returns `[]`.
+    // list. `reviewCommentList` (used by the reconcile's relist) now returns `[]`.
     bridge.drafts.delete(created.id);
     bridge.failNextUpsert = new SpacesBridgeError("notFound", "already sent");
     textarea.dispatchEvent(new Event("blur"));
@@ -4199,10 +4197,10 @@ describe("CommentsController — round-19 Fix 2 (P2): batch tray membership and 
 
 describe("CommentsController — round-23 Fix: divergent-commit loop revalidates each entry per iteration", () => {
   // The plain "stays divergent the whole time, gets committed then sent" path is already pinned by
-  // the round-19 Fix 1 (P1) tests above and by Fix 1 (P2)'s "sendBatch: commits a still-focused
-  // card's live-divergent text..." test — no separate control test is added here. In both tests
+  // the tests above and by "sendBatch: commits a still-focused
+  // card's live-divergent text..." — no separate control test is added here. In both tests
   // below, draft A stays divergent across the whole held window and is still committed and sent,
-  // which re-proves that path is unchanged by this fix's added per-entry revalidation.
+  // which re-proves that path is unchanged by the per-entry revalidation added here.
   function setup() {
     const bridge = makeBridge();
     const controller = new CommentsController(bridge, [AGENT], { onToolbarStateChange: vi.fn() });
@@ -4231,7 +4229,7 @@ describe("CommentsController — round-23 Fix: divergent-commit loop revalidates
     await controller.loadInitial();
 
     // Both cards mid-edit: live text ahead of their persisted body, neither has blurred — same shape
-    // the round-19 Fix 1 (P1) tests use (a still-focused/hibernation-restored card), just with two
+    // the tests above use (a still-focused/hibernation-restored card), just with two
     // cards so the commit loop has a second entry to reach mid-drain. Creation order (A before B)
     // makes A the divergent loop's first entry.
     const cardA = controller.hooks.renderCard({ comment: a, position: { lineNumber: 1, outdated: false } });
@@ -4392,8 +4390,9 @@ describe("CommentsController — round-24 Fix 1 (P1): doSendOne recomputes the b
     bridge.releaseHeldSend?.(); // A's send resolves, freeing `sendInFlight`; B's queued send now runs for real
     await vi.waitFor(() => expect(bridge.sendCalls).toHaveLength(2));
 
-    // Pre-fix, `doSendOne` sent the stale click-time `body` ("v1") verbatim, clobbering the blur's
-    // newer "v2" both in the upsert re-check and in the delivered text.
+    // Without recomputing the body at execution time, `doSendOne` would send the stale click-time
+    // `body` ("v1") verbatim, clobbering the blur's newer "v2" both in the upsert re-check and in
+    // the delivered text.
     const sendForB = bridge.sendCalls.find((c) => c.comments.some((entry) => entry.id === b.id))!;
     expect(sendForB.text).toContain("v2");
     expect(sendForB.text).not.toContain("v1");
@@ -4450,8 +4449,8 @@ describe("CommentsController — round-24 Fix 1 (P1): doSendOne recomputes the b
     bridge.releaseHeldSend?.();
     await vi.waitFor(() => expect(bridge.sendCalls).toHaveLength(1)); // A's own send only, ever
 
-    // Pre-fix, `doSendOne` would have re-sent the stale click-time "v1" body instead of discarding
-    // the now-empty card.
+    // Without recomputing the body at execution time, `doSendOne` would re-send the stale click-time
+    // "v1" body instead of discarding the now-empty card.
     await vi.waitFor(() => expect(bridge.drafts.has(b.id)).toBe(false)); // discarded via delete, not send
     expect(bridge.sendCalls.some((c) => c.comments.some((entry) => entry.id === b.id))).toBe(false);
     expect(bridge.drafts.has(a.id)).toBe(false); // A's own send completed normally, unaffected by B
@@ -4490,7 +4489,7 @@ describe("CommentsController — round-24 Fix 2 (P2): doSendOne's pre-send upser
     textarea.dispatchEvent(new Event("input"));
 
     // Simulates another surface having already sent/deleted this draft server-side since the last
-    // list — same setup as round-18 Fix 2's persistBody-catch test, but exercised through Send
+    // list — same setup as the persistBody-catch test above, but exercised through Send
     // instead of blur.
     bridge.drafts.delete(created.id);
     bridge.failNextUpsert = new SpacesBridgeError("notFound", "already sent");
@@ -4503,9 +4502,8 @@ describe("CommentsController — round-24 Fix 2 (P2): doSendOne's pre-send upser
       expect(banner.style.display).toBe("flex");
     });
 
-    // Pre-fix, `doSendOne`'s upsert catch only called `surfaceError` — the stale row would still be
-    // in the rendered mirror and the toolbar count. Fix 2 also reconciles the mirror, exactly like
-    // `doDeleteDraft`'s own catch does.
+    // If the upsert catch only called `surfaceError`, the stale row would still be in the rendered
+    // mirror and the toolbar count. Reconciling the mirror here mirrors `doDeleteDraft`'s own catch.
     await vi.waitFor(() => {
       const rendered = diffViewFake.setComments.mock.calls.at(-1)![0] as { comment: SpacesReviewComment }[];
       expect(rendered.some((ac) => ac.comment.id === created.id)).toBe(false);

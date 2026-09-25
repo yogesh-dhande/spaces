@@ -5,8 +5,7 @@ import workspacecore
 /// Owns the workspace-delete marking domain: the local pending-delete set that keeps a deleting
 /// workspace's sidebar row listed and inert while the daemon works through the mutation, and the
 /// deferred-resolution bookkeeping for deletes whose fate reconciliation could not prove before its
-/// retry budget ran out. Extracted from `AppKitController` as a behavior-preserving move (part of the
-/// ongoing decomposition of that type); `AppKitController` holds this as `workspaceDeletion` and reaches
+/// retry budget ran out. `AppKitController` holds this as `workspaceDeletion` and reaches
 /// it as `host.workspaceDeletion` from other files (`SidebarController`) that read the pending set or its
 /// derived row marking. `deleteWorkspace` itself — the mutation call, its reconciliation loop, and the
 /// browser/pane cleanup on a confirmed delete — stays on `AppKitController`, routing its touches of the
@@ -142,8 +141,8 @@ import workspacecore
     }
 
     /// Resolves every entry in `workspaceIDsAwaitingDeletionResolution` whose owning device now has an
-    /// overview installed. Hooked off the `workspacesByProject` `didSet` (see its comment) because that
-    /// is the nearest point in this file every overview-install path — the local snapshot, a remote
+    /// overview installed. Hooked off the `workspacesByProject` `didSet` because that is the nearest
+    /// point in this file every overview-install path — the local snapshot, a remote
     /// pull/subscription, and a mutation response, including `deleteWorkspace`'s own reconciliation
     /// refetches — is guaranteed to reach, without requiring `SidebarController` to know this feature
     /// exists.

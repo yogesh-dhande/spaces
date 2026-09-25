@@ -27,21 +27,20 @@ import Foundation
 /// `.spacesTerminalRuntimeStateDidChange`: `TerminalSessionPaneViewController` observes both, and
 /// both observers do the identical unconditional `refreshNow()` gated only by session ID, so
 /// fanning one title change out to both would run that refresh twice for no second effect. A
-/// coding agent rewriting its terminal title can post this reason many times a second, and the
-/// duplicate used to double that refresh cost on every one of them. The in-process local host
-/// (`GhosttyEmbeddedSessionHost.postSessionMetadataDidChange`) never posted the runtime-state
-/// notification alongside its metadata one — this table's remote-mirroring path is what
-/// introduced the extra fan-out, not a second consumer that actually needs it. `attachment_state`
-/// keeps its own pairing unchanged: fixing that would be the same shape of change but is out of
+/// coding agent rewriting its terminal title can post this reason many times a second, so routing
+/// it to both notifications would double that refresh cost on every one of them. The in-process local
+/// host (`GhosttyEmbeddedSessionHost.postSessionMetadataDidChange`) posts no runtime-state
+/// notification alongside its metadata one, so the extra fan-out belongs to this table's
+/// remote-mirroring path alone, not to a second consumer that actually needs it. `attachment_state`
+/// keeps its dual routing: fixing that would be the same shape of change but is out of
 /// scope here, since ownership handoffs are rare enough that doubling their refresh is not the
 /// streaming-cadence cost this table exists to control.
 public enum TerminalRemoteSessionStateNotificationRouting {
     /// Keeps the `String` entry point: callers hold the wire reason off a payload, not the parsed
-    /// enum. An unrecognized reason parses to `nil` and posts nothing, matching what the old
-    /// `default:` branch did — the payload has already been applied to the mirror and to the
-    /// client's cached session state, so posting nothing keeps an unrecognized reason off the
-    /// refresh path instead of letting it inherit the most expensive one; a state change that needs
-    /// a refresh also arrives under a known reason.
+    /// enum. An unrecognized reason parses to `nil` and posts nothing — the payload has already been
+    /// applied to the mirror and to the client's cached session state, so posting nothing keeps an
+    /// unrecognized reason off the refresh path instead of letting it inherit the most expensive one;
+    /// a state change that needs a refresh also arrives under a known reason.
     ///
     /// Falling back to a runtime-state refresh here would buy forward compatibility with a daemon
     /// that introduces a reason this client has never seen, at the cost of restoring the silent

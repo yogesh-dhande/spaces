@@ -35,7 +35,7 @@ struct AlertsTabView: View {
     }
 
     /// Failed/timed-out automation runs get their own band rather than joining coding-agent attention
-    /// grouped by workspace — mirrors the Mac's synthetic "Automations" alerts group.
+    /// grouped by workspace.
     @ViewBuilder private func automationAlertsSection(_ entries: [SpacesMobileAutomationAlertEntry]) -> some View {
         HeaderBand {
             Text("Automations").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)

@@ -202,13 +202,12 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     }
 
     /// A frame from a retired stream must never clear the outage it was retired out of. `applyStreamEvent`
-    /// used to guard on `streamClientGeneration`, the ever-increasing counter `openStateStream` bumps on
-    /// every install: `handleStreamDisconnect` clears `streamClient`/`installedStreamClientGeneration` but
-    /// never retires that counter, so a frame the old client already had in flight on the main actor still
-    /// carried a generation equal to it and passed the guard after the disconnect, clearing the banner
-    /// and resetting backoff while no stream was installed, exactly as if the old client were still live.
-    /// The guard must instead be the same one `handleStreamDisconnect` already uses
-    /// (`installedStreamClientGeneration`), which the disconnect path does retire.
+    /// guards on `installedStreamClientGeneration`, the same counter `handleStreamDisconnect` retires, not
+    /// `streamClientGeneration` (the ever-increasing counter `openStateStream` bumps on every install,
+    /// which `handleStreamDisconnect` never retires). Guarding on `streamClientGeneration` instead would
+    /// let a frame the old client already had in flight on the main actor carry a generation equal to it
+    /// and pass the guard after the disconnect, clearing the banner and resetting backoff while no stream
+    /// was installed, exactly as if the old client were still live.
     @MainActor func testFrameFromARetiredStreamCannotClearTheOutage() async throws {
         let sessionID = "session-\(UUID().uuidString)"
         let model = try makeModel(sessionID: sessionID)
@@ -521,11 +520,11 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     }
 
     /// The cached runtime state is not evidence that a dropped stream needs no replacement. The stream
-    /// that just died is the only thing that keeps that cache current, so a cache reading `.exited` for a
-    /// session the device still has running used to end the reconnect path for good: no stream, no retry,
-    /// no notice, and nothing left that could correct any of it — the pane stayed frozen until it was
-    /// closed and reopened (issue #537). The drop asks the device instead of ruling on the cache, and the
-    /// device's answer re-arms both the notice and the retry.
+    /// that just died is the only thing that keeps that cache current, so ruling on a cache reading
+    /// `.exited` for a session the device still has running would end the reconnect path for good: no
+    /// stream, no retry, no notice, and nothing left that could correct any of it — the pane stays frozen
+    /// until it is closed and reopened (issue #537). The drop asks the device instead of ruling on the
+    /// cache, and the device's answer re-arms both the notice and the retry.
     @MainActor func testADropAgainstAStaleEndedCacheRecoversWhenTheDeviceReportsTheSessionRunning() async throws {
         let sessionID = "session-\(UUID().uuidString)"
         let model = try makeModel(sessionID: sessionID)
@@ -876,7 +875,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
 
     /// The 500ms subscribe throttle paces attempts; it must never be the reason a session is left with
     /// listeners and nothing arranging a stream for them. A pane replaced inside that window — its last
-    /// listener leaving cancels the liveness recheck, and its replacement registers immediately — used to
+    /// listener leaving cancels the liveness recheck, and its replacement registers immediately — must not
     /// land exactly there: listeners present, no stream, no connect, no reconnect, nothing scheduled.
     @MainActor func testASubscribeTheThrottleTurnsAwayStillArmsRecovery() async throws {
         let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
@@ -1083,12 +1082,12 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertEqual(notifiedSessionIDs, [sessionID])
     }
 
-    /// F3: an input send is a different connection than the state subscription, and the racing
+    /// An input send is a different connection than the state subscription, and the racing
     /// command-channel connect it uses can exhaust every one of this device's candidate addresses on its
     /// own, the same hard evidence `openStateStream`'s `StateStreamConnectResult.failed(true)` already
     /// escalates on (`testAllCandidatesUnreachableEntersStage2ImmediatelyAndRetryResetsTheLadder` above).
-    /// Before the fix, `reportFailedInputSend` routed every conclusive input failure through
-    /// `tearDownStreamAndScheduleReconnect()` with no way to carry that evidence, so this always landed at
+    /// Without carrying that evidence, `reportFailedInputSend` would route every conclusive input failure
+    /// through `tearDownStreamAndScheduleReconnect()`, so this would always land at
     /// stage 1 no matter how conclusive the input failure was.
     @MainActor func testInputSendFailingOnEveryCandidateEscalatesStraightToStage2() throws {
         let sessionID = "session-\(UUID().uuidString)"
@@ -1123,12 +1122,13 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertFalse(model.connectionStageTracker.isBannerVisible, "a single-address refusal is stage 1 evidence only")
     }
 
-    /// Before the fix, `reportFailedInputSend`'s `guard !isStateStreamDisconnected else { return true }` sat
-    /// ahead of the `allCandidatesUnreachable` classification, so a conclusive stage 2 input failure that
-    /// arrived while a reconnect was already armed at stage 1 (a link the model already suspects, but has
-    /// not yet confirmed unreachable) was discarded unread: the guard returned `true` before the error's
-    /// shape was ever looked at, and the tracker stayed at `.reconnecting` no matter how conclusive the new
-    /// evidence was. Every candidate refusing this send is the same hard evidence that escalates straight
+    /// Without an exception for that evidence, `reportFailedInputSend`'s `guard !isStateStreamDisconnected
+    /// else { return true }` would sit ahead of the `allCandidatesUnreachable` classification, so a
+    /// conclusive stage 2 input failure that arrives while a reconnect is already armed at stage 1 (a link
+    /// the model already suspects, but has not yet confirmed unreachable) would be discarded unread: the
+    /// guard would return `true` before the error's shape is ever looked at, and the tracker would stay at
+    /// `.reconnecting` no matter how conclusive the new evidence was. Every candidate refusing this send is
+    /// the same hard evidence that escalates straight
     /// from `.connected` in `testInputSendFailingOnEveryCandidateEscalatesStraightToStage2`, and arriving
     /// mid-reconnect does not make it any less conclusive.
     @MainActor func testInputSendFailingOnEveryCandidateEscalatesFromStage1EvenWithAReconnectAlreadyArmed() throws {
@@ -1211,11 +1211,11 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     /// The escalation in `reportFailedInputSend`'s `isStateStreamDisconnected` branch can fire while an
     /// automatic redial is already racing: `openStateStream` installs `streamClient` before its blocking
     /// dial resolves, so a client that dialed but has delivered no frame yet leaves the tracker at
-    /// `.reconnecting`, indistinguishable here from no redial being in flight at all. Before the fix, the
-    /// escalation armed the ladder's fresh redial without retiring that in-flight attempt first, so the
-    /// new `reconnectTask` fired straight into either `ensureSubscriptionStarted()`'s own in-flight guard
+    /// `.reconnecting`, indistinguishable here from no redial being in flight at all. Without retiring
+    /// that in-flight attempt first, the escalation would arm the ladder's fresh redial anyway, so the
+    /// new `reconnectTask` would fire straight into either `ensureSubscriptionStarted()`'s own in-flight guard
     /// (`streamClient != nil || subscriptionConnectTask != nil`) or the reconnect timer's own
-    /// `streamClient == nil` guard, and returned without ever dialing again: the pane was stuck waiting on
+    /// `streamClient == nil` guard, and return without ever dialing again: the pane would be stuck waiting on
     /// the stream watchdog, or forever if keepalives kept arriving with no frame.
     @MainActor func testAllCandidatesInputFailureDuringAnInFlightRedialRetiresItSoTheLadderRedialRuns() async throws {
         let sessionID = "session-\(UUID().uuidString)"
@@ -1249,9 +1249,9 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
             model.lastReconnectDelayForTesting, .seconds(TerminalUnreachableBackoff.ladderSeconds[0]),
             "the ladder redial armed by the escalation, not a leftover stage 1 delay")
 
-        // Let the ladder's fresh redial actually run: before the fix it returns without ever calling the
-        // connect override below, because the retired attempt's client (or connect task) was still
-        // occupying the in-flight guard(s) that turn a redial away.
+        // Let the ladder's fresh redial actually run: without retiring the stale attempt's client (or
+        // connect task), it would still occupy the in-flight guard(s) that turn a redial away, so the
+        // redial would return without ever calling the connect override below.
         var connectOverrideInvoked = false
         model.stateStreamConnectOverrideForTesting = { _ in
             connectOverrideInvoked = true
@@ -1313,8 +1313,8 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     /// dropped by `ensureSubscriptionStarted`'s in-flight guard because the original connect is still
     /// running, and that connect then finishes reporting success (`start()` can return true even for a
     /// client that was concurrently stopped — stopping it does not abort a low-level connect already past
-    /// that point) while `streamClient` is still nil. Before the fix nothing is left to retry: the pane
-    /// stays connected to nothing until it is reopened or the app restarts. Drives a real in-process
+    /// that point) while `streamClient` is still nil. Without a retry hook for this race, nothing is left
+    /// to retry: the pane stays connected to nothing until it is reopened or the app restarts. Drives a real in-process
     /// `SpacesDeviceAPIServer` so the retry's own connect, once armed, actually reconnects — proving
     /// recovery, not just that a flag got set — and controls the first connect's resolution through
     /// `stateStreamConnectOverrideForTesting` so the race is reproduced deterministically instead of
@@ -1597,8 +1597,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         XCTAssertTrue(model.hasActiveStreamClientForTesting, "Retry's own connect must have installed a fresh stream client")
 
         // Prove the replacement can fully recover while the first attempt is still hung: deliver a frame
-        // over it, which is what actually clears the banner (`openStateStream` succeeding is not enough,
-        // see its doc comment).
+        // over it, which is what actually clears the banner (`openStateStream` succeeding is not enough).
         guard let replacementGeneration = model.installedStreamClientGenerationForTesting else {
             return XCTFail("Retry's connect must have installed a stream client with a generation")
         }

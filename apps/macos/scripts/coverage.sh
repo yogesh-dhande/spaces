@@ -14,8 +14,8 @@ coverage_dir="$root/.build/coverage"
 # they landed was the Ghostty submodule, where the Linux artifact build's clean-tree check failed on
 # a file the host's global excludes made invisible. A separate scratch path also keeps the two builds
 # from invalidating each other: toggling the coverage flag in one scratch tree recompiles the whole
-# package, so a plain build followed by a coverage build used to pay for both from scratch. It is
-# persistent, so both trees stay incremental across runs.
+# package, so a plain build followed by a coverage build would otherwise pay for both from scratch.
+# It is persistent, so both trees stay incremental across runs.
 coverage_scratch_path="$root/.build/coverage-scratch"
 test_config_home="$root/.build/test-config-home"
 test_log_path="$coverage_dir/swift-test.log"

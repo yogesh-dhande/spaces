@@ -103,9 +103,9 @@ final class GhosttyEmbeddedSessionLeaseCoalescingTests: XCTestCase {
 
     /// A `.local` client is judged by its lease exactly like a `.remote` one (see `TerminalClientKind`),
     /// so typing in a Spaces window refreshes its durable lease on the same coalesced cadence, and the
-    /// client goes stale once that lease lapses. This is the inverse of the exemption that used to apply
-    /// here: a local window that never proved it was still there held a session's ownership forever,
-    /// because nothing read its lease and nothing could expire it.
+    /// client goes stale once that lease lapses. Without this, a local window that never proved it was
+    /// still there would hold a session's ownership forever, because nothing would read its lease and
+    /// nothing could expire it.
     func testLocalClientSendsRefreshTheLeaseAndLapseLikeAnyOther() async throws {
         let owner = TerminalClient(id: "window-client", kind: .local, identity: .init(label: "Spaces window"), connectedAt: "2026-07-21T00:00:00Z")
         let box = try await makeStartedCore(owner: owner)
@@ -120,7 +120,6 @@ final class GhosttyEmbeddedSessionLeaseCoalescingTests: XCTestCase {
             try durableLease(for: owner.id, on: box), Self.sentinelLease,
             "a local client's send must refresh its durable lease — its liveness is read from that row")
 
-        // Coalescing applies to it identically: one write per interval, not one per keystroke.
         try writeSentinelLease(for: owner.id, on: box)
         for index in 0..<10 { send("burst-\(index)", from: owner.id, on: box) }
         XCTAssertEqual(

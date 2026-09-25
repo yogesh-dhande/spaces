@@ -8,8 +8,7 @@
     /// stays address-independent across a rescan, and the `activeHost` warm-start cache.
     ///
     /// These tests exercise the real `SpacesMobileDeviceStore` persistence, which lives in
-    /// `UserDefaults.standard` and the Keychain, so each test clears and reseeds that state — see
-    /// `SpacesMobileDemoModeTests` for the same pattern.
+    /// `UserDefaults.standard` and the Keychain, so each test clears and reseeds that state.
     final class SpacesMobileDeviceStoreTests: XCTestCase {
         private let devicesKey = "spaces.mobile.paired-devices"
         private let activeDeviceKey = "spaces.mobile.active-device-id"
@@ -68,7 +67,6 @@
             XCTAssertEqual(decoded.hosts, ["10.0.0.5", "100.64.0.5"])
         }
 
-        /// Same round-trip contract for the paired-device record type.
         func testPairedDeviceRecordMultiHostRoundTripPreservesOrderAndOmitsLegacyKey() throws {
             let record = SpacesMobilePairedDeviceRecord(
                 id: "device-abc", name: "Mac", hosts: ["10.0.0.5", "100.64.0.5"], port: 47_900, certificateFingerprint: "SHA256:mac",
@@ -186,7 +184,6 @@
             XCTAssertEqual(UserDefaults.standard.data(forKey: devicesKey), blobBefore)
         }
 
-        /// `clearActiveHosts` nils the cached candidate on every paired device.
         func testClearActiveHostsNilsEveryDevice() throws {
             _ = SpacesMobileDeviceStore.upsert(
                 settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac-1", token: "token-1"), name: "Mac 1")
@@ -222,8 +219,7 @@
         /// address stored. Once the daemon reports both addresses, the record's `hosts` leads with the
         /// daemon's list and order, with no rescan, and reports the change so a live client can be
         /// rebuilt. (Every address here is also in the daemon's report, so there is no previously-stored
-        /// fallback to append — see `testMergeAdvertisedHostsKeepsPreviouslyKnownAddressAsTrailingFallback`
-        /// for the case that exercises the union's other half.)
+        /// fallback to append.)
         func testMergeAdvertisedHostsAdoptsDaemonOrder() throws {
             let state = SpacesMobileDeviceStore.upsert(
                 settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
@@ -236,7 +232,7 @@
             XCTAssertEqual(reloaded.devices.first(where: { $0.id == id })?.hosts, ["10.0.0.5", "100.64.0.5"])
         }
 
-        /// The regression this fix closes: a daemon report that is momentarily missing a previously
+        /// A daemon report that is momentarily missing a previously
         /// known address (e.g. the Mac's Tailscale drops briefly while this device is on the LAN, so the
         /// overview reports only the LAN address) must not delete that address from `hosts` — it is kept
         /// as a trailing fallback so this device can still find its way back once both are reachable
@@ -310,7 +306,6 @@
             XCTAssertNil(device.activeHost, "the active host was trimmed off the tail, so it must be dropped like any other missing host")
         }
 
-        /// `activeHost` survives a merge that keeps it in the new list.
         func testMergeAdvertisedHostsKeepsActiveHostWhenStillPresent() throws {
             _ = SpacesMobileDeviceStore.upsert(
                 settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
@@ -324,9 +319,7 @@
 
         /// Merging the record's own current `hosts` (the common steady-state case, and the union of the
         /// daemon's list with itself) must be a true no-op: the persisted devices blob is byte-identical
-        /// before and after, and no change is reported. See
-        /// `testMergeAdvertisedHostsBoundsResultAndTrimsFromTail` for `activeHost` being dropped when it
-        /// does not survive the union.
+        /// before and after, and no change is reported.
         func testMergeAdvertisedHostsIsNoOpWhenUnchanged() throws {
             _ = SpacesMobileDeviceStore.upsert(
                 settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
@@ -383,8 +376,8 @@
         /// The single warm-start mechanism lives in `SpacesDeviceEndpointResolver` seeding its cached
         /// winner from the persisted `activeHost`, not in `hosts` order: selecting a device must yield
         /// settings whose `hosts` stays in the record's own order (LAN first) even once
-        /// `recordActiveHost` has learned a different address. Reordering `hosts` here as well used to
-        /// fight the resolver's seed — it captures `hosts` immutably at construction, so a
+        /// `recordActiveHost` has learned a different address. Reordering `hosts` here as well would
+        /// fight the resolver's seed: it captures `hosts` immutably at construction, so a
         /// Tailscale-reordered list could never be undone by clearing `activeHost` alone. Reached only
         /// through the public `select` API.
         func testSelectKeepsHostsInRecordOrderRegardlessOfActiveHost() throws {

@@ -10,7 +10,7 @@ import spacesruntimecore
     import Glibc
 #endif
 
-/// Round-20: `sha256Hex`'s `#elseif canImport(OpenSSL)` branch (Linux) only compiles there, so this suite
+/// `sha256Hex`'s `#elseif canImport(OpenSSL)` branch (Linux) only compiles there, so this suite
 /// only actually exercises that branch when it runs on the Linux lane (see `run_linux_tests.sh`); on macOS
 /// it exercises the `CryptoKit` branch instead, which is harmless (the assertions are branch-agnostic
 /// known-answer values) but does not by itself prove the Linux branch is correct. Both known-answer values

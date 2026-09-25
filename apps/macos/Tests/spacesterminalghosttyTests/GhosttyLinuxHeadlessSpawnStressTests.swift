@@ -7,15 +7,14 @@
 
     /// Regression gate for the fork-child runtime deadlock (#371): a PTY child forked from this
     /// heavily multithreaded process must always reach exec and produce output, never park forever
-    /// on a lock it inherited from the parent. Before the fix a debugger caught the child dead in
-    /// `pthread_mutex_lock` under `swift_getTypeByMangledName` — the Swift runtime's conformance
-    /// cache, locked by another thread at the fork instant — at roughly 1 in 100-200 spawns on a
-    /// busy 4-core box. One organic spawn per behavior suite made that a slow, rotating flake;
-    /// this suite makes it a deterministic gate by attacking the race directly: many spawns in a
-    /// row while churn tasks keep the runtime's metadata and allocator locks hot. At the measured
-    /// pre-fix rate, 200 amplified spawns fail far more often than not, while the fixed spawn path
-    /// (the child's entire pre-exec body in C, `spaces_pty_child_exec`) cannot deadlock this way
-    /// at all.
+    /// on a lock it inherited from the parent. Without the child's entire pre-exec body running in
+    /// C (`spaces_pty_child_exec`), a debugger catches the child dead in `pthread_mutex_lock` under
+    /// `swift_getTypeByMangledName` — the Swift runtime's conformance cache, locked by another
+    /// thread at the fork instant — at roughly 1 in 100-200 spawns on a busy 4-core box. One organic
+    /// spawn per behavior suite made that a slow, rotating flake; this suite makes it a deterministic
+    /// gate by attacking the race directly: many spawns in a row while churn tasks keep the runtime's
+    /// metadata and allocator locks hot. At that rate, 200 amplified spawns fail far more often than
+    /// not, while the fixed spawn path cannot deadlock this way at all.
     ///
     /// A failure here means a child stayed silent past its deadline: the hang diagnostics print
     /// the child's /proc state and blocked pc before the assertion fires.
@@ -52,9 +51,9 @@
             try? FileManager.default.removeItem(at: databaseRoot)
         }
 
-        /// 400 spawns detected the pre-fix deadlock in ~9 of 10 runs on a 4-vCPU runner-shaped VM
-        /// (measured per-spawn hit rate ~0.55% under the conformance churn below); the fixed spawn
-        /// path completes the whole suite in ~15s.
+        /// 400 spawns detect the deadlock in ~9 of 10 runs on a 4-vCPU runner-shaped VM without the
+        /// fix (measured per-spawn hit rate ~0.55% under the conformance churn below); the fixed
+        /// spawn path completes the whole suite in ~15s.
         private static let spawnCount = 400
         private static let marker = "SPAWN_STRESS_OK"
         /// Generous next to the sub-second healthy spawn, tiny next to the sibling suites' 30s waits:

@@ -23,7 +23,6 @@ import Testing
         let color = blackWhiteDynamic()
         bindAppearanceReactiveLayer(view) { $0.layer?.backgroundColor = color.cgColor }
 
-        // Dark resolves to white (component ≈ 1).
         #expect((layerWhiteComponent(view) ?? 0) > 0.9)
 
         // Flip the view's appearance and fire the same notification the setting change posts.

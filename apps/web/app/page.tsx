@@ -724,9 +724,6 @@ function OrchestrationDiagram() {
   );
 }
 
-// Diagram for the persistence section: the Spaces app detaches, but the
-// device daemon keeps every terminal and agent session alive for reattach.
-
 // A muted keycap used inside the app mocks, distinct from the amber marketing
 // <Key>. Mirrors the subtle shortcut chips in the real sidebar.
 function NumKey({ children }: { children: React.ReactNode }) {

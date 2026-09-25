@@ -202,7 +202,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
     /// A dangling symlink (the link exists; its target does not) must NOT be treated as a plain missing
     /// component: `fileManager.fileExists` follows links and reports `false` for both, so an unguarded walk
     /// would reappend the remaining components literally under the workspace root and let a create/write
-    /// land outside it. This is the round-3 codex finding: the link itself must be `lstat`'d and, when it
+    /// land outside it. The link itself must be `lstat`'d and, when it
     /// resolves outside the workspace, rejected exactly like a live escaping symlink.
     @Test func rejectsADanglingSymlinkThatResolvesOutsideTheWorkspace() throws {
         let workspace = try makeWorkspace()
@@ -418,7 +418,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         #expect(untracked.patch?.contains("new file content") == true)
     }
 
-    // Round-10 fix 1: a freshly `git init`ed repo with no commits yet ("unborn HEAD") is still a valid git
+    // A freshly `git init`ed repo with no commits yet ("unborn HEAD") is still a valid git
     // project (`assertIsGitRepository` accepts it), but every `HEAD` comparison fails against it. Verified
     // empirically against real git before writing this test: `git rev-parse --verify HEAD` fails (exit 128)
     // in this state, `git hash-object -t tree /dev/null` deterministically returns the well-known SHA-1
@@ -447,13 +447,13 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         #expect(untracked.patch?.contains("untracked content") == true)
     }
 
-    // Round-9 fix 2: git emits a patch's raw on-disk bytes verbatim, and a file that is not valid UTF-8 is
+    // git emits a patch's raw on-disk bytes verbatim, and a file that is not valid UTF-8 is
     // still git's idea of "text" (its own binary sniff looks at content, not encoding). Verified empirically
     // against real git before writing this test: a file that is almost all ASCII plus one lone 0xE9 byte
     // (an invalid UTF-8 continuation on its own — not a valid Latin-1 -> UTF-8 multi-byte sequence either)
-    // is diffed by `git diff` as ordinary text, not flagged binary. Before the fix, capturing that patch's
-    // bytes through `String(data:encoding:.utf8)` returned nil for the whole capture and `?? ""` silently
-    // turned it into an empty patch, hiding the change; `String(decoding:as:)` never fails, so the patch
+    // is diffed by `git diff` as ordinary text, not flagged binary. Capturing that patch's
+    // bytes through `String(data:encoding:.utf8)` would return nil for the whole capture, and `?? ""` would
+    // silently turn it into an empty patch, hiding the change; `String(decoding:as:)` never fails, so the patch
     // still renders with a U+FFFD replacement character standing in for the invalid byte.
     @Test func aPatchWithAnInvalidUTF8ByteStillRendersInsteadOfBeingEmptied() throws {
         let repo = try makeRepo()
@@ -1159,27 +1159,27 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         #expect(change.dirty == false)
     }
 
-    // Round-9 fix 3: `buildDiff` now tracks a 45s request-wide deadline (`diffBuildDeadline`) alongside the
+    // `buildDiff` tracks a 45s request-wide deadline (`diffBuildDeadline`) alongside the
     // existing per-file/total-byte caps, reusing the same `truncated` shape once elapsed time crosses it.
     // There is no seam to inject a shorter deadline without adding test-only surface area to the engine's
-    // public API, which the round-9 spec explicitly forbids ("Do NOT add a configurable deadline parameter
-    // to the public API") — so the 45s cutoff itself has no automated trigger test here. This test instead
-    // covers the regression the deadline could introduce: an ordinary small diff, which finishes in
-    // milliseconds, must come back exactly as before (no file marked `truncated`), proving the per-loop-
-    // iteration deadline check does not misfire for a request nowhere near 45s.
+    // public API ("Do NOT add a configurable deadline parameter to the public API") — so the 45s cutoff
+    // itself has no automated trigger test here. This test instead covers the regression the deadline
+    // could introduce: an ordinary small diff, which finishes in milliseconds, must come back exactly as
+    // before (no file marked `truncated`), proving the per-loop-iteration deadline check does not misfire
+    // for a request nowhere near 45s.
     //
-    // Round-12: the per-loop-iteration check is now `remainingTimeout(start:)` itself (via `try?`), which
-    // both re-checks the deadline and computes the shrunk-to-the-remaining-budget timeout that `buildFile`/
-    // `buildUntrackedFile` pass into their own git captures — round 10 only threaded the budget into
-    // `buildDiff`'s up-front commands (merge-base, the raw diff listing, the untracked status scan); round 12 extends
-    // the same threading to each file's own patch capture, so a file whose git only starts near the end of
-    // the 45s budget gets a correspondingly shrunk timeout instead of a fresh flat 30s. Same seam problem as
-    // rounds 9/10 applies here too: proving a per-file capture actually receives a shrunk timeout requires
-    // either a configurable deadline (forbidden) or waiting most of the real 45s (too slow/flaky to run in
-    // this suite), so there is deliberately no trigger test for the per-file threading either — this test's
-    // coverage (an ordinary, fast diff comes back with nothing truncated) already exercises the `buildFile`/
-    // `buildUntrackedFile` call sites with the new `timeout:` parameter on the non-expired path, which is the
-    // only path a hermetic, fast unit test can reach.
+    // The per-loop-iteration check is `remainingTimeout(start:)` itself (via `try?`), which both re-checks
+    // the deadline and computes the shrunk-to-the-remaining-budget timeout that `buildFile`/
+    // `buildUntrackedFile` pass into their own git captures, threading the budget into both `buildDiff`'s
+    // up-front commands (merge-base, the raw diff listing, the untracked status scan) and each file's own
+    // patch capture, so a file whose git only starts near the end of the 45s budget gets a correspondingly
+    // shrunk timeout instead of a fresh flat 30s. The same seam problem applies here too: proving a
+    // per-file capture actually receives a shrunk timeout requires either a configurable deadline
+    // (forbidden) or waiting most of the real 45s (too slow/flaky to run in this suite), so there is
+    // deliberately no trigger test for the per-file threading either — this test's coverage (an ordinary,
+    // fast diff comes back with nothing truncated) already exercises the `buildFile`/`buildUntrackedFile`
+    // call sites with the `timeout:` parameter on the non-expired path, which is the only path a
+    // hermetic, fast unit test can reach.
     @Test func anOrdinarySmallDiffIsUnaffectedByTheRequestDeadline() throws {
         let repo = try makeRepo()
         defer { try? FileManager.default.removeItem(at: repo) }
@@ -1433,7 +1433,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         #expect(!magicPatch.contains("edited content"))
     }
 
-    // Round 13: `git rm --cached f` untracks a file without touching its worktree content, so `f` is
+    // `git rm --cached f` untracks a file without touching its worktree content, so `f` is
     // simultaneously `.deleted` per `--name-status` (gone from the index) and `??` per `git status`
     // (present on disk) — the same path in two states, not two files. `buildDiff` coalesces this into one
     // `.modified` entry whose patch diffs the base blob against the worktree file (via a scratch
@@ -1562,13 +1562,13 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         #expect(byPath["README.md"]?.status == .untracked)
     }
 
-    // Round-18 fix, corrected scope: the spec's literal "replace f with a bare FIFO via mkfifo" scenario
+    // The spec's literal "replace f with a bare FIFO via mkfifo" scenario
     // turns out to never reach `buildCoalescedDeletedButUntrackedFile` at all. Empirically confirmed: `git
     // status --porcelain --untracked-files=all` reports only `D  f.txt` for a bare FIFO recreated at a
     // `git rm --cached`'d path — never a paired `?? f.txt` the way it does for a recreated regular file or
     // symlink — so `deletedButUntrackedPaths` (the intersection this coalescing keys on) never contains it,
     // and the plan keeps the ordinary `.deleted` tracked-file entry instead. That is exactly what this test
-    // asserts as the (pre-existing, unaffected-by-this-round) baseline. The scenario that DOES reach the
+    // asserts as the baseline. The scenario that DOES reach the
     // coalescing builder with a non-regular target is a *symlink* to a FIFO (a symlink is an ordinary
     // filesystem entry `git status` does report as `?? f.txt`), covered by the test below.
     @Test func aRecreatedBareFIFODoesNotCoalesceAndStaysAPlainDeletedEntry() throws {
@@ -1592,7 +1592,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
     }
 
     // The reachable non-regular-target scenario for the coalescing builder: a symlink (which `git status`
-    // does report as untracked) whose target is a FIFO. Round-18's guard lets a symlink through unconditionally
+    // does report as untracked) whose target is a FIFO. The guard lets a symlink through unconditionally
     // (its own content — the link text — is always tiny), and this exercises that path end to end through
     // `buildDiff` rather than only via the ad hoc empirical checks: `update-index --add` on the symlink and
     // the subsequent `diff <compareRef>` against the scratch index must both complete without opening the
@@ -1622,12 +1622,12 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         #expect(entry.patch?.contains("real.fifo") == true)
     }
 
-    // Round-15 fix: a workspace can be rooted BELOW its repository's root (a monorepo subpackage added as
+    // A workspace can be rooted BELOW its repository's root (a monorepo subpackage added as
     // its own project — `Orchestrator.normalizeDir` accepts any dir where `rev-parse --is-inside-work-tree`
-    // succeeds, so this is a real, supported configuration). Before this fix, git's `--name-status`/porcelain
-    // output came back repo-root-relative while pathspecs/stats were workspace-relative, so a subdir
-    // workspace's diffs came back empty, untracked captures failed, out-of-subtree changes leaked in, and
-    // `scopeSignature` desynced from what `buildDiff` actually returned. `--relative` on the tracked
+    // succeeds, so this is a real, supported configuration). Without `--relative`, git's `--name-status`/porcelain
+    // output comes back repo-root-relative while pathspecs/stats are workspace-relative, so a subdir
+    // workspace's diffs come back empty, untracked captures fail, out-of-subtree changes leak in, and
+    // `scopeSignature` desyncs from what `buildDiff` actually returns. `--relative` on the tracked
     // enumeration/per-file/coalesced captures (empirically confirmed to both scope AND relativize, including
     // patch headers, and to auto-demote a rename crossing the subtree boundary into a plain add/delete) fixes
     // the diff side; a hand-rolled filter-and-strip by `rev-parse --show-prefix` (porcelain has no
@@ -1682,12 +1682,12 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         #expect(file.patch?.contains("new inside content") == true)
     }
 
-    // Round-21 Fix 2: `--show-prefix`'s output is a repo-relative path (plus a trailing slash and git's
+    // `--show-prefix`'s output is a repo-relative path (plus a trailing slash and git's
     // own trailing newline), and a repo-relative directory can legitimately start with whitespace (e.g. a
-    // subpackage literally named " sub"). Before the fix, `.trimmingCharacters(in: .whitespacesAndNewlines)`
-    // stripped that leading space along with the trailing newline, so the trimmed prefix (`"sub/"`) no
-    // longer matched any of this workspace's own porcelain paths (all reported as `" sub/…"`) and
-    // `subtreeScoped` rejected every one of them as apparently outside the subtree — silently reporting an
+    // subpackage literally named " sub"). A naive `.trimmingCharacters(in: .whitespacesAndNewlines)`
+    // strips that leading space along with the trailing newline, so the trimmed prefix (`"sub/"`) no
+    // longer matches any of this workspace's own porcelain paths (all reported as `" sub/…"`) and
+    // `subtreeScoped` rejects every one of them as apparently outside the subtree — silently reporting an
     // empty diff for a workspace rooted at a leading-space subdirectory. Reuses
     // `makeRepoWithSubdirWorkspace`'s exact shape (an `other/` sibling and a root-level file, both outside
     // the workspace, to prove scoping still excludes them) with only the subdir's name swapped for one that
@@ -2387,7 +2387,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
     }
 
     /// Same shape as `makeRepoWithSubdirWorkspace` (an `other/` sibling and a root-level file, both outside
-    /// the workspace), except the workspace subdirectory's own name starts with a space — the round-21 Fix 2
+    /// the workspace), except the workspace subdirectory's own name starts with a space — the
     /// regression case for the `--show-prefix` probes' trimming.
     private func makeRepoWithLeadingSpaceSubdirWorkspace() throws -> (root: URL, workspace: URL) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(

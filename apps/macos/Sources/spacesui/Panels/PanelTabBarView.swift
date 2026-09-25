@@ -169,7 +169,7 @@ import systembridge
     }
 
     /// Shared with `PanelWindowIdentityStripView`, whose split buttons must read identically to
-    /// this strip's own — Option B keeps them in the same 28px row across both chrome kinds.
+    /// this strip's own, keeping them in the same 28px row across both chrome kinds.
     static func actionButton(symbol: String, tooltip: String, identifier: String, target: AnyObject, action: Selector) -> NSButton {
         let button = NSButton(
             image: NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?.withSymbolConfiguration(

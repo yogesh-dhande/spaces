@@ -30,8 +30,7 @@ extension AppKitController: CompatibilityBlockPresenting {}
 
 /// Owns the staged-apply / SSH-update domain: the silent daemon exec-in-place handoff Spaces requests
 /// the moment a device reports a build staged on disk, the watchdog that tells the user when that
-/// handoff does not land, and the Linux "Update over SSH" installer run. Extracted from
-/// `AppKitController` as a behavior-preserving move (part of the ongoing decomposition of that type);
+/// handoff does not land, and the Linux "Update over SSH" installer run.
 /// `AppKitController` holds this as `daemonUpdate` and reaches it as `host.daemonUpdate` from other
 /// files (`SidebarController`, `DevicePairingController`) that need to feed it fresh device facts or
 /// drop its state for a device they stop tracking.

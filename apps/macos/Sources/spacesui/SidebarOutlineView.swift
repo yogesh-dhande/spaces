@@ -11,7 +11,6 @@ final class SidebarOutlineView: NSOutlineView {
     /// visible targets. The selection reads from the squared teal left rail alone — no fill, no border.
     var selectedWorkspaceHighlight: (() -> (frame: NSRect, rail: NSColor)?)?
 
-    /// Width of the leading accent rail.
     private static let selectionRailWidth: CGFloat = 2
 
     override func drawBackground(inClipRect clipRect: NSRect) {

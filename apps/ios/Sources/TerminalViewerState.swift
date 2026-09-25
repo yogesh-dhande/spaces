@@ -92,7 +92,6 @@ enum TerminalViewerOwnershipSyncState: Equatable {
 /// standalone staleness counter, read by async continuations regardless of this state's current case.
 enum TerminalViewerSceneState: Equatable {
     enum ResumeEvaluation: Equatable {
-        /// No foreground-ownership evaluation outstanding.
         case none
         /// A foreground-ownership evaluation is outstanding for the current `foregroundResumeCycle`.
         case pending

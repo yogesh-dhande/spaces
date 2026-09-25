@@ -19,7 +19,6 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** The vscode-icons commit every emitted artifact comes from. */
 const PACK_COMMIT = "d3800d6b8c70b035f357a0b3f3f8b0f16c99a43e";
 const PACK_REPO = "https://github.com/vscode-icons/vscode-icons";
 const RAW_BASE = `https://raw.githubusercontent.com/vscode-icons/vscode-icons/${PACK_COMMIT}`;

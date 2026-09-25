@@ -172,7 +172,6 @@ describe("parseJSONDocument: rejections", () => {
 });
 
 describe("parseJSONDocument: container retention", () => {
-  /** A document whose root array holds `length` copies of `item`. */
   function arrayOf(length: number, item: (index: number) => string): string {
     return `[${Array.from({ length }, (_unused, index) => item(index)).join(",")}]`;
   }

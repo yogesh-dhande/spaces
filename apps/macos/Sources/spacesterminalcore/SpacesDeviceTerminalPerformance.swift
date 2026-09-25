@@ -38,10 +38,10 @@ public enum SpacesDeviceTerminalPerformanceLogger {
 
     /// Resolved once, the first time this enum is touched, rather than per call. `ProcessInfo.processInfo
     /// .environment` materializes the *entire* process environment dictionary on every access; reading it
-    /// as a per-call default argument here used to run on every terminal output tick and measured at
-    /// 70-80% of the serial terminal-engine queue's CPU while the logger was switched off (#332). Because
-    /// this is a `static let`, exporting the environment variable after the process has already started
-    /// has no effect on that process — the same one-time-read behavior as `ghosttyEmbeddedSessionTraceEnabled`
+    /// as a per-call default argument would run on every terminal output tick and measured at 70-80% of
+    /// the serial terminal-engine queue's CPU while the logger was switched off (#332). Because this is a
+    /// `static let`, exporting the environment variable after the process has already started has no
+    /// effect on that process — the same one-time-read behavior as `ghosttyEmbeddedSessionTraceEnabled`
     /// in GhosttyEmbeddedSessionHost.swift.
     private static let resolvedLogPathAtLaunch: String? = resolvedLogPath(environment: ProcessInfo.processInfo.environment)
 

@@ -515,9 +515,9 @@
             return latestFrame?.snapshot
         }
 
-        /// Flattens the pane's current grid to text on demand. Deliberately not precomputed when a frame
-        /// arrives: extracting a full grid allocates a string per row on a path that runs at the session's
-        /// flush rate, while its readers (the ended-pane copy buffer, debug and test dumps) ask rarely.
+        /// Deliberately not precomputed when a frame arrives: extracting a full grid allocates a string per
+        /// row on a path that runs at the session's flush rate, while its readers (the ended-pane copy
+        /// buffer, debug and test dumps) ask rarely.
         func snapshotText() -> String? {
             if let surfaceText = GhosttyTerminalSnapshotCapture.captureText(from: mirrorSurface()), !surfaceText.isEmpty { return surfaceText }
             guard let snapshot = latestFrame?.snapshot else { return nil }
@@ -527,8 +527,6 @@
         func renderedSnapshotText() -> String? { snapshotText() }
         var hasRenderedSurfaceContent: Bool { latestFrame != nil }
 
-        /// Applies the app-wide terminal text size to this pane.
-        ///
         /// A live surface is retuned in place: Ghostty's `set_font_size` rebuilds the font grid on the
         /// existing surface, keeping the surface and its renderer resources. A surface built later takes
         /// the size from `ensureMirrorIfNeeded` instead. The re-measurement afterwards is what carries a
@@ -669,9 +667,8 @@
             updateSurfaceFocus()
         }
 
-        /// Tears the pane's rendering down for good: the mirror is freed, the render state is dropped,
-        /// and the view leaves its container. Driven by ownership and attachment transitions, never by
-        /// visibility — a pane that is merely hidden goes through `evictMirrorSurface` instead.
+        /// Driven by ownership and attachment transitions, never by visibility — a pane that is merely
+        /// hidden goes through `evictMirrorSurface` instead.
         func releaseSurface() {
             freeMirror()
             latestFrame = nil

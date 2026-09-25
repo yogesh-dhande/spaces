@@ -262,7 +262,7 @@
             XCTAssertEqual(SpacesMobileAutomations.durationDescription(running, relativeTo: now), expectedFormatter.string(from: 90))
         }
 
-        /// #540 P2: the shared relative-time reference advances in 30-second jumps and can still trail a
+        /// #540: the shared relative-time reference advances in 30-second jumps and can still trail a
         /// run that started only moments before the jump caught up. Read unguarded, that renders in the
         /// future tense ("started in 5s"); comparing `started` against itself to avoid the wrong tense
         /// instead renders "in 0 sec" (the formatter's numeric abbreviated style has no bare "now" for a
@@ -735,7 +735,6 @@
                 model.automationRows.first?.lastRunStatus, "running", "the fresh overview lands, not the stale one the held poll answered with")
         }
 
-        /// Mirrors `testTriggerAutomationReadsPastAPollIssuedBeforeTheCommand` for the schedule action.
         func testSetAutomationNextRunReadsPastAPollIssuedBeforeTheCommand() async {
             let recorder = SpacesMobileAutomationsRequestRecorder()
             let overviewGate = SpacesMobileAutomationsAsyncGate()
@@ -783,7 +782,6 @@
                 "the fresh next-run time lands, not the stale one the held poll answered with")
         }
 
-        /// Mirrors `testTriggerAutomationReadsPastAPollIssuedBeforeTheCommand` for the cancel action.
         func testCancelAutomationRunReadsPastAPollIssuedBeforeTheCommand() async {
             let recorder = SpacesMobileAutomationsRequestRecorder()
             let overviewGate = SpacesMobileAutomationsAsyncGate()
@@ -823,7 +821,6 @@
                 model.automationRows.first?.lastRunStatus, "canceled", "the fresh overview lands, not the stale one the held poll answered with")
         }
 
-        /// Mirrors `testTriggerAutomationReadsPastAPollIssuedBeforeTheCommand` for the end-agents action.
         func testEndAutomationAgentsReadsPastAPollIssuedBeforeTheCommand() async {
             let recorder = SpacesMobileAutomationsRequestRecorder()
             let overviewGate = SpacesMobileAutomationsAsyncGate()
@@ -915,7 +912,7 @@
             XCTAssertEqual(model.relativeTimeReference, clock.now)
         }
 
-        /// The equality gate that stops republishing an unchanged `overview` (#540 P1) must not also stop
+        /// The equality gate that stops republishing an unchanged `overview` (#540) must not also stop
         /// relative-time labels from advancing: they read `relativeTimeReference`, a separate published
         /// property proven here to keep moving — and keep invalidating views that read it — on its own
         /// 30-second cadence even while the fetched overview is byte-for-byte identical on every refresh.

@@ -278,8 +278,8 @@ extension ProcessProfileEnvironmentSuites {
             #expect(controller.selectedWorkspaceID == nil)
         }
 
-        /// The plain case behind the report: a reload arriving while nothing is selected. It used to end
-        /// in Alerts, which is what pulled users out of a focused terminal.
+        /// A reload arriving while nothing is selected must not land on Alerts, which would pull users out
+        /// of a focused terminal.
         @Test func aReloadWithNothingSelectedLeavesThePaneAlone() {
             let controller = makeController()
             controller.deviceModel.deviceSections = [populatedSection(deviceID: controller.deviceModel.localDeviceID)]

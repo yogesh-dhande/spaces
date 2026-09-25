@@ -221,7 +221,7 @@ describe("EditorSidebar", () => {
       onSelectFile,
       makeCallbacks(),
     );
-    sidebar.reattach(); // first show: triggers the listing fetch (Finding 1)
+    sidebar.reattach(); // first show: triggers the listing fetch
 
     await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1)); // "dir" starts collapsed
     (sidebar.el.querySelector(".dirrow") as HTMLElement).click(); // expand "dir" to reach its row
@@ -244,7 +244,7 @@ describe("EditorSidebar", () => {
       vi.fn(),
       makeCallbacks(),
     );
-    sidebar.reattach(); // first show: triggers the listing fetch (Finding 1)
+    sidebar.reattach(); // first show: triggers the listing fetch
 
     await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(2));
     expect(sidebar.el.querySelector(".row.on")).toBeNull();
@@ -291,7 +291,7 @@ describe("EditorSidebar", () => {
       vi.fn(),
       makeCallbacks(),
     );
-    sidebar.reattach(); // first show: triggers the initial listing fetch (Finding 1)
+    sidebar.reattach(); // first show: triggers the initial listing fetch
 
     await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
     expect(getFreshSpy).toHaveBeenCalledTimes(1);
@@ -300,7 +300,7 @@ describe("EditorSidebar", () => {
     sidebar.refreshFilesListing();
 
     expect(getFreshSpy).toHaveBeenCalledTimes(2);
-    // Finding 1: getFresh() revalidates in the background even without an explicit invalidate() —
+    // getFresh() revalidates in the background even without an explicit invalidate() —
     // renderList() runs on every Files-tab "show", which refreshFilesListing() is one path into.
     expect(bridgeFn).toHaveBeenCalledTimes(2);
     await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(2));
@@ -332,8 +332,8 @@ describe("EditorSidebar", () => {
 
     await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
 
-    // reattach() is the diff→editor re-entry path (the other Finding 1 "show" point, alongside a
-    // tab click) — a non-git workspace or a pane that never fetched a diff has no diff-signature
+    // reattach() is the diff→editor re-entry path (the other "show" point that triggers a fetch,
+    // alongside a tab click) — a non-git workspace or a pane that never fetched a diff has no diff-signature
     // push to invalidate the cache, so this revalidation is the only thing that keeps it fresh.
     sidebar.reattach();
     expect(bridgeFn).toHaveBeenCalledTimes(2);
@@ -361,7 +361,7 @@ describe("EditorSidebar", () => {
       vi.fn(),
       makeCallbacks(),
     );
-    sidebar.reattach(); // first show: triggers the initial listing fetch (Finding 1)
+    sidebar.reattach(); // first show: triggers the initial listing fetch
 
     await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
 
@@ -406,7 +406,7 @@ describe("EditorSidebar", () => {
       vi.fn(),
       makeCallbacks(),
     );
-    sidebar.reattach(); // first show: triggers the listing fetch (Finding 1)
+    sidebar.reattach(); // first show: triggers the listing fetch
 
     await vi.waitFor(() => expect(bridgeFn).toHaveBeenCalledTimes(1));
     // Let the fetch's .catch() run before asserting the tree is left untouched, not crashed.
@@ -549,7 +549,7 @@ describe("EditorSidebar", () => {
 
     // Painted synchronously at construction from the cache's snapshot — this instance has never
     // fetched a listing itself, but the shared cache already holds one. Construction still never
-    // fetches on its own (Finding 1's invariant): the count below is just the OTHER consumer's call.
+    // fetches on its own: the count below is just the OTHER consumer's call.
     expect(bridgeFn).toHaveBeenCalledTimes(1);
     let fnTexts = [...sidebar.el.querySelectorAll(".row .fn")].map((el) => el.textContent);
     expect(fnTexts).toEqual(["a.ts", "b.ts"]);

@@ -58,7 +58,6 @@ enum PanelLayoutEngine {
         return false
     }
 
-    /// The tab and pane holding a given content descriptor, if any.
     static func location(of content: PaneContentDescriptor, in layout: PanelLayout) -> (tabID: String, paneID: String)? {
         for tab in layout.tabs { if let pane = panes(in: tab).first(where: { $0.content == content }) { return (tab.id, pane.id) } }
         return nil
@@ -71,7 +70,6 @@ enum PanelLayoutEngine {
 
     // MARK: - Mutations
 
-    /// Appends a tab holding a single pane, selecting and focusing it.
     static func appendTab(tabID: String, pane: Pane, to layout: PanelLayout) -> PanelLayout {
         var layout = layout
         layout.tabs.append(PanelTab(id: tabID, title: nil, lastFocusedPaneID: nil, root: .leaf(pane)))

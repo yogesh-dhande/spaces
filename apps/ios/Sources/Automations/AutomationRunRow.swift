@@ -3,9 +3,8 @@ import spacesdevicecore
 import spacesterminalcore
 
 /// Shared run-row rendering for the two run-history surfaces (`AutomationRunsView`'s global "Recent
-/// Runs" list and `AutomationDetailView`'s per-automation runs section): the row itself (status dot,
-/// title, detail line, Cancel/End Agents trailing action, attributed-agents chips) plus the two
-/// confirmation dialogs that gate those trailing actions. `title` is parameterized because the two
+/// Runs" list and `AutomationDetailView`'s per-automation runs section): the row itself plus the two
+/// confirmation dialogs that gate its trailing actions. `title` is parameterized because the two
 /// screens want a different row title for the same run: the global screen shows the automation name
 /// (many automations share one list), the detail screen shows the run's outcome (the automation name is
 /// already the screen's own navigation title, so repeating it on every row would be redundant).

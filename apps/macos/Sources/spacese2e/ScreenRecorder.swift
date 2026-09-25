@@ -103,8 +103,7 @@ struct RecordScreenCommand: ParsableCommand {
     @Option(name: .long) var timeoutSeconds: Int = 10
 
     /// Records the current main display with ScreenCaptureKit until the
-    /// process receives SIGINT or SIGTERM. This is the native screen capture
-    /// path used by the manual real-system E2E script.
+    /// process receives SIGINT or SIGTERM.
     func run() throws {
         let outputPath = output
         let readyFilePath = readyFile
