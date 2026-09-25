@@ -186,7 +186,7 @@ struct TerminalDetailView: View {
             item: Binding(get: { model.safariLink }, set: { link in if link == nil { model.dismissSafariLink() } })
         ) { safariLink in TerminalSafariView(url: safariLink.url) }.sheet(isPresented: $isShowingComposer) {
             TerminalComposerSheet(model: model, stagedScreenshots: appModel.stagedScreenshots)
-        }.confirmationDialog(
+        }.sheet(isPresented: briefSheetBinding) { TerminalBriefSheet(appModel: appModel, sessionID: session.id) }.confirmationDialog(
             pendingStopRow.map { StopConfirmationCopy.rowTitle($0.title) } ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible,
             presenting: pendingStopRow
         ) { row in
@@ -198,6 +198,18 @@ struct TerminalDetailView: View {
     }
 
     private var pendingStopDialogBinding: Binding<Bool> { Binding(get: { pendingStopRow != nil }, set: { if !$0 { pendingStopRow = nil } }) }
+
+    /// The brief sheet is up exactly while `AgentBriefVisibility` says so, which is what opens it on its
+    /// own for an agent with a brief the user has not hidden. A swipe or a tap outside the sheet closes
+    /// it through the setter, which the store records as the user hiding this agent's brief.
+    private var briefSheetBinding: Binding<Bool> {
+        Binding(
+            get: { runtimeRow.map { appModel.agentBriefVisibility.isPresented(for: $0) } ?? false },
+            set: { isPresented in
+                guard let row = runtimeRow else { return }
+                appModel.agentBriefVisibility.setPresented(isPresented, for: row)
+            })
+    }
 
     private var linkPreviewBannerOverlay: some View {
         VStack(spacing: 0) {
@@ -437,43 +449,56 @@ struct TerminalDetailView: View {
 
     private var runtimeRow: SpacesMobileWorkspaceRuntimeRow? { appModel.runtimeRow(forSessionID: session.id) }
 
-    @ViewBuilder private var trailingChrome: some View {
-        if let row = runtimeRow, row.hasTerminalDetailActions {
-            HStack(spacing: 6) {
-                ownerChromeStateMarker
-                Menu {
-                    if row.canRun {
-                        Button {
-                            Task { await runRuntime(row) }
-                        } label: {
-                            Label("Run", systemImage: "play.fill")
-                        }.disabled(appModel.isMutating)
-                    }
-                    if row.canRestartFromTerminalDetail {
-                        Button {
-                            Task { await restartRuntime(row) }
-                        } label: {
-                            Label("Restart", systemImage: "arrow.clockwise")
-                        }.disabled(appModel.isMutating)
-                    }
-                    if row.canStopFromTerminalDetail {
-                        Button(role: .destructive) {
-                            pendingStopRow = row
-                        } label: {
-                            Label("Stop", systemImage: "stop.fill")
-                        }.disabled(appModel.isMutating)
-                    }
-                } label: {
-                    Image(systemName: appModel.isMutating ? "arrow.triangle.2.circlepath" : "ellipsis").font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white).frame(width: Self.chromeControlHeight, height: Self.chromeControlHeight).background(
-                            Theme.terminalChromePillBackground)
-                }.disabled(appModel.isMutating).accessibilityLabel("Terminal actions").accessibilityIdentifier("terminal.runtimeActions")
-            }
-        } else if model.isOwner {
+    /// The brief pill sits immediately before the actions menu, or at the trailing edge on its own when
+    /// the row has no actions, since an agent with nothing to stop can still keep a brief.
+    private var trailingChrome: some View {
+        let row = runtimeRow
+        return HStack(spacing: 6) {
             ownerChromeStateMarker
-        } else {
-            Color.clear.frame(width: 1, height: 1)
+            if let row, row.brief != nil { briefPill(row) }
+            if let row, row.hasTerminalDetailActions { runtimeActionsMenu(row) }
         }
+    }
+
+    private func runtimeActionsMenu(_ row: SpacesMobileWorkspaceRuntimeRow) -> some View {
+        Menu {
+            if row.canRun {
+                Button {
+                    Task { await runRuntime(row) }
+                } label: {
+                    Label("Run", systemImage: "play.fill")
+                }.disabled(appModel.isMutating)
+            }
+            if row.canRestartFromTerminalDetail {
+                Button {
+                    Task { await restartRuntime(row) }
+                } label: {
+                    Label("Restart", systemImage: "arrow.clockwise")
+                }.disabled(appModel.isMutating)
+            }
+            if row.canStopFromTerminalDetail {
+                Button(role: .destructive) {
+                    pendingStopRow = row
+                } label: {
+                    Label("Stop", systemImage: "stop.fill")
+                }.disabled(appModel.isMutating)
+            }
+        } label: {
+            Image(systemName: appModel.isMutating ? "arrow.triangle.2.circlepath" : "ellipsis").font(.subheadline.weight(.semibold)).foregroundStyle(
+                .white
+            ).frame(width: Self.chromeControlHeight, height: Self.chromeControlHeight).background(Theme.terminalChromePillBackground)
+        }.disabled(appModel.isMutating).accessibilityLabel("Terminal actions").accessibilityIdentifier("terminal.runtimeActions")
+    }
+
+    /// Toggles the agent's brief sheet: brings it back for an agent the user hid, or hides it.
+    private func briefPill(_ row: SpacesMobileWorkspaceRuntimeRow) -> some View {
+        Button {
+            appModel.agentBriefVisibility.setPresented(!appModel.agentBriefVisibility.isPresented(for: row), for: row)
+        } label: {
+            Image(systemName: "doc.text").font(.subheadline.weight(.semibold)).foregroundStyle(Theme.accent).frame(
+                width: Self.chromeControlHeight, height: Self.chromeControlHeight
+            ).background(Theme.terminalChromePillBackground)
+        }.accessibilityLabel("Brief").accessibilityIdentifier("terminal.brief")
     }
 
     @ViewBuilder private var ownerChromeStateMarker: some View {

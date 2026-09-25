@@ -29,14 +29,14 @@ import Testing
         let panel = WorkspacePanelView(scope: .globalWindow(panelWindowID: "panel-1"))
         panel.apply(
             layout: layout(tabID: "tab-1", sessionID: "sess-1"), titlesByTabID: ["tab-1": "zsh"],
-            identity: PanelWindowIdentity(workspaceLabel: "old-branch-name", paneTitle: "zsh", followsSidebar: false))
+            identity: PanelWindowIdentity(workspaceLabel: "old-branch-name", paneTitle: "zsh", followsSidebar: false, brief: .unavailable))
         #expect(textFieldStringValues(in: panel).contains("old-branch-name"))
 
         // The lightweight title-refresh path calls both of these on an overview tick: `updateTabTitle`
         // for the tab's title bookkeeping, then `updateIdentity` with a freshly computed identity — see
         // `PanelCoordinator.refreshTabTitles`. Neither should leave the stale label on screen.
         panel.updateTabTitle("zsh", forTabID: "tab-1")
-        panel.updateIdentity(PanelWindowIdentity(workspaceLabel: "renamed-branch", paneTitle: "zsh", followsSidebar: false))
+        panel.updateIdentity(PanelWindowIdentity(workspaceLabel: "renamed-branch", paneTitle: "zsh", followsSidebar: false, brief: .unavailable))
 
         let values = textFieldStringValues(in: panel)
         #expect(values.contains("renamed-branch"))
@@ -48,7 +48,7 @@ import Testing
         // harmless no-op there rather than assuming the strip exists.
         let panel = WorkspacePanelView(scope: .workspace(deviceID: "device", workspaceID: "workspace-1"))
         panel.apply(layout: layout(tabID: "tab-1", sessionID: "sess-1"), titlesByTabID: ["tab-1": "zsh"])
-        panel.updateIdentity(PanelWindowIdentity(workspaceLabel: "renamed-branch", paneTitle: "zsh", followsSidebar: false))
+        panel.updateIdentity(PanelWindowIdentity(workspaceLabel: "renamed-branch", paneTitle: "zsh", followsSidebar: false, brief: .unavailable))
         #expect(!textFieldStringValues(in: panel).contains("renamed-branch"))
     }
 }

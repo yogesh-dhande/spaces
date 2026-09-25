@@ -60,8 +60,13 @@ enum TerminalMarkdownDocument {
     /// can't be read (the caller shows a failure state).
     static func make(fromFileAt url: URL) -> String? {
         guard let data = try? Data(contentsOf: url) else { return nil }
-        let source = TerminalTextArtifact.lossyString(from: data)
-        return makeHTML(markdownSource: source, markdownItJS: bundledMarkdownItJS(), css: bundledCSS())
+        return makeHTML(markdownSource: TerminalTextArtifact.lossyString(from: data))
+    }
+
+    /// Builds the rendered document for Markdown the app already holds as a string, such as a coding
+    /// agent's brief, with the bundled markdown-it and stylesheet inlined.
+    static func makeHTML(markdownSource: String) -> String {
+        makeHTML(markdownSource: markdownSource, markdownItJS: bundledMarkdownItJS, css: bundledCSS)
     }
 
     /// Builds the full HTML document around `markdownSource`, inlining `markdownItJS` and `css`. The source
@@ -69,6 +74,10 @@ enum TerminalMarkdownDocument {
     /// out of the `<script>` context. `markdownit({ html: false })` keeps any raw HTML in agent-authored
     /// Markdown inert (rendered as text, not injected as markup), which is the safe default for content
     /// that originates from a terminal session.
+    ///
+    /// markdown-it has no task lists of its own, and agents write their briefs' questions and tasks as
+    /// `- [ ]`/`- [x]` items, so a list item that opens with that marker is drawn as a read-only
+    /// checkbox, the way GitHub renders the same Markdown.
     static func makeHTML(markdownSource: String, markdownItJS: String, css: String) -> String {
         """
         <!doctype html>
@@ -88,11 +97,28 @@ enum TerminalMarkdownDocument {
         <script>
         (function () {
           var src = \(javaScriptStringLiteral(for: markdownSource));
+          var content = document.getElementById("content");
           try {
             var md = window.markdownit({ html: false, linkify: true });
-            document.getElementById("content").innerHTML = md.render(src);
+            content.innerHTML = md.render(src);
           } catch (e) {
-            document.getElementById("content").textContent = src;
+            content.textContent = src;
+            return;
+          }
+          var items = content.querySelectorAll("li");
+          for (var i = 0; i < items.length; i++) {
+            var lead = items[i].firstChild;
+            if (lead && lead.nodeName === "P") { lead = lead.firstChild; }
+            if (!lead || lead.nodeType !== Node.TEXT_NODE) { continue; }
+            var marker = /^\\[([ xX])\\] /.exec(lead.nodeValue);
+            if (!marker) { continue; }
+            lead.nodeValue = lead.nodeValue.slice(marker[0].length);
+            var box = document.createElement("input");
+            box.type = "checkbox";
+            box.disabled = true;
+            box.checked = marker[1] !== " ";
+            lead.parentNode.insertBefore(box, lead);
+            items[i].classList.add("task-list-item");
           }
         })();
         </script>
@@ -112,9 +138,10 @@ enum TerminalMarkdownDocument {
         ).replacingOccurrences(of: "\u{2028}", with: "\\u2028").replacingOccurrences(of: "\u{2029}", with: "\\u2029")
     }
 
-    private static func bundledMarkdownItJS() -> String { bundleResourceString(forResource: "markdown-it.min", withExtension: "js") }
+    /// Read from the bundle once: a brief's document is rebuilt every time its sheet re-renders.
+    private static let bundledMarkdownItJS = bundleResourceString(forResource: "markdown-it.min", withExtension: "js")
 
-    private static func bundledCSS() -> String { bundleResourceString(forResource: "terminal-markdown", withExtension: "css") }
+    private static let bundledCSS = bundleResourceString(forResource: "terminal-markdown", withExtension: "css")
 
     private static func bundleResourceString(forResource name: String, withExtension ext: String) -> String {
         guard let url = Bundle.main.url(forResource: name, withExtension: ext), let contents = try? String(contentsOf: url, encoding: .utf8) else {

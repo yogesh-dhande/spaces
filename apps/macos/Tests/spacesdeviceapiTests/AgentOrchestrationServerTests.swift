@@ -8,9 +8,9 @@
     @testable import spacesterminalcore
 
     /// Device API server coverage for the remote orchestration surface (`spawnAgentSession`,
-    /// `listAgentSessions`, `annotateAgentSession`, `renameAgentSession`, `killAgentSession`): the remote
-    /// spawn gate, the row shape carried over the wire, note sanitization, how a renamed row is named
-    /// across overview builds, and the injected-killer routing for remote kill.
+    /// `listAgentSessions`, `writeAgentBrief`/`readAgentBrief`/`clearAgentBrief`, `renameAgentSession`,
+    /// `killAgentSession`): the remote spawn gate, the row shape carried over the wire, the brief round trip,
+    /// how a renamed row is named across overview builds, and the injected-killer routing for remote kill.
     final class AgentOrchestrationServerTests: XCTestCase {
         // `agentOrchestrationTestTLSRoot` below is an instance property (not file-scope), so XCTest
         // constructs a fresh one per test method; clean it up per-instance rather than once for the class.
@@ -147,10 +147,10 @@
             }
         }
 
-        func testListAgentSessionsCarriesNoteAndReadinessOverTheWire() throws {
+        func testListAgentSessionsCarriesBriefHeadlineAndReadinessOverTheWire() throws {
             try withTemporaryProfile { _ in
                 let agent = try seedAgentSession(
-                    terminalSessionID: "agent-session", label: "Claude Code CLI", status: .waiting, note: "review auth",
+                    terminalSessionID: "agent-session", label: "Claude Code CLI", status: .waiting, brief: "# review auth\n\n- token refresh",
                     signalAt: "2026-07-14T10:00:00Z")
                 let (server, client, clientApp, token) = try startServerAndClient()
                 defer {
@@ -166,30 +166,119 @@
                 XCTAssertEqual(row.id, agent.id)
                 XCTAssertEqual(row.terminalSessionID, "agent-session")
                 XCTAssertEqual(row.status, "waiting")
-                XCTAssertEqual(row.note, "review auth")
+                XCTAssertEqual(row.briefSummary, "review auth")
+                XCTAssertNotNil(row.briefUpdatedAt)
                 XCTAssertEqual(row.lastSignalAt, "2026-07-14T10:00:00Z")
             }
         }
 
-        func testAnnotateAgentSessionSanitizesNoteOverTheWire() throws {
+        /// A write over the wire stores the sanitized document, answers with the agent's row (headline
+        /// derived by the daemon), and a fresh overview carries the full text on the coding-agent row, which
+        /// is what the clients render. A read returns the stored markdown verbatim.
+        func testWriteAgentBriefStoresTheSanitizedDocumentAndReadReturnsIt() throws {
             try withTemporaryProfile { _ in
-                _ = try seedAgentSession(terminalSessionID: "agent-session", label: "Claude Code CLI", status: .idle, note: nil, signalAt: nil)
+                _ = try seedAgentSession(terminalSessionID: "agent-session", label: "Claude Code CLI", status: .idle, brief: nil, signalAt: nil)
                 let (server, client, clientApp, token) = try startServerAndClient()
                 defer {
                     client.cancel()
                     server.stop()
                 }
 
-                let response = try client.send(
+                let written = try client.send(
                     SpacesDeviceAPIRequest(
-                        command: .annotateAgentSession(.init(sessionID: "agent-session", note: "line one\nline two\u{07}")), authToken: token,
-                        clientApp: clientApp))
+                        command: .writeAgentBrief(.init(sessionID: "agent-session", markdown: "\r\n## Fix login\r\n\n- step\u{07} one\t(tab)\r\n")),
+                        authToken: token, clientApp: clientApp))
 
-                XCTAssertTrue(response.ok, response.message)
-                XCTAssertEqual(response.agentSessions?.first?.note, "line oneline two")
-                // The sanitized note is persisted, not just echoed.
-                let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-                XCTAssertEqual(try store.agentWindows(workspaceID: "workspace-1").first?.note, "line oneline two")
+                XCTAssertTrue(written.ok, written.message)
+                XCTAssertEqual(written.message, "Wrote agent brief.")
+                let row = try XCTUnwrap(written.agentSessions?.first)
+                XCTAssertEqual(row.briefSummary, "Fix login")
+                XCTAssertNotNil(row.briefUpdatedAt)
+                let document = "## Fix login\n\n- step one\t(tab)"
+                let overview = try client.send(SpacesDeviceAPIRequest(command: .overview, authToken: token, clientApp: clientApp))
+                let codingRow = try XCTUnwrap(overview.overview?.workspaces.first(where: { $0.id == "workspace-1" })?.codingAgentRows.first)
+                XCTAssertEqual(codingRow.brief, document)
+                XCTAssertEqual(codingRow.briefUpdatedAt, row.briefUpdatedAt)
+
+                let read = try client.send(
+                    SpacesDeviceAPIRequest(command: .readAgentBrief(.init(sessionID: "agent-session")), authToken: token, clientApp: clientApp))
+                XCTAssertTrue(read.ok, read.message)
+                XCTAssertEqual(
+                    read.agentBrief, SpacesDeviceAgentBriefResult(sessionID: "agent-session", brief: document, updatedAt: row.briefUpdatedAt))
+            }
+        }
+
+        /// Clearing removes the document: the row loses its headline, the overview row its text, and a
+        /// read answers successfully with no brief (an agent without a brief is not an error).
+        func testClearAgentBriefRemovesTheDocument() throws {
+            try withTemporaryProfile { _ in
+                _ = try seedAgentSession(
+                    terminalSessionID: "agent-session", label: "Claude Code CLI", status: .idle, brief: "working on it", signalAt: nil)
+                let (server, client, clientApp, token) = try startServerAndClient()
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let cleared = try client.send(
+                    SpacesDeviceAPIRequest(command: .clearAgentBrief(.init(sessionID: "agent-session")), authToken: token, clientApp: clientApp))
+
+                XCTAssertTrue(cleared.ok, cleared.message)
+                let row = try XCTUnwrap(cleared.agentSessions?.first)
+                XCTAssertNil(row.briefSummary)
+                XCTAssertNotNil(row.briefUpdatedAt)
+                let overview = try client.send(SpacesDeviceAPIRequest(command: .overview, authToken: token, clientApp: clientApp))
+                XCTAssertNil(overview.overview?.workspaces.first(where: { $0.id == "workspace-1" })?.codingAgentRows.first?.brief)
+                let read = try client.send(
+                    SpacesDeviceAPIRequest(command: .readAgentBrief(.init(sessionID: "agent-session")), authToken: token, clientApp: clientApp))
+                XCTAssertTrue(read.ok, read.message)
+                XCTAssertEqual(read.agentBrief?.sessionID, "agent-session")
+                XCTAssertNil(read.agentBrief?.brief)
+            }
+        }
+
+        /// A write whose markdown sanitizes to nothing clears the brief, and its answer says so in the words
+        /// a clear uses, which is what `spaces agent brief write --device` prints.
+        func testWriteOfAnEmptyAgentBriefReportsTheClear() throws {
+            try withTemporaryProfile { _ in
+                _ = try seedAgentSession(
+                    terminalSessionID: "agent-session", label: "Claude Code CLI", status: .idle, brief: "working on it", signalAt: nil)
+                let (server, client, clientApp, token) = try startServerAndClient()
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let emptyWrite = SpacesDeviceAPIRequest(
+                    command: .writeAgentBrief(.init(sessionID: "agent-session", markdown: " \r\n\u{07}")), authToken: token, clientApp: clientApp)
+                let written = try client.send(emptyWrite)
+
+                XCTAssertTrue(written.ok, written.message)
+                XCTAssertEqual(written.message, "Cleared agent brief.")
+                XCTAssertNil(try XCTUnwrap(written.agentSessions?.first).briefSummary)
+            }
+        }
+
+        /// A brief belongs to a coding-agent session, so a terminal without one is refused rather than
+        /// silently accepted, and a request without a session id is an invalid argument.
+        func testAgentBriefRequestsRejectAMissingSessionOrANonAgentTerminal() throws {
+            try withTemporaryProfile { _ in
+                try seedWorkspace()
+                let (server, client, clientApp, token) = try startServerAndClient()
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let blank = try client.send(
+                    SpacesDeviceAPIRequest(command: .writeAgentBrief(.init(sessionID: "  ", markdown: "x")), authToken: token, clientApp: clientApp))
+                XCTAssertFalse(blank.ok)
+                XCTAssertEqual(blank.errorCode, .invalidArgument)
+
+                let unknown = try client.send(
+                    SpacesDeviceAPIRequest(command: .readAgentBrief(.init(sessionID: "plain-shell")), authToken: token, clientApp: clientApp))
+                XCTAssertFalse(unknown.ok)
+                XCTAssertTrue(unknown.message.contains("No agent session for terminal plain-shell"), unknown.message)
             }
         }
 
@@ -248,7 +337,7 @@
         func testStopWorkspaceTerminalStopsHookRegisteredConfiguredProcessAgent() throws {
             try withTemporaryProfile { _ in
                 _ = try seedAgentSession(
-                    terminalSessionID: "configured-process-agent-session", label: "Codex", status: .spinning, note: nil, signalAt: nil)
+                    terminalSessionID: "configured-process-agent-session", label: "Codex", status: .spinning, brief: nil, signalAt: nil)
                 let killer = AgentSessionKillerRecorder(result: true)
                 let (server, client, clientApp, token) = try startServerAndClient(agentSessionKiller: { killer.record($0) })
                 defer {
@@ -378,7 +467,7 @@
             try withTemporaryProfile { _ in
                 let sessionID = "agent-session"
                 let agent = try seedAgentSession(
-                    terminalSessionID: sessionID, label: "Claude Code CLI", status: .spinning, note: nil, signalAt: "2026-07-14T10:00:00Z")
+                    terminalSessionID: sessionID, label: "Claude Code CLI", status: .spinning, brief: nil, signalAt: "2026-07-14T10:00:00Z")
 
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
                 try paths.ensureDirectories()
@@ -423,7 +512,7 @@
         func testRenamingAnAgentNamesItsRowAndPersists() throws {
             try withTemporaryProfile { _ in
                 let agent = try seedAgentSession(
-                    terminalSessionID: "agent-session", label: "Claude Code CLI", status: .idle, note: nil, signalAt: nil)
+                    terminalSessionID: "agent-session", label: "Claude Code CLI", status: .idle, brief: nil, signalAt: nil)
                 let (server, client, clientApp, token) = try startServerAndClient()
                 defer {
                     client.cancel()
@@ -449,7 +538,7 @@
         func testAgentSignalWithANewLabelLeavesTheUserRenameStanding() throws {
             try withTemporaryProfile { _ in
                 let agent = try seedAgentSession(
-                    terminalSessionID: "agent-session", label: "Claude Code CLI", status: .idle, note: nil, signalAt: nil)
+                    terminalSessionID: "agent-session", label: "Claude Code CLI", status: .idle, brief: nil, signalAt: nil)
                 let (server, client, clientApp, token) = try startServerAndClient()
                 defer {
                     client.cancel()
@@ -479,7 +568,7 @@
         func testEmptyTitleClearsAnAgentRenameBackToItsReportedLabel() throws {
             try withTemporaryProfile { _ in
                 let agent = try seedAgentSession(
-                    terminalSessionID: "agent-session", label: "Claude Code CLI", status: .idle, note: nil, signalAt: nil)
+                    terminalSessionID: "agent-session", label: "Claude Code CLI", status: .idle, brief: nil, signalAt: nil)
                 let (server, client, clientApp, token) = try startServerAndClient()
                 defer {
                     client.cancel()
@@ -504,7 +593,7 @@
         /// client believe a rename it can never see took effect.
         func testRenamingAnUnknownAgentFailsLoudly() throws {
             try withTemporaryProfile { _ in
-                _ = try seedAgentSession(terminalSessionID: "agent-session", label: "Claude Code CLI", status: .idle, note: nil, signalAt: nil)
+                _ = try seedAgentSession(terminalSessionID: "agent-session", label: "Claude Code CLI", status: .idle, brief: nil, signalAt: nil)
                 let (server, client, clientApp, token) = try startServerAndClient()
                 defer {
                     client.cancel()
@@ -529,7 +618,7 @@
         func testStoppingAHookRegisteredAgentRemovesItsRow() throws {
             try withTemporaryProfile { _ in
                 let agent = try seedAgentSession(
-                    terminalSessionID: "agent-session", label: "Claude Code CLI", status: .spinning, note: nil, signalAt: "2026-07-14T10:00:00Z")
+                    terminalSessionID: "agent-session", label: "Claude Code CLI", status: .spinning, brief: nil, signalAt: "2026-07-14T10:00:00Z")
                 let (server, client, clientApp, token) = try startServerAndClient()
                 defer {
                     client.cancel()
@@ -555,7 +644,7 @@
         }
 
         @discardableResult private func seedAgentSession(
-            terminalSessionID: String, label: String, status: AgentWindowStatus, note: String?, signalAt: String?
+            terminalSessionID: String, label: String, status: AgentWindowStatus, brief: String?, signalAt: String?
         ) throws -> AgentWindowRecord {
             let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
             let orchestrator = WorkspaceOrchestrator(store: store)
@@ -570,7 +659,7 @@
                     lastLaunchedAt: nil))
             let agent = try orchestrator.registerAgentWindow(
                 workspaceID: "workspace-1", provider: .spaces, label: label, terminalTrackingID: terminalSessionID, status: status)
-            if let note { try store.setAgentSessionNote(id: agent.id, note: note) }
+            if let brief { try store.setAgentSessionBrief(id: agent.id, brief: brief, updatedAt: "2026-07-14T09:00:00Z") }
             if let signalAt {
                 try store.appendAgentSessionEvent(
                     agentSessionID: agent.id, eventType: "working", source: "spaces_agent_signal", message: nil, createdAt: signalAt)

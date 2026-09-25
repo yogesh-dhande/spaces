@@ -107,7 +107,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "agent-codex", workspaceID: "workspace-visible", name: "Codex", command: "codex", agentID: "running-agent",
-                            sessionID: "session-agent", runState: .running, activityState: .waiting, canStop: true)
+                            sessionID: "session-agent", runState: .running, activityState: .waiting, brief: nil, briefUpdatedAt: nil, canStop: true)
                     ],
                     terminalRows: [
                         SpacesDeviceWorkspaceTerminalRow(
@@ -265,7 +265,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
                     id: "agent-codex", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "running-agent",
-                    sessionID: "session-agent", runState: .running, activityState: .waiting, canStop: true)
+                    sessionID: "session-agent", runState: .running, activityState: .waiting, brief: nil, briefUpdatedAt: nil, canStop: true)
             ],
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(

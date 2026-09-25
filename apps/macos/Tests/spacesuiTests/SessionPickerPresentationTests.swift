@@ -39,7 +39,7 @@ import workspacecore
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
                     id: "agent:agent-\(id)", workspaceID: id, name: "claude", command: "claude", agentID: "agent-\(id)",
-                    sessionID: "session-agent-\(id)", runState: .running, activityState: .idle, canStop: true)
+                    sessionID: "session-agent-\(id)", runState: .running, activityState: .idle, brief: nil, briefUpdatedAt: nil, canStop: true)
             ],
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(
@@ -205,10 +205,10 @@ import workspacecore
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
                     id: "agent:busy", workspaceID: "workspace-1", name: "Codex busy", command: "codex", agentID: "busy", sessionID: "session-busy",
-                    runState: .running, activityState: .spinning, canStop: true, liveTitle: "reviewing PR 493"),
+                    runState: .running, activityState: .spinning, brief: nil, briefUpdatedAt: nil, canStop: true, liveTitle: "reviewing PR 493"),
                 SpacesDeviceWorkspaceCodingAgentRow(
                     id: "agent:quiet", workspaceID: "workspace-1", name: "Codex quiet", command: "codex", agentID: "quiet",
-                    sessionID: "session-quiet", runState: .running, activityState: .idle, canStop: true),
+                    sessionID: "session-quiet", runState: .running, activityState: .idle, brief: nil, briefUpdatedAt: nil, canStop: true),
             ])
         let sessions = [
             terminalSessionSummary(id: "session-busy", title: "Codex busy", foregroundCommand: "ignored foreground"),

@@ -464,7 +464,7 @@ final class StoreTests: XCTestCase {
             let claimed = try XCTUnwrap(agents.first { $0.id == "agent-claimed" })
             XCTAssertEqual(claimed.effectiveLabel, "Codex")
             XCTAssertEqual(claimed.status, .spinning)
-            XCTAssertEqual(claimed.note, "carried")
+            XCTAssertEqual(claimed.brief, "carried")
             XCTAssertEqual(claimed.detectedAgentKind, "codex")
             XCTAssertEqual(claimed.terminalTrackingID, "session-1")
             let renamed = try XCTUnwrap(agents.first { $0.id == "agent-renamed" })

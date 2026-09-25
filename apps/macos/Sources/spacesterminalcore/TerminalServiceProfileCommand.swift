@@ -193,27 +193,27 @@ public struct TerminalServiceAgentListPayload: Codable, Sendable, Equatable {
     }
 }
 
-public struct TerminalServiceAgentAnnotatePayload: Codable, Sendable, Equatable {
-    /// Terminal session / tracking id of the agent to annotate.
+public struct TerminalServiceAgentBriefWritePayload: Codable, Sendable, Equatable {
+    /// Terminal session / tracking id of the agent whose brief is replaced.
     public let sessionID: String
-    /// The annotation to store. An empty string clears the note, so this field is required but not
-    /// normalized-non-empty at the wire boundary.
-    public let note: String
+    /// The whole new document. Markdown that sanitizes to nothing clears the brief, so this field is
+    /// required but not normalized-non-empty at the wire boundary.
+    public let markdown: String
 
-    public init(sessionID: String, note: String) {
+    public init(sessionID: String, markdown: String) {
         self.sessionID = sessionID
-        self.note = note
+        self.markdown = markdown
     }
 
     private enum CodingKeys: String, CodingKey {
         case sessionID
-        case note
+        case markdown
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         sessionID = try container.decodeRequiredNonEmpty(forKey: .sessionID)
-        note = try container.decode(String.self, forKey: .note)
+        markdown = try container.decode(String.self, forKey: .markdown)
     }
 }
 
@@ -531,7 +531,12 @@ public enum TerminalServiceProfileCommand: Sendable, Equatable {
     case workspaceRestart(TerminalServiceWorkspaceLifecyclePayload)
     case agentSignal(TerminalServiceProfileAgentSignalPayload)
     case agentList(TerminalServiceAgentListPayload)
-    case agentAnnotate(TerminalServiceAgentAnnotatePayload)
+    /// Replaces the brief of the coding agent in a terminal session, returning its updated row.
+    case agentBriefWrite(TerminalServiceAgentBriefWritePayload)
+    /// Reads the full brief of the coding agent in a terminal session, returned on the response's `agentBrief`.
+    case agentBriefRead(sessionID: String)
+    /// Clears the brief of the coding agent in a terminal session, returning its updated row.
+    case agentBriefClear(sessionID: String)
     case agentSpawn(TerminalServiceAgentSpawnPayload)
     case agentKill(TerminalServiceAgentKillPayload)
     case agentSubscribe(TerminalServiceAgentSubscriptionPayload)
@@ -582,7 +587,9 @@ extension TerminalServiceProfileCommand: Codable {
         case workspaceRestart
         case agentSignal
         case agentList
-        case agentAnnotate
+        case agentBriefWrite
+        case agentBriefRead
+        case agentBriefClear
         case agentSpawn
         case agentKill
         case agentSubscribe
@@ -625,7 +632,9 @@ extension TerminalServiceProfileCommand: Codable {
         case .workspaceRestart: self = .workspaceRestart(try container.decode(TerminalServiceWorkspaceLifecyclePayload.self, forKey: key))
         case .agentSignal: self = .agentSignal(try container.decode(TerminalServiceProfileAgentSignalPayload.self, forKey: key))
         case .agentList: self = .agentList(try container.decode(TerminalServiceAgentListPayload.self, forKey: key))
-        case .agentAnnotate: self = .agentAnnotate(try container.decode(TerminalServiceAgentAnnotatePayload.self, forKey: key))
+        case .agentBriefWrite: self = .agentBriefWrite(try container.decode(TerminalServiceAgentBriefWritePayload.self, forKey: key))
+        case .agentBriefRead: self = .agentBriefRead(sessionID: try container.decodeRequiredNonEmpty(forKey: key))
+        case .agentBriefClear: self = .agentBriefClear(sessionID: try container.decodeRequiredNonEmpty(forKey: key))
         case .agentSpawn: self = .agentSpawn(try container.decode(TerminalServiceAgentSpawnPayload.self, forKey: key))
         case .agentKill: self = .agentKill(try container.decode(TerminalServiceAgentKillPayload.self, forKey: key))
         case .agentSubscribe: self = .agentSubscribe(try container.decode(TerminalServiceAgentSubscriptionPayload.self, forKey: key))
@@ -666,7 +675,9 @@ extension TerminalServiceProfileCommand: Codable {
         case .workspaceRestart(let payload): try container.encode(payload, forKey: .workspaceRestart)
         case .agentSignal(let payload): try container.encode(payload, forKey: .agentSignal)
         case .agentList(let payload): try container.encode(payload, forKey: .agentList)
-        case .agentAnnotate(let payload): try container.encode(payload, forKey: .agentAnnotate)
+        case .agentBriefWrite(let payload): try container.encode(payload, forKey: .agentBriefWrite)
+        case .agentBriefRead(let sessionID): try container.encode(sessionID, forKey: .agentBriefRead)
+        case .agentBriefClear(let sessionID): try container.encode(sessionID, forKey: .agentBriefClear)
         case .agentSpawn(let payload): try container.encode(payload, forKey: .agentSpawn)
         case .agentKill(let payload): try container.encode(payload, forKey: .agentKill)
         case .agentSubscribe(let payload): try container.encode(payload, forKey: .agentSubscribe)

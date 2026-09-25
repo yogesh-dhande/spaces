@@ -29,7 +29,7 @@ import workspacecore
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
                     id: "agent:agent-1", workspaceID: "workspace", name: "claude", command: "claude", agentID: "agent-1", sessionID: "sess-agent",
-                    runState: .running, activityState: .idle, canStop: true)
+                    runState: .running, activityState: .idle, brief: nil, briefUpdatedAt: nil, canStop: true)
             ],
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(
@@ -125,7 +125,7 @@ import workspacecore
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
                     id: "agent:agent-1", workspaceID: "workspace", name: "claude", command: "claude", agentID: "agent-1", sessionID: "sess-agent",
-                    runState: .running, activityState: .idle, canStop: true, liveTitle: "reviewing PR 420")
+                    runState: .running, activityState: .idle, brief: nil, briefUpdatedAt: nil, canStop: true, liveTitle: "reviewing PR 420")
             ],
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(
@@ -140,6 +140,31 @@ import workspacecore
         #expect(busy["terminal:sess-term"]?.detail == "vim main.swift")
         #expect(busy["agent:agent-1"]?.title == "claude", "the agent keeps the name it answers to")
         #expect(busy["agent:agent-1"]?.detail == "reviewing PR 420")
+    }
+
+    /// An agent row marks that its agent keeps a brief, and no other row ever does.
+    @Test func onlyAnAgentRowWithABriefCarriesTheBriefMark() {
+        #expect(fixtureItems().allSatisfy { !$0.hasBrief }, "the fixture's agent keeps no brief")
+
+        let summary = SpacesDeviceWorkspaceSummary(
+            id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,
+            isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true,
+            codingAgentRows: [
+                SpacesDeviceWorkspaceCodingAgentRow(
+                    id: "agent:agent-1", workspaceID: "workspace", name: "claude", command: "claude", agentID: "agent-1", sessionID: "sess-agent",
+                    runState: .running, activityState: .waiting, brief: "# Waiting on review", briefUpdatedAt: "2026-09-25T10:00:00Z", canStop: true)
+            ],
+            terminalRows: [
+                SpacesDeviceWorkspaceTerminalRow(
+                    id: "term-1", workspaceID: "workspace", title: "zsh", workingDirectory: "/tmp/workspace", sessionID: "sess-term",
+                    runState: .running, canOpenTerminal: true, canStop: true)
+            ])
+        let byKey = Dictionary(
+            uniqueKeysWithValues: AppKitController.sidebarRuntimeTargetItems(
+                detail: SpacesDeviceWorkspaceDetailViewModel(workspace: summary), browserSessions: []
+            ).map { ($0.key, $0) })
+        #expect(byKey["agent:agent-1"]?.hasBrief == true)
+        #expect(byKey["terminal:sess-term"]?.hasBrief == false)
     }
 
     /// Nothing in the workspace config names a coding agent, so every agent row's rename is stored on
@@ -179,7 +204,7 @@ import workspacecore
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
                     id: "agent:agent-1", workspaceID: "workspace", name: "claude", command: "claude", agentID: "agent-1", sessionID: "sess-agent",
-                    runState: .running, activityState: .waiting, canStop: true)
+                    runState: .running, activityState: .waiting, brief: nil, briefUpdatedAt: nil, canStop: true)
             ],
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(

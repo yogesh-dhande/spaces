@@ -17,7 +17,7 @@ import spacestestsupport
     private func agentRow(id: String, workspaceID: String, sessionID: String?) -> SpacesDeviceWorkspaceCodingAgentRow {
         SpacesDeviceWorkspaceCodingAgentRow(
             id: id, workspaceID: workspaceID, name: id, command: "claude", agentID: "agent-\(id)", sessionID: sessionID, runState: .running,
-            activityState: .idle, canStop: true)
+            activityState: .idle, brief: nil, briefUpdatedAt: nil, canStop: true)
     }
 
     private func terminalRow(id: String, workspaceID: String, sessionID: String?) -> SpacesDeviceWorkspaceTerminalRow {

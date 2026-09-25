@@ -467,6 +467,7 @@ struct SpacesTabView: View {
     }
 
     @ViewBuilder private func runtimeTrailingIndicator(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
+        if row.brief != nil { RowBriefGlyph() }
         if row.isBrowserSession || row.sessionID != nil { RowChevron() } else if row.canRun { RowPlayIndicator() }
     }
 

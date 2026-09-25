@@ -372,7 +372,7 @@ import workspacecore
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "agent:running-agent", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "running-agent",
-                            sessionID: "session-agent", runState: .running, activityState: .waiting, canStop: true)
+                            sessionID: "session-agent", runState: .running, activityState: .waiting, brief: nil, briefUpdatedAt: nil, canStop: true)
                     ],
                     terminalRows: [
                         SpacesDeviceWorkspaceTerminalRow(
@@ -444,7 +444,7 @@ import workspacecore
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "agent:running-agent", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "running-agent",
-                            sessionID: "session-agent", runState: .running, activityState: .waiting, canStop: true)
+                            sessionID: "session-agent", runState: .running, activityState: .waiting, brief: nil, briefUpdatedAt: nil, canStop: true)
                     ],
                     terminalRows: [
                         SpacesDeviceWorkspaceTerminalRow(
@@ -586,10 +586,11 @@ import workspacecore
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "agent:busy", workspaceID: "workspace-1", name: "Codex busy", command: "codex", agentID: "busy",
-                            sessionID: "session-busy", runState: .running, activityState: .spinning, canStop: true, liveTitle: "reviewing PR 493"),
+                            sessionID: "session-busy", runState: .running, activityState: .spinning, brief: nil, briefUpdatedAt: nil, canStop: true,
+                            liveTitle: "reviewing PR 493"),
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "agent:quiet", workspaceID: "workspace-1", name: "Codex quiet", command: "codex", agentID: "quiet",
-                            sessionID: "session-quiet", runState: .running, activityState: .idle, canStop: true),
+                            sessionID: "session-quiet", runState: .running, activityState: .idle, brief: nil, briefUpdatedAt: nil, canStop: true),
                     ])
             ],
             sessions: [
@@ -614,11 +615,12 @@ import workspacecore
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "agent:busy", workspaceID: "workspace-1", name: "Codex busy", command: "codex", agentID: "busy",
-                            sessionID: "session-busy", runState: .running, activityState: .waiting, updatedAt: "2026-08-14T09:00:00Z", canStop: true,
-                            liveTitle: "waiting for approval"),
+                            sessionID: "session-busy", runState: .running, activityState: .waiting, updatedAt: "2026-08-14T09:00:00Z", brief: nil,
+                            briefUpdatedAt: nil, canStop: true, liveTitle: "waiting for approval"),
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "agent:quiet", workspaceID: "workspace-1", name: "Codex quiet", command: "codex", agentID: "quiet",
-                            sessionID: "session-quiet", runState: .running, activityState: .done, updatedAt: "2026-08-14T09:01:00Z", canStop: true),
+                            sessionID: "session-quiet", runState: .running, activityState: .done, updatedAt: "2026-08-14T09:01:00Z", brief: nil,
+                            briefUpdatedAt: nil, canStop: true),
                     ])
             ],
             sessions: [
@@ -774,7 +776,7 @@ import workspacecore
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "agent:remote", workspaceID: "remote-workspace", name: "Remote Codex", command: "codex", agentID: "remote-agent",
                             sessionID: "remote-agent-session", runState: .running, activityState: .waiting, updatedAt: "2026-08-14T09:00:00Z",
-                            canStop: true)
+                            brief: nil, briefUpdatedAt: nil, canStop: true)
                     ])
             ],
             sessions: [
@@ -1073,7 +1075,8 @@ import workspacecore
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "agent:agent-1", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "agent-1",
-                            sessionID: "session-agent", runState: .running, activityState: .waiting, updatedAt: "2026-06-28T09:00:00Z", canStop: true)
+                            sessionID: "session-agent", runState: .running, activityState: .waiting, updatedAt: "2026-06-28T09:00:00Z", brief: nil,
+                            briefUpdatedAt: nil, canStop: true)
                     ])
             ], sessions: [])
 
@@ -1323,7 +1326,8 @@ import workspacecore
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "agent:running-agent", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "running-agent",
-                            sessionID: "session-starting-agent", runState: .running, activityState: .waiting, canStop: true)
+                            sessionID: "session-starting-agent", runState: .running, activityState: .waiting, brief: nil, briefUpdatedAt: nil,
+                            canStop: true)
                     ])
             ], sessions: [session])
 

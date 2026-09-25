@@ -10,54 +10,78 @@ import spacesterminalcore
     import SQLite3
 #endif
 
-/// Behavior coverage for the schema-v2 orchestration surface: explicit notes, subscription edges,
-/// hook-signal readiness, and the v1→v2 migration carrying existing agent rows forward.
+/// Behavior coverage for the orchestration surface: agent briefs, subscription edges, hook-signal
+/// readiness, and the migrations carrying existing agent rows forward.
 final class AgentOrchestrationStoreTests: XCTestCase {
 
     override func setUpWithError() throws { try useIsolatedSpacesProfile() }
 
-    func testAnnotatedNoteSurvivesStatusSignalCycle() throws {
+    func testBriefSurvivesStatusSignalCycle() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
-        let agent = try orchestrator.registerAgentWindow(
+        _ = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "agent-session", status: .idle)
-        try store.setAgentSessionNote(id: agent.id, note: "review the auth flow")
+        _ = try orchestrator.writeAgentBrief(terminalSessionID: "agent-session", markdown: "# Reviewing the auth flow")
 
-        // A working then blocked signal re-upserts the agent row with a nil note; the annotation must
-        // be preserved through both.
+        // A working then blocked signal re-upserts the agent row; the brief must be preserved through both.
         _ = try orchestrator.updateAgentWindowStatus(
             workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .spinning)
         let afterWorking = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
-        XCTAssertEqual(afterWorking.note, "review the auth flow")
+        XCTAssertEqual(afterWorking.brief, "# Reviewing the auth flow")
         XCTAssertEqual(afterWorking.status, .spinning)
 
         _ = try orchestrator.updateAgentWindowStatus(
             workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .waiting)
         let afterBlocked = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
-        XCTAssertEqual(afterBlocked.note, "review the auth flow")
+        XCTAssertEqual(afterBlocked.brief, "# Reviewing the auth flow")
         XCTAssertEqual(afterBlocked.status, .waiting)
     }
 
-    func testSetAgentSessionNoteWithEmptyStringClearsNote() throws {
+    /// A hook signal upserts a record built from a snapshot it read earlier, and the agent writes its brief
+    /// while it works, so a signal can land holding the brief from before the latest write. The upsert
+    /// must never put that older document back.
+    func testStatusUpsertFromAnOlderSnapshotKeepsTheNewerBrief() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
-        let agent = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
+        _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
+        _ = try orchestrator.writeAgentBrief(terminalSessionID: "agent-session", markdown: "first draft")
+        let staleSnapshot = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
 
-        try store.setAgentSessionNote(id: agent.id, note: "temporary")
-        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).first?.note, "temporary")
+        _ = try orchestrator.writeAgentBrief(terminalSessionID: "agent-session", markdown: "second draft")
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: staleSnapshot.id, workspaceID: staleSnapshot.workspaceID, provider: staleSnapshot.provider, label: staleSnapshot.label,
+                runtimeTargetID: staleSnapshot.runtimeTargetID, terminalTarget: staleSnapshot.terminalTarget, sessionKey: staleSnapshot.sessionKey,
+                status: .waiting, brief: staleSnapshot.brief, briefUpdatedAt: staleSnapshot.briefUpdatedAt, createdAt: staleSnapshot.createdAt,
+                updatedAt: "2026-07-14T00:00:00Z"))
 
-        try store.setAgentSessionNote(id: agent.id, note: nil)
-        XCTAssertNil(try store.agentWindows(workspaceID: workspace.id).first?.note)
+        let stored = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+        XCTAssertEqual(stored.status, .waiting)
+        XCTAssertEqual(stored.brief, "second draft")
     }
 
-    /// `updated_at` is read by macOS and iOS Alerts as the lifecycle event date and ordering key
-    /// (see `docs/implementation.md`'s `agent_sessions.note` paragraph), so annotating a waiting/done
-    /// agent must not bump it — otherwise an old blocked/finished alert would appear newly occurred.
-    func testSetAgentSessionNoteDoesNotChangeUpdatedAt() throws {
+    func testBriefWriteReplacesTheWholeDocumentAndClearRemovesIt() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
+
+        _ = try orchestrator.writeAgentBrief(terminalSessionID: "agent-session", markdown: "## Status\nRunning tests\n\n## Tasks\n- [ ] fix")
+        _ = try orchestrator.writeAgentBrief(terminalSessionID: "agent-session", markdown: "## Status\nDone")
+        XCTAssertEqual(try orchestrator.readAgentBrief(terminalSessionID: "agent-session").brief, "## Status\nDone")
+
+        let cleared = try orchestrator.clearAgentBrief(terminalSessionID: "agent-session")
+        XCTAssertNil(cleared.briefSummary)
+        XCTAssertNil(try orchestrator.readAgentBrief(terminalSessionID: "agent-session").brief)
+    }
+
+    /// `updated_at` is read by macOS and iOS Alerts as the lifecycle event date and ordering key, so
+    /// writing or clearing a waiting/done agent's brief must not bump it (an old blocked or finished alert
+    /// would appear newly occurred). Each write and each clear dates itself on `brief_updated_at` instead.
+    func testBriefWritesMoveBriefUpdatedAtButNeverUpdatedAt() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
@@ -66,13 +90,20 @@ final class AgentOrchestrationStoreTests: XCTestCase {
 
         let lifecycleTimestamp = "2026-07-14T00:00:00Z"
         try store.updateAgentWindowStatus(id: agent.id, status: .waiting, updatedAt: lifecycleTimestamp)
+        XCTAssertNil(try orchestrator.readAgentBrief(terminalSessionID: "agent-session").updatedAt, "a brief never written has no timestamp")
+
+        let written = try orchestrator.writeAgentBrief(terminalSessionID: "agent-session", markdown: "Reviewing the auth flow")
+        XCTAssertEqual(written.updatedAt, lifecycleTimestamp)
+        XCTAssertNotNil(written.briefUpdatedAt)
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).first?.updatedAt, lifecycleTimestamp)
 
-        try store.setAgentSessionNote(id: agent.id, note: "review the auth flow")
-
-        let afterAnnotate = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
-        XCTAssertEqual(afterAnnotate.note, "review the auth flow")
-        XCTAssertEqual(afterAnnotate.updatedAt, lifecycleTimestamp)
+        try store.setAgentSessionBrief(id: agent.id, brief: "Reviewing the auth flow", updatedAt: "2026-07-15T00:00:00Z")
+        _ = try orchestrator.clearAgentBrief(terminalSessionID: "agent-session")
+        let afterClear = try orchestrator.readAgentBrief(terminalSessionID: "agent-session")
+        XCTAssertNil(afterClear.brief)
+        XCTAssertNotNil(afterClear.updatedAt)
+        XCTAssertNotEqual(afterClear.updatedAt, "2026-07-15T00:00:00Z", "a clear stamps its own time")
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).first?.updatedAt, lifecycleTimestamp)
     }
 
     func testSubscriptionInsertListAndRestrictBlocksBypassDelete() throws {
@@ -203,7 +234,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         XCTAssertEqual(try store.lastAgentSignalAt(agentSessionID: agent.id), "2026-07-14T11:00:00Z")
     }
 
-    func testMigrationFromV1CarriesAgentRowForwardAndEnablesAnnotate() throws {
+    func testMigrationFromV1CarriesAgentRowForwardAndEnablesBrief() throws {
         let dir = try makeTempDirectory()
         let dbPath = dir.appendingPathComponent("v1.db").path
         try createV1Database(at: dbPath, workspaceID: "workspace-1", agentID: "agent-1", terminalSessionID: "agent-session")
@@ -214,10 +245,10 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         let migrated = try XCTUnwrap(store.agentWindows(workspaceID: "workspace-1").first)
         XCTAssertEqual(migrated.id, "agent-1")
         XCTAssertEqual(migrated.terminalTrackingID, "agent-session")
-        XCTAssertNil(migrated.note)
+        XCTAssertNil(migrated.brief)
 
-        try store.setAgentSessionNote(id: "agent-1", note: "carried forward")
-        XCTAssertEqual(try store.agentWindows(workspaceID: "workspace-1").first?.note, "carried forward")
+        try store.setAgentSessionBrief(id: "agent-1", brief: "carried forward", updatedAt: "2026-07-14T00:01:00Z")
+        XCTAssertEqual(try store.agentWindows(workspaceID: "workspace-1").first?.brief, "carried forward")
 
         // The new subscriptions table exists post-migration and accepts an edge to the carried-forward row.
         // Its FK migrates forward as ON DELETE RESTRICT, so a bypass delete of the watched row is rejected.
@@ -274,10 +305,10 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         // Opening the store runs the v3→v4 migration in place.
         let store = try SQLiteStore(path: dbPath)
 
-        // Existing agent, note, and pending-notification data survive the migration.
+        // Existing agent, note (carried into the brief), and pending-notification data survive the migration.
         let migrated = try XCTUnwrap(store.agentWindows(workspaceID: "workspace-1").first)
         XCTAssertEqual(migrated.id, "agent-1")
-        XCTAssertEqual(migrated.note, "carried")
+        XCTAssertEqual(migrated.brief, "carried")
         XCTAssertEqual(try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub").count, 1)
 
         // The new cross-device watch table exists post-migration and accepts a remote-agent id.
@@ -286,8 +317,8 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         XCTAssertEqual(try store.agentRemoteSubscribers(deviceID: "dev-1", agentSessionID: "remote-child"), ["local-A"])
     }
 
-    /// A profile written before agent rows could be renamed keeps every row it had — label, note, and
-    /// detected kind — with no rename stored, so each row still reads as the label its agent reports.
+    /// A profile written before agent rows could be renamed keeps every row it had (label, note carried into the
+    /// brief, and detected kind) with no rename stored, so each row still reads as the label its agent reports.
     /// Renaming then works on the carried-forward row.
     func testMigrationFromV11CarriesAgentRowForwardAndEnablesRename() throws {
         let dir = try makeTempDirectory()
@@ -300,7 +331,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         let migrated = try XCTUnwrap(store.agentWindows(workspaceID: "workspace-1").first)
         XCTAssertEqual(migrated.id, "agent-1")
         XCTAssertEqual(migrated.label, "Claude Code CLI")
-        XCTAssertEqual(migrated.note, "carried")
+        XCTAssertEqual(migrated.brief, "carried")
         XCTAssertEqual(migrated.detectedAgentKind, "claude")
         XCTAssertNil(migrated.userLabel)
 
@@ -308,20 +339,53 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         XCTAssertEqual(try store.agentWindow(id: "agent-1")?.userLabel, "Reviewer")
     }
 
+    /// A profile written while agents carried a one-line note turns each note into that agent's brief,
+    /// dated by the row's lifecycle time since the note kept no time of its own, and leaves a row with no
+    /// note (or an empty one) without a brief. The lifecycle time itself does not move, and a status signal
+    /// afterwards keeps the carried brief.
+    func testMigrationFromV24TurnsEachNoteIntoTheAgentsBrief() throws {
+        let dir = try makeTempDirectory()
+        let dbPath = dir.appendingPathComponent("v24.db").path
+        try createV24Database(at: dbPath, workspaceID: "workspace-1")
+
+        let store = try SQLiteStore(path: dbPath)
+
+        let annotated = try XCTUnwrap(store.agentWindow(id: "agent-noted"))
+        XCTAssertEqual(annotated.brief, "review the auth flow")
+        XCTAssertEqual(annotated.briefUpdatedAt, "2026-07-14T09:00:00Z")
+        XCTAssertEqual(annotated.updatedAt, "2026-07-14T09:00:00Z")
+        XCTAssertEqual(annotated.detectedAgentKind, "claude")
+        XCTAssertEqual(annotated.launchCommand, "claude --resume")
+        for id in ["agent-empty-note", "agent-no-note"] {
+            let row = try XCTUnwrap(store.agentWindow(id: id))
+            XCTAssertNil(row.brief, "\(id) has no brief")
+            XCTAssertNil(row.briefUpdatedAt, "\(id) has no brief timestamp")
+        }
+
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: annotated.id, workspaceID: annotated.workspaceID, provider: annotated.provider, label: annotated.label,
+                sessionKey: annotated.sessionKey, status: .waiting, createdAt: annotated.createdAt, updatedAt: "2026-07-14T10:00:00Z"))
+        let afterSignal = try XCTUnwrap(store.agentWindow(id: "agent-noted"))
+        XCTAssertEqual(afterSignal.status, .waiting)
+        XCTAssertEqual(afterSignal.brief, "review the auth flow")
+    }
+
     // MARK: - Shared orchestration rows (profile command + Device API)
 
-    func testAgentSessionRowsCarryNoteProjectContextAndReadiness() throws {
+    func testAgentSessionRowsCarryBriefHeadlineProjectContextAndReadiness() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
         let (project, workspace) = try makeProjectAndWorkspace(store: store)
         let agent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "agent-session", status: .waiting)
-        try store.setAgentSessionNote(id: agent.id, note: "review auth")
+        try store.setAgentSessionBrief(id: agent.id, brief: "## Review auth\n\nStep 2 of 3", updatedAt: "2026-07-14T09:00:00Z")
 
-        // No hook signal yet: the row carries its note and context but is not ready.
+        // No hook signal yet: the row carries its brief's headline and context but is not ready.
         let beforeSignal = try XCTUnwrap(orchestrator.agentSessionRows(sessionID: "agent-session").first)
         XCTAssertEqual(beforeSignal.terminalSessionID, "agent-session")
-        XCTAssertEqual(beforeSignal.note, "review auth")
+        XCTAssertEqual(beforeSignal.briefSummary, "Review auth")
+        XCTAssertEqual(beforeSignal.briefUpdatedAt, "2026-07-14T09:00:00Z")
         XCTAssertEqual(beforeSignal.status, "waiting")
         XCTAssertEqual(beforeSignal.projectID, project.id)
         XCTAssertEqual(beforeSignal.workspaceID, workspace.id)
@@ -421,35 +485,98 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         XCTAssertEqual(row.label, "Reviewer")
     }
 
-    func testAnnotateAgentSessionSanitizesControlCharacters() throws {
+    func testWriteAgentBriefStoresTheSanitizedDocument() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
 
-        let updated = try orchestrator.annotateAgentSession(terminalSessionID: "agent-session", note: "line one\nline two\u{07}")
+        let updated = try orchestrator.writeAgentBrief(terminalSessionID: "agent-session", markdown: "  # Status\r\nline two\u{07}\n")
 
-        // Embedded newlines and control characters are stripped so the note stays a single safe line.
-        XCTAssertEqual(updated.note, "line oneline two")
-        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).first?.note, "line oneline two")
+        // Line structure survives; the bell and the CR are dropped and the document is trimmed.
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).first?.brief, "# Status\nline two")
+        XCTAssertEqual(updated.briefSummary, "Status")
     }
 
-    func testAnnotateAgentSessionWithEmptyNoteClearsAndReportsNilNote() throws {
+    func testWriteAgentBriefWithWhitespaceOnlyMarkdownClearsTheBrief() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
 
-        _ = try orchestrator.annotateAgentSession(terminalSessionID: "agent-session", note: "temporary")
-        let cleared = try orchestrator.annotateAgentSession(terminalSessionID: "agent-session", note: "  ")
-        XCTAssertNil(cleared.note)
+        _ = try orchestrator.writeAgentBrief(terminalSessionID: "agent-session", markdown: "temporary")
+        let cleared = try orchestrator.writeAgentBrief(terminalSessionID: "agent-session", markdown: " \n\t ")
+        XCTAssertNil(cleared.briefSummary)
+        XCTAssertNil(try orchestrator.readAgentBrief(terminalSessionID: "agent-session").brief)
     }
 
-    func testAnnotateAgentSessionThrowsWhenNoAgentRow() throws {
+    /// `spaces agent brief write` and the MCP write tool print the daemon's message, so a write that
+    /// cleared the brief (nothing left after sanitizing) reports the clear, in the words a clear uses.
+    func testAgentBriefWriteMessageReportsAClearWhenNothingSurvivesSanitizing() {
+        XCTAssertEqual(WorkspaceOrchestrator.agentBriefWriteMessage(markdown: "## Status\nRunning tests"), "Wrote agent brief.")
+        for cleared in ["", " \r\n\t ", "\u{07}\u{1B}"] {
+            XCTAssertEqual(WorkspaceOrchestrator.agentBriefWriteMessage(markdown: cleared), "Cleared agent brief.", cleared.debugDescription)
+        }
+        XCTAssertEqual(WorkspaceOrchestrator.agentBriefClearedMessage, "Cleared agent brief.")
+    }
+
+    /// A brief needs no hook: an agent foreground detection found, which has never signaled, keeps one too.
+    func testWriteAgentBriefWorksForADetectedAgentThatNeverSignaled() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let (project, workspace) = try makeProjectAndWorkspace(store: store)
+        try orchestrator.insertAdHocDetectedAgent(
+            detectedAgent: AdHocDetectedForegroundAgent(kind: "claude", label: "Claude Code", displayCommand: "claude", launchCommand: "claude"),
+            workspace: workspace, sessionID: "detected-session")
+        XCTAssertEqual(try orchestrator.agentSessionRows(sessionID: "detected-session").first?.projectID, project.id)
+        XCTAssertNil(try orchestrator.agentSessionRows(sessionID: "detected-session").first?.lastSignalAt)
+
+        _ = try orchestrator.writeAgentBrief(terminalSessionID: "detected-session", markdown: "Investigating the flaky test")
+        XCTAssertEqual(try orchestrator.readAgentBrief(terminalSessionID: "detected-session").brief, "Investigating the flaky test")
+    }
+
+    func testBriefCommandsThrowWhenNoAgentRow() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
         _ = try makeProjectAndWorkspace(store: store)
-        XCTAssertThrowsError(try orchestrator.annotateAgentSession(terminalSessionID: "missing-session", note: "note"))
+        let expected = "No agent session for terminal missing-session. A brief needs a coding-agent session (detected or hook-signaled)."
+        XCTAssertThrowsError(try orchestrator.writeAgentBrief(terminalSessionID: "missing-session", markdown: "brief")) { error in
+            XCTAssertTrue(error.localizedDescription.contains(expected), error.localizedDescription)
+        }
+        XCTAssertThrowsError(try orchestrator.readAgentBrief(terminalSessionID: "missing-session"))
+        XCTAssertThrowsError(try orchestrator.clearAgentBrief(terminalSessionID: "missing-session"))
+    }
+
+    // MARK: - Brief sanitization
+
+    func testSanitizedAgentBriefNormalizesLineEndingsAndKeepsTabs() {
+        XCTAssertEqual(WorkspaceOrchestrator.sanitizedAgentBrief("## Status\r\n\tindented\r\ndone"), "## Status\n\tindented\ndone")
+    }
+
+    func testSanitizedAgentBriefStripsControlCharactersOtherThanNewlineAndTab() {
+        XCTAssertEqual(WorkspaceOrchestrator.sanitizedAgentBrief("a\u{1B}[31mred\u{1B}[0m\u{07}\u{00}\nb\rc"), "a[31mred[0m\nbc")
+    }
+
+    func testSanitizedAgentBriefKeepsEmojiJoinersAndVariationSelectors() {
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"
+        let heart = "\u{2764}\u{FE0F}"
+        XCTAssertEqual(WorkspaceOrchestrator.sanitizedAgentBrief("Team \(family) \u{07}ships\u{1B} \(heart)"), "Team \(family) ships \(heart)")
+    }
+
+    func testSanitizedAgentBriefTrimsSurroundingWhitespace() {
+        XCTAssertEqual(WorkspaceOrchestrator.sanitizedAgentBrief("\n\n  # Title  \n\n"), "# Title")
+    }
+
+    func testSanitizedAgentBriefCapsAt8000Characters() throws {
+        let sanitized = try XCTUnwrap(WorkspaceOrchestrator.sanitizedAgentBrief(String(repeating: "é", count: 9000)))
+        XCTAssertEqual(sanitized.count, 8000)
+        XCTAssertEqual(WorkspaceOrchestrator.agentBriefCharacterLimit, 8000)
+    }
+
+    func testSanitizedAgentBriefOfWhitespaceOnlyIsNil() {
+        XCTAssertNil(WorkspaceOrchestrator.sanitizedAgentBrief(""))
+        XCTAssertNil(WorkspaceOrchestrator.sanitizedAgentBrief(" \r\n\t\n "))
+        XCTAssertNil(WorkspaceOrchestrator.sanitizedAgentBrief("\u{07}\u{1B}"))
     }
 
     // MARK: - Fixtures
@@ -574,6 +701,48 @@ final class AgentOrchestrationStoreTests: XCTestCase {
             let message = errorMessage.map { String(cString: $0) } ?? "unknown sqlite error"
             if let errorMessage { sqlite3_free(errorMessage) }
             XCTFail("Failed seeding v3 fixture: \(message)")
+            return
+        }
+    }
+
+    /// Writes a minimal schema-v24 database (`migration_state` at 24, the v24 `agent_sessions` shape with its
+    /// `note` column, and the `runtime_targets` table the agent read joins) with three agent rows: one with a
+    /// note, one with an empty note, and one with none. The migrator upgrades it to the current version on
+    /// open.
+    private func createV24Database(at path: String, workspaceID: String) throws {
+        var handle: OpaquePointer?
+        guard sqlite3_open(path, &handle) == SQLITE_OK, let db = handle else {
+            XCTFail("Failed opening fixture database at \(path)")
+            return
+        }
+        defer { sqlite3_close(db) }
+        let sql = """
+            CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+            INSERT INTO migration_state(current_version) VALUES (24);
+            CREATE TABLE runtime_targets (
+              id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, type TEXT NOT NULL, name TEXT, detail TEXT,
+              app TEXT NOT NULL, tracking_id TEXT, order_index INTEGER NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE agent_sessions (
+              id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, provider TEXT NOT NULL, label TEXT, user_label TEXT,
+              status TEXT NOT NULL DEFAULT 'idle', runtime_target_id TEXT, terminal_session_id TEXT, session_key TEXT,
+              note TEXT, detected_agent_kind TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, launch_command TEXT
+            );
+            INSERT INTO agent_sessions(
+              id, workspace_id, provider, label, status, terminal_session_id, note, detected_agent_kind, created_at, updated_at, launch_command)
+            VALUES
+              ('agent-noted', '\(workspaceID)', 'spaces', 'Claude Code CLI', 'spinning', 'session-noted', 'review the auth flow', 'claude',
+               '2026-07-14T08:00:00Z', '2026-07-14T09:00:00Z', 'claude --resume'),
+              ('agent-empty-note', '\(workspaceID)', 'spaces', 'Codex', 'idle', 'session-empty', '', 'codex',
+               '2026-07-14T08:00:00Z', '2026-07-14T09:00:00Z', NULL),
+              ('agent-no-note', '\(workspaceID)', 'spaces', 'Reviewer', 'idle', 'session-none', NULL, NULL,
+               '2026-07-14T08:00:00Z', '2026-07-14T09:00:00Z', NULL);
+            """
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        guard sqlite3_exec(db, sql, nil, nil, &errorMessage) == SQLITE_OK else {
+            let message = errorMessage.map { String(cString: $0) } ?? "unknown sqlite error"
+            if let errorMessage { sqlite3_free(errorMessage) }
+            XCTFail("Failed seeding v24 fixture: \(message)")
             return
         }
     }

@@ -949,12 +949,27 @@ public enum SpacesDeviceClient {
         return response.agentSessions ?? []
     }
 
-    /// Sets (or clears, with an empty note) a coding-agent session's note on a paired device
-    /// (`spaces agent annotate --device`). Returns the updated row.
-    @discardableResult public static func annotateAgentSession(sessionID: String, note: String, context: DeviceRequestContext) throws
-        -> [SpacesDeviceAgentSessionRow]
-    {
-        let response = try request(.init(command: .annotateAgentSession(.init(sessionID: sessionID, note: note))), context: context)
+    /// Replaces a coding agent's brief on a paired device (`spaces agent brief write --device`). Returns the
+    /// whole response: its `agentSessions` carries the updated row, and its `message` says whether the
+    /// write stored a document or cleared the brief, which only the device's daemon knows after sanitizing.
+    @discardableResult public static func writeAgentBrief(sessionID: String, markdown: String, context: DeviceRequestContext) throws
+        -> SpacesDeviceAPIResponse
+    { try request(.init(command: .writeAgentBrief(.init(sessionID: sessionID, markdown: markdown))), context: context) }
+
+    /// A coding agent's full brief on a paired device (`spaces agent brief read --device`). The result's
+    /// `brief` is nil when the agent has none.
+    public static func readAgentBrief(sessionID: String, context: DeviceRequestContext) throws -> SpacesDeviceAgentBriefResult {
+        let response = try request(.init(command: .readAgentBrief(.init(sessionID: sessionID))), context: context)
+        guard let brief = response.agentBrief else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
+        return brief
+    }
+
+    /// Clears a coding agent's brief on a paired device (`spaces agent brief clear --device`). Returns the
+    /// updated row.
+    @discardableResult public static func clearAgentBrief(sessionID: String, context: DeviceRequestContext) throws -> [SpacesDeviceAgentSessionRow] {
+        let response = try request(.init(command: .clearAgentBrief(.init(sessionID: sessionID))), context: context)
         return response.agentSessions ?? []
     }
 

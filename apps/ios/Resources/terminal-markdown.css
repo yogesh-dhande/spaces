@@ -64,6 +64,14 @@ p, ul, ol, blockquote, table, pre { margin: 0 0 0.9em; }
 ul, ol { padding-left: 1.5em; }
 li + li { margin-top: 0.2em; }
 
+/* A task-list item's checkbox takes the bullet's place, so its text lines up with plain items. */
+li.task-list-item { list-style: none; }
+li.task-list-item input[type="checkbox"] {
+  margin: 0 0.45em 0 -1.35em;
+  vertical-align: -0.1em;
+  accent-color: var(--md-link);
+}
+
 a { color: var(--md-link); text-decoration: none; }
 a:hover { text-decoration: underline; }
 

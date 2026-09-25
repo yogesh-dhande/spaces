@@ -29,9 +29,9 @@ public struct SpacesCommand: ParsableCommand {
               - `workspace restart` forces a full stop and relaunch for a workspace.
               - `terminal stop <session>` ends one terminal session on this machine the way stopping its runtime target in the app does: the daemon tears the session down, its row disappears, and its pane closes. A session that has already ended is refused.
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for the current Spaces terminal session, or no-ops outside one.
-              - `agent list`/`agent status` report coding-agent sessions with status, note, project/workspace context, and a spaces://terminal deep link. `agent annotate` sets an explicit note (empty clears it). `status`/`annotate` default the session to SPACES_TERMINAL_TRACKING_ID.
+              - `agent list`/`agent status` report coding-agent sessions with status, the first line of the agent's brief, project/workspace context, and a spaces://terminal deep link. `agent brief write [markdown]` replaces the agent's brief, a markdown status page Spaces shows beside its terminal (markdown read from stdin when omitted; empty clears it); `agent brief read` prints it and `agent brief clear` removes it. `status` and `brief` default the session to SPACES_TERMINAL_TRACKING_ID.
               - `agent spawn --command <cmd>` starts a supported coding agent (\(CodingAgent.commandListText)) in a new terminal and blocks until the detected agent is ready for input: its foreground kind is identified and its TUI enables bracketed paste (not until a hook signal — a promptless Codex never signals). It delivers no prompt — the orchestrator sends the prompt with `terminal send text --submit` and confirms work with `terminal tail`/`agent status`. It auto-subscribes the current terminal once the child has an agent row. `agent kill <session>` terminates the session, and `agent subscribe`/`unsubscribe <session>` record a watch edge (subscriber defaults to SPACES_TERMINAL_TRACKING_ID). Keystrokes go to a child through `terminal send`; agent status comes only from the agent's own signals, so sending input never moves it.
-              - `agent spawn`/`list`/`status`/`annotate`/`kill`/`subscribe`/`unsubscribe` accept `--device <name-or-id>` to act on a paired device; remote `spawn` requires `--workspace`, auto-subscribes the current terminal to the remote child, and remote `kill` works before the child signals (it terminates the session directly when no agent row exists yet). `agent subscribe --device` records a cross-device watch: the current terminal receives the same blocked/done/exited notification lines for the remote child, delivered by this machine's daemon (device-qualified deep links). A `--device` naming this machine is validated like a local watch (self-edges and subscription cycles are rejected); cross-device cycles to a remote device cannot be detected (the remote's own subscriptions are not queryable locally).
+              - `agent spawn`/`list`/`status`/`brief`/`kill`/`subscribe`/`unsubscribe` accept `--device <name-or-id>` to act on a paired device; remote `spawn` requires `--workspace`, auto-subscribes the current terminal to the remote child, and remote `kill` works before the child signals (it terminates the session directly when no agent row exists yet). `agent subscribe --device` records a cross-device watch: the current terminal receives the same blocked/done/exited notification lines for the remote child, delivered by this machine's daemon (device-qualified deep links). A `--device` naming this machine is validated like a local watch (self-edges and subscription cycles are rejected); cross-device cycles to a remote device cannot be detected (the remote's own subscriptions are not queryable locally).
             """, version: AppVersion.current,
         subcommands: [
             ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self, DaemonCommand.self,
@@ -233,7 +233,7 @@ struct AgentCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "agent", abstract: "Manage and orchestrate coding-agent sessions.",
         subcommands: [
-            AgentSignalCommand.self, AgentListCommand.self, AgentStatusCommand.self, AgentAnnotateCommand.self, AgentSpawnCommand.self,
+            AgentSignalCommand.self, AgentListCommand.self, AgentStatusCommand.self, AgentBriefCommand.self, AgentSpawnCommand.self,
             AgentKillCommand.self, AgentSubscribeCommand.self, AgentUnsubscribeCommand.self,
         ])
 }
@@ -243,33 +243,36 @@ struct AgentCommand: ParsableCommand {
 /// `open` deep link); missing optional values render as `-`. `deviceID`, when present, qualifies the
 /// `open` deep link so it points at the agent on its paired device (`?device=<id>`). `signaled=`
 /// reports whether the agent has emitted at least one lifecycle hook signal (`lastSignalAt` is set) —
-/// informational hook-health, distinct from spawn's input-readiness gate.
+/// informational hook-health, distinct from spawn's input-readiness gate. `brief=` is the brief's one-line
+/// headline, never the document, so the row stays one line; `agent brief read` prints the document.
 func agentSessionRow(
-    terminalSessionID: String, agent: String?, status: String, signaled: Bool, note: String?, projectName: String, workspaceName: String,
-    branch: String?, deviceID: String? = nil
+    terminalSessionID: String, agent: String?, status: String, signaled: Bool, briefSummary: String?, briefUpdatedAt: String?, projectName: String,
+    workspaceName: String, branch: String?, deviceID: String? = nil
 ) -> String {
     [
-        terminalSessionID, "agent=\(agent ?? "-")", "status=\(status)", "signaled=\(signaled)", "note=\(note ?? "-")", "project=\(projectName)",
-        "workspace=\(workspaceName)", "branch=\(branch ?? "-")",
+        terminalSessionID, "agent=\(agent ?? "-")", "status=\(status)", "signaled=\(signaled)", "brief=\(briefSummary ?? "-")",
+        "briefUpdatedAt=\(briefUpdatedAt ?? "-")", "project=\(projectName)", "workspace=\(workspaceName)", "branch=\(branch ?? "-")",
         "open=\(SpacesTerminalDeepLink(sessionID: terminalSessionID, deviceID: deviceID).absoluteString)",
     ].joined(separator: "\t")
 }
 
 func agentSessionRow(_ row: TerminalServiceAgentSessionRow) -> String {
     agentSessionRow(
-        terminalSessionID: row.terminalSessionID ?? row.id, agent: row.agent, status: row.status, signaled: row.lastSignalAt != nil, note: row.note,
-        projectName: row.projectName, workspaceName: row.workspaceName, branch: row.branch)
+        terminalSessionID: row.terminalSessionID ?? row.id, agent: row.agent, status: row.status, signaled: row.lastSignalAt != nil,
+        briefSummary: row.briefSummary, briefUpdatedAt: row.briefUpdatedAt, projectName: row.projectName, workspaceName: row.workspaceName,
+        branch: row.branch)
 }
 
 /// Renders a paired-device agent row, qualifying the `open` deep link with the device record id so a
 /// click resolves the session on its owning device.
 func agentSessionRow(_ row: SpacesDeviceAgentSessionRow, deviceID: String) -> String {
     agentSessionRow(
-        terminalSessionID: row.terminalSessionID ?? row.id, agent: row.agent, status: row.status, signaled: row.lastSignalAt != nil, note: row.note,
-        projectName: row.projectName, workspaceName: row.workspaceName, branch: row.branch, deviceID: deviceID)
+        terminalSessionID: row.terminalSessionID ?? row.id, agent: row.agent, status: row.status, signaled: row.lastSignalAt != nil,
+        briefSummary: row.briefSummary, briefUpdatedAt: row.briefUpdatedAt, projectName: row.projectName, workspaceName: row.workspaceName,
+        branch: row.branch, deviceID: deviceID)
 }
 
-/// Resolves the terminal session id to act on for `status`/`annotate`, defaulting to the current Spaces
+/// Resolves the terminal session id to act on for `status`/`brief`, defaulting to the current Spaces
 /// terminal's `SPACES_TERMINAL_TRACKING_ID`. Unlike `agent signal`, these commands always target a
 /// specific session, so a missing id is an error rather than a silent no-op.
 func resolvedAgentSessionID(_ session: String?, environment: [String: String] = ProcessInfo.processInfo.environment) throws -> String {
@@ -352,11 +355,81 @@ struct AgentStatusCommand: ParsableCommand {
     }
 }
 
-struct AgentAnnotateCommand: ParsableCommand {
+struct AgentBriefCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "annotate", abstract: "Set (or clear, with an empty note) a coding-agent session's note.")
+        commandName: "brief", abstract: "Write, read, or clear a coding agent's brief, the markdown status page Spaces shows beside its terminal.",
+        subcommands: [AgentBriefWriteCommand.self, AgentBriefReadCommand.self, AgentBriefClearCommand.self])
+}
 
-    @Argument(help: "Note text. Pass an empty string to clear the note.") var note: String
+struct AgentBriefWriteCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "write", abstract: "Replace a coding agent's brief with a markdown document (an empty one clears it).")
+
+    // A markdown argument that starts with `-` (a list-first brief) parses as an option, so the help names
+    // the two spellings that pass it through: `--` before it, or the document on standard input.
+    @Argument(help: "The brief as markdown. Read from standard input when omitted. Put -- before markdown that starts with -.") var markdown: String?
+    @Option(name: .long, help: "Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID.") var session: String?
+    @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local sessions.") var device: String?
+
+    /// Prints the daemon's message on both paths rather than a fixed confirmation: the daemon words the
+    /// outcome (`WorkspaceOrchestrator.agentBriefWriteMessage`), so markdown that sanitizes to nothing
+    /// reports the clear it caused instead of claiming a write.
+    func run() throws {
+        let context = CLIContext()
+        let sessionID = try resolvedAgentSessionID(session)
+        let markdown = resolvedMarkdown(standardInput: .standardInput)
+        if let device {
+            let record = try SpacesPairedDeviceSelection.resolve(device)
+            let response = try SpacesDeviceClient.writeAgentBrief(
+                sessionID: sessionID, markdown: markdown, context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp()))
+            context.output.emit(response.message)
+            return
+        }
+        let response = try TerminalService.sendProfileCommand(.agentBriefWrite(.init(sessionID: sessionID, markdown: markdown)))
+        context.output.emit(response.message)
+    }
+
+    /// The document to write: the positional argument when given, else everything on `standardInput`, so
+    /// an agent can pipe a multi-line document in without shell-quoting it.
+    func resolvedMarkdown(standardInput: FileHandle) -> String {
+        if let markdown { return markdown }
+        return String(decoding: standardInput.readDataToEndOfFile(), as: UTF8.self)
+    }
+}
+
+struct AgentBriefReadCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "read", abstract: "Print a coding agent's brief as markdown. Exits 1 when the agent has no brief.")
+
+    @Option(name: .long, help: "Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID.") var session: String?
+    @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local sessions.") var device: String?
+
+    func run() throws {
+        let context = CLIContext()
+        let sessionID = try resolvedAgentSessionID(session)
+        let brief: String?
+        if let device {
+            let record = try SpacesPairedDeviceSelection.resolve(device)
+            brief = try SpacesDeviceClient.readAgentBrief(
+                sessionID: sessionID, context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp())
+            ).brief
+        } else {
+            brief = try TerminalService.sendProfileCommand(.agentBriefRead(sessionID: sessionID)).agentBrief?.brief
+        }
+        // No brief is an answer, not a failure of the command, but it exits 1 so a script can tell "nothing
+        // to read" apart from an empty document, and the notice goes to stderr so stdout only ever carries
+        // markdown.
+        guard let brief else {
+            context.output.emitError("No brief for terminal \(sessionID).")
+            throw ExitCode.failure
+        }
+        context.output.emit(brief)
+    }
+}
+
+struct AgentBriefClearCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "clear", abstract: "Clear a coding agent's brief.")
+
     @Option(name: .long, help: "Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID.") var session: String?
     @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local sessions.") var device: String?
 
@@ -365,12 +438,12 @@ struct AgentAnnotateCommand: ParsableCommand {
         let sessionID = try resolvedAgentSessionID(session)
         if let device {
             let record = try SpacesPairedDeviceSelection.resolve(device)
-            let rows = try SpacesDeviceClient.annotateAgentSession(
-                sessionID: sessionID, note: note, context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp()))
-            context.output.emit(rows.first?.note == nil ? "Cleared agent note." : "Annotated agent session.")
+            try SpacesDeviceClient.clearAgentBrief(
+                sessionID: sessionID, context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp()))
+            context.output.emit(WorkspaceOrchestrator.agentBriefClearedMessage)
             return
         }
-        let response = try TerminalService.sendProfileCommand(.agentAnnotate(.init(sessionID: sessionID, note: note)))
+        let response = try TerminalService.sendProfileCommand(.agentBriefClear(sessionID: sessionID))
         context.output.emit(response.message)
     }
 }

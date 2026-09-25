@@ -431,7 +431,7 @@ extension SpacesDeviceWorkspaceCodingAgentRow {
     fileprivate func demoStopped(at updatedAt: String) -> SpacesDeviceWorkspaceCodingAgentRow {
         SpacesDeviceWorkspaceCodingAgentRow(
             id: id, workspaceID: workspaceID, name: name, command: command, agentID: agentID, sessionID: sessionID, runState: .exited,
-            activityState: .exited, updatedAt: updatedAt, canStop: false)
+            activityState: .exited, updatedAt: updatedAt, brief: brief, briefUpdatedAt: briefUpdatedAt, canStop: false)
     }
 }
 

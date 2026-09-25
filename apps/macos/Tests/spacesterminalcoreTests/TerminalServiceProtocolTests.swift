@@ -241,7 +241,9 @@ final class TerminalServiceProtocolTests: XCTestCase {
             .agentSignal(
                 .init(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "working", agentSessionKey: .resumable("thread-9"))),
             .agentList(.init(workspaceID: "workspace-1", sessionID: "session-1")), .agentList(.init()),
-            .agentAnnotate(.init(sessionID: "session-1", note: "review the auth flow")), .agentAnnotate(.init(sessionID: "session-1", note: "")),
+            .agentBriefWrite(.init(sessionID: "session-1", markdown: "# Status\nreviewing the auth flow")),
+            .agentBriefWrite(.init(sessionID: "session-1", markdown: "")), .agentBriefRead(sessionID: "session-1"),
+            .agentBriefClear(sessionID: "session-1"),
             .agentSpawn(.init(cwd: "/tmp/work", workspaceID: "workspace-1", command: "claude", title: "Claude Code")),
             .agentSpawn(.init(cwd: "/tmp/work", command: "codex --yolo")), .agentKill(.init(sessionID: "session-1")),
             .agentSubscribe(.init(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: "agent-1")),
@@ -296,26 +298,40 @@ final class TerminalServiceProtocolTests: XCTestCase {
             agentSessions: [
                 TerminalServiceAgentSessionRow(
                     id: "agent-1", terminalSessionID: "session-1", agent: "Claude Code CLI", label: "Claude Code CLI", status: "waiting",
-                    note: "review the auth flow", projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature",
-                    workspaceDir: "/repo/workspaces/feature", branch: "feature", updatedAt: "2026-07-14T00:00:00Z",
-                    lastSignalAt: "2026-07-14T00:00:00Z"),
+                    briefSummary: "Reviewing the auth flow", briefUpdatedAt: "2026-07-14T00:00:00Z", projectID: "project-1", projectName: "Spaces",
+                    workspaceID: "workspace-1", workspaceName: "feature", workspaceDir: "/repo/workspaces/feature", branch: "feature",
+                    updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: "2026-07-14T00:00:00Z"),
                 TerminalServiceAgentSessionRow(
-                    id: "agent-2", terminalSessionID: "session-2", agent: nil, label: nil, status: "idle", note: nil, projectID: "project-1",
-                    projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature", workspaceDir: "/repo/workspaces/feature",
-                    branch: nil, updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: nil),
+                    id: "agent-2", terminalSessionID: "session-2", agent: nil, label: nil, status: "idle", briefSummary: nil, briefUpdatedAt: nil,
+                    projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature",
+                    workspaceDir: "/repo/workspaces/feature", branch: nil, updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: nil),
             ])
         let decoded = try JSONDecoder().decode(TerminalServiceProfileCommandResponse.self, from: JSONEncoder().encode(response))
         XCTAssertEqual(decoded, response)
     }
 
-    func testAgentAnnotatePayloadRejectsEmptySessionButKeepsEmptyNote() throws {
+    func testAgentBriefResponseRoundTrips() throws {
+        for brief in [
+            TerminalServiceAgentBriefResult(sessionID: "session-1", brief: "## Status\n- [ ] ship", updatedAt: "2026-07-14T00:00:00Z"),
+            TerminalServiceAgentBriefResult(sessionID: "session-1", brief: nil, updatedAt: nil),
+        ] {
+            let response = TerminalServiceProfileCommandResponse(message: "Read agent brief.", agentBrief: brief)
+            let decoded = try JSONDecoder().decode(TerminalServiceProfileCommandResponse.self, from: JSONEncoder().encode(response))
+            XCTAssertEqual(decoded, response)
+        }
+    }
+
+    func testAgentBriefCommandsRejectEmptySessionButKeepEmptyMarkdown() throws {
         let decoder = JSONDecoder()
-        // An empty note is a valid clear request; an empty session id is not.
+        // An empty document is a valid clear request; an empty session id is not.
         XCTAssertEqual(
-            try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentAnnotate":{"sessionID":"session-1","note":""}}"#.utf8)),
-            .agentAnnotate(.init(sessionID: "session-1", note: "")))
+            try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentBriefWrite":{"sessionID":"session-1","markdown":""}}"#.utf8)),
+            .agentBriefWrite(.init(sessionID: "session-1", markdown: "")))
         XCTAssertThrowsError(
-            try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentAnnotate":{"sessionID":"  ","note":"hi"}}"#.utf8)))
+            try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentBriefWrite":{"sessionID":"  ","markdown":"hi"}}"#.utf8)))
+        XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentBriefWrite":{"sessionID":"s"}}"#.utf8)))
+        XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentBriefRead":" "}"#.utf8)))
+        XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentBriefClear":""}"#.utf8)))
     }
 
     func testAgentSpawnPayloadRequiresCwdAndCommand() throws {

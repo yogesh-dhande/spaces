@@ -107,8 +107,8 @@ extension KeyedDecodingContainer {
     }
 
     /// The exact string value with no trimming or empty-to-nil collapsing — the `requiredRawString`
-    /// leniency used where an empty string is itself a meaningful, valid value (an agent note cleared to
-    /// empty) rather than "absent".
+    /// leniency used where an empty string is itself a meaningful, valid value (an agent brief cleared by
+    /// writing an empty document) rather than "absent".
     fileprivate func mcpRequiredRawString(forKey key: Key, field: String) throws -> String {
         guard case .string(let string) = try decodeIfPresent(MCPArgumentValue.self, forKey: key) else {
             throw MCPError.invalidArguments("\(field) is required.")
@@ -116,13 +116,9 @@ extension KeyedDecodingContainer {
         return string
     }
 
-    fileprivate func mcpOptionalBool(forKey key: Key) throws -> Bool? {
-        lenientOptionalBool(try decodeIfPresent(MCPArgumentValue.self, forKey: key))
-    }
+    fileprivate func mcpOptionalBool(forKey key: Key) throws -> Bool? { lenientOptionalBool(try decodeIfPresent(MCPArgumentValue.self, forKey: key)) }
 
-    fileprivate func mcpOptionalInt(forKey key: Key) throws -> Int? {
-        lenientOptionalInt(try decodeIfPresent(MCPArgumentValue.self, forKey: key))
-    }
+    fileprivate func mcpOptionalInt(forKey key: Key) throws -> Int? { lenientOptionalInt(try decodeIfPresent(MCPArgumentValue.self, forKey: key)) }
 }
 
 /// Decodes one tool's typed arguments from the raw JSON-RPC `arguments` object. Re-serializes the
@@ -291,7 +287,7 @@ struct TerminalSendArguments: Decodable {
     }
 }
 
-// MARK: - spaces_agent_list / spaces_agent_status / spaces_agent_annotate
+// MARK: - spaces_agent_list / spaces_agent_status / spaces_agent_brief_*
 
 struct AgentListArguments: Decodable {
     let workspace: String?
@@ -306,6 +302,8 @@ struct AgentListArguments: Decodable {
     }
 }
 
+/// The agent a tool addresses: `spaces_agent_status`, `spaces_agent_brief_read`, and
+/// `spaces_agent_brief_clear` all take exactly this session/device pair.
 struct AgentStatusArguments: Decodable {
     let session: String?
     let device: String?
@@ -319,18 +317,17 @@ struct AgentStatusArguments: Decodable {
     }
 }
 
-struct AgentAnnotateArguments: Decodable {
-    let note: String
+struct AgentBriefWriteArguments: Decodable {
+    let markdown: String
     let session: String?
     let device: String?
 
-    private enum CodingKeys: String, CodingKey { case note, session, device }
+    private enum CodingKeys: String, CodingKey { case markdown, session, device }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        // Decoded before `session`/`device` so a missing `note` throws first, matching the pre-refactor
-        // handler's order (`requiredRawString` before `resolvedAgentSessionID`).
-        note = try container.mcpRequiredRawString(forKey: .note, field: "note")
+        // Raw, so an empty string reaches the daemon as the clear it means rather than reading as missing.
+        markdown = try container.mcpRequiredRawString(forKey: .markdown, field: "markdown")
         session = try container.mcpOptionalString(forKey: .session)
         device = try container.mcpOptionalString(forKey: .device)
     }

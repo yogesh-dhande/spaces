@@ -95,7 +95,18 @@ extension ProcessProfileEnvironmentSuites {
             workspace(codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
                     id: Self.agentTargetKey, workspaceID: Self.workspaceID, name: Self.agentRowName, command: "codex", agentID: "agent-1",
-                    sessionID: "session-1", runState: .running, activityState: .idle, canStop: true, liveTitle: liveTitle)
+                    sessionID: "session-1", runState: .running, activityState: .idle, brief: nil, briefUpdatedAt: nil, canStop: true,
+                    liveTitle: liveTitle)
+            ])
+        }
+
+        /// The workspace's one coding agent, keeping `brief`.
+        private func briefingAgentWorkspace(brief: String?) -> SpacesDeviceWorkspaceSummary {
+            workspace(codingAgentRows: [
+                SpacesDeviceWorkspaceCodingAgentRow(
+                    id: Self.agentTargetKey, workspaceID: Self.workspaceID, name: Self.agentRowName, command: "codex", agentID: "agent-1",
+                    sessionID: "session-1", runState: .running, activityState: .waiting, brief: brief,
+                    briefUpdatedAt: brief == nil ? nil : "2026-09-25T10:00:00Z", canStop: true)
             ])
         }
 
@@ -178,6 +189,16 @@ extension ProcessProfileEnvironmentSuites {
             return found
         }
 
+        private func imageAccessibilityLabels(in view: NSView) -> [String] {
+            var found: [String] = []
+            func walk(_ view: NSView) {
+                if let image = view as? NSImageView, let label = image.accessibilityLabel() { found.append(label) }
+                for subview in view.subviews { walk(subview) }
+            }
+            walk(view)
+            return found
+        }
+
         @Test func shellRowShowsALiveTitleThatArrivesAfterTheRowWasPainted() throws {
             let painted = try labelsAroundLiveTitleArrival(shellWorkspace, targetKey: Self.targetKey, liveTitle: Self.liveTitle)
 
@@ -193,6 +214,29 @@ extension ProcessProfileEnvironmentSuites {
 
             #expect(painted.before == [Self.agentRowName], "the agent's terminal has reported no title yet")
             #expect(painted.after == [Self.agentRowName, Self.liveTitle])
+        }
+
+        /// An agent that writes its first brief after its row was painted gains the row's brief mark, and
+        /// loses it again when the brief is cleared.
+        @Test func codingAgentRowMarksABriefThatArrivesAfterTheRowWasPainted() throws {
+            let controller = makeController()
+            attachOutline(controller)
+            let deviceID = controller.deviceModel.localDeviceID
+
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, workspace: briefingAgentWorkspace(brief: nil))]
+            controller.sidebar.applySidebarDataChange()
+            controller.sidebar.toggleWorkspaceExpanded(workspaceID: Self.workspaceID)
+            controller.sidebar.applySidebarDataChange()
+            let row = try #require(runtimeTargetRow(controller, key: Self.agentTargetKey), "the expanded workspace must list the agent row")
+            #expect(!imageAccessibilityLabels(in: try #require(paintedCell(controller, row: row))).contains("Has brief"))
+
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, workspace: briefingAgentWorkspace(brief: "# Waiting on review"))]
+            controller.sidebar.applySidebarDataChange()
+            #expect(imageAccessibilityLabels(in: try #require(paintedCell(controller, row: row))).contains("Has brief"))
+
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, workspace: briefingAgentWorkspace(brief: nil))]
+            controller.sidebar.applySidebarDataChange()
+            #expect(!imageAccessibilityLabels(in: try #require(paintedCell(controller, row: row))).contains("Has brief"))
         }
     }
 }

@@ -1555,6 +1555,9 @@ private struct DeviceSyncState {
         // cycling row's Alerts count, which `applySidebarDataChange` repaints right after this merge.
         host.alerts.consumeFocusedSessionBellAlerts()
         host.panelCoordinator.refreshGlobalPanelTitles()
+        // A brief reaches this client only in a coding-agent row of an overview, so this is where every
+        // open pane's brief column, and the footer glyph that toggles it, follows the installed rows.
+        host.panelCoordinator.refreshAgentBriefs()
     }
 
     /// The single entry point for "the sidebar's data changed": re-merges the device sections and then
@@ -2558,6 +2561,17 @@ private struct DeviceSyncState {
             }
 
             row.addArrangedSubview(NSView())
+
+            if item.hasBrief {
+                let briefGlyph = NSImageView()
+                briefGlyph.image = NSImage(systemSymbolName: "doc.text", accessibilityDescription: "Has brief")?.withSymbolConfiguration(
+                    .init(pointSize: 11, weight: .regular))
+                briefGlyph.contentTintColor = Theme.mutedSecondary
+                briefGlyph.setAccessibilityLabel("Has brief")
+                briefGlyph.setContentHuggingPriority(.required, for: .horizontal)
+                briefGlyph.setContentCompressionResistancePriority(.required, for: .horizontal)
+                row.addArrangedSubview(briefGlyph)
+            }
         }
 
         cell.addSubview(row)

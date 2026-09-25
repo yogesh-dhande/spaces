@@ -48,12 +48,15 @@ struct SidebarRuntimeTargetItem: Hashable, Sendable {
     /// its attention color from failed back to inactive (see `SidebarAttentionStatus.resolve`).
     /// Meaningless for every other kind.
     let isExitAcknowledged: Bool
+    /// Whether a coding-agent row's agent keeps a brief, which the row marks with a trailing glyph. False
+    /// for every other kind.
+    let hasBrief: Bool
 
     init(
         key: String, title: String, detail: String?, kind: AppKitController.WorkspaceRunShortcutTarget.Kind, runState: SpacesDeviceRunState?,
         shortcutIndex: Int?, sessionID: String?, canRun: Bool, canStop: Bool, canRestart: Bool, processID: String?, processKey: String?,
         processTemplateID: String?, agentID: String?, browserTargetURL: String?, agentActivityState: SpacesDeviceCodingAgentActivityState? = nil,
-        undismissedAttentionIDs: [String] = [], isExitAcknowledged: Bool = false
+        undismissedAttentionIDs: [String] = [], isExitAcknowledged: Bool = false, hasBrief: Bool = false
     ) {
         self.key = key
         self.title = title
@@ -73,6 +76,7 @@ struct SidebarRuntimeTargetItem: Hashable, Sendable {
         self.agentActivityState = agentActivityState
         self.undismissedAttentionIDs = undismissedAttentionIDs
         self.isExitAcknowledged = isExitAcknowledged
+        self.hasBrief = hasBrief
     }
 }
 
@@ -208,7 +212,7 @@ extension AppKitController {
                 key: key, title: title ?? row.name, detail: row.liveTitle, kind: .agent, runState: row.runState, shortcutIndex: shortcutIndex,
                 sessionID: row.sessionID, canRun: false, canStop: row.canStop, canRestart: false, processID: nil, processKey: nil,
                 processTemplateID: nil, agentID: agentWindow.id, browserTargetURL: nil, agentActivityState: row.activityState,
-                undismissedAttentionIDs: undismissedAttentionIDs(agentID: agentWindow.id, sessionID: row.sessionID))
+                undismissedAttentionIDs: undismissedAttentionIDs(agentID: agentWindow.id, sessionID: row.sessionID), hasBrief: row.brief != nil)
         case .missingConfiguredProcess:
             guard let processKey = target.processKey else { return nil }
             let templateID = detail.config.processes.first {

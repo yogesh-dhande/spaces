@@ -310,11 +310,20 @@ public struct SpacesDeviceWorkspaceCodingAgentRow: Codable, Sendable, Equatable,
     /// ISO-8601 timestamp of the agent session's last state change, when known. Drives
     /// attention-alert recency and dismissal identity without the client opening the daemon database.
     public let updatedAt: String?
+    /// The agent's whole brief as markdown, nil when it has none. The overview carries the full text rather
+    /// than the headline the orchestration rows carry: this row is what a client renders the brief pane
+    /// from, and the overview stream already pushes it on every database change, so a brief write reaches
+    /// every open pane without a separate read.
+    public let brief: String?
+    /// When the brief was last written or cleared, nil when it never was. Kept apart from `updatedAt`, which
+    /// a brief write never moves.
+    public let briefUpdatedAt: String?
     public let canStop: Bool
 
     public init(
         id: String, workspaceID: String, name: String, command: String, agentID: String?, sessionID: String?, runState: SpacesDeviceRunState,
-        activityState: SpacesDeviceCodingAgentActivityState, updatedAt: String? = nil, canStop: Bool, liveTitle: String? = nil
+        activityState: SpacesDeviceCodingAgentActivityState, updatedAt: String? = nil, brief: String?, briefUpdatedAt: String?, canStop: Bool,
+        liveTitle: String? = nil
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -326,6 +335,8 @@ public struct SpacesDeviceWorkspaceCodingAgentRow: Codable, Sendable, Equatable,
         self.runState = runState
         self.activityState = activityState
         self.updatedAt = updatedAt
+        self.brief = brief
+        self.briefUpdatedAt = briefUpdatedAt
         self.canStop = canStop
     }
 }
@@ -2386,16 +2397,25 @@ public struct SpacesDeviceListAgentSessionsRequest: Codable, Sendable, Equatable
     }
 }
 
-/// Sets (or clears, with an empty note) a coding-agent session's explicit note on a paired device
-/// (`spaces agent annotate --device`). `sessionID` is the agent's terminal tracking id.
-public struct SpacesDeviceAnnotateAgentSessionRequest: Codable, Sendable, Equatable {
+/// Replaces a coding agent's brief on a paired device (`spaces agent brief write --device`). `sessionID` is
+/// the agent's terminal tracking id; `markdown` is the whole new document, and markdown that sanitizes to
+/// nothing clears the brief.
+public struct SpacesDeviceWriteAgentBriefRequest: Codable, Sendable, Equatable {
     public let sessionID: String
-    public let note: String
+    public let markdown: String
 
-    public init(sessionID: String, note: String) {
+    public init(sessionID: String, markdown: String) {
         self.sessionID = sessionID
-        self.note = note
+        self.markdown = markdown
     }
+}
+
+/// Names the coding agent a brief read or clear on a paired device addresses (`spaces agent brief
+/// read --device`, `spaces agent brief clear --device`) by its terminal tracking id.
+public struct SpacesDeviceAgentBriefRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+
+    public init(sessionID: String) { self.sessionID = sessionID }
 }
 
 /// Kills a coding-agent session on a paired device by its child terminal session id (`spaces agent kill
@@ -2411,16 +2431,20 @@ public struct SpacesDeviceKillAgentSessionRequest: Codable, Sendable, Equatable 
 }
 
 /// One coding-agent session as reported to orchestration clients over the Device API
-/// (`listAgentSessions`/`annotateAgentSession`). Mirrors `TerminalServiceAgentSessionRow`: the agent's
-/// live status, its explicit note, the full project/workspace context, and `lastSignalAt` — the
-/// readiness marker, nil until the agent's hooks emit their first lifecycle signal.
+/// (`listAgentSessions`, `writeAgentBrief`, `clearAgentBrief`). Mirrors `TerminalServiceAgentSessionRow`:
+/// the agent's live status, the headline of its brief, the full project/workspace context, and
+/// `lastSignalAt`, the readiness marker, nil until the agent's hooks emit their first lifecycle signal.
 public struct SpacesDeviceAgentSessionRow: Codable, Sendable, Equatable {
     public let id: String
     public let terminalSessionID: String?
     public let agent: String?
     public let label: String?
     public let status: String
-    public let note: String?
+    /// The brief's one-line headline (`AgentBriefSummary`), derived by the device's daemon; nil when the
+    /// agent has no brief. The full document is read with `readAgentBrief`.
+    public let briefSummary: String?
+    /// When the brief was last written or cleared, nil when it never was.
+    public let briefUpdatedAt: String?
     public let projectID: String
     public let projectName: String
     public let workspaceID: String
@@ -2432,15 +2456,17 @@ public struct SpacesDeviceAgentSessionRow: Codable, Sendable, Equatable {
     public let lastSignalAt: String?
 
     public init(
-        id: String, terminalSessionID: String?, agent: String?, label: String?, status: String, note: String?, projectID: String, projectName: String,
-        workspaceID: String, workspaceName: String, workspaceDir: String, branch: String?, updatedAt: String, lastSignalAt: String?
+        id: String, terminalSessionID: String?, agent: String?, label: String?, status: String, briefSummary: String?, briefUpdatedAt: String?,
+        projectID: String, projectName: String, workspaceID: String, workspaceName: String, workspaceDir: String, branch: String?, updatedAt: String,
+        lastSignalAt: String?
     ) {
         self.id = id
         self.terminalSessionID = terminalSessionID
         self.agent = agent
         self.label = label
         self.status = status
-        self.note = note
+        self.briefSummary = briefSummary
+        self.briefUpdatedAt = briefUpdatedAt
         self.projectID = projectID
         self.projectName = projectName
         self.workspaceID = workspaceID
@@ -2452,11 +2478,26 @@ public struct SpacesDeviceAgentSessionRow: Codable, Sendable, Equatable {
     }
 }
 
-/// Wraps the agent-session rows returned by `listAgentSessions`/`annotateAgentSession`.
+/// Wraps the agent-session rows returned by `listAgentSessions`, `writeAgentBrief`, and `clearAgentBrief`.
 public struct SpacesDeviceAgentSessionsResult: Codable, Sendable, Equatable {
     public let rows: [SpacesDeviceAgentSessionRow]
 
     public init(rows: [SpacesDeviceAgentSessionRow]) { self.rows = rows }
+}
+
+/// A coding agent's full brief, answered by `readAgentBrief`. `brief` is nil when the agent has none;
+/// `updatedAt` is when the brief was last written or cleared, nil when it never was.
+public struct SpacesDeviceAgentBriefResult: Codable, Sendable, Equatable {
+    /// The agent's terminal session id, the one the read addressed.
+    public let sessionID: String
+    public let brief: String?
+    public let updatedAt: String?
+
+    public init(sessionID: String, brief: String?, updatedAt: String?) {
+        self.sessionID = sessionID
+        self.brief = brief
+        self.updatedAt = updatedAt
+    }
 }
 
 /// Answers the restore offer a device is making, naming the record the client acted on. The generation
@@ -2522,7 +2563,7 @@ public struct SpacesDeviceAutomationRunReference: Codable, Sendable, Equatable {
 }
 
 /// Automations returned by the create/update/list Device API commands (create/update return the affected
-/// automation as a one-element list, matching how `annotateAgentSession` returns its single row).
+/// automation as a one-element list, matching how `writeAgentBrief` returns its single row).
 public struct SpacesDeviceAutomationsResult: Codable, Sendable, Equatable {
     public let rows: [TerminalServiceAutomationSummary]
 
@@ -2609,8 +2650,12 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case spawnAgentSession(SpacesDeviceSpawnAgentSessionRequest)
     /// Lists coding-agent sessions on the daemon host (orchestration list/status + remote readiness).
     case listAgentSessions(SpacesDeviceListAgentSessionsRequest)
-    /// Sets or clears a coding-agent session's explicit note on the daemon host.
-    case annotateAgentSession(SpacesDeviceAnnotateAgentSessionRequest)
+    /// Replaces a coding agent's brief on the daemon host, returning its updated row.
+    case writeAgentBrief(SpacesDeviceWriteAgentBriefRequest)
+    /// Reads a coding agent's full brief on the daemon host.
+    case readAgentBrief(SpacesDeviceAgentBriefRequest)
+    /// Clears a coding agent's brief on the daemon host, returning its updated row.
+    case clearAgentBrief(SpacesDeviceAgentBriefRequest)
     /// Kills a coding-agent session on the daemon host by its child terminal session id, the remote
     /// counterpart of the local `.agentKill` command. Routes through the daemon's `killAgentSession`
     /// flow so a hook-signaled child's subscribers are told it exited before its row is deleted.
@@ -2733,7 +2778,9 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .installAgentHooks: "installAgentHooks"
         case .spawnAgentSession: "spawnAgentSession"
         case .listAgentSessions: "listAgentSessions"
-        case .annotateAgentSession: "annotateAgentSession"
+        case .writeAgentBrief: "writeAgentBrief"
+        case .readAgentBrief: "readAgentBrief"
+        case .clearAgentBrief: "clearAgentBrief"
         case .killAgentSession: "killAgentSession"
         case .openServiceTunnel: "openServiceTunnel"
         case .createAutomation: "createAutomation"
@@ -2875,8 +2922,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         switch self {
         case .ping, .daemonStatus, .overview, .previewProject, .previewGitProject, .listDirectories, .workspaceCreateOptions, .state,
             .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput, .terminalTranscript, .agentHooksStatus, .listAgentSessions,
-            .listAutomations, .listAutomationRuns, .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileList, .workspaceRefList,
-            .workspaceDiffManifestChunk, .workspaceDiffManifestRelease, .workspaceDiffFileChunk, .workspaceReviewCommentList:
+            .readAgentBrief, .listAutomations, .listAutomationRuns, .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileList,
+            .workspaceRefList, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease, .workspaceDiffFileChunk, .workspaceReviewCommentList:
             true
         default: false
         }
@@ -2932,7 +2979,9 @@ extension SpacesDeviceAPICommand: Codable {
         case installAgentHooks
         case spawnAgentSession
         case listAgentSessions
-        case annotateAgentSession
+        case writeAgentBrief
+        case readAgentBrief
+        case clearAgentBrief
         case killAgentSession
         case openServiceTunnel
         case createAutomation
@@ -3037,7 +3086,9 @@ extension SpacesDeviceAPICommand: Codable {
         case .installAgentHooks: self = .installAgentHooks(try container.decode(SpacesDeviceInstallAgentHooksRequest.self, forKey: key))
         case .spawnAgentSession: self = .spawnAgentSession(try container.decode(SpacesDeviceSpawnAgentSessionRequest.self, forKey: key))
         case .listAgentSessions: self = .listAgentSessions(try container.decode(SpacesDeviceListAgentSessionsRequest.self, forKey: key))
-        case .annotateAgentSession: self = .annotateAgentSession(try container.decode(SpacesDeviceAnnotateAgentSessionRequest.self, forKey: key))
+        case .writeAgentBrief: self = .writeAgentBrief(try container.decode(SpacesDeviceWriteAgentBriefRequest.self, forKey: key))
+        case .readAgentBrief: self = .readAgentBrief(try container.decode(SpacesDeviceAgentBriefRequest.self, forKey: key))
+        case .clearAgentBrief: self = .clearAgentBrief(try container.decode(SpacesDeviceAgentBriefRequest.self, forKey: key))
         case .killAgentSession: self = .killAgentSession(try container.decode(SpacesDeviceKillAgentSessionRequest.self, forKey: key))
         case .openServiceTunnel: self = .openServiceTunnel(try container.decode(SpacesDeviceServiceTunnelRequest.self, forKey: key))
         case .createAutomation: self = .createAutomation(try container.decode(TerminalServiceAutomationFields.self, forKey: key))
@@ -3137,7 +3188,9 @@ extension SpacesDeviceAPICommand: Codable {
         case .installAgentHooks(let payload): try container.encode(payload, forKey: .installAgentHooks)
         case .spawnAgentSession(let payload): try container.encode(payload, forKey: .spawnAgentSession)
         case .listAgentSessions(let payload): try container.encode(payload, forKey: .listAgentSessions)
-        case .annotateAgentSession(let payload): try container.encode(payload, forKey: .annotateAgentSession)
+        case .writeAgentBrief(let payload): try container.encode(payload, forKey: .writeAgentBrief)
+        case .readAgentBrief(let payload): try container.encode(payload, forKey: .readAgentBrief)
+        case .clearAgentBrief(let payload): try container.encode(payload, forKey: .clearAgentBrief)
         case .killAgentSession(let payload): try container.encode(payload, forKey: .killAgentSession)
         case .openServiceTunnel(let payload): try container.encode(payload, forKey: .openServiceTunnel)
         case .createAutomation(let payload): try container.encode(payload, forKey: .createAutomation)
@@ -3248,6 +3301,7 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case agentHooksStatus(SpacesAgentHooksStatusPayload)
     case agentHooksInstall(AgentHookInstallOutcome)
     case agentSessions(SpacesDeviceAgentSessionsResult)
+    case agentBrief(SpacesDeviceAgentBriefResult)
     case automations(SpacesDeviceAutomationsResult)
     case automationRuns(SpacesDeviceAutomationRunsResult)
     case workspaceFileRead(SpacesDeviceWorkspaceFileReadResult)
@@ -3281,6 +3335,7 @@ extension SpacesDeviceAPIResult: Codable {
         case agentHooksStatus
         case agentHooksInstall
         case agentSessions
+        case agentBrief
         case automations
         case automationRuns
         case workspaceFileRead
@@ -3319,6 +3374,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .agentHooksStatus: self = .agentHooksStatus(try container.decode(SpacesAgentHooksStatusPayload.self, forKey: key))
         case .agentHooksInstall: self = .agentHooksInstall(try container.decode(AgentHookInstallOutcome.self, forKey: key))
         case .agentSessions: self = .agentSessions(try container.decode(SpacesDeviceAgentSessionsResult.self, forKey: key))
+        case .agentBrief: self = .agentBrief(try container.decode(SpacesDeviceAgentBriefResult.self, forKey: key))
         case .automations: self = .automations(try container.decode(SpacesDeviceAutomationsResult.self, forKey: key))
         case .automationRuns: self = .automationRuns(try container.decode(SpacesDeviceAutomationRunsResult.self, forKey: key))
         case .workspaceFileRead: self = .workspaceFileRead(try container.decode(SpacesDeviceWorkspaceFileReadResult.self, forKey: key))
@@ -3358,6 +3414,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .agentHooksStatus(let payload): try container.encode(payload, forKey: .agentHooksStatus)
         case .agentHooksInstall(let payload): try container.encode(payload, forKey: .agentHooksInstall)
         case .agentSessions(let payload): try container.encode(payload, forKey: .agentSessions)
+        case .agentBrief(let payload): try container.encode(payload, forKey: .agentBrief)
         case .automations(let payload): try container.encode(payload, forKey: .automations)
         case .automationRuns(let payload): try container.encode(payload, forKey: .automationRuns)
         case .workspaceFileRead(let payload): try container.encode(payload, forKey: .workspaceFileRead)
@@ -3450,6 +3507,8 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     public var agentHooksInstall: AgentHookInstallOutcome? { if case .agentHooksInstall(let payload) = result { payload } else { nil } }
 
     public var agentSessions: [SpacesDeviceAgentSessionRow]? { if case .agentSessions(let payload) = result { payload.rows } else { nil } }
+
+    public var agentBrief: SpacesDeviceAgentBriefResult? { if case .agentBrief(let payload) = result { payload } else { nil } }
 
     public var automations: [TerminalServiceAutomationSummary]? { if case .automations(let payload) = result { payload.rows } else { nil } }
 

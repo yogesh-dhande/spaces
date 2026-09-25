@@ -527,7 +527,7 @@ import workspacecore
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
                     id: "agent:agent-1", workspaceID: "workspace", name: "claude", command: "claude", agentID: "agent-1", sessionID: "session-agent",
-                    runState: .running, activityState: .idle, canStop: true)
+                    runState: .running, activityState: .idle, brief: nil, briefUpdatedAt: nil, canStop: true)
             ],
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(

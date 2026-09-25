@@ -648,7 +648,8 @@ extension WorkspaceOrchestrator {
                 runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
                 terminalTarget: TerminalTargetRecord(
                     runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
-                sessionKey: sessionKey.applied(to: isReusedAfterExit ? nil : existing.sessionKey), status: resolvedStatus, note: existing.note,
+                sessionKey: sessionKey.applied(to: isReusedAfterExit ? nil : existing.sessionKey), status: resolvedStatus, brief: existing.brief,
+                briefUpdatedAt: existing.briefUpdatedAt,
                 detectedAgentKind: liveDetectedAgentKind(terminalSessionID: terminalTrackingID ?? existing.terminalTrackingID)
                     ?? existing.detectedAgentKind, launchCommand: existing.launchCommand, createdAt: existing.createdAt, updatedAt: now)
             try validateWorkspaceFocusNames(
@@ -711,7 +712,8 @@ extension WorkspaceOrchestrator {
                 runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
                 terminalTarget: TerminalTargetRecord(
                     runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
-                sessionKey: sessionKey.applied(to: existing.sessionKey), status: status, note: existing.note,
+                sessionKey: sessionKey.applied(to: existing.sessionKey), status: status, brief: existing.brief,
+                briefUpdatedAt: existing.briefUpdatedAt,
                 detectedAgentKind: liveDetectedAgentKind(terminalSessionID: terminalTrackingID ?? existing.terminalTrackingID)
                     ?? existing.detectedAgentKind, launchCommand: existing.launchCommand, createdAt: existing.createdAt, updatedAt: now)
             try validateWorkspaceFocusNames(
@@ -784,8 +786,8 @@ extension WorkspaceOrchestrator {
         return AgentWindowRecord(
             id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: existing.label, userLabel: existing.userLabel,
             runtimeTargetID: existing.runtimeTargetID, terminalTarget: terminalTarget, sessionKey: existing.sessionKey, status: .exited,
-            note: existing.note, detectedAgentKind: existing.detectedAgentKind, launchCommand: existing.launchCommand, createdAt: existing.createdAt,
-            updatedAt: now)
+            brief: existing.brief, briefUpdatedAt: existing.briefUpdatedAt, detectedAgentKind: existing.detectedAgentKind,
+            launchCommand: existing.launchCommand, createdAt: existing.createdAt, updatedAt: now)
     }
 
     public func stopCodingAgent(workspaceID: String, agentID: String) throws {
@@ -1045,6 +1047,10 @@ extension WorkspaceOrchestrator {
     /// rows. `workspaceID` narrows to one workspace; `sessionID` narrows to the agent bound to that
     /// terminal tracking id (single-agent `status` and readiness polling). `lastSignalAt` is the
     /// readiness marker: nil until the agent's hooks emit their first lifecycle signal.
+    ///
+    /// A row carries the brief's one-line headline (`AgentBriefSummary`), never the document: these rows
+    /// feed listings, notifications, and every orchestrator poll, and the full text is only for the reader
+    /// that asks for it (`readAgentBrief`).
     public func agentSessionRows(workspaceID: String? = nil, sessionID: String? = nil) throws -> [TerminalServiceAgentSessionRow] {
         var rows: [TerminalServiceAgentSessionRow] = []
         for project in try store.projects() {
@@ -1064,7 +1070,8 @@ extension WorkspaceOrchestrator {
                         TerminalServiceAgentSessionRow(
                             id: agent.id, terminalSessionID: terminalSessionID, agent: detectedKind,
                             label: trimmedOrNilAgentField(agent.effectiveLabel), status: agent.status.rawValue,
-                            note: trimmedOrNilAgentField(agent.note), projectID: project.id, projectName: project.name, workspaceID: workspace.id,
+                            briefSummary: AgentBriefSummary.summary(of: agent.brief), briefUpdatedAt: agent.briefUpdatedAt, projectID: project.id,
+                            projectName: project.name, workspaceID: workspace.id,
                             workspaceName: project.kind.workspaceDisplayName(branch: workspace.branch, dir: workspace.dir),
                             workspaceDir: workspace.dir, branch: trimmedOrNilAgentField(project.kind.maskedBranch(workspace.branch)),
                             updatedAt: agent.updatedAt, lastSignalAt: try store.lastAgentSignalAt(agentSessionID: agent.id)))
@@ -1074,21 +1081,58 @@ extension WorkspaceOrchestrator {
         return rows
     }
 
-    /// Sets (or clears, with an empty note) a coding-agent session's explicit note, addressed by its
-    /// terminal session id, and returns the updated row. Shared by the profile `agentAnnotate` command
-    /// and the Device API `annotateAgentSession` handler so both sanitize identically. Errors loudly
-    /// when no agent row is bound to the session yet (annotation requires a hook-signaled agent).
-    @discardableResult public func annotateAgentSession(terminalSessionID: String, note: String) throws -> TerminalServiceAgentSessionRow {
+    /// Replaces a coding agent's brief with `markdown`, addressed by its terminal session id, and returns
+    /// the updated row. The whole document is replaced: a brief is one page the agent keeps current, not a
+    /// log. Markdown that sanitizes to nothing clears it. Every write, clear included, stamps
+    /// `brief_updated_at` and leaves `updated_at` alone (see `SQLiteStore.setAgentSessionBrief`). Shared by
+    /// the profile `agentBriefWrite`/`agentBriefClear` commands and the Device API `writeAgentBrief`/
+    /// `clearAgentBrief` handlers so every surface sanitizes identically. Any coding-agent row qualifies,
+    /// whether foreground detection or a hook signal created it; a terminal with no agent row is a loud
+    /// error, since the brief lives on that row and dies with it.
+    @discardableResult public func writeAgentBrief(terminalSessionID: String, markdown: String) throws -> TerminalServiceAgentSessionRow {
+        let target = try agentBriefTarget(terminalSessionID: terminalSessionID)
+        try store.setAgentSessionBrief(id: target.id, brief: Self.sanitizedAgentBrief(markdown), updatedAt: nowISO8601())
+        return try agentBriefTarget(terminalSessionID: terminalSessionID)
+    }
+
+    /// Clears a coding agent's brief: a write of the empty document, so it stamps `brief_updated_at` too.
+    @discardableResult public func clearAgentBrief(terminalSessionID: String) throws -> TerminalServiceAgentSessionRow {
+        try writeAgentBrief(terminalSessionID: terminalSessionID, markdown: "")
+    }
+
+    /// What a brief write reports back. Markdown that sanitizes to nothing clears the brief, so that write
+    /// reports `agentBriefClearedMessage`, the words a clear reports, instead of claiming it stored a
+    /// document. The profile command and the Device API both word their write responses with it and the
+    /// CLI and MCP tools print the daemon's message, so the daemon that sanitized the markdown is the one
+    /// that says what happened.
+    public static func agentBriefWriteMessage(markdown: String) -> String {
+        sanitizedAgentBrief(markdown) == nil ? agentBriefClearedMessage : "Wrote agent brief."
+    }
+
+    /// What clearing a brief reports, whether a clear or a write of an empty document did it.
+    public static let agentBriefClearedMessage = "Cleared agent brief."
+
+    /// The full text of a coding agent's brief and when it was last written or cleared. `brief` is nil when
+    /// the agent has none, which is an answer rather than an error; a terminal with no agent row throws, as
+    /// a write does.
+    public func readAgentBrief(terminalSessionID: String) throws -> TerminalServiceAgentBriefResult {
+        let target = try agentBriefTarget(terminalSessionID: terminalSessionID)
+        guard let agent = try store.agentWindow(id: target.id) else { throw Self.noAgentBriefTargetError(terminalSessionID: terminalSessionID) }
+        return TerminalServiceAgentBriefResult(sessionID: terminalSessionID, brief: agent.brief, updatedAt: agent.briefUpdatedAt)
+    }
+
+    /// The orchestration row of the coding agent bound to `terminalSessionID`, resolved the way `agent list`
+    /// and `agent status` resolve it, so a brief command addresses exactly the agent those commands show.
+    private func agentBriefTarget(terminalSessionID: String) throws -> TerminalServiceAgentSessionRow {
         guard let target = try agentSessionRows(sessionID: terminalSessionID).first else {
-            throw WorkspaceError.invalidArgument(
-                message: "No agent session for terminal \(terminalSessionID). Annotate requires an active coding-agent session (hook-signaled).")
+            throw Self.noAgentBriefTargetError(terminalSessionID: terminalSessionID)
         }
-        let sanitized = Self.sanitizedAgentNote(note)
-        try store.setAgentSessionNote(id: target.id, note: sanitized.isEmpty ? nil : sanitized)
-        guard let updated = try agentSessionRows(sessionID: terminalSessionID).first else {
-            throw WorkspaceError.invalidArgument(message: "No agent session for terminal \(terminalSessionID).")
-        }
-        return updated
+        return target
+    }
+
+    private static func noAgentBriefTargetError(terminalSessionID: String) -> WorkspaceError {
+        .invalidArgument(
+            message: "No agent session for terminal \(terminalSessionID). A brief needs a coding-agent session (detected or hook-signaled).")
     }
 
     /// Sets (or clears, with an empty title) the name a user gave a coding-agent row, addressed by the
@@ -1155,12 +1199,23 @@ extension WorkspaceOrchestrator {
         return uniqueLabel
     }
 
-    /// Notes are single-line, bounded, plain text: control characters (including any embedded newlines)
-    /// are removed so an annotation can never inject terminal control sequences or break the one-line
-    /// injection format, then the result is trimmed and capped.
-    public static func sanitizedAgentNote(_ note: String) -> String {
-        let stripped = String(note.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) })
-        return String(stripped.trimmingCharacters(in: .whitespacesAndNewlines).prefix(500))
+    /// The most characters a stored brief keeps; a longer document is cut to this length.
+    public static let agentBriefCharacterLimit = 8000
+
+    /// The stored form of a brief, or nil when nothing is left to store. A brief is markdown, so it keeps
+    /// its line structure: CRLF line endings become LF, and newlines and tabs survive while every other
+    /// control character (general category Cc) is removed, so the document can never carry terminal
+    /// control sequences into a client that renders it or into the notification block its headline feeds.
+    /// Format characters (Cf) are kept on purpose: `CharacterSet.controlCharacters` also covers them, and
+    /// removing U+200D ZERO WIDTH JOINER breaks compound emoji apart. The result is then trimmed and capped
+    /// at `agentBriefCharacterLimit` characters.
+    public static func sanitizedAgentBrief(_ markdown: String) -> String? {
+        let unixLineEndings = markdown.replacingOccurrences(of: "\r\n", with: "\n")
+        let kept = unixLineEndings.unicodeScalars.filter { scalar in scalar == "\n" || scalar == "\t" || scalar.properties.generalCategory != .control
+        }
+        let trimmed = String(String.UnicodeScalarView(kept)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let capped = String(trimmed.prefix(agentBriefCharacterLimit)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return capped.isEmpty ? nil : capped
     }
 
 }

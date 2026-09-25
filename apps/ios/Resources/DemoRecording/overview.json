@@ -389,6 +389,8 @@
             {
               "activityState" : "waiting",
               "agentID" : "411E18A0-8F55-4662-85A3-DF7F5476DF2F",
+              "brief" : "## Status\n\nCheckout returns a 500 when the payment session expires mid-request (`src/routes/checkout.py:82`). The fix is ready to apply; ETA about 10 minutes once you approve it.\n\n## Questions for you\n\n- [ ] Apply the fix to `src/routes/checkout.py` and add the regression test?\n- [ ] Return 409 with a retry hint, or renew the payment session server-side?\n\n## Tasks\n\n- [x] Reproduce the 500 on /api/checkout\n- [x] Trace it to the unguarded expired session\n- [x] Run the checkout suite (1 failing)\n- [ ] Guard the expired-session case\n- [ ] Add the regression test\n- [ ] Re-run the checkout integration suite",
+              "briefUpdatedAt" : "-120",
               "canStop" : true,
               "command" : "Fix checkout 500",
               "id" : "agent:411E18A0-8F55-4662-85A3-DF7F5476DF2F",

@@ -18,6 +18,9 @@ import AppKit
     /// Tab-header context menu's "Open Selected Pane in New Window".
     var onOpenSelectedPaneInNewWindow: ((_ tabID: String) -> Void)?
     var onFocusPane: ((String) -> Void)?
+    /// A global window's identity-strip brief glyph; resolved by the coordinator against the pane the
+    /// strip shows.
+    var onToggleBrief: (() -> Void)?
     /// The empty state's `Start workspace` button; offered only for a `.workspace` panel.
     var onStartWorkspace: (() -> Void)?
     /// The empty state's `New terminal` button, which starts a session directly like the leader
@@ -81,6 +84,7 @@ import AppKit
                 guard let self, let tabID = self.renderedLayout.tabs.first?.id else { return }
                 self.onOpenSelectedPaneInNewWindow?(tabID)
             }
+            identityStrip!.onToggleBrief = { [weak self] in self?.onToggleBrief?() }
             chromeView = identityStrip!
         }
         paneTree.onSplitWeightsChanged = { [weak self] splitID, weights in self?.onSplitWeightsChanged?(splitID, weights) }

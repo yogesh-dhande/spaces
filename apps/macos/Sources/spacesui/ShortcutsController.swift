@@ -162,6 +162,7 @@ import workspacecore
             if self.host.commandPalette.handleCommandPaletteShortcut(event: event) { return nil }
             if self.host.handleNewTabSessionPickerShortcut(event: event) { return nil }
             if self.host.handleClosePaneShortcut(event: event) { return nil }
+            if self.host.handleToggleBriefShortcut(event: event) { return nil }
             if self.host.handleFocusedTextInputShortcut(event: event) { return nil }
             if let cycleModeShortcutSpec, self.matches(event: event, spec: cycleModeShortcutSpec) {
                 // An in-app shortcut rather than a Carbon global hotkey like next/previous: the mode

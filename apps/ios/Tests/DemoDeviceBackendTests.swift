@@ -75,6 +75,24 @@
             }
         }
 
+        /// The demo agent opens its brief sheet on entry, so the recording has to carry a brief with the
+        /// sections the sheet is shown off with, stamped relative to load time like every other timestamp.
+        func testDemoAgentCarriesABriefStampedRelativeToLoadTime() throws {
+            let now = Date().addingTimeInterval(100_000)
+            let library = try loadLibrary(now: now)
+            let agent = try XCTUnwrap(
+                library.overview.workspaces.lazy.flatMap(\.codingAgentRows).first { $0.sessionID == "demo-harbor-agent" },
+                "Expected the demo agent row.")
+
+            let brief = try XCTUnwrap(agent.brief, "The demo agent should carry a brief.")
+            for section in ["## Status", "## Questions for you", "## Tasks", "- [ ] ", "- [x] "] {
+                XCTAssertTrue(brief.contains(section), "The demo brief is missing \(section)")
+            }
+            let updated = try XCTUnwrap(SpacesMobileAttention.date(fromISO8601: agent.briefUpdatedAt), "The brief time should rebase to ISO-8601.")
+            XCTAssertLessThan(updated, now)
+            XCTAssertLessThan(now.timeIntervalSince(updated), 600, "The brief should read as written minutes before load time.")
+        }
+
         // MARK: - Read-only terminal input
 
         func testSendAndKeyRejectedWithDemoNotice() async throws {
@@ -177,6 +195,10 @@
             XCTAssertEqual(stopped.runState, .exited)
             XCTAssertEqual(stopped.activityState, .exited)
             XCTAssertNotNil(stopped.updatedAt)
+            // Stopping an agent does not erase what it wrote: the brief stays readable on the stopped row.
+            XCTAssertNotNil(runningAgent.brief)
+            XCTAssertEqual(stopped.brief, runningAgent.brief)
+            XCTAssertEqual(stopped.briefUpdatedAt, runningAgent.briefUpdatedAt)
         }
 
         // MARK: - Synthesizing sessions for not-started rows

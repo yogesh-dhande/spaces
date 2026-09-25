@@ -33,6 +33,11 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     public let takeoverButtonVisible: Bool
     public let takeoverButtonEnabled: Bool
     public let takeoverMessage: String
+    /// Whether the pane's agent brief column is on screen, and the headline of the brief it shows. The
+    /// column belongs to the app's pane content rather than to this terminal controller, so the content
+    /// that hosts it fills these in; the terminal's own dump leaves them empty.
+    public var briefVisible = false
+    public var briefSummary: String?
 
     public init(
         renderedOutput: String, visibleSurfaceOutput: String?, surfaceSelectionText: String?, showsTerminalSurface: Bool, showsTextRenderer: Bool,

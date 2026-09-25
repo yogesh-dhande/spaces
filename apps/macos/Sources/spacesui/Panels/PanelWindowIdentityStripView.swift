@@ -12,14 +12,18 @@ struct PanelWindowIdentity: Equatable {
     /// surfaced in the chrome, not a separate, independently toggleable follow mode — a terminal
     /// pane never follows, so this is always false for one.
     let followsSidebar: Bool
+    /// The shown pane's brief toggle state, which draws the strip's brief glyph (absent when the pane's
+    /// session has no coding agent with a brief).
+    let brief: AgentBriefToggleState
 }
 
 /// A global window's chrome row (Option B, "identity strip" — see the approved mockup):
 /// the same 28px row a `.workspace` panel's tab strip occupies, but showing identity instead of
 /// tabs, since a global window carries no tabs (`WorkspacePanelView`'s docstring). Left to right:
 /// the pane's workspace, its title, and — for a code pane only — a "follows sidebar" indicator;
-/// split-right and split-down sit on the trailing edge, the only way to reach the split-target
-/// picker from a global window.
+/// the brief toggle (while the pane's agent has a brief), split-right, and split-down sit on the
+/// trailing edge. The splits are the only way to reach the split-target picker from a global window,
+/// and the brief toggle stands in for the main window footer's, which a global window does not have.
 @MainActor final class PanelWindowIdentityStripView: NSView {
     static let preferredHeight = PanelTabBarView.preferredHeight
 
@@ -31,10 +35,13 @@ struct PanelWindowIdentity: Equatable {
     /// the same name. No tab id parameter: a global window carries exactly one tab
     /// (`WorkspacePanelView`'s docstring), so there is nothing for the strip itself to disambiguate.
     var onOpenSelectedPaneInNewWindow: (() -> Void)?
+    /// The brief glyph's click, resolved by `PanelCoordinator` against the pane the strip shows.
+    var onToggleBrief: (() -> Void)?
 
     private let workspaceChipLabel = NSTextField(labelWithString: "")
     private let paneTitleLabel = NSTextField(labelWithString: "")
     private let followsSidebarLabel = NSTextField(labelWithString: "follows sidebar")
+    private var briefButton: NSButton!
     private var identity: PanelWindowIdentity?
     /// Whether the right-click menu's "Open Selected Pane in New Window" should be offered: the
     /// window's one tab must hold more than one pane (a lone pane has nothing to split off, the
@@ -89,16 +96,20 @@ struct PanelWindowIdentity: Equatable {
         followsSidebarLabel.isHidden = true
 
         let splitRightButton = PanelTabBarView.actionButton(
-            symbol: "rectangle.split.2x1", tooltip: "Split right", identifier: "panel-split-right", target: self,
-            action: #selector(splitRightClicked))
+            symbol: "rectangle.split.2x1", tooltip: "Split right", identifier: "panel-split-right", target: self, action: #selector(splitRightClicked)
+        )
         let splitDownButton = PanelTabBarView.actionButton(
-            symbol: "rectangle.split.1x2", tooltip: "Split down", identifier: "panel-split-down", target: self,
-            action: #selector(splitDownClicked))
+            symbol: "rectangle.split.1x2", tooltip: "Split down", identifier: "panel-split-down", target: self, action: #selector(splitDownClicked))
         // `actionButton` only sets hugging (resist growing); compression resistance defaults to
         // `.defaultHigh`, which a `.required` label could still outrank. These buttons are the
         // window's only split controls (see this type's docstring), so they must never be the ones
         // that give up space to a long label — required on both ends of the row.
-        for button in [splitRightButton, splitDownButton] { button.setContentCompressionResistancePriority(.required, for: .horizontal) }
+        let briefButton = PanelTabBarView.actionButton(
+            symbol: "doc.text", tooltip: AgentBriefToggleState.hidden.toggleTitle, identifier: "panel-window-brief-toggle", target: self,
+            action: #selector(briefClicked))
+        briefButton.applyAgentBriefToggleState(.unavailable)
+        self.briefButton = briefButton
+        for button in [briefButton, splitRightButton, splitDownButton] { button.setContentCompressionResistancePriority(.required, for: .horizontal) }
 
         let identityStack = NSStackView(views: [workspaceChipBackground, paneTitleLabel, followsSidebarLabel])
         identityStack.orientation = .horizontal
@@ -106,7 +117,7 @@ struct PanelWindowIdentity: Equatable {
         identityStack.spacing = 7
         identityStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let row = NSStackView(views: [identityStack, splitRightButton, splitDownButton])
+        let row = NSStackView(views: [identityStack, briefButton, splitRightButton, splitDownButton])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.distribution = .fill
@@ -130,6 +141,7 @@ struct PanelWindowIdentity: Equatable {
         workspaceChipLabel.stringValue = identity?.workspaceLabel ?? ""
         paneTitleLabel.stringValue = identity?.paneTitle ?? ""
         followsSidebarLabel.isHidden = identity?.followsSidebar != true
+        briefButton.applyAgentBriefToggleState(identity?.brief ?? .unavailable)
     }
 
     /// The strip's only context menu: "Open Selected Pane in New Window", offered exactly when
@@ -138,8 +150,7 @@ struct PanelWindowIdentity: Equatable {
     override func menu(for event: NSEvent) -> NSMenu? {
         guard canMoveFocusedPane else { return nil }
         let menu = NSMenu()
-        let openPane = NSMenuItem(
-            title: "Open Selected Pane in New Window", action: #selector(openSelectedPaneInNewWindowClicked), keyEquivalent: "")
+        let openPane = NSMenuItem(title: "Open Selected Pane in New Window", action: #selector(openSelectedPaneInNewWindowClicked), keyEquivalent: "")
         openPane.target = self
         openPane.image = NSImage(systemSymbolName: "macwindow.badge.plus", accessibilityDescription: nil)
         menu.addItem(openPane)
@@ -151,4 +162,6 @@ struct PanelWindowIdentity: Equatable {
     @objc private func splitDownClicked() { onSplitFocusedPane?(.down) }
 
     @objc private func openSelectedPaneInNewWindowClicked() { onOpenSelectedPaneInNewWindow?() }
+
+    @objc private func briefClicked() { onToggleBrief?() }
 }

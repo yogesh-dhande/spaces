@@ -91,10 +91,10 @@ extension ProcessProfileEnvironmentSuites {
             let rows = [
                 SpacesDeviceWorkspaceCodingAgentRow(
                     id: "agent:live", workspaceID: "workspace-1", name: "Live", command: "codex", agentID: "live", sessionID: "session-live",
-                    runState: .running, activityState: .waiting, canStop: true),
+                    runState: .running, activityState: .waiting, brief: nil, briefUpdatedAt: nil, canStop: true),
                 SpacesDeviceWorkspaceCodingAgentRow(
                     id: "agent:exited", workspaceID: "workspace-1", name: "Exited", command: "codex", agentID: "exited", sessionID: "session-exited",
-                    runState: .running, activityState: .exited, canStop: true),
+                    runState: .running, activityState: .exited, brief: nil, briefUpdatedAt: nil, canStop: true),
             ]
             controller.deviceModel.deviceSections = [section(deviceID: deviceID, sessionID: "session-live", codingAgentRows: rows)]
             controller.rebuildFlatSidebarData()

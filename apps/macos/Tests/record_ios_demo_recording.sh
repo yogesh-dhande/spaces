@@ -11,7 +11,7 @@
 #
 # Contrasting states produced:
 #   - harbor-web  : launched (frontend + backend running, healthy) + coding agent
-#                   "Fix checkout 500" waiting on input.
+#                   "Fix checkout 500" waiting on input, with a brief.
 #   - lantern-api : launched, then its backend process stopped (exited → Alerts).
 #   - atlas-docs  : seeded but idle (an untouched workspace).
 #
@@ -307,6 +307,26 @@ seed_and_launch() {
   # The stand-in reports no label of itself, so the row carries the materialized default name. Name it
   # the way a user would, through the same rename the app and the mobile clients issue.
   name_coding_agent "$harbor_ws" "$agent_session" "Fix checkout 500"
+  # The brief Demo Mode's sheet opens on, written the way an agent writes its own.
+  demo_env "$spaces_cli" agent brief write --session "$agent_session" >/dev/null <<'BRIEF'
+## Status
+
+Checkout returns a 500 when the payment session expires mid-request (`src/routes/checkout.py:82`). The fix is ready to apply; ETA about 10 minutes once you approve it.
+
+## Questions for you
+
+- [ ] Apply the fix to `src/routes/checkout.py` and add the regression test?
+- [ ] Return 409 with a retry hint, or renew the payment session server-side?
+
+## Tasks
+
+- [x] Reproduce the 500 on /api/checkout
+- [x] Trace it to the unguarded expired session
+- [x] Run the checkout suite (1 failing)
+- [ ] Guard the expired-session case
+- [ ] Add the regression test
+- [ ] Re-run the checkout integration suite
+BRIEF
 
   log "Launching lantern-api, then crashing its backend (exited state + alert)..."
   device_request "{\"launchWorkspace\":{\"workspaceID\":\"$lantern_ws\"}}" >/dev/null

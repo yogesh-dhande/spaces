@@ -320,8 +320,8 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
 }
 
 /// One coding-agent session as reported to orchestration clients (`agent list`/`status`). Carries the
-/// agent's live status, its explicit note, and the full project/workspace context an orchestrator needs
-/// to reason about and reach the agent (`terminalSessionID` is the target for `terminal send`, deep
+/// agent's live status, the headline of its brief, and the full project/workspace context an orchestrator
+/// needs to reason about and reach the agent (`terminalSessionID` is the target for `terminal send`, deep
 /// links, and subscriptions). `lastSignalAt` is the readiness marker: `nil` until the agent's hooks
 /// emit their first lifecycle signal.
 public struct TerminalServiceAgentSessionRow: Codable, Sendable, Equatable {
@@ -330,7 +330,11 @@ public struct TerminalServiceAgentSessionRow: Codable, Sendable, Equatable {
     public let agent: String?
     public let label: String?
     public let status: String
-    public let note: String?
+    /// The brief's one-line headline (`AgentBriefSummary`), nil when the agent has no brief. The full
+    /// document is read with `agentBriefRead`.
+    public let briefSummary: String?
+    /// When the brief was last written or cleared, nil when it never was.
+    public let briefUpdatedAt: String?
     public let projectID: String
     public let projectName: String
     public let workspaceID: String
@@ -342,15 +346,17 @@ public struct TerminalServiceAgentSessionRow: Codable, Sendable, Equatable {
     public let lastSignalAt: String?
 
     public init(
-        id: String, terminalSessionID: String?, agent: String?, label: String?, status: String, note: String?, projectID: String, projectName: String,
-        workspaceID: String, workspaceName: String, workspaceDir: String, branch: String?, updatedAt: String, lastSignalAt: String?
+        id: String, terminalSessionID: String?, agent: String?, label: String?, status: String, briefSummary: String?, briefUpdatedAt: String?,
+        projectID: String, projectName: String, workspaceID: String, workspaceName: String, workspaceDir: String, branch: String?, updatedAt: String,
+        lastSignalAt: String?
     ) {
         self.id = id
         self.terminalSessionID = terminalSessionID
         self.agent = agent
         self.label = label
         self.status = status
-        self.note = note
+        self.briefSummary = briefSummary
+        self.briefUpdatedAt = briefUpdatedAt
         self.projectID = projectID
         self.projectName = projectName
         self.workspaceID = workspaceID
@@ -359,6 +365,21 @@ public struct TerminalServiceAgentSessionRow: Codable, Sendable, Equatable {
         self.branch = branch
         self.updatedAt = updatedAt
         self.lastSignalAt = lastSignalAt
+    }
+}
+
+/// A coding agent's full brief, answered by `agentBriefRead`. `brief` is nil when the agent has none;
+/// `updatedAt` is when the brief was last written or cleared, nil when it never was.
+public struct TerminalServiceAgentBriefResult: Codable, Sendable, Equatable {
+    /// The agent's terminal session id, the one the read addressed.
+    public let sessionID: String
+    public let brief: String?
+    public let updatedAt: String?
+
+    public init(sessionID: String, brief: String?, updatedAt: String?) {
+        self.sessionID = sessionID
+        self.brief = brief
+        self.updatedAt = updatedAt
     }
 }
 
@@ -407,6 +428,8 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
     public let terminalSession: TerminalServiceSessionSummary?
     public let terminalOutput: String?
     public let agentSessions: [TerminalServiceAgentSessionRow]?
+    /// The brief `agentBriefRead` returned. Nil for every other command.
+    public let agentBrief: TerminalServiceAgentBriefResult?
     public let agentSpawn: TerminalServiceAgentSpawnResult?
     /// Rendered notification blocks a watched child queued for this terminal while it was busy, drained
     /// and attached to the response of the orchestrator's next `spaces_*` MCP tool call (the busy-time
@@ -428,7 +451,7 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         message: String, projects: [TerminalServiceProfileProjectSummary]? = nil, workspaces: [TerminalServiceProfileWorkspaceRecord]? = nil,
         workspace: TerminalServiceProfileWorkspaceRecord? = nil, terminalSessions: [TerminalServiceSessionSummary]? = nil,
         terminalSession: TerminalServiceSessionSummary? = nil, terminalOutput: String? = nil, agentSessions: [TerminalServiceAgentSessionRow]? = nil,
-        agentSpawn: TerminalServiceAgentSpawnResult? = nil, pendingAgentEvents: [String]? = nil,
+        agentBrief: TerminalServiceAgentBriefResult? = nil, agentSpawn: TerminalServiceAgentSpawnResult? = nil, pendingAgentEvents: [String]? = nil,
         automations: [TerminalServiceAutomationSummary]? = nil, automationRuns: [TerminalServiceAutomationRunSummary]? = nil,
         parkedRestoreGeneration: String? = nil
     ) {
@@ -440,6 +463,7 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         self.terminalSession = terminalSession
         self.terminalOutput = terminalOutput
         self.agentSessions = agentSessions
+        self.agentBrief = agentBrief
         self.agentSpawn = agentSpawn
         self.pendingAgentEvents = pendingAgentEvents
         self.automations = automations
@@ -454,8 +478,9 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         guard let events, !events.isEmpty else { return self }
         return TerminalServiceProfileCommandResponse(
             message: message, projects: projects, workspaces: workspaces, workspace: workspace, terminalSessions: terminalSessions,
-            terminalSession: terminalSession, terminalOutput: terminalOutput, agentSessions: agentSessions, agentSpawn: agentSpawn,
-            pendingAgentEvents: events, automations: automations, automationRuns: automationRuns, parkedRestoreGeneration: parkedRestoreGeneration)
+            terminalSession: terminalSession, terminalOutput: terminalOutput, agentSessions: agentSessions, agentBrief: agentBrief,
+            agentSpawn: agentSpawn, pendingAgentEvents: events, automations: automations, automationRuns: automationRuns,
+            parkedRestoreGeneration: parkedRestoreGeneration)
     }
 }
 
