@@ -2238,9 +2238,87 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// the same transition costs no second fetch, since `refresh()` joins a fetch already in flight for
     /// this connection.
     func resumeFromBackground() async {
+        let generation = foregroundEndpointRefreshGeneration
+        latestForegroundResumeToken &+= 1
+        let resumeToken = latestForegroundResumeToken
+        defer { releaseForegroundEndpointRefreshWaiters(armedBy: generation, startedAs: resumeToken) }
         await resetActiveConnectionEndpointAndWait()
         guard settings.isPaired else { return }
         await refresh()
+    }
+
+    /// Whether the shell still owes the connection the foreground refresh above, which backgrounding asked
+    /// for it, and which resume is currently the one that owes it. Plumbing for the gate below rather than
+    /// anything a view reads, so it stays out of observation.
+    ///
+    /// Two stamps, because a resume that is still inside its overview read can be overtaken in two ways,
+    /// and in both the older call's work has stopped being the refresh that warms the cache. It can be
+    /// overtaken by a new backgrounding (rapid app switching), which the generation catches. And it can be
+    /// overtaken by another resume in the same generation, since `RootTabView` runs one on every `.active`
+    /// and an `.inactive` bounce (a control-center pull, a call banner) reaches `.active` again with no
+    /// backgrounding in between: the second call's endpoint reset closes the command channel and aborts
+    /// the first call's fetch, so the first call returns having read nothing. Releasing on the way out of
+    /// either would open the gate for a redial whose own refresh has not landed, which is exactly what the
+    /// gate exists to prevent. A counter bumped at entry and checked at release names the newest resume;
+    /// coalescing the overlapping calls instead would have to make the newer caller inherit the older
+    /// call's work, which is the thing that just got aborted, so it is both more machinery and wrong.
+    @ObservationIgnored private var isForegroundEndpointRefreshPending = false
+    @ObservationIgnored private var foregroundEndpointRefreshGeneration: UInt64 = 0
+    @ObservationIgnored private var latestForegroundResumeToken: UInt64 = 0
+    @ObservationIgnored private var foregroundEndpointRefreshWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Records that the app left the foreground, arming the gate `waitForForegroundEndpointRefresh()`
+    /// holds callers behind for this backgrounding.
+    ///
+    /// Armed on the way out rather than on the way back in: SwiftUI gives no ordering between the shell's
+    /// `scenePhase` observer and an open detail's, so a viewer that reaches `.active` first would find no
+    /// refresh in flight yet and go on to dial the address the reset is about to forget. Arming at
+    /// background makes the gate closed before either observer can run.
+    func noteBackgroundedForEndpointRefresh() {
+        foregroundEndpointRefreshGeneration &+= 1
+        isForegroundEndpointRefreshPending = true
+    }
+
+    /// Arms the gate from the shell's very first scene phase, for an app that mounts with the scene
+    /// already backgrounded (state restoration, a background launch). Such a mount gets no `.background`
+    /// change of its own, while a terminal detail mounting beside it does arm its own foreground redial
+    /// for exactly that phase, so without this the redial would find the gate open and dial ahead of the
+    /// endpoint reset the return to the foreground is about to make. Any other initial phase arms
+    /// nothing: the app is on screen and owes the connection no refresh.
+    ///
+    /// Safe to be followed by a `.background` change for the same absence: arming twice only spends a
+    /// generation, and the release is keyed to the generation current when the resume starts, which is
+    /// the last arming before it.
+    func noteInitialSceneIsBackgrounded(_ isBackgrounded: Bool) {
+        guard isBackgrounded else { return }
+        noteBackgroundedForEndpointRefresh()
+    }
+
+    /// Suspends until `resumeFromBackground()` has finished re-racing this device's endpoint candidates
+    /// and reading the device, and returns immediately when no such refresh is owed. An open terminal's
+    /// foreground redial waits here so its single-candidate stream dial reads a warm cache.
+    ///
+    /// A waiter cannot be stranded: `RootTabView` runs `resumeFromBackground()` on every `.active`, so the
+    /// backgrounding that armed the gate is always followed either by a resume or by the app being
+    /// terminated, which takes the waiter with it. Whichever resume started last is the one that releases,
+    /// and it always reaches its release: the release is deferred, so it runs even if the call returns
+    /// early or is cancelled. That invariant is why there is no timeout here.
+    func waitForForegroundEndpointRefresh() async {
+        guard isForegroundEndpointRefreshPending else { return }
+        await withCheckedContinuation { foregroundEndpointRefreshWaiters.append($0) }
+    }
+
+    /// Opens the gate, but only for the newest resume of the backgrounding still outstanding: a later
+    /// `noteBackgroundedForEndpointRefresh()`, or a later resume of the same backgrounding, leaves the
+    /// gate armed for that later call to release. Everyone waiting is released together, since the gate
+    /// answers one question ("has the foreground refresh landed"), and the refresh that lands is the
+    /// newest one.
+    private func releaseForegroundEndpointRefreshWaiters(armedBy generation: UInt64, startedAs resumeToken: UInt64) {
+        guard foregroundEndpointRefreshGeneration == generation, latestForegroundResumeToken == resumeToken else { return }
+        isForegroundEndpointRefreshPending = false
+        let waiters = foregroundEndpointRefreshWaiters
+        foregroundEndpointRefreshWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
     }
 
     func selectDevice(id: String) {

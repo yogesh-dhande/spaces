@@ -135,6 +135,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private let openSource: String
     private let onAuthenticationRequired: @MainActor @Sendable (String) -> Void
     private let onOpenTerminalDeepLink: @MainActor @Sendable (SpacesTerminalDeepLink) -> Void
+    /// Suspends until the app shell's own foreground work has re-raced this device's endpoint candidates
+    /// and cached the winner, and returns at once when the shell owes no such refresh. The foreground
+    /// redial waits behind it: a stream dials one candidate per attempt, so redialing before the refresh
+    /// lands would pick whichever address the reset is about to forget rather than the one that just
+    /// answered. See `SpacesMobileAppModel.waitForForegroundEndpointRefresh()`.
+    private let awaitForegroundEndpointRefresh: @MainActor @Sendable () async -> Void
 
     var latestState: GhosttyRemoteSessionStatePayload?
     /// Unit tests inject a uniquely-named pasteboard here so an owner-targeted OSC 52 write never
@@ -329,6 +335,34 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// rather than the redial a test means to measure: counting the schedules is what lets the test wait
     /// for its own one instead of for a value that is already there.
     private(set) var scheduledReconnectCountForTesting = 0
+    /// The clock the foreground-resume gap is measured on. Continuous rather than uptime, because most of
+    /// the gap it has to measure is time the device spent asleep, which uptime does not count. Only a test
+    /// overrides it (`monotonicNowForTesting`), so a suite can stage a suspension of any length without
+    /// waiting one out.
+    var monotonicNowForTesting: (@MainActor () -> ContinuousClock.Instant)?
+    private var monotonicNow: ContinuousClock.Instant { monotonicNowForTesting?() ?? ContinuousClock.now }
+    /// When `prepareForBackgrounding()` armed this detail's foreground evaluation, so the resume behind it
+    /// can tell a real suspension from a momentary trip out of `.active`. Read and cleared by that resume.
+    private var backgroundedAt: ContinuousClock.Instant?
+    /// Whether the stream this detail holds still owes itself a foreground redial: set when a resume
+    /// measures a gap long enough to have cost a keepalive, and when a stream ends while the app is away
+    /// or while that redial is already waiting. Cleared only by the redial that pays it, and by `stop()`.
+    ///
+    /// Owed by the viewer rather than by the resume that recorded it, since neither the call nor the
+    /// cycle that notices the debt is reliably the one that gets to pay it. A cycle can be resumed more
+    /// than once, because an `.inactive` bounce back to `.active` (a Control Center pull, a call banner)
+    /// calls `resumeAfterBackgrounding()` again while the first call is still parked on the endpoint
+    /// gate. And the app can background again while that same call waits, which arms a fresh cycle whose
+    /// own absence may be too short to notice a debt that is still outstanding. Carrying the debt across
+    /// both leaves `isCurrentForegroundResume` as the only thing deciding which task dials, and clearing
+    /// it at the dial is what keeps that to one redial however often the scene turns over.
+    private var isForegroundRedialOwed = false
+    /// The connect attempt a foreground resume's redial started. That one dial takes the short
+    /// initial-event budget: the shell re-raced this device's addresses moments earlier, so a dial that
+    /// has produced no payload within it is on an address that stopped working, and starting over is
+    /// worth more than the rest of a cold open's budget. Attempt generations only increase, so this stops
+    /// naming anything as soon as the next attempt begins.
+    private var foregroundRedialAttemptGeneration: UInt64?
     /// How many connect attempts are live right now. Stage 2 races several at once, so a test that has to
     /// prove a teardown actually retired all of them cannot infer it from the stream cancel count alone:
     /// an attempt that never installed a handle has nothing to cancel.
@@ -744,6 +778,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// viewer's serial command channel, so an orphaned one holds the channel (and therefore the next
     /// attempt's own bootstrap read) for its full timeout.
     private static let unreachableRedialStateRequestTimeout: Duration = .seconds(4)
+    /// How long the app must have been away before returning to the foreground retires the stream it held
+    /// and redials rather than trusting it. The daemon writes a keepalive every
+    /// `TerminalStreamLiveness.keepaliveIntervalSeconds`, so a trip shorter than one interval cannot have
+    /// cost the stream a single keepalive and the connection is still proving itself; a longer one can
+    /// have been a suspension the transport did not survive, which nothing on the socket reports.
+    private static let foregroundRedialSuspensionThreshold: Duration = .seconds(TerminalStreamLiveness.keepaliveIntervalSeconds)
     /// How many stage 2 dials may be in flight at once: the stale attempt and the fresh one the ladder
     /// tick started. A third tick retires the oldest rather than letting dials pile up against a device
     /// that is not answering.
@@ -790,7 +830,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     init(
         session: SpacesDeviceTerminalSessionSummary, settings: SpacesMobileConnectionSettings,
         onAuthenticationRequired: @escaping @MainActor @Sendable (String) -> Void,
-        onOpenTerminalDeepLink: @escaping @MainActor @Sendable (SpacesTerminalDeepLink) -> Void, bridgeClient: SpacesDeviceAPIClient? = nil,
+        onOpenTerminalDeepLink: @escaping @MainActor @Sendable (SpacesTerminalDeepLink) -> Void,
+        awaitForegroundEndpointRefresh: @escaping @MainActor @Sendable () async -> Void = {}, bridgeClient: SpacesDeviceAPIClient? = nil,
         isDemoMode: Bool = false, openSource: String = "list", retainedScreens: TerminalRetainedScreenStore = TerminalRetainedScreenStore(),
         remoteMediaDownloader: @escaping @Sendable (URL, SpacesDeviceTerminalLinkArtifactKind) async throws -> URL = TerminalViewerModel
             .defaultRemoteMediaDownloader, linkPreviewCacheDirectory: URL? = nil
@@ -802,6 +843,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         self.retainedScreens = retainedScreens
         self.onAuthenticationRequired = onAuthenticationRequired
         self.onOpenTerminalDeepLink = onOpenTerminalDeepLink
+        self.awaitForegroundEndpointRefresh = awaitForegroundEndpointRefresh
         let resolvedBridgeClient = bridgeClient ?? SpacesDeviceAPIClient(settings: settings, deviceName: UIDevice.current.name)
         self.bridgeClient = resolvedBridgeClient
         commandChannel = resolvedBridgeClient.makeCommandChannel()
@@ -1229,18 +1271,35 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     /// Arms the one foreground ownership evaluation for a detail that stays open while iOS suspends the
-    /// app. State that arrives before the next `.active` is not authoritative for that evaluation.
+    /// app, and records the moment the app left. State that arrives before the next `.active` is not
+    /// authoritative for that evaluation.
     func prepareForBackgrounding() {
-        guard !isStopping, !isEndedState else { return }
+        guard armForegroundResumeEvaluation(traceEvent: "background_arm_foreground_state_evaluation") else { return }
+        backgroundedAt = monotonicNow
+    }
+
+    /// Arms the same evaluation for a detail that mounts behind a scene that is not active (an app
+    /// switcher swipe, a call banner over the open), and records no absence, because there is none: the
+    /// app is on screen and nothing has suspended it, so the stream is as live as any foreground stream
+    /// and a loss it takes is the ordinary outage rather than the foreground redial's.
+    func noteMountedWhileSceneInactive() { _ = armForegroundResumeEvaluation(traceEvent: "inactive_mount_arm_foreground_state_evaluation") }
+
+    /// Closes automatic takeover and opens a fresh evaluation cycle, which is the whole of what both
+    /// arming paths share. Answers whether it armed, since a stopped or ended detail arms nothing.
+    private func armForegroundResumeEvaluation(traceEvent: String) -> Bool {
+        guard !isStopping, !isEndedState else { return false }
         cancelAutomaticTakeover()
         foregroundResumeCycle &+= 1
         sceneState = .backgrounded(resume: .pending)
-        trace("background_arm_foreground_state_evaluation cycle=\(foregroundResumeCycle)")
+        trace("\(traceEvent) cycle=\(foregroundResumeCycle)")
+        return true
     }
 
-    /// Evaluates the ownership result associated with the foreground resume. Its stream reconnects without
-    /// a new `start()` call, but the daemon may have expired this device's remote-client lease while it
-    /// was away, so this always reads state after the scene is active instead of trusting background work.
+    /// Evaluates the ownership result associated with the foreground resume, and, when the app was really
+    /// suspended, redials the stream first.
+    ///
+    /// The daemon may have expired this device's remote-client lease while the app was away, so this
+    /// always reads state after the scene is active instead of trusting background work.
     func resumeAfterBackgrounding() {
         guard !isStopping, !isEndedState else { return }
         let needsForegroundEvaluation = isForegroundResumeEvaluationPending || !isSceneActive
@@ -1251,6 +1310,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             sceneState = .active(resume: .pending)
             trace("foreground_arm_remounted_state_evaluation cycle=\(foregroundResumeCycle)")
         }
+        // A stream held across a suspension long enough to have missed a keepalive is not one this viewer
+        // can tell apart from a dead one, and waiting for its own watchdog to say so is the whole of what
+        // a return to the foreground used to cost. Anything shorter kept a keepalive flowing, so the
+        // stream is live and replacing it would throw a working connection away.
+        if backgroundedAt.map({ monotonicNow - $0 > Self.foregroundRedialSuspensionThreshold }) ?? false { isForegroundRedialOwed = true }
+        backgroundedAt = nil
         let resumeCycle = foregroundResumeCycle
         let lifecycle = viewerAttachmentLifecycle
         let clientID = remoteClient.id
@@ -1258,6 +1323,16 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             guard let self else { return }
             guard self.isCurrentForegroundResume(lifecycle: lifecycle, clientID: clientID, resumeCycle: resumeCycle) else { return }
             let isCurrent = { self.isCurrentForegroundResume(lifecycle: lifecycle, clientID: clientID, resumeCycle: resumeCycle) }
+            if self.isForegroundRedialOwed {
+                await self.awaitForegroundEndpointRefresh()
+                guard isCurrent() else { return }
+                // Re-read on the far side of the gate: several tasks can be waiting on it, and clearing
+                // the debt here is what makes the first one through the only one that dials.
+                if self.isForegroundRedialOwed {
+                    self.isForegroundRedialOwed = false
+                    self.redialAfterSuspension()
+                }
+            }
             // The heartbeat is this resume's state read. It renews the lease and answers with the session's
             // state, quoting the frame this viewer already displays so a screen that did not change while
             // the app was away comes back as metadata with no render update at all: one round trip, no
@@ -1353,6 +1428,59 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
+    /// Retires the stream held across the suspension and dials a fresh one at once, which is exactly what
+    /// re-entering the view does. Nothing reports the held stream as lost: `scheduleReconnect` retires
+    /// attempts without routing them through `handleDisconnect`, so no banner is raised and the screen the
+    /// session last painted stays on the surface until the new stream's first frame replaces it.
+    ///
+    /// Issued ahead of the heartbeat the resume goes on to send, so frames flow as soon as the redial
+    /// lands. It also keeps the attach ordering the model relies on: this viewer's command channel carries
+    /// one round trip at a time, so the redial's own attach (which it makes only for an attachment no
+    /// stream ever confirmed) is answered before the heartbeat asks after the lease, and the heartbeat's
+    /// own `notFound` recovery joins that attach through `attachViewerForCurrentLifecycle` rather than
+    /// sending a second one.
+    private func redialAfterSuspension() {
+        scheduleReconnect(after: .zero)
+        // Read after the schedule: `beginConnectAttempt` mints the generation this names.
+        foregroundRedialAttemptGeneration = reconnectAttemptGeneration
+        trace("foreground_redial_after_suspension generation=\(reconnectAttemptGeneration)")
+    }
+
+    /// Whether this stream loss belongs to the foreground redial instead of the ordinary reconnect, which
+    /// is true for any retryable loss taken while the app is away, and for one taken while a redial is
+    /// already owed. Records the debt and reports it handled.
+    ///
+    /// A suspension longer than the stream's silence timeout ends the subscription from the client's own
+    /// watchdog, and that can land before the scene's `.active` handlers run. Left to the ordinary path,
+    /// the loss would dial against the endpoint the shell is about to re-race, making a second dial out of
+    /// the one the resume deliberately holds behind the gate, and would arm the reconnect banner's grace
+    /// timer, putting "Reconnecting..." on screen for a foreground refresh over a second long. The
+    /// suspension's redial is the single owner of that dial, so the loss is recorded as a debt and
+    /// nothing else is started for it: the banner is still armed normally by that redial's own failure,
+    /// and a stall with no backgrounding in it takes the ordinary path untouched.
+    ///
+    /// Being away is the whole of the rule, with no gap test of its own, because the gap at the moment the
+    /// loss arrives says nothing about the absence it belongs to: a stream can end in the first second
+    /// after `.background` and the app then stay suspended for minutes, and dialing that loss on the
+    /// ordinary path would leave an attempt that wakes with the app, reads the resolver the shell is
+    /// about to reset, and arms the banner clock for a refresh the user asked for by coming back. The
+    /// debt the loss records is what makes the resume dial it: the resume dials on the debt alone, so an
+    /// absence too short to have cost a keepalive still replaces a stream that provably ended.
+    ///
+    /// A loss with no backgrounding behind it keeps the ordinary reconnect and its banner untouched:
+    /// that is the outage a user is sitting in front of, and it is reported as one.
+    ///
+    /// Only a loss the model already treats as retryable defers. Anything else (a revoked pairing, a
+    /// session that is gone) is a verdict the resume must not swallow.
+    private func deferStreamLossToForegroundRedial(_ error: (any Error)?) -> Bool {
+        guard error.map({ Self.isTransientReconnectError($0) }) ?? true else { return false }
+        let isAway = backgroundedAt != nil
+        guard isForegroundRedialOwed || isAway else { return false }
+        isForegroundRedialOwed = true
+        trace("stream_loss_deferred_to_foreground_redial away=\(isAway ? 1 : 0)")
+        return true
+    }
+
     /// The reason attribute every performance event this resume's state read emits is stamped with. The
     /// baseline lane settles the background metric on the `explicit_state_refresh_end` that carries it.
     private static let foregroundResumeStateReason = "foreground_resume"
@@ -1423,6 +1551,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         reattachCheckAfterReconnect = nil
         hasAttemptedAutomaticTakeover = false
         sceneState = isSceneActive ? .active(resume: .none) : .backgrounded(resume: .none)
+        // Paired with the arm in `prepareForBackgrounding()`: a retained detail that stops while the app is
+        // away would otherwise hand its next open's resume a stamp from the run that ended, and that resume
+        // would redial over the connect `start()` had just made, on the short budget a cold open needs.
+        backgroundedAt = nil
+        isForegroundRedialOwed = false
         hasConfirmedOwnerInputReadiness = false
         isInputSurfaceReady = false
         cancelAllConnectAttempts()
@@ -3657,8 +3790,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // behind the recovery's own (#737), the second of which re-attaches as a viewer and hands the
             // session back ownerless.
             let attachAcknowledgementsBeforeSubscribe = attachAcknowledgementCount
-            let handle = try await bridgeClient.subscribe(sessionID: session.id, clientID: clientID, initialEventTimeout: streamInitialEventTimeout) {
-                [weak self] payload in
+            let handle = try await bridgeClient.subscribe(
+                sessionID: session.id, clientID: clientID, initialEventTimeout: streamInitialEventTimeout(forAttempt: reconnectAttempt)
+            ) { [weak self] payload in
                 guard let self else { return }
                 guard self.isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
                 // Any frame at all on a live stream is proof the connection is up, regardless of what it
@@ -3726,11 +3860,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
-    /// The dial-to-first-payload budget this attempt's subscription gets. A redial made while the device
-    /// is already reported unreachable takes the short one: the ladder tick will start a fresh dial
-    /// alongside it anyway, so a dead dial only needs to be gone before it costs a concurrency slot.
-    private var streamInitialEventTimeout: Duration {
-        connectionStage == .unreachable ? Self.unreachableRedialStreamInitialEventTimeout : Self.streamInitialEventTimeout
+    /// The dial-to-first-payload budget this attempt's subscription gets. Two kinds of attempt take the
+    /// short one. A redial made while the device is already reported unreachable: the ladder tick will
+    /// start a fresh dial alongside it anyway, so a dead dial only needs to be gone before it costs a
+    /// concurrency slot. And a foreground resume's redial: it dials the address the shell's own foreground
+    /// refresh just proved, so a dial that produces nothing in four seconds is worth replacing rather than
+    /// waiting out. Neither changes the other, and the unreachable ladder paces itself exactly as before.
+    private func streamInitialEventTimeout(forAttempt generation: UInt64) -> Duration {
+        connectionStage == .unreachable || foregroundRedialAttemptGeneration == generation
+            ? Self.unreachableRedialStreamInitialEventTimeout : Self.streamInitialEventTimeout
     }
 
     /// `connect`'s bootstrap read, as one call taking only sendable values. `async let` evaluates its
@@ -4253,6 +4391,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             }
             return
         }
+        if deferStreamLossToForegroundRedial(error) { return }
         if let error {
             let isTransient = Self.isTransientReconnectError(error)
             // Transient first: a stream the OS tore down while the app was suspended comes back dead and

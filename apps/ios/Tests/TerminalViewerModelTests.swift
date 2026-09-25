@@ -131,6 +131,44 @@
             }
         }
 
+        /// A hand-advanced continuous clock, so a suspension of any length can be staged for the
+        /// foreground-resume gap without waiting one out.
+        @MainActor private final class StagedForegroundClock {
+            private(set) var now = ContinuousClock.now
+
+            func advance(by duration: Duration) { now = now.advanced(by: duration) }
+        }
+
+        /// Stands in for the app shell's foreground endpoint refresh, so a test can hold the redial at that
+        /// seam and see what the resume does while it waits.
+        private actor ForegroundRefreshGate {
+            private var didEnter = false
+            private var isReleased = false
+            private var entryWaiters: [CheckedContinuation<Void, Never>] = []
+            private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+            func wait() async {
+                didEnter = true
+                let entered = entryWaiters
+                entryWaiters.removeAll()
+                for waiter in entered { waiter.resume() }
+                guard !isReleased else { return }
+                await withCheckedContinuation { continuation in releaseWaiters.append(continuation) }
+            }
+
+            func waitForEntry() async {
+                guard !didEnter else { return }
+                await withCheckedContinuation { continuation in entryWaiters.append(continuation) }
+            }
+
+            func release() {
+                isReleased = true
+                let waiters = releaseWaiters
+                releaseWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+        }
+
         private actor HeldHeartbeatResponder {
             private var didStart = false
             private var isReleased = false
@@ -732,6 +770,423 @@
             XCTAssertEqual(attachCount, 0, "a superseded foreground cycle must not reattach after its heartbeat returns")
         }
 
+        /// A return after a real suspension retires the held stream and dials at once, exactly as
+        /// re-entering the view does: the screen the session last painted is still on the surface, so the
+        /// redial is silent unless it fails.
+        func testForegroundResumeAfterASuspensionRedialsAtOnceWithTheShortBudget() async throws {
+            let backend = StageTrackerTestBackend()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let clock = StagedForegroundClock()
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.monotonicNowForTesting = { clock.now }
+            model.connectionBannerGraceSecondsForTesting = 30
+
+            model.start()
+            await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
+
+            model.prepareForBackgrounding()
+            clock.advance(by: .seconds(TerminalStreamLiveness.keepaliveIntervalSeconds + 1))
+            let schedulesBeforeResume = model.scheduledReconnectCountForTesting
+            XCTAssertEqual(model.connectionStage, .connected, "the short budget under test must not be the unreachable ladder's")
+            model.resumeAfterBackgrounding()
+
+            let redialed = await backend.waitForSubscribeCount(2, timeout: .seconds(5))
+            XCTAssertTrue(redialed, "a return after a real suspension must retire the held stream and dial a fresh one")
+            XCTAssertEqual(model.scheduledReconnectCountForTesting, schedulesBeforeResume + 1, "the resume arms exactly one redial, not a retry loop")
+            XCTAssertEqual(model.lastScheduledReconnectDelayForTesting, .zero, "a foreground redial must dial at once, like re-entering the view")
+            let budgets = await backend.initialEventTimeouts
+            XCTAssertEqual(budgets.count, 2)
+            XCTAssertEqual(budgets[0], .seconds(12), "the cold open keeps the full initial-event budget")
+            XCTAssertEqual(budgets[1], .seconds(4), "a foreground redial dials the address the shell just re-raced, so it takes the short budget")
+            XCTAssertFalse(model.isConnectionBannerVisible, "retiring the suspended stream is not an outage to report")
+        }
+
+        /// A trip out of the foreground shorter than the stream's keepalive interval cannot have cost the
+        /// stream a keepalive, so the live stream is kept rather than thrown away.
+        func testForegroundResumeAfterAShortTripKeepsTheLiveStream() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let payload) = request.command, payload.action == .heartbeat {
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:25:00Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let clock = StagedForegroundClock()
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.monotonicNowForTesting = { clock.now }
+
+            model.prepareForBackgrounding()
+            clock.advance(by: .seconds(1))
+            let schedulesBeforeResume = model.scheduledReconnectCountForTesting
+            model.resumeAfterBackgrounding()
+
+            let didHeartbeat = try await waitForTerminalControlAction(.heartbeat, count: 1, recorder: recorder)
+            XCTAssertTrue(didHeartbeat, "a short trip away must still evaluate ownership on return")
+            XCTAssertEqual(
+                model.scheduledReconnectCountForTesting, schedulesBeforeResume, "a trip shorter than one keepalive must leave the stream alone")
+        }
+
+        /// The redial is armed before the resume's heartbeat goes out, so the fresh stream is already
+        /// dialing while the ownership round trip is still on the command channel.
+        func testForegroundResumeArmsTheRedialBeforeIssuingItsHeartbeat() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let heartbeat = HeldHeartbeatResponder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let payload) = request.command, payload.action == .heartbeat {
+                    await heartbeat.markStarted()
+                    await heartbeat.waitForRelease()
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:25:00Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let clock = StagedForegroundClock()
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.monotonicNowForTesting = { clock.now }
+
+            model.prepareForBackgrounding()
+            clock.advance(by: .seconds(TerminalStreamLiveness.keepaliveIntervalSeconds + 1))
+            let schedulesBeforeResume = model.scheduledReconnectCountForTesting
+            model.resumeAfterBackgrounding()
+            await heartbeat.waitForStart()
+
+            XCTAssertGreaterThan(
+                model.scheduledReconnectCountForTesting, schedulesBeforeResume, "the heartbeat must not go out ahead of the stream redial")
+            XCTAssertEqual(model.lastScheduledReconnectDelayForTesting, .zero, "the redial the heartbeat follows is the zero-delay one")
+            await heartbeat.release()
+        }
+
+        /// The redial waits for the app shell's own foreground refresh: that refresh re-races this device's
+        /// addresses and caches the winner, and a stream dials exactly one candidate per attempt.
+        func testForegroundRedialWaitsForTheShellsEndpointRefresh() async throws {
+            let backend = StageTrackerTestBackend()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let clock = StagedForegroundClock()
+            let gate = ForegroundRefreshGate()
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                awaitForegroundEndpointRefresh: { await gate.wait() }, bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.monotonicNowForTesting = { clock.now }
+            model.connectionBannerGraceSecondsForTesting = 30
+
+            model.start()
+            await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
+
+            model.prepareForBackgrounding()
+            clock.advance(by: .seconds(TerminalStreamLiveness.keepaliveIntervalSeconds + 1))
+            let schedulesBeforeResume = model.scheduledReconnectCountForTesting
+            model.resumeAfterBackgrounding()
+            await gate.waitForEntry()
+            try await Task.sleep(for: .milliseconds(100))
+
+            XCTAssertEqual(
+                model.scheduledReconnectCountForTesting, schedulesBeforeResume,
+                "a redial made before the endpoint refresh lands would dial the address the reset is about to forget")
+            let subscribesWhileHeld = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribesWhileHeld, 1, "no fresh stream may be dialed while the endpoint refresh is still running")
+
+            await gate.release()
+            let redialed = await backend.waitForSubscribeCount(2, timeout: .seconds(5))
+            XCTAssertTrue(redialed, "the redial must follow the endpoint refresh")
+            XCTAssertEqual(model.lastScheduledReconnectDelayForTesting, .zero, "the redial the refresh released must still dial at once")
+        }
+
+        /// A scene can leave `.active` and come back without ever backgrounding (a Control Center pull, a
+        /// call banner), and SwiftUI delivers that as another resume while the suspension's own resume is
+        /// still parked on the endpoint gate. The suspension is still owed its redial: the second resume
+        /// carries no gap of its own, so left to itself it would read state at once, settle the evaluation,
+        /// and leave the stream the suspension may have killed in place, which is the whole of what this
+        /// resume exists to replace.
+        func testAnInactiveBounceWhileTheEndpointGateIsClosedStillRedialsExactlyOnce() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let backend = StageTrackerTestBackend(transportFactory: { RecordingStalledStreamRequestTransport(recorder: recorder) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let clock = StagedForegroundClock()
+            let gate = ForegroundRefreshGate()
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                awaitForegroundEndpointRefresh: { await gate.wait() }, bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.monotonicNowForTesting = { clock.now }
+            model.connectionBannerGraceSecondsForTesting = 30
+
+            model.start()
+            await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
+            let schedulesBeforeResume = model.scheduledReconnectCountForTesting
+            let heartbeatsBeforeResume = await recorder.countTerminalControlAction(.heartbeat)
+
+            model.prepareForBackgrounding()
+            clock.advance(by: .seconds(TerminalStreamLiveness.keepaliveIntervalSeconds + 1))
+            model.resumeAfterBackgrounding()
+            await gate.waitForEntry()
+            // The bounce, with the suspension's resume still waiting behind the gate.
+            model.resumeAfterBackgrounding()
+            try await Task.sleep(for: .milliseconds(100))
+
+            let heartbeatsWhileHeld = await recorder.countTerminalControlAction(.heartbeat)
+            XCTAssertEqual(
+                heartbeatsWhileHeld, heartbeatsBeforeResume,
+                "the bounce must not read state ahead of the redial, which would settle the evaluation the redial is waiting on")
+            let subscribesWhileHeld = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribesWhileHeld, 1, "no stream may be dialed while the endpoint refresh is still running")
+
+            await gate.release()
+            let redialed = await backend.waitForSubscribeCount(2, timeout: .seconds(5))
+            XCTAssertTrue(redialed, "the suspension's redial survives a bounce taken while it waited")
+            let didHeartbeat = try await waitForTerminalControlAction(.heartbeat, count: heartbeatsBeforeResume + 1, recorder: recorder)
+            XCTAssertTrue(didHeartbeat, "the resume's state read follows the redial")
+            XCTAssertEqual(
+                model.scheduledReconnectCountForTesting, schedulesBeforeResume + 1, "one backgrounding redials once, however often the scene bounces")
+            let subscribesAfterRelease = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribesAfterRelease, 2, "the bounce must not dial a stream of its own")
+        }
+
+        /// The app can background again while the suspension's redial is still waiting on the endpoint
+        /// gate, and the absence that follows can be short enough to have cost the stream nothing. The debt
+        /// is still outstanding: the stream it was raised against is the one the first suspension may have
+        /// killed, so the resume that gets to run must pay it rather than measure its own gap and find
+        /// nothing owed.
+        func testASecondBriefBackgroundingWhileTheGateIsClosedStillRedialsExactlyOnce() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let backend = StageTrackerTestBackend(transportFactory: { RecordingStalledStreamRequestTransport(recorder: recorder) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let clock = StagedForegroundClock()
+            let gate = ForegroundRefreshGate()
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                awaitForegroundEndpointRefresh: { await gate.wait() }, bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.monotonicNowForTesting = { clock.now }
+            model.connectionBannerGraceSecondsForTesting = 30
+
+            model.start()
+            await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
+            let schedulesBeforeResume = model.scheduledReconnectCountForTesting
+            let heartbeatsBeforeResume = await recorder.countTerminalControlAction(.heartbeat)
+
+            model.prepareForBackgrounding()
+            clock.advance(by: .seconds(TerminalStreamLiveness.keepaliveIntervalSeconds + 1))
+            model.resumeAfterBackgrounding()
+            await gate.waitForEntry()
+            // Away and back again while the first resume is still parked, this time for an absence that
+            // proves nothing on its own.
+            model.prepareForBackgrounding()
+            clock.advance(by: .seconds(1))
+            model.resumeAfterBackgrounding()
+            try await Task.sleep(for: .milliseconds(100))
+
+            let subscribesWhileHeld = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribesWhileHeld, 1, "no stream may be dialed while the endpoint refresh is still running")
+
+            await gate.release()
+            let redialed = await backend.waitForSubscribeCount(2, timeout: .seconds(5))
+            XCTAssertTrue(redialed, "the debt the first suspension raised must still be paid by the resume that runs")
+            let didHeartbeat = try await waitForTerminalControlAction(.heartbeat, count: heartbeatsBeforeResume + 1, recorder: recorder)
+            XCTAssertTrue(didHeartbeat, "the resume's state read follows the redial")
+            try await Task.sleep(for: .milliseconds(200))
+            XCTAssertEqual(
+                model.scheduledReconnectCountForTesting, schedulesBeforeResume + 1, "the carried debt buys one redial, not one per absence")
+            let subscribesAfterRelease = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribesAfterRelease, 2, "only the surviving resume dials")
+            let heartbeatsAfterRelease = await recorder.countTerminalControlAction(.heartbeat)
+            XCTAssertEqual(heartbeatsAfterRelease, heartbeatsBeforeResume + 1, "the superseded resume must not read state of its own")
+        }
+
+        /// A suspension longer than the stream's silence timeout ends the subscription from the client's
+        /// own watchdog, and that end can land before the scene is active again. The foreground redial owns
+        /// the dial that replaces it: the ordinary reconnect would dial against the endpoint the shell is
+        /// about to re-race, and would start the banner clock for a refresh the user asked for by returning
+        /// to the app.
+        func testAStallTakenDuringASuspensionIsDialedOnlyByTheForegroundRedial() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let backend = StageTrackerTestBackend(transportFactory: { RecordingStalledStreamRequestTransport(recorder: recorder) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let clock = StagedForegroundClock()
+            let gate = ForegroundRefreshGate()
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                awaitForegroundEndpointRefresh: { await gate.wait() }, bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.monotonicNowForTesting = { clock.now }
+            model.connectionBannerGraceSecondsForTesting = 30
+
+            model.start()
+            await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
+            let schedulesBeforeResume = model.scheduledReconnectCountForTesting
+            let heartbeatsBeforeResume = await recorder.countTerminalControlAction(.heartbeat)
+
+            model.prepareForBackgrounding()
+            clock.advance(by: .seconds(TerminalStreamLiveness.keepaliveIntervalSeconds + 1))
+            // The watchdog's verdict on the stream the suspension killed, delivered while the scene is
+            // still away.
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+            // Longer than either reconnect cadence the ordinary path would have used, so a dial it started
+            // would have been made by now.
+            try await Task.sleep(for: .milliseconds(1200))
+
+            XCTAssertEqual(model.connectionStage, .connected, "a stall the foreground redial owns must not put the pane into reconnecting")
+            XCTAssertFalse(model.isConnectionBannerVisible, "returning to the foreground must not show a banner before the redial has failed")
+            var subscribes = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribes, 1, "the ordinary reconnect must not dial the stall the resume owns")
+
+            model.resumeAfterBackgrounding()
+            await gate.waitForEntry()
+            try await Task.sleep(for: .milliseconds(100))
+            subscribes = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribes, 1, "the redial still waits for the endpoint refresh")
+            XCTAssertEqual(model.connectionStage, .connected, "no banner stage may be entered while the refresh runs")
+
+            await gate.release()
+            let redialed = await backend.waitForSubscribeCount(2, timeout: .seconds(5))
+            XCTAssertTrue(redialed, "the stall taken during the suspension is dialed by the foreground redial")
+            let didHeartbeat = try await waitForTerminalControlAction(.heartbeat, count: heartbeatsBeforeResume + 1, recorder: recorder)
+            XCTAssertTrue(didHeartbeat, "the resume's state read follows the redial")
+            try await Task.sleep(for: .milliseconds(200))
+            XCTAssertEqual(model.scheduledReconnectCountForTesting, schedulesBeforeResume + 1, "the suspension costs exactly one dial")
+            subscribes = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribes, 2, "the stall and the resume must not dial one stream each")
+            XCTAssertFalse(model.isConnectionBannerVisible, "a redial that has not failed reports nothing")
+        }
+
+        /// A stream can end in the first seconds after the app leaves the foreground, before any absence
+        /// worth measuring has passed, and the app can then stay suspended for minutes. Dialing that loss
+        /// on the ordinary path would leave an attempt that wakes with the app, reads the address the shell
+        /// is about to reset, and puts the reconnect banner on screen for a refresh the user asked for by
+        /// coming back. Being away is enough for the loss to belong to the resume.
+        func testALossTakenEarlyInTheBackgroundIsDialedOnlyByTheForegroundRedial() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let backend = StageTrackerTestBackend(transportFactory: { RecordingStalledStreamRequestTransport(recorder: recorder) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let clock = StagedForegroundClock()
+            let gate = ForegroundRefreshGate()
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                awaitForegroundEndpointRefresh: { await gate.wait() }, bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.monotonicNowForTesting = { clock.now }
+            model.connectionBannerGraceSecondsForTesting = 30
+
+            model.start()
+            await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
+            let schedulesBeforeResume = model.scheduledReconnectCountForTesting
+            let heartbeatsBeforeResume = await recorder.countTerminalControlAction(.heartbeat)
+
+            model.prepareForBackgrounding()
+            clock.advance(by: .seconds(1))
+            await backend.fireDisconnect(POSIXError(.ECONNRESET))
+            // Longer than either reconnect cadence the ordinary path would have used.
+            try await Task.sleep(for: .milliseconds(1200))
+
+            var subscribes = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribes, 1, "a stream lost while the app is away is not dialed from the background")
+            XCTAssertEqual(model.connectionStage, .connected, "a loss the foreground redial owns must not put the pane into reconnecting")
+
+            // The absence the loss was taken at the start of turns out to be a real suspension.
+            clock.advance(by: .seconds(TerminalStreamLiveness.keepaliveIntervalSeconds + 1))
+            model.resumeAfterBackgrounding()
+            await gate.waitForEntry()
+            try await Task.sleep(for: .milliseconds(100))
+            subscribes = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribes, 1, "the redial still waits for the endpoint refresh")
+
+            await gate.release()
+            let redialed = await backend.waitForSubscribeCount(2, timeout: .seconds(5))
+            XCTAssertTrue(redialed, "the resume dials the loss it took ownership of")
+            let didHeartbeat = try await waitForTerminalControlAction(.heartbeat, count: heartbeatsBeforeResume + 1, recorder: recorder)
+            XCTAssertTrue(didHeartbeat, "the resume's state read follows the redial")
+            try await Task.sleep(for: .milliseconds(200))
+            XCTAssertEqual(model.scheduledReconnectCountForTesting, schedulesBeforeResume + 1, "the absence costs exactly one dial")
+            subscribes = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribes, 2, "the loss and the resume must not dial one stream each")
+            let budgets = await backend.initialEventTimeouts
+            XCTAssertEqual(budgets.count, 2)
+            XCTAssertEqual(budgets[1], .seconds(4), "the resume's dial takes the short budget, like every foreground redial")
+            XCTAssertFalse(model.isConnectionBannerVisible, "a redial that has not failed reports nothing")
+        }
+
+        /// The same early loss, with a trip too short to have cost the stream a keepalive. The gap decides
+        /// nothing here: the stream provably ended, so the resume owes it a dial whatever the clock says,
+        /// and that dial is still the one that waits for the endpoint refresh.
+        func testALossTakenInTheBackgroundIsStillDialedAfterAShortTrip() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let backend = StageTrackerTestBackend(transportFactory: { RecordingStalledStreamRequestTransport(recorder: recorder) })
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let clock = StagedForegroundClock()
+            let gate = ForegroundRefreshGate()
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                awaitForegroundEndpointRefresh: { await gate.wait() }, bridgeClient: bridgeClient)
+            defer { model.stop() }
+            model.monotonicNowForTesting = { clock.now }
+            model.connectionBannerGraceSecondsForTesting = 30
+
+            model.start()
+            await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
+            let schedulesBeforeResume = model.scheduledReconnectCountForTesting
+            let heartbeatsBeforeResume = await recorder.countTerminalControlAction(.heartbeat)
+
+            model.prepareForBackgrounding()
+            clock.advance(by: .seconds(1))
+            await backend.fireDisconnect(POSIXError(.ECONNRESET))
+            model.resumeAfterBackgrounding()
+            await gate.waitForEntry()
+            try await Task.sleep(for: .milliseconds(100))
+
+            let subscribesWhileHeld = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribesWhileHeld, 1, "a trip too short to measure does not make the loss the ordinary reconnect's")
+
+            await gate.release()
+            let redialed = await backend.waitForSubscribeCount(2, timeout: .seconds(5))
+            XCTAssertTrue(redialed, "a stream that ended is replaced whatever the gap was")
+            let didHeartbeat = try await waitForTerminalControlAction(.heartbeat, count: heartbeatsBeforeResume + 1, recorder: recorder)
+            XCTAssertTrue(didHeartbeat, "the resume's state read follows the redial")
+            try await Task.sleep(for: .milliseconds(200))
+            XCTAssertEqual(model.scheduledReconnectCountForTesting, schedulesBeforeResume + 1, "exactly one dial")
+            let subscribesAfterRelease = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribesAfterRelease, 2, "exactly one stream replaces the one that ended")
+        }
+
+        /// The suspension rule is about a suspension: a stream that stalls while the app is in use is the
+        /// ordinary outage the reconnect path and its banner exist for.
+        func testAStallWithNoBackgroundingStillTakesTheOrdinaryReconnectPath() async throws {
+            let backend = StageTrackerTestBackend()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            await backend.waitForSubscribeCount(1)
+            await waitForColdOpenToSettle(model)
+
+            await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
+
+            XCTAssertEqual(model.connectionStage, .reconnecting, "a stall with no suspension behind it is still a reported loss")
+            let redialed = await backend.waitForSubscribeCount(2, timeout: .seconds(5))
+            XCTAssertTrue(redialed, "the ordinary reconnect still dials")
+        }
+
         func testBackgroundStartingToRunningWaitsForForegroundOwnershipEvaluation() async throws {
             let recorder = DeviceAPIRequestRecorder()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
@@ -779,7 +1234,7 @@
             defer { model.stop() }
 
             // This is the detail's initial-task ordering for a scene that mounted inactive.
-            model.prepareForBackgrounding()
+            model.noteMountedWhileSceneInactive()
             model.start()
             await model.applyLatestState(
                 Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:25:00Z"),
@@ -7287,12 +7742,15 @@
         /// at all. Mirrors the Mac pane's `refreshNow` (`TerminalSessionPaneViewController.swift`,
         /// `attachmentModeToRequest`), which re-attaches under the identical condition.
         ///
-        /// Backgrounded throughout (`prepareForBackgrounding()`, never resumed): a running session this
-        /// client does not own also arms the pre-existing, unrelated "claim an ownerless session"
-        /// automatic takeover (`attemptAutomaticTakeoverIfNeeded`, gated on `isSceneActive`) on every
-        /// applied state, including a plain viewer's very first bootstrap. Backgrounding is this suite's
-        /// established way of holding that mechanism off (see `testInitiallyInactiveViewerWaitsForActivationBeforeAutomaticTakeover`),
-        /// which is what isolates the reattach behavior this test actually protects.
+        /// Mounted behind an inactive scene throughout (`noteMountedWhileSceneInactive()`, never resumed):
+        /// a running session this client does not own also arms the pre-existing, unrelated "claim an
+        /// ownerless session" automatic takeover (`attemptAutomaticTakeoverIfNeeded`, gated on
+        /// `isSceneActive`) on every applied state, including a plain viewer's very first bootstrap. An
+        /// inactive scene is this suite's established way of holding that mechanism off (see
+        /// `testInitiallyInactiveViewerWaitsForActivationBeforeAutomaticTakeover`), which is what isolates
+        /// the reattach behavior this test actually protects. Inactive rather than backgrounded because
+        /// this test's stream loss is an ordinary one: a loss taken while the app is away belongs to the
+        /// foreground redial instead (see `deferStreamLossToForegroundRedial`).
         func testAViewerWhoseAttachmentVanishedAcrossAReconnectAttachesAgain() async throws {
             let backend = RestartedDaemonBackend(attachmentSnapshot: TerminalSessionAttachmentSnapshot())
             let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
@@ -7301,7 +7759,7 @@
                 bridgeClient: bridgeClient)
             defer { model.stop() }
             model.connectionBannerGraceSecondsForTesting = 30
-            model.prepareForBackgrounding()
+            model.noteMountedWhileSceneInactive()
 
             let client = model.remoteClientForTesting
             let viewerAttachment = TerminalAttachment(
@@ -7335,9 +7793,9 @@
         /// session's owner, and the only mode `attachViewerForCurrentLifecycle` sends is `.viewer`, so a
         /// blind reattach here would demote an owner for no reason.
         ///
-        /// Backgrounded throughout for the same reason as the reattach test above: it keeps the
-        /// pre-existing "claim an ownerless session" automatic takeover from firing on this viewer's own
-        /// bootstrap, isolating the "does not attach again" behavior this test actually protects.
+        /// Mounted behind an inactive scene throughout for the same reason as the reattach test above: it
+        /// keeps the pre-existing "claim an ownerless session" automatic takeover from firing on this
+        /// viewer's own bootstrap, isolating the "does not attach again" behavior this test protects.
         func testAReconnectWhoseBootstrapStillNamesThisClientDoesNotAttachAgain() async throws {
             let backend = RestartedDaemonBackend(attachmentSnapshot: TerminalSessionAttachmentSnapshot())
             let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
@@ -7346,7 +7804,7 @@
                 bridgeClient: bridgeClient)
             defer { model.stop() }
             model.connectionBannerGraceSecondsForTesting = 30
-            model.prepareForBackgrounding()
+            model.noteMountedWhileSceneInactive()
 
             let client = model.remoteClientForTesting
             let viewerAttachment = TerminalAttachment(
@@ -7522,9 +7980,9 @@
         /// (`shouldAttachBeforeSubscribing`) is the retry. Nothing in this test reports a second
         /// disconnect; the redial is `connect`'s own doing, not something driven from outside it.
         ///
-        /// Backgrounded throughout, for the same reason as the plain reattach test above: this is a
-        /// viewer's recovery, not an owner's, so the pre-existing "claim an ownerless session" automatic
-        /// takeover has no part to play here and is kept off entirely.
+        /// Mounted behind an inactive scene throughout, for the same reason as the plain reattach test
+        /// above: this is a viewer's recovery, not an owner's, so the pre-existing "claim an ownerless
+        /// session" automatic takeover has no part to play here and is kept off entirely.
         func testAViewerWhoseReattachFailedRedialsAndAttachesBeforeSubscribing() async throws {
             let backend = RestartedDaemonBackend(attachmentSnapshot: TerminalSessionAttachmentSnapshot())
             let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
@@ -7533,7 +7991,7 @@
                 bridgeClient: bridgeClient)
             defer { model.stop() }
             model.connectionBannerGraceSecondsForTesting = 30
-            model.prepareForBackgrounding()
+            model.noteMountedWhileSceneInactive()
 
             let client = model.remoteClientForTesting
             let viewerAttachment = TerminalAttachment(
@@ -7610,9 +8068,9 @@
         /// covers: whichever source produces the first snapshot naming this client gone is the one that
         /// settles the check.
         ///
-        /// Backgrounded throughout, for the same reason as the plain reattach test above: this is a
-        /// viewer's recovery, not an owner's, so the pre-existing "claim an ownerless session" automatic
-        /// takeover has no part to play here and is kept off entirely.
+        /// Mounted behind an inactive scene throughout, for the same reason as the plain reattach test
+        /// above: this is a viewer's recovery, not an owner's, so the pre-existing "claim an ownerless
+        /// session" automatic takeover has no part to play here and is kept off entirely.
         func testAViewerReattachesFromTheStreamPayloadWhenTheBootstrapReadIsUnavailable() async throws {
             let backend = RestartedDaemonBackend(attachmentSnapshot: TerminalSessionAttachmentSnapshot())
             let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
@@ -7621,7 +8079,7 @@
                 bridgeClient: bridgeClient)
             defer { model.stop() }
             model.connectionBannerGraceSecondsForTesting = 30
-            model.prepareForBackgrounding()
+            model.noteMountedWhileSceneInactive()
 
             let client = model.remoteClientForTesting
             let viewerAttachment = TerminalAttachment(
@@ -7685,7 +8143,7 @@
                 bridgeClient: bridgeClient)
             defer { model.stop() }
             model.connectionBannerGraceSecondsForTesting = 30
-            model.prepareForBackgrounding()
+            model.noteMountedWhileSceneInactive()
 
             let client = model.remoteClientForTesting
             let viewerAttachment = TerminalAttachment(
@@ -7779,7 +8237,7 @@
             // check on its own before this test's checkpoint. Pinning the interval far out of reach removes
             // that confound: the only `.state` call in play is the reconnect's own bootstrap read.
             model.renderUpdateResyncIntervalForTesting = 1_000_000
-            model.prepareForBackgrounding()
+            model.noteMountedWhileSceneInactive()
 
             let client = model.remoteClientForTesting
             let viewerAttachment = TerminalAttachment(
@@ -8783,6 +9241,26 @@
                     TerminalViewerModelTests.runningTerminalState(
                         attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]),
                         emittedAt: "2026-06-04T14:23:31Z"))
+            }
+
+            func close() async {}
+        }
+
+        /// Answers requests exactly as `StalledStreamRequestTransport` does and records them, so a test
+        /// driving the stream through `StageTrackerTestBackend` can also see what a resume sent, and when
+        /// it sent it relative to the stream dials the backend counts.
+        private struct RecordingStalledStreamRequestTransport: SpacesDeviceAPIRequestTransport {
+            let recorder: DeviceAPIRequestRecorder
+
+            func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+                await recorder.append(request)
+                if let acknowledgement = TerminalViewerModelTests.attachAcknowledgement(for: request) { return acknowledgement }
+                if case .state = request.command {
+                    return TerminalViewerModelTests.terminalStateResponse(
+                        TerminalViewerModelTests.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:31Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
 
             func close() async {}

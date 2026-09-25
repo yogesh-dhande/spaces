@@ -83,7 +83,8 @@ struct TerminalDetailView: View {
         _model = State(
             initialValue: TerminalViewerModel(
                 session: session, settings: settings, onAuthenticationRequired: onAuthenticationRequired,
-                onOpenTerminalDeepLink: { link in Task { await appModel.openTerminalDeepLink(link) } }, bridgeClient: appModel.deviceClient,
+                onOpenTerminalDeepLink: { link in Task { await appModel.openTerminalDeepLink(link) } },
+                awaitForegroundEndpointRefresh: { await appModel.waitForForegroundEndpointRefresh() }, bridgeClient: appModel.deviceClient,
                 isDemoMode: appModel.isDemoModeEnabled, openSource: openSource, retainedScreens: appModel.retainedTerminalScreens))
     }
 
@@ -151,7 +152,10 @@ struct TerminalDetailView: View {
         }.background(Theme.terminalSurface.ignoresSafeArea()).accessibilityElement(children: .contain).accessibilityIdentifier(
             "terminal.detail.\(session.id)"
         ).toolbar(.hidden, for: .navigationBar).task {
-            if scenePhase != .active { model.prepareForBackgrounding() }
+            // Mounting behind a scene that is merely inactive arms the evaluation without recording an
+            // absence: the app is on screen, so the stream this open is about to make is a foreground one.
+            if scenePhase == .background { model.prepareForBackgrounding() }
+            if scenePhase == .inactive { model.noteMountedWhileSceneInactive() }
             model.start()
             if scenePhase == .active { model.resumeAfterBackgrounding() }
         }.task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }.task(id: e2eCommandRequestPath) { await consumeE2ECommandRequestsIfNeeded() }.onChange(

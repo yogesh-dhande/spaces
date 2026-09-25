@@ -421,8 +421,12 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
     /// How long this stream may receive no bytes at all before it reports itself stalled. Injected only so
     /// tests can compress the wait; production always uses `TerminalStreamLiveness.silenceTimeoutSeconds`.
     private let silenceTimeout: TimeInterval
-    /// Uptime of the last bytes received from the daemon, keepalives included. Guarded by `connectionLock`.
-    private var lastReceiveUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+    /// When the last bytes arrived from the daemon, keepalives included. Guarded by `connectionLock`.
+    ///
+    /// `ContinuousClock` rather than uptime: uptime stops while the machine sleeps, so a stream that died
+    /// across a sleep would not be counted silent for that time and would go on looking alive until the
+    /// timeout had passed again in awake time.
+    private var lastReceiveInstant = ContinuousClock.now
     /// Set by whichever termination path runs first, so the silence watchdog can neither report a stream
     /// that has already ended nor keep polling after it. Guarded by `connectionLock`.
     private var hasFinished = false
@@ -484,7 +488,7 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
         connectionLock.lock()
         connection = createdConnection
         connectedHostStorage = host
-        lastReceiveUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        lastReceiveInstant = ContinuousClock.now
         hasFinished = false
         connectionLock.unlock()
         let onDisconnect = SpacesDeviceAPIStreamEndpoint.invalidating(onDisconnect, resolver: resolver, host: host)
@@ -516,7 +520,7 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
 
     private func noteBytesReceived() {
         connectionLock.lock()
-        lastReceiveUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        lastReceiveInstant = ContinuousClock.now
         connectionLock.unlock()
     }
 
@@ -545,10 +549,10 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
                 guard let self else { return }
                 connectionLock.lock()
                 let isRunning = !hasFinished && connection != nil
-                let silentSeconds = Double(DispatchTime.now().uptimeNanoseconds &- lastReceiveUptimeNanoseconds) / 1_000_000_000
+                let isSilentPastTimeout = ContinuousClock.now - lastReceiveInstant >= .seconds(silenceTimeout)
                 connectionLock.unlock()
                 guard isRunning else { return }
-                guard silentSeconds >= silenceTimeout else { continue }
+                guard isSilentPastTimeout else { continue }
                 guard markFinished() else { return }
                 onDisconnect(SpacesDeviceAPIRequestClientError.streamStalled)
                 stop()
