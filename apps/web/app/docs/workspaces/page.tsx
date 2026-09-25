@@ -1,94 +1,139 @@
 import type { Metadata } from "next";
+import { DocLink } from "../components/doc-link";
 import { DocsShell } from "../components/docs-shell";
 import { Prose, Section } from "../components/section";
 
 export const metadata: Metadata = {
   title: "Workspaces",
-  description: "Workspace concepts, services, env vars, and switching.",
+  description: "Create, set up, start, stop, hide, and delete workspaces.",
 };
 
 export default function WorkspacesDocsPage() {
   return (
     <DocsShell
       title="Workspaces"
-      description="A workspace is the core runtime unit in Spaces. It owns process templates, browser sessions, window tracking, and named services routed through Caddy."
+      description="A workspace is one branch of a Git project, checked out in its own directory with its own ports, processes, browser sessions, and terminals."
       pagePath="/docs/workspaces"
     >
-      <Section title="What Is a Workspace?">
+      <Section title="What a workspace is">
         <Prose>
-          A workspace is one stream of work — a feature, a bug fix, an experiment. It belongs to a project, has its own directory (a git worktree for Git projects), and keeps its own copy of the project&apos;s processes, browser sessions, and services.
+          A workspace is one branch of a Git project, in its own worktree and directory, with its
+          own ports, processes, browser sessions, and terminals. A folder project has exactly one.
+          The home workspace (<code>~</code>) holds terminals only.
         </Prose>
       </Section>
 
-      <Section title="Creating a Workspace">
+      <Section id="creating" title="Creating">
         <Prose>
-          Open the New Workspace form from the <code>+</code> on any project or workspace row, or press <code>cmd+n</code>. For a Git project you&apos;ll fill in:
+          For a Git project, create a workspace from the &quot;+&quot; on its row (&quot;New
+          workspace in &lt;project&gt;&quot;) or with <code>⌘N</code>, choosing &quot;Create
+          branch&quot; (a branch name and a base branch) or &quot;Use existing&quot; (pick a
+          branch), plus optional notes. A folder project that isn&apos;t a Git repository has
+          only its one workspace and offers no &quot;New workspace&quot; action. There is no
+          separate title or directory-name field: Spaces
+          generates a directory name on its own, independent of the branch name, and it
+          isn&apos;t editable; the sidebar shows the branch name. A workspace created on the
+          iPhone always branches from the project&apos;s default branch. From the CLI, see{" "}
+          <DocLink href="/docs/cli#workspaces">CLI: Workspaces</DocLink>.
         </Prose>
+      </Section>
+
+      <Section id="discovery" title="Existing worktrees">
+        <Prose>
+          A worktree you create with git outside Spaces, on a named branch, appears as a workspace
+          on its own. A worktree on a detached HEAD is skipped. A non-default workspace whose
+          worktree is gone is removed automatically; one whose directory still exists on disk
+          keeps its record even when git&apos;s own listing omits it.
+        </Prose>
+      </Section>
+
+      <Section id="setup" title="Setup">
+        <Prose>
+          A workspace&apos;s setup script runs before anything else launches, right after it is
+          created. While it is
+          pending, running, or failed, the workspace shows a setup screen instead of its panel:
+          status, timestamps, exit code, error text, and a log tail, with Retry, Reveal in Finder,
+          an ad hoc terminal for repairs, and copy/open actions for the log. After a failure you
+          can also edit the setup script before retrying. Processes and browser sessions wait
+          until setup succeeds.
+        </Prose>
+      </Section>
+
+      <Section id="workspace-settings" title="Workspace settings">
+        <Prose>
+          Per-workspace browser sessions, processes, services, a stop script, and a read-only
+          Environment section (see{" "}
+          <DocLink href="/docs/environment-variables">Environment variables</DocLink>). Editing
+          settings while a workspace is running never starts or stops anything on its own: a
+          process name or on-exit edit updates the running process immediately, while a command
+          edit asks you to confirm before restarting it.
+        </Prose>
+      </Section>
+
+      <Section id="notes" title="Notes">
+        <Prose>
+          Your own free-text notes on a workspace, on the Mac. Set them from the Notes field when
+          creating a workspace, or edit them from the notes button in the workspace footer, which
+          opens a popover (<code>⌘↩</code> saves, <code>Esc</code> closes). The button shows a
+          tint once notes exist and its tooltip previews them; empty, its tooltip reads &quot;Add
+          notes&quot;. The home workspace has none. Coding agents keep their own status in a
+          brief; see{" "}
+          <DocLink href="/docs/coding-agents#briefs">Agent status: Agent briefs</DocLink>.
+        </Prose>
+      </Section>
+
+      <Section id="start-stop-and-restart" title="Start, stop, and restart">
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>Title</strong> &mdash; the display name in the sidebar.</li>
-          <li>• <strong>Branch</strong> &mdash; pick an existing branch or enter a name to create a new one.</li>
-          <li>• <strong>Base branch</strong> &mdash; the base for a new branch. Defaults to the project&apos;s default, falling back to <code>main</code> or <code>master</code>.</li>
-          <li>• <strong>Directory name</strong> &mdash; the folder name for the worktree. Auto-generated, editable later.</li>
-          <li>• <strong>Notes</strong> &mdash; optional context you can edit any time or ask a coding agent to keep in sync with the work.</li>
+          <li>
+            • <strong>Start</strong> launches configured processes that aren&apos;t already
+            running and leaves running ones alone; it never touches ad hoc terminals or agents.
+            It&apos;s offered whenever something is left to start.
+          </li>
+          <li>
+            • <strong>Stop</strong> ends the workspace&apos;s processes and terminal sessions,
+            closes its panes and its Chrome tabs, then runs the stop script.
+          </li>
+          <li>
+            • <strong>Restart</strong> is a full stop followed by a fresh start, and it also ends
+            the workspace&apos;s ad hoc terminals and agent sessions.
+          </li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          For a non-Git project, the workspace uses the project directory itself and doesn&apos;t need a branch.
+          Restarting keeps a target&apos;s pane in place: the replacement session takes over the
+          same tab and split the old one had. Today, restarting a whole workspace from the Mac
+          closes its open panes instead of reusing them; restarting from the iPhone, the CLI, or
+          MCP keeps each process&apos;s pane. Restarting a single process, from any client, keeps
+          its pane. Starting or restarting a workspace from the CLI or MCP never moves focus in
+          the Mac app. See <DocLink href="/docs/restarts">What survives a restart</DocLink> for
+          quitting and rebooting.
         </p>
       </Section>
 
-      <Section title="Per-Workspace Settings">
+      <Section id="hiding" title="Hiding">
         <Prose>
-          A new workspace inherits the project&apos;s processes, browser sessions, and services. From there, each workspace edits its own copy — the project&apos;s templates stay unchanged.
+          Hiding takes a workspace out of the sidebar and every other list, the command palette,
+          Alerts, and the session picker, without asking first, and leaves everything in it
+          running. An already-open panel for that workspace keeps its own session picker working,
+          since hiding suppresses listings rather than closing panels. The Workspaces dialog (the
+          &quot;Filter workspaces&quot; button in the Projects
+          header) brings it back; on the iPhone, the Spaces tab&apos;s Workspaces sheet. Hidden on
+          one client is hidden on both. Projects hide the same way: hiding a project takes it and
+          every workspace under it off every list, without changing which of its workspaces were
+          themselves hidden, so unhiding the project brings back exactly what was showing before.
         </Prose>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Double-click the title, branch, or notes to rename them inline. <code>Escape</code> or click away to cancel.</li>
-          <li>• Renaming the branch inline renames the underlying git branch.</li>
-          <li>• Add, remove, or rename services per workspace.</li>
-          <li>• Edit a process command while the workspace is running and Spaces asks to confirm, then restarts just that process.</li>
-          <li>• Add a browser session and it opens as a Chrome tab when you focus it.</li>
-          <li>• The GUI is the place to edit workspace settings after creation. The CLI stays focused on workspace creation, launch, and agent events.</li>
-        </ul>
       </Section>
 
-      <Section title="Services">
+      <Section id="deleting" title="Deleting">
         <Prose>
-          Name the services your project uses with unique lowercase DNS labels (for example <code>web</code>, <code>api</code>) and Spaces gives each workspace its own port per service plus a stable URL <code>http://&lt;service&gt;.&lt;workspace&gt;.localhost:7391</code> routed through a bundled Caddy proxy. Two workspaces can run the same project at the same time without fighting over a port.
+          Deleting a non-default workspace stops its sessions and removes its worktree checkout
+          from disk, including any uncommitted or untracked files in it. A confirmation names the
+          workspace, with checkboxes to also delete the local branch and the remote branch, both
+          off by default; those checkboxes only decide whether the branch itself is deleted. The
+          default workspace can&apos;t be deleted; delete the project to remove it. While a delete
+          is in progress, the row dims and shows a small progress mark in place of its status, and
+          nothing on it can be acted on until it completes. Deleting removes the workspace&apos;s
+          settings and port assignments with it.
         </Prose>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Each service is exposed as <code>SPACES_&lt;SERVICE&gt;_PORT</code>, <code>SPACES_&lt;SERVICE&gt;_HOST</code>, and <code>SPACES_&lt;SERVICE&gt;_URL</code> to every workspace process, plus the setup and stop scripts.</li>
-          <li>• Remote Linux workspace services keep their daemon-local port, and the Mac app forwards that port over SSH when a browser session targets the service URL.</li>
-          <li>• Spaces keeps each port assignment pinned to the workspace until it is deleted.</li>
-          <li>• Stopped workspaces hold placeholder reservations for assigned ports; running workspaces release those placeholders so processes can bind normally.</li>
-        </ul>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-sm border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
-          <code>{`Workspace: bugfix/login-timeout
-SPACES_WEB_PORT=20001
-SPACES_WEB_URL=http://web.login-fix-a3f9c2d1847b.localhost:7391
-SPACES_API_PORT=20002`}</code>
-        </pre>
-      </Section>
-
-      <Section title="Environment Variables">
-        <Prose>
-          Every workspace process, setup script, and stop script runs with:
-        </Prose>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Per-service variables (for example <code>SPACES_WEB_PORT=20001</code>, <code>SPACES_API_PORT=20002</code>, and the matching <code>SPACES_WEB_HOST</code>/<code>SPACES_WEB_URL</code>, <code>SPACES_API_HOST</code>/<code>SPACES_API_URL</code>). Reference a service&apos;s <code>SPACES_&lt;SERVICE&gt;_URL</code> directly rather than composing a URL by hand.</li>
-          <li>• <code>SPACES_PROJECT_DIR</code> &mdash; the project directory.</li>
-          <li>• <code>SPACES_WORKSPACE_DIR</code> &mdash; this workspace&apos;s directory.</li>
-        </ul>
-      </Section>
-
-      <Section title="Switching Between Workspaces">
-        <Prose>
-          Selecting another workspace swaps the whole context — its windows and processes all follow you.
-        </Prose>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <code>cmd+alt+=</code> from anywhere brings Spaces forward; pick the workspace you want.</li>
-          <li>• Inside Spaces, <code>cmd+alt+]</code> / <code>cmd+alt+[</code> step between workspaces.</li>
-          <li>• <code>cmd+1</code> through <code>cmd+0</code> open or focus a specific target of the selected workspace.</li>
-          <li>• Click any workspace in the sidebar or window row in the workspace run tab to jump directly.</li>
-        </ul>
       </Section>
     </DocsShell>
   );

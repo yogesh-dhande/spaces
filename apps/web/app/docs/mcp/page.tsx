@@ -1,59 +1,88 @@
 import type { Metadata } from "next";
-import { CodeBlock, Cmd } from "../components/code-block";
+import { CodeBlock, Cmd, InlineCode } from "../components/code-block";
 import { DocsShell } from "../components/docs-shell";
-import { Section } from "../components/section";
+import { DocLink } from "../components/doc-link";
+import { Prose, Section } from "../components/section";
+import { RefTable } from "../components/ref-table";
 
 export const metadata: Metadata = {
-  title: "Model Context Protocol",
+  title: "MCP tools",
   description:
-    "Connect an MCP client such as Claude Code, Codex, or opencode to the spaces mcp server to list and drive projects, workspaces, and Spaces terminals.",
+    "Connect Claude Code, Codex, or opencode to Spaces and see the tools they get.",
 };
 
-function Tool({ name, description }: { name: string; description: string }) {
-  return (
-    <li className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
-      <span className="w-64 shrink-0 font-mono text-xs text-accent">{name}</span>
-      <span className="text-sm leading-6 text-foreground-soft">{description}</span>
-    </li>
-  );
-}
+const TOOL_ROWS: [string, string][] = [
+  ["spaces_project_list", "List projects on this or a paired device."],
+  ["spaces_workspace_list", "List workspaces, optionally filtered by project."],
+  [
+    "spaces_workspace_create",
+    "Create a workspace: project and branch required, plus a base branch or existingBranch to reuse a branch, and an optional device. Not started automatically.",
+  ],
+  ["spaces_workspace_start", "Ensure a workspace is running."],
+  ["spaces_workspace_restart", "Force a full stop and relaunch for a workspace."],
+  ["spaces_terminal_list", "List available terminal sessions."],
+  ["spaces_terminal_tail", "Read a session's recent output, defaulting to the last 20 lines."],
+  [
+    "spaces_terminal_send",
+    "Send text or raw bytes to a terminal session, optionally submitting it as a paste plus a separate Enter keystroke.",
+  ],
+  ["spaces_agent_list", "List coding-agent sessions, optionally filtered by workspace."],
+  ["spaces_agent_status", "Read one agent session's status, brief summary, and context."],
+  [
+    "spaces_agent_spawn",
+    "Start a supported agent (claude, codex, or opencode) in a workspace and wait until it is ready for input.",
+  ],
+  ["spaces_agent_kill", "End a coding-agent session and its terminal."],
+  ["spaces_agent_subscribe", "Watch an agent from this terminal; get told when it goes blocked, done, or exits."],
+  ["spaces_agent_unsubscribe", "Stop watching an agent."],
+  [
+    "spaces_agent_brief_write",
+    "Replace an agent's brief, the short status page Spaces shows beside its terminal. An empty string clears it.",
+  ],
+  ["spaces_agent_brief_read", "Read an agent's brief in full, with when it was last updated."],
+  ["spaces_agent_brief_clear", "Remove an agent's brief."],
+  ["spaces_device_list", "List the paired devices this machine can reach."],
+];
 
 export default function McpReferencePage() {
   return (
     <DocsShell
-      title="Model Context Protocol"
-      description="Spaces ships an MCP server so a coding-agent client can inspect and drive your projects, workspaces, and terminals as tools."
+      title="MCP tools"
+      description="Spaces ships an MCP server so a coding agent can inspect and drive your projects, workspaces, and terminals as tools."
       pagePath="/docs/mcp"
     >
-      <Section title="Overview">
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>spaces mcp</Cmd> runs a Model Context Protocol server over <strong>stdio</strong>: the MCP client launches it as a subprocess and exchanges JSON-RPC over standard input and output. Each tool call is forwarded to the running <Cmd>spacesd</Cmd> daemon, so the server uses the same orchestration path as the GUI and CLI.
-        </p>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          The app shows ready-to-paste configuration under <strong>Settings → MCP</strong>, including the resolved path to the <Cmd>spaces</Cmd> binary. The examples below use <Cmd>spaces</Cmd> on your <Cmd>PATH</Cmd>; substitute the absolute path from Settings if the CLI is not on your <Cmd>PATH</Cmd>. Any MCP client that launches a stdio server works; the same <Cmd>command</Cmd> and <Cmd>args</Cmd> apply.
-        </p>
+      <Section title="What it is">
+        <Prose>
+          <Cmd>spaces mcp</Cmd> starts a Model Context Protocol server: an MCP client (a coding agent
+          such as Claude Code, Codex, or opencode) launches it as a subprocess and calls its tools
+          directly, over standard input and output. Every call runs against the same Spaces service on
+          this machine that the app and the CLI use, so an agent sees the same projects, workspaces, and
+          terminals you do.
+        </Prose>
       </Section>
 
-      <Section title="Claude Code">
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Register the server once at user scope so the tools are available in every directory. Claude Code then spawns <Cmd>spaces mcp</Cmd> when it needs the tools.
-        </p>
+      <Section id="setup" title="Setup">
+        <Prose>
+          <strong>Settings &rarr; MCP &rarr; &quot;MCP Client Setup&quot;</strong> shows a ready-to-paste
+          snippet per agent, including the resolved path to the <Cmd>spaces</Cmd> binary. The examples
+          below use <InlineCode>spaces</InlineCode> on your <InlineCode>PATH</InlineCode>; substitute the
+          absolute path from Settings if the CLI is not on it.
+        </Prose>
+        <p className="mt-4 text-sm font-semibold text-foreground">Claude Code</p>
+        <Prose>Register the server once at user scope, and Claude Code spawns it when it needs the tools.</Prose>
         <CodeBlock>{`claude mcp add spaces -s user -- spaces mcp`}</CodeBlock>
-      </Section>
-
-      <Section title="Codex CLI">
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Add an <Cmd>mcp_servers</Cmd> table to <Cmd>~/.codex/config.toml</Cmd>.
-        </p>
+        <p className="mt-4 text-sm font-semibold text-foreground">Codex CLI</p>
+        <Prose>
+          Add an <InlineCode>mcp_servers</InlineCode> table to <InlineCode>~/.codex/config.toml</InlineCode>.
+        </Prose>
         <CodeBlock>{`[mcp_servers.spaces]
 command = "spaces"
 args = ["mcp"]`}</CodeBlock>
-      </Section>
-
-      <Section title="opencode">
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Add a <Cmd>spaces</Cmd> entry to the <Cmd>mcp</Cmd> block in <Cmd>~/.config/opencode/opencode.json</Cmd>.
-        </p>
+        <p className="mt-4 text-sm font-semibold text-foreground">opencode</p>
+        <Prose>
+          Add a <InlineCode>spaces</InlineCode> entry to the <InlineCode>mcp</InlineCode> block in{" "}
+          <InlineCode>~/.config/opencode/opencode.json</InlineCode>.
+        </Prose>
         <CodeBlock>{`{
   "mcp": {
     "spaces": {
@@ -65,36 +94,25 @@ args = ["mcp"]`}</CodeBlock>
 }`}</CodeBlock>
       </Section>
 
-      <Section title="Tools">
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          The server exposes project, workspace, terminal, paired-device, and coding-agent orchestration tools.
-        </p>
-        <ul className="mt-3 space-y-1">
-          <Tool name="spaces_project_list" description="List Spaces projects." />
-          <Tool name="spaces_workspace_list" description="List workspaces, optionally filtered by project." />
-          <Tool name="spaces_workspace_create" description="Create a workspace on this device. Requires a project and branch; accepts a title, base branch, and existing-branch reuse." />
-          <Tool name="spaces_workspace_start" description="Ensure a workspace is running." />
-          <Tool name="spaces_workspace_restart" description="Force a full stop and relaunch for a workspace." />
-          <Tool name="spaces_terminal_list" description="List available Spaces terminal sessions." />
-          <Tool name="spaces_terminal_tail" description="Read recent rendered output, omitting inline suggestions only in identified coding-agent sessions. Defaults to the last 20 lines." />
-          <Tool name="spaces_terminal_send" description="Send UTF-8 text or explicit raw byte values to a terminal session, optionally submitting text as a paste followed by a separate Enter keystroke that every supported agent TUI (Claude Code, Codex, OpenCode) reads as a distinct submit rather than an unsubmitted paste." />
-          <Tool name="spaces_agent_list" description="List coding-agent sessions, optionally filtered by workspace." />
-          <Tool name="spaces_agent_status" description="Read one coding-agent session's status, brief summary, and context." />
-          <Tool name="spaces_agent_spawn" description="Start a supported coding agent (claude, codex, or opencode) in a workspace and wait until it is ready for input." />
-          <Tool name="spaces_agent_subscribe" description="Watch a coding agent from this terminal; get told when it goes blocked, done, or exits." />
-          <Tool name="spaces_agent_unsubscribe" description="Stop watching a coding agent." />
-          <Tool name="spaces_agent_kill" description="End a coding agent and its terminal." />
-          <Tool name="spaces_agent_brief_write" description="Replace an agent's brief, the short markdown status page Spaces shows beside its terminal on Mac and iPhone. An empty brief clears it." />
-          <Tool name="spaces_agent_brief_read" description="Read an agent's brief in full, with when it was last updated." />
-          <Tool name="spaces_agent_brief_clear" description="Remove an agent's brief, for example once its work is finished." />
-          <Tool name="spaces_device_list" description="List the paired devices this machine can reach." />
-        </ul>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          The brief tools act on the calling terminal's agent unless given a session, so an agent connected to this server keeps its own brief with no extra setup. The write tool tells the agent what a useful brief holds: a one-line headline first (it is what <Cmd>spaces agent list</Cmd> and notifications show), what it is doing now and when it expects a long step to finish, the questions only you can answer, and a checklist of its tasks, all kept under one screen and updated as the work moves.
-        </p>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Agent lifecycle signals are intentionally not MCP tools. Coding agents report state through the CLI hook <Cmd>spaces agent signal</Cmd> so those hooks stay out of the agent-callable tool surface.
-        </p>
+      <Section id="tools" title="Tools">
+        <Prose>
+          The server exposes project, workspace, terminal, paired-device, and coding-agent tools. There
+          is no stop tool for a workspace and no signal tool: an agent reports its own lifecycle only
+          through the CLI hook <Cmd>spaces agent signal</Cmd>, which is intentionally left off the tool
+          surface, so an agent can read another agent&apos;s status but never forge it.
+        </Prose>
+        <RefTable
+          columns={["Tool", "What it does"]}
+          rows={TOOL_ROWS.map(([name, description]) => [<InlineCode key={name}>{name}</InlineCode>, description])}
+        />
+        <Prose>
+          The brief tools act on the calling terminal&apos;s own agent unless given a session, so an
+          agent connected to this server keeps its own brief with no extra setup. See{" "}
+          <DocLink href="/docs/coding-agents#briefs">agent briefs</DocLink> for what a brief is and where
+          it shows, and <DocLink href="/docs/orchestration#brief">briefs</DocLink> for the matching CLI
+          commands. The rest of the agent tools are covered in full at{" "}
+          <DocLink href="/docs/orchestration">Orchestrate agents</DocLink>.
+        </Prose>
       </Section>
     </DocsShell>
   );

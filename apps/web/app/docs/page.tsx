@@ -3,43 +3,98 @@ import Link from "next/link";
 import { SiteHeader } from "../components/site-header";
 import { SiteFooter } from "../components/site-footer";
 import { PrimaryButton } from "../components/primary-button";
-import { docsPageLinks } from "./content";
+import { docsNavGroups } from "./content";
 
 export const metadata: Metadata = {
   title: "Docs",
-  description: "Getting started with Spaces workspaces.",
+  description: "What Spaces is and the terms the rest of the docs use.",
 };
 
-const terms = [
+const concepts: { name: string; description: string; href: string }[] = [
+  {
+    name: "Device",
+    description: "A Mac or Linux machine running Spaces. Your Mac is one device; each paired machine is another.",
+    href: "/docs/remote-access",
+  },
   {
     name: "Project",
-    description:
-      "A codebase you configure once so new workspaces start with consistent behavior.",
+    description: "A folder or Git repository added to a device, with settings for how its workspaces run.",
+    href: "/docs/projects",
   },
   {
     name: "Workspace",
-    description:
-      "An isolated stream of work for a feature, fix, or experiment consisting of git branch, processes, terminal and browser windows.",
-  },
-  {
-    name: "Process",
-    description:
-      "Commands you want running with the workspace, like app servers or agents.",
-  },
-  {
-    name: "Browser Session",
-    description:
-      "URLs you want tied to a workspace (e.g. localhost:3000, github.com/owner/repo) so you can return to them quickly.",
-  },
-  {
-    name: "Service",
-    description:
-      "A named process (like web or api) that gets its own reserved port per workspace and a stable URL through the bundled proxy — so parallel workspaces never fight over the same local port.",
+    description: "One branch of a Git project in its own worktree, or a folder project's single directory, with its own processes, services, and terminals.",
+    href: "/docs/workspaces",
   },
   {
     name: "Worktree",
-    description:
-      "A Git feature that checks out a branch into its own directory, so multiple branches can be open at once. Spaces gives each workspace its own worktree.",
+    description: "The git worktree each Git workspace gets: its own branch checkout, sharing the project's one clone.",
+    href: "/docs/projects#git-and-folder-projects",
+  },
+  {
+    name: "Default workspace",
+    description: "The workspace created with a project, on the repository's default branch, or the folder itself for a folder project. Listed first and cannot be deleted.",
+    href: "/docs/projects#default-workspace",
+  },
+  {
+    name: "Home workspace (~)",
+    description: "Every device's workspace for terminals that belong to no project.",
+    href: "/docs/projects#home-workspace",
+  },
+  {
+    name: "Service",
+    description: "A name a project declares; each workspace gets its own port for it and a stable URL that stays the same across restarts.",
+    href: "/docs/services",
+  },
+  {
+    name: "Process",
+    description: "A long-running command a workspace starts, such as a dev server.",
+    href: "/docs/processes",
+  },
+  {
+    name: "Terminal",
+    description: "An ad hoc shell, a process, or a coding agent, running on a device and shown as a pane in its workspace.",
+    href: "/docs/terminals",
+  },
+  {
+    name: "Tab and pane",
+    description: "How terminals are arranged in a workspace's panel: tabs across the top, split into panes.",
+    href: "/docs/terminals#tabs-and-panes",
+  },
+  {
+    name: "Browser session",
+    description: "A name and a URL a workspace opens as a Chrome tab when you focus it.",
+    href: "/docs/browser-sessions",
+  },
+  {
+    name: "Target",
+    description: "A numbered row under a workspace, a browser session, process, agent, or terminal, that you can jump to with a keystroke.",
+    href: "/docs/window-management#numbered-targets",
+  },
+  {
+    name: "Coding agent",
+    description: "Claude Code, Codex, or opencode, run in a terminal, whose state Spaces shows using hooks it installs for the agent.",
+    href: "/docs/coding-agents",
+  },
+  {
+    name: "Alert",
+    description: "A row for something that needs you: a blocked or finished agent, an exited process, a bell, or a failed automation run.",
+    href: "/docs/alerts",
+  },
+  {
+    name: "Automation",
+    description: "A script or agent Spaces runs on a device, by hand or on a schedule.",
+    href: "/docs/automations",
+  },
+  {
+    name: "Cycling mode",
+    description: "What the cycle shortcuts step through: a workspace's windows, your alerts, every agent, or every open session.",
+    href: "/docs/window-management#cycling",
+  },
+  {
+    name: "Editor",
+    description: "The window for reviewing a workspace's diff and editing its files.",
+    href: "/docs/editor",
   },
 ];
 
@@ -62,12 +117,15 @@ export default function DocsPage() {
             Spaces in five minutes.
           </h1>
           <p className="mt-5 max-w-2xl text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-            A quick mental model for how Spaces helps you run and switch
-            workspaces during parallel development.
+            Spaces runs your terminals, dev servers, and coding agents in parallel workspaces, one per
+            branch, and keeps them running independent of any client. A native Mac app and an iPhone app
+            drive the Spaces service on each of your machines: your Mac, another Mac, or a Linux box.
+            Terminals, processes, and coding agents run in that service, so they keep running when you
+            close the app or lose the connection.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <PrimaryButton href="/docs/getting-started">
-              Getting Started
+              Quickstart
               <span aria-hidden>→</span>
             </PrimaryButton>
             <a
@@ -81,7 +139,7 @@ export default function DocsPage() {
         </div>
       </section>
 
-      {/* Core Terms */}
+      {/* Core concepts */}
       <section className="border-y border-line/70 bg-background-soft/60">
         <div className="mx-auto w-full max-w-7xl px-6 py-20">
           <div className="grid gap-10 lg:grid-cols-12">
@@ -90,21 +148,20 @@ export default function DocsPage() {
                 Glossary
               </p>
               <h2 className="mt-4 text-3xl font-semibold tracking-tight md:text-4xl">
-                Core terms.
+                Core concepts.
               </h2>
               <p className="mt-4 max-w-sm text-sm leading-7 text-foreground-soft">
-                The small vocabulary you need to get oriented with Spaces.
+                The small vocabulary the rest of the docs use.
               </p>
             </div>
 
             <dl className="grid gap-x-8 gap-y-6 lg:col-span-8 md:grid-cols-2">
-              {terms.map((item) => (
-                <div
-                  key={item.name}
-                  className="border-t border-line/70 pt-5"
-                >
-                  <dt className="font-mono text-[0.62rem] uppercase tracking-[0.18em] text-accent">
-                    {item.name}
+              {concepts.map((item) => (
+                <div key={item.name} className="border-t border-line/70 pt-5">
+                  <dt className="font-mono text-[0.62rem] uppercase tracking-[0.18em]">
+                    <Link href={item.href} className="text-accent hover:underline">
+                      {item.name}
+                    </Link>
                   </dt>
                   <dd className="mt-2 text-sm leading-7 text-foreground-soft">
                     {item.description}
@@ -124,37 +181,40 @@ export default function DocsPage() {
               Overview
             </p>
             <h2 className="mt-4 max-w-2xl text-3xl font-semibold tracking-tight md:text-4xl">
-              Docs Overview
+              All docs
             </h2>
           </div>
           <p className="max-w-md text-sm leading-7 text-foreground-soft">
-            These pages cover the most common user questions and operational
-            workflows from setup through troubleshooting.
+            Grouped by task, from first launch through troubleshooting.
           </p>
         </div>
 
-        <div className="mt-10 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {docsPageLinks.map((page, i) => (
-            <Link
-              key={page.href}
-              href={page.href}
-              className="group flex flex-col gap-3 rounded-sm border border-line/80 bg-surface/80 p-5 transition-colors hover:border-accent/60"
-            >
-              <span className="font-mono text-[0.6rem] uppercase tracking-[0.18em] text-foreground-soft">
-                {String(i + 1).padStart(2, "0")}
-              </span>
-              <h3 className="text-lg font-semibold tracking-tight">
-                {page.title}
+        {docsNavGroups.map((group) => {
+          const pages = group.pages.filter((page) => page.href !== "/docs");
+          if (pages.length === 0) return null;
+          return (
+            <div key={group.label} className="mt-12 first:mt-10">
+              <h3 className="font-mono text-[0.68rem] uppercase tracking-[0.18em] text-foreground-soft">
+                {group.label}
               </h3>
-              <p className="text-sm leading-6 text-foreground-soft">
-                {page.summary}
-              </p>
-              <span className="mt-1 inline-flex items-center gap-1 text-xs font-semibold text-accent transition-transform group-hover:translate-x-0.5">
-                Read page <span aria-hidden>→</span>
-              </span>
-            </Link>
-          ))}
-        </div>
+              <div className="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                {pages.map((page) => (
+                  <Link
+                    key={page.href}
+                    href={page.href}
+                    className="group flex flex-col gap-3 rounded-sm border border-line/80 bg-surface/80 p-5 transition-colors hover:border-accent/60"
+                  >
+                    <h4 className="text-lg font-semibold tracking-tight">{page.title}</h4>
+                    <p className="text-sm leading-6 text-foreground-soft">{page.summary}</p>
+                    <span className="mt-1 inline-flex items-center gap-1 text-xs font-semibold text-accent transition-transform group-hover:translate-x-0.5">
+                      Read page <span aria-hidden>→</span>
+                    </span>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          );
+        })}
       </section>
 
       <SiteFooter />

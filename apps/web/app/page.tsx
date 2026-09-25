@@ -43,7 +43,7 @@ export default function HomePage() {
               <span className="hero-caret" aria-hidden />
             </h2>
 
-            {/* Scope marquee — infinite left scroll between two hairlines, edges faded. */}
+            {/* Scope marquee: infinite left scroll between two hairlines, edges faded. */}
             <div className="marquee relative mt-6 overflow-hidden border-y border-line/70 py-3">
               <span className="sr-only">
                 Manage agents, worktrees, ports, processes, windows, and remote machines.
@@ -86,9 +86,9 @@ export default function HomePage() {
             </div>
 
             <dl className="mt-8 grid grid-cols-3 gap-6 border-t border-line/70 pt-7">
-              <SpecItem label="Client" lines={["macOS", "iOS"]} />
-              <SpecItem label="Daemon" lines={["macOS", "Linux"]} />
-              <SpecItem label="Price" lines={["Mac: Free", "iOS: $29.99/year"]} />
+              <SpecItem label="Client" lines={["macOS", "iOS (TestFlight)"]} />
+              <SpecItem label="Service" lines={["macOS", "Linux"]} />
+              <SpecItem label="Price" lines={["Mac and Linux: Free", "iOS: TestFlight beta"]} />
             </dl>
           </div>
 
@@ -112,7 +112,7 @@ export default function HomePage() {
               Your workflow, <span className="text-accent">minus the friction</span>
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Run a few coding sessions at once and the moving parts multiply —
+              Run a few coding sessions at once and the moving parts multiply:
               worktrees, agents, processes, ports, windows. Spaces makes each of
               those a thing you manage, not a thing you chase.
             </p>
@@ -137,9 +137,10 @@ export default function HomePage() {
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
               A workspace is one feature, branch, or experiment with its own
               directory, named services on stable URLs, processes, browser
-              sessions, and coding-agent terminals. Launching it starts every
-              process and tracks every window. Stopping it shuts everything
-              down. Reopening restores the state.
+              sessions, and coding-agent terminals. Starting it launches every
+              configured process and tracks every window. Stopping it shuts
+              everything down. Starting it again brings the configured
+              processes back.
             </p>
           </div>
 
@@ -188,7 +189,7 @@ export default function HomePage() {
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
               Run Claude Code, Codex, and opencode across a dozen workspaces and
               it&apos;s easy to lose track of who&apos;s waiting. Each agent
-              reports working, blocked, or done — Alerts gathers the ones that
+              reports working, blocked, or done. Alerts gathers the ones that
               need you into a single list, so you see what&apos;s stuck or
               finished at a glance and jump to its terminal or workspace with a
               keystroke.
@@ -207,9 +208,9 @@ export default function HomePage() {
                 Open Alerts, jump to whoever needs you.
               </p>
               <p className="mt-3 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
-                Press <Key>⌘⌥A</Key> from anywhere to open Alerts. Blocked
-                agents clear the moment they move again; finished agents stay
-                until you review them — so the list is always exactly what needs
+                Press <Key>⌘⌥A</Key> in Spaces to open Alerts. Blocked
+                agents clear the moment they move again, and finished agents stay
+                until you dismiss them, so the list is always exactly what needs
                 your attention. Select one to focus its terminal, or jump to its
                 workspace to see everything around it.
               </p>
@@ -239,9 +240,9 @@ export default function HomePage() {
               Connect to all machines <span className="text-accent whitespace-nowrap">from one Mac</span>
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Pair another Mac or a cloud Linux box over SSH with pinned TLS.
-              Each machine runs its own <code>spacesd</code> and appears as its
-              own section in the sidebar — projects, workspaces, terminals, and
+              Pair another Mac or a cloud Linux box over SSH.
+              Each machine runs the Spaces service and appears as its
+              own section in the sidebar: projects, workspaces, terminals, and
               agents, all reachable from the Mac in front of you.
             </p>
           </div>
@@ -258,10 +259,11 @@ export default function HomePage() {
                 Like tmux, for everything a session runs.
               </p>
               <p className="mt-3 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
-                Terminals and coding agents run on the daemon, not on your SSH
-                connection. Kick off a build or an agent on a remote box, close
-                your laptop, and it keeps running — then reattach later from
-                your Mac or your phone, right where it left off.
+                Terminals and coding agents run on the Spaces service on that
+                machine, not on your SSH connection. Kick off a build or an
+                agent on a remote box, close your laptop, and it keeps
+                running. Reattach later from your Mac or your phone, right
+                where it left off.
               </p>
             </div>
           </div>
@@ -277,9 +279,9 @@ export default function HomePage() {
               <span className="text-accent whitespace-nowrap">one orchestrator agent</span>
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Use the Spaces MCP to put a single agent in front of everything you have going — a fix
+              Use the Spaces MCP to put a single agent in front of everything you have going: a fix
               in this repo, a feature on that branch, an experiment on the Linux
-              box. Subagents can use any harness or model so you get the right tool for the job. 
+              box. Subagents can use any harness or model so you get the right tool for the job.
               Just prompt it to teach your workflow.
             </p>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8"> 
@@ -302,7 +304,7 @@ export default function HomePage() {
               <ul className="mt-4 space-y-3 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
                 <li>
                   <strong className="font-semibold text-foreground">Mix harnesses.</strong>{" "}
-                  Claude Code, Codex, and opencode — any of them can lead, any can
+                  Claude Code, Codex, and opencode: any of them can lead, any can
                   be a child.
                 </li>
                 <li>
@@ -312,7 +314,7 @@ export default function HomePage() {
                 </li>
                 <li>
                   <strong className="font-semibold text-foreground">Mix machines.</strong>{" "}
-                  Children run wherever you have them — a cloud Linux box does the
+                  Children run wherever you have them: a cloud Linux box does the
                   heavy lifting while you drive from your Mac.
                 </li>
               </ul>
@@ -339,23 +341,33 @@ export default function HomePage() {
             <div className="max-w-xl">
               <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
                 <span className="rounded-full border border-accent-2/50 px-2 py-0.5 text-[0.62rem] text-accent-2">
-                  Coming soon
+                  TestFlight beta
                 </span>
               </p>
               <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
-                Remote control <span className="text-accent whitespace-nowrap">from your iPhone</span>
+                A full client <span className="text-accent whitespace-nowrap">on your iPhone</span>
               </h2>
               <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
                 Pair the Spaces iOS app with a QR code and it talks to that
-                machine directly — your Mac, or a cloud Linux box. Browse live terminal sessions across your
+                machine directly: your Mac, or a cloud Linux box. Browse live terminal sessions across your
                 workspaces, watch an agent that&apos;s working or waiting, type
                 into the same shell, and run or restart processes.
               </p>
               <p className="mt-4 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
                 Nothing routes through the desktop app. Sessions live in the
-                Spaces daemon on the machine that owns them, so your phone
-                reaches them whether the Mac app is open, closed, or crashed —
+                Spaces service on the machine that owns them, so your phone
+                reaches them whether the Mac app is open, closed, or crashed,
                 and reaches a Linux box even while your Mac is asleep.
+              </p>
+              <p className="mt-4 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+                The app is in an invite-only TestFlight beta.{" "}
+                <a
+                  href="https://github.com/yogesh-dhande/spaces/issues"
+                  className="text-accent hover:underline"
+                >
+                  Ask for an invite
+                </a>
+                .
               </p>
               <Link
                 href="/docs/ios"
@@ -369,7 +381,7 @@ export default function HomePage() {
             <div className="mx-auto grid w-full max-w-[34rem] grid-cols-2 gap-4 sm:gap-6">
               <PhoneFrame
                 src="/media/ios-sessions.png"
-                alt="The Spaces iOS app listing live sessions per workspace — browser tabs, terminals, and a running agent — with restart, stop, and new-terminal controls"
+                alt="The Spaces iOS app listing live sessions per workspace (browser tabs, terminals, and a running agent) with restart, stop, and new-terminal controls"
               />
               <PhoneFrame
                 src="/media/ios-terminal.png"
@@ -396,7 +408,7 @@ export default function HomePage() {
 
           <div className="mt-14 grid gap-6 lg:grid-cols-2">
             <ComparisonColumn tone="negative" label="Plain localhost" items={localhostPains} />
-            <ComparisonColumn tone="accent" label="Spaces with Caddy Reverse Proxy" items={spacesFixes} />
+            <ComparisonColumn tone="accent" label="Spaces with a Reverse Proxy" items={spacesFixes} />
           </div>
         </div>
       </section>
@@ -411,10 +423,10 @@ export default function HomePage() {
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
               Context switching is a keystroke, not a window hunt. Focus any
               session (browser or terminal) in the active workspace, cycle
-              through just that workspace&apos;s windows to stay in flow, or
+              through one workspace, your alerts, or your agents to stay in flow, or
               jump to any window of any workspace from the global command palette,
               all without lifting your hands off the keyboard. <Link href="/docs/shortcuts" className="text-accent hover:underline">
-                Every shortcut is configurable.
+                Spaces&apos; own shortcuts are configurable.
               </Link>
             </p>
             <p className="mt-6 flex flex-wrap items-center gap-x-2.5 gap-y-2 text-sm text-foreground-soft">
@@ -467,10 +479,10 @@ export default function HomePage() {
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
               Common questions about setup, tools, and the app. Still stuck?{" "}
               <a
-                href="mailto:support@spaces.dev"
+                href="https://github.com/yogesh-dhande/spaces/issues"
                 className="text-accent hover:underline"
               >
-                Email us.
+                Open an issue on GitHub.
               </a>
             </p>
           </div>
@@ -734,7 +746,7 @@ function NumKey({ children }: { children: React.ReactNode }) {
   );
 }
 
-// Three dimmed traffic-light dots — the window-chrome cue that reads these
+// Three dimmed traffic-light dots, the window-chrome cue that reads these
 // panels as the native app, not a web widget.
 function WindowChrome({ children }: { children?: React.ReactNode }) {
   return (
@@ -821,7 +833,7 @@ function WorkspaceSidebarMock() {
           <span>spaces</span>
         </div>
 
-        {/* Selected, active workspace — expanded into its targets. */}
+        {/* Selected, active workspace, expanded into its targets. */}
         <div className="mt-0.5 rounded-sm border border-accent/40 bg-accent/[0.06]">
           <div className="flex items-center gap-2 px-2.5 py-2 text-sm font-semibold text-foreground">
             <span className="h-2 w-2 rounded-full bg-accent" />
@@ -875,7 +887,7 @@ function WorkspaceRow({ name, active }: { name: string; active?: boolean }) {
 }
 
 // Alerts panel mock for the agents section. Each row is one agent that raised
-// an alert — blocked (amber) or done (teal) — with its workspace, agent name,
+// an alert, blocked (amber) or done (teal), with its workspace, agent name,
 // and a jump affordance.
 function AlertsPanel() {
   return (

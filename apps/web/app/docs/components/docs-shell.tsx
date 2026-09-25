@@ -2,7 +2,7 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { SiteHeader } from "../../components/site-header";
 import { SiteFooter } from "../../components/site-footer";
-import { cookbookGuides, docsPageLinks } from "../content";
+import { cookbookGuides, docsNavGroups } from "../content";
 
 type DocsShellProps = {
   title: string;
@@ -10,6 +10,13 @@ type DocsShellProps = {
   pagePath: string;
   children: ReactNode;
 };
+
+// The group that owns the Recipes index and its subpages, used to find the
+// breadcrumb group label for a recipe subpage (which isn't itself in
+// docsNavGroups; only its index page /docs/guides is).
+const guidesGroup = docsNavGroups.find((group) =>
+  group.pages.some((page) => page.href === "/docs/guides"),
+);
 
 export function DocsShell({
   title,
@@ -19,6 +26,12 @@ export function DocsShell({
 }: DocsShellProps) {
   const isOnGuideSubpage =
     pagePath.startsWith("/docs/guides/") && pagePath !== "/docs/guides";
+
+  const ownerGroup = isOnGuideSubpage
+    ? guidesGroup
+    : docsNavGroups.find((group) =>
+        group.pages.some((page) => page.href === pagePath),
+      );
 
   return (
     <div className="relative min-h-screen overflow-x-clip">
@@ -31,18 +44,24 @@ export function DocsShell({
             <Link href="/docs" className="transition-colors hover:text-foreground">
               Docs
             </Link>
-            <span aria-hidden>/</span>
+            {ownerGroup ? (
+              <>
+                <span aria-hidden>/</span>
+                <span>{ownerGroup.label}</span>
+              </>
+            ) : null}
             {isOnGuideSubpage ? (
               <>
+                <span aria-hidden>/</span>
                 <Link
                   href="/docs/guides"
                   className="transition-colors hover:text-foreground"
                 >
-                  Cookbook Guides
+                  Recipes
                 </Link>
-                <span aria-hidden>/</span>
               </>
             ) : null}
+            <span aria-hidden>/</span>
             <span className="text-foreground">{title}</span>
           </nav>
           <h1 className="mt-4 max-w-4xl text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
@@ -54,50 +73,60 @@ export function DocsShell({
         </section>
 
         <div className="grid gap-10 pt-10 lg:grid-cols-[16rem_minmax(0,1fr)]">
-          <aside className="min-w-0 lg:sticky lg:top-20 lg:self-start">
-            <p className="font-mono text-[0.62rem] uppercase tracking-[0.18em] text-foreground-soft">
-              Docs
-            </p>
-            <nav className="mt-3 flex flex-col gap-0.5 border-l border-line/70">
-              {docsPageLinks.map((item) => {
-                const isActive = item.href === pagePath;
-                const isGuidesIndex = item.href === "/docs/guides";
-                return (
-                  <div key={item.href} className="flex flex-col gap-0.5">
-                    <Link
-                      href={item.href}
-                      className={`-ml-px border-l-2 px-3 py-1.5 text-sm transition-colors ${
-                        isActive
-                          ? "border-accent font-semibold text-foreground"
-                          : "border-transparent text-foreground-soft hover:border-line hover:text-foreground"
-                      }`}
-                    >
-                      {item.title}
-                    </Link>
-                    {isGuidesIndex ? (
-                      <ul className="flex flex-col gap-0.5 pl-3">
-                        {cookbookGuides.map((guide) => {
-                          const isGuideActive = guide.href === pagePath;
-                          return (
-                            <li key={guide.href}>
-                              <Link
-                                href={guide.href}
-                                className={`-ml-px block border-l-2 px-3 py-1 text-xs transition-colors ${
-                                  isGuideActive
-                                    ? "border-accent font-semibold text-foreground"
-                                    : "border-transparent text-foreground-soft hover:border-line hover:text-foreground"
-                                }`}
-                              >
-                                {guide.title}
-                              </Link>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    ) : null}
+          <aside className="min-w-0 lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:self-start lg:overflow-y-auto lg:pb-6">
+            <nav className="flex flex-col gap-0.5">
+              {docsNavGroups.map((group, groupIndex) => (
+                <div key={group.label}>
+                  <p
+                    className={`font-mono text-[0.62rem] uppercase tracking-[0.18em] text-foreground-soft ${
+                      groupIndex > 0 ? "mt-6" : ""
+                    }`}
+                  >
+                    {group.label}
+                  </p>
+                  <div className="mt-3 flex flex-col gap-0.5 border-l border-line/70">
+                    {group.pages.map((item) => {
+                      const isActive = item.href === pagePath;
+                      const isGuidesIndex = item.href === "/docs/guides";
+                      return (
+                        <div key={item.href} className="flex flex-col gap-0.5">
+                          <Link
+                            href={item.href}
+                            className={`-ml-px border-l-2 px-3 py-1.5 text-sm transition-colors ${
+                              isActive
+                                ? "border-accent font-semibold text-foreground"
+                                : "border-transparent text-foreground-soft hover:border-line hover:text-foreground"
+                            }`}
+                          >
+                            {item.title}
+                          </Link>
+                          {isGuidesIndex ? (
+                            <ul className="flex flex-col gap-0.5 pl-3">
+                              {cookbookGuides.map((guide) => {
+                                const isGuideActive = guide.href === pagePath;
+                                return (
+                                  <li key={guide.href}>
+                                    <Link
+                                      href={guide.href}
+                                      className={`-ml-px block border-l-2 px-3 py-1 text-xs transition-colors ${
+                                        isGuideActive
+                                          ? "border-accent font-semibold text-foreground"
+                                          : "border-transparent text-foreground-soft hover:border-line hover:text-foreground"
+                                      }`}
+                                    >
+                                      {guide.title}
+                                    </Link>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          ) : null}
+                        </div>
+                      );
+                    })}
                   </div>
-                );
-              })}
+                </div>
+              ))}
             </nav>
           </aside>
 

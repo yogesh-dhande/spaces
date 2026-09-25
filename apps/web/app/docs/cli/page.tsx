@@ -1,170 +1,203 @@
 import type { Metadata } from "next";
-import { CodeBlock, Cmd } from "../components/code-block";
+import { CodeBlock, Cmd, InlineCode } from "../components/code-block";
 import { DocsShell } from "../components/docs-shell";
+import { DocLink } from "../components/doc-link";
 import { Prose, Section } from "../components/section";
+import { RefTable } from "../components/ref-table";
 
 export const metadata: Metadata = {
-  title: "CLI Reference",
-  description:
-    "Reference for the minimal spaces command-line interface used by coding agents and terminal workflows.",
+  title: "CLI",
+  description: "Every `spaces` command and flag.",
 };
-
-function Flag({ name, description }: { name: string; description: string }) {
-  return (
-    <li className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
-      <span className="w-56 shrink-0 font-mono text-xs text-accent">{name}</span>
-      <span className="text-sm leading-6 text-foreground-soft">{description}</span>
-    </li>
-  );
-}
 
 export default function CliReferencePage() {
   return (
     <DocsShell
-      title="CLI Reference"
-      description="The spaces CLI is intentionally minimal. It exposes grouped project, workspace, agent, terminal, and MCP commands for automation and terminal workflows."
+      title="CLI"
+      description="The spaces command-line tool for scripts, coding agents, and terminal workflows. This page lists every command and flag; see Orchestrate agents for what the agent commands actually do."
       pagePath="/docs/cli"
     >
-      <Section title="Overview">
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Use <Cmd>spaces</Cmd> when automation needs to inspect projects or workspaces, create host-scoped workspaces, launch workspace runtime, report coding-agent lifecycle state, or control Spaces terminal sessions. To expose these actions to an MCP client such as Claude Code, Codex, or opencode, see the <a className="text-accent hover:underline" href="/docs/mcp">Model Context Protocol</a> reference.
-        </p>
-        <CodeBlock>{`spaces --version
-spaces project list
-spaces workspace list
-spaces workspace start
-spaces agent signal blocked`}</CodeBlock>
-      </Section>
-
-      <Section title="Version">
+      <Section title="Basics">
         <CodeBlock>{`spaces --version`}</CodeBlock>
         <Prose>
-          Prints the installed Spaces CLI version.
+          Most commands act on the workspace containing the current directory when run inside one;
+          pass <InlineCode>--workspace</InlineCode> to target another. Inside a Spaces terminal,
+          commands that would otherwise need <InlineCode>--workspace</InlineCode> or{" "}
+          <InlineCode>--session</InlineCode> read them from the terminal&apos;s{" "}
+          <DocLink href="/docs/environment-variables">environment variables</DocLink> instead.{" "}
+          <InlineCode>--device</InlineCode> runs the command against a paired device instead of
+          this machine. <InlineCode>--json</InlineCode> is available on{" "}
+          <InlineCode>agent list</InlineCode>, <InlineCode>agent status</InlineCode>,{" "}
+          <InlineCode>agent spawn</InlineCode>, and <InlineCode>device pair</InlineCode> (without{" "}
+          <InlineCode>--ssh</InlineCode> or <InlineCode>--link</InlineCode>) for machine-readable
+          output.
         </Prose>
       </Section>
 
-      <Section title="Projects">
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>spaces project list</Cmd> prints the projects in the active profile, or on a paired device with <Cmd>--device</Cmd>.
-        </p>
+      <Section id="projects" title="Projects">
         <CodeBlock>{`spaces project list [--device <name-or-id>]`}</CodeBlock>
+        <Prose>
+          Lists the projects on this machine, or on a paired device with{" "}
+          <InlineCode>--device</InlineCode>. See{" "}
+          <DocLink href="/docs/projects">Projects</DocLink>.
+        </Prose>
       </Section>
 
-      <Section title="Workspaces">
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Workspace commands list, create, start, stop, and restart workspaces on the same-machine daemon, or on a paired device with <Cmd>--device</Cmd> so an orchestrator can discover and prepare work before spawning agents there. A remote listing reads the device overview. Stop matches the app's Stop: the workspace's processes and terminal sessions end, and a running Spaces app closes their panes and tracked browser tabs. Stopping with no app running leaves the tracked tabs open, since the app is what tracks them.
-        </p>
-        <CodeBlock>{`spaces workspace list [--project <project-id>] [--device <name-or-id>]
-spaces workspace create --project <project-id> --branch <branch> [--base-branch <branch>] [--existing-branch] [--device <name-or-id>]
-spaces workspace start [--workspace <workspace-id>]
-spaces workspace stop [--workspace <workspace-id>]
-spaces workspace restart [--workspace <workspace-id>]
-spaces workspace start --device <name-or-id> --workspace <workspace-id>
-spaces workspace stop --device <name-or-id> --workspace <workspace-id>
-spaces workspace restart --device <name-or-id> --workspace <workspace-id>`}</CodeBlock>
-        <ul className="mt-3 space-y-1">
-          <Flag name="--project <id>" description="Project filter for list; project ID for workspace creation." />
-          <Flag name="--branch <branch>" description="Workspace branch for creation." />
-          <Flag name="--base-branch <branch>" description="Base branch. Defaults to the project default branch, then main or master." />
-          <Flag name="--existing-branch" description="Uses an existing branch instead of creating one." />
-          <Flag name="--workspace <id>" description="Workspace ID for start, stop, and restart. Local commands infer the deepest workspace containing the current directory when omitted; paired-device commands require it." />
-          <Flag name="--device <name-or-id>" description="Paired device selector for list, create, start, stop, and restart. Defaults to this machine." />
-        </ul>
+      <Section id="workspaces" title="Workspaces">
+        <CodeBlock>{`spaces workspace list [--project <id>] [--device <name-or-id>]
+spaces workspace create --project <id> --branch <branch> [--base-branch <branch>] [--existing-branch] [--device <name-or-id>]
+spaces workspace start [--workspace <id>] [--device <name-or-id>]
+spaces workspace stop [--workspace <id>] [--device <name-or-id>]
+spaces workspace restart [--workspace <id>] [--device <name-or-id>]`}</CodeBlock>
+        <Prose>
+          Lists, creates, starts, stops, and restarts workspaces on this machine or a paired
+          device. See{" "}
+          <DocLink href="/docs/workspaces#start-stop-and-restart">
+            Start, stop, and restart
+          </DocLink>{" "}
+          for what each action does.
+        </Prose>
+        <RefTable
+          columns={["Flag", "Description"]}
+          rows={[
+            [<InlineCode key="project">--project &lt;id&gt;</InlineCode>, "Project filter for list; project id for creation."],
+            [<InlineCode key="branch">--branch &lt;branch&gt;</InlineCode>, "Workspace branch for creation."],
+            [
+              <InlineCode key="base-branch">--base-branch &lt;branch&gt;</InlineCode>,
+              "Base branch. Defaults to the project's default branch, then main or master.",
+            ],
+            [<InlineCode key="existing-branch">--existing-branch</InlineCode>, "Uses an existing branch instead of creating one."],
+            [
+              <InlineCode key="workspace">--workspace &lt;id&gt;</InlineCode>,
+              "Workspace id for start, stop, and restart. Defaults to the workspace containing the current directory; required with --device.",
+            ],
+            [<InlineCode key="device">--device &lt;name-or-id&gt;</InlineCode>, "Paired device selector. Defaults to this machine."],
+          ]}
+        />
       </Section>
 
-      <Section title="Terminals">
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Terminal commands inspect and drive Spaces-owned terminal sessions on the same-machine daemon. Sessions survive app quit, so commands started here stay discoverable through <Cmd>spaces terminal list</Cmd>.
-        </p>
+      <Section id="terminals" title="Terminals">
         <CodeBlock>{`spaces terminal list [--device <name-or-id>]
-spaces terminal create [--workspace <workspace-id>] [--command <cmd>] [--title <title>]
+spaces terminal create [--workspace <id>] [--command <cmd>] [--title <title>]
 spaces terminal send text <session-id> <text> [--submit] [--device <name-or-id>]
 spaces terminal send bytes <session-id> <byte> [<byte>...] [--device <name-or-id>]
 spaces terminal tail <session-id> [--lines <count>] [--device <name-or-id>]
 spaces terminal show <session-id>
 spaces terminal stop <session-id>`}</CodeBlock>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Tail reconstructs rendered terminal output. For identified coding-agent sessions, it omits an inline suggestion at the cursor while preserving status lines, dialogs, menus, and real input. Ordinary terminal sessions preserve faint text at the cursor.
-        </p>
-        <ul className="mt-3 space-y-1">
-          <Flag name="--device <name-or-id>" description="Paired device selector for list, send, and tail. Defaults to this machine's local sessions." />
-          <Flag name="--workspace <id>" description="Workspace ID for terminal create; omit inside a workspace." />
-          <Flag name="--command <cmd>" description="Shell command. Defaults to a login shell." />
-          <Flag name="--title <title>" description="Session title. Defaults to shell." />
-          <Flag name="--submit" description="Sends the text as a paste followed by a separate Enter keystroke so every supported agent TUI (Claude Code, Codex, OpenCode) submits the line instead of leaving it as an unsubmitted paste." />
-          <Flag name="<byte>" description="Decimal byte value from 0 through 255." />
-          <Flag name="--lines <count>" description="Number of lines to print. Defaults to 20." />
-          <Flag name="show <session>" description="Opens a native Spaces window for the session in owner-seeking mode on macOS." />
-          <Flag name="stop <session>" description="Ends the session on this machine the way stopping its runtime target in the app does: its row disappears and its pane closes. A session that has already ended is refused." />
-        </ul>
+        <Prose>
+          A terminal session survives quitting Spaces, so a session started here stays
+          discoverable with <InlineCode>spaces terminal list</InlineCode>. Tail reconstructs
+          rendered terminal output.
+        </Prose>
+        <RefTable
+          columns={["Flag", "Description"]}
+          rows={[
+            [<InlineCode key="device">--device &lt;name-or-id&gt;</InlineCode>, "Paired device selector for list, send, and tail. Defaults to this machine's local sessions."],
+            [<InlineCode key="workspace">--workspace &lt;id&gt;</InlineCode>, "Workspace id for terminal create; omit inside a workspace."],
+            [<InlineCode key="command">--command &lt;cmd&gt;</InlineCode>, "Shell command. Defaults to a login shell."],
+            [
+              <InlineCode key="title">--title &lt;title&gt;</InlineCode>,
+              <>
+                Session title. Defaults to <InlineCode>shell-1</InlineCode>,{" "}
+                <InlineCode>shell-2</InlineCode>, and so on, the first not already in use.
+              </>,
+            ],
+            [
+              <InlineCode key="submit">--submit</InlineCode>,
+              "Sends the text as a paste followed by a separate Enter keystroke, so Claude Code, Codex, and opencode submit the line instead of leaving it unsubmitted.",
+            ],
+            [<InlineCode key="byte">&lt;byte&gt;</InlineCode>, "Decimal byte value from 0 through 255."],
+            [<InlineCode key="lines">--lines &lt;count&gt;</InlineCode>, "Number of lines to print. Defaults to 20."],
+            [<InlineCode key="show">show &lt;session&gt;</InlineCode>, "Opens a native Spaces window for the session on macOS."],
+            [
+              <InlineCode key="stop">stop &lt;session&gt;</InlineCode>,
+              "Ends the session on this machine the way stopping its runtime target in the app does: its row disappears and its pane closes. A session that has already ended is refused.",
+            ],
+          ]}
+        />
       </Section>
 
-      <Section title="Agent Signal">
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Coding agents report their lifecycle explicitly for a workspace and terminal session. Inside a Spaces-managed terminal, the command reads the workspace and terminal-session IDs from environment. Spaces uses these events to surface blocked and done states in the app and Alerts. This command records state only; it does not launch or stop an agent.
-        </p>
-        <CodeBlock>{`spaces agent signal init
-spaces agent signal working
-spaces agent signal blocked
-spaces agent signal done
-spaces agent signal exit`}</CodeBlock>
-        <ul className="mt-3 space-y-1">
-          <Flag name="--workspace <id>" description="Workspace ID to associate with the event. Defaults to SPACES_WORKSPACE_ID." />
-          <Flag name="--session <id>" description="Spaces terminal session ID that owns the agent. Defaults to SPACES_TERMINAL_TRACKING_ID." />
-          <Flag name="<event>" description="Required event type: init, working, blocked, done, or exit." />
-        </ul>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Spaces records agent lifecycle events only for Spaces-managed terminal sessions. Outside one, <code>spaces agent signal</code> exits successfully without reporting an event. Passing <code>--workspace</code> without <code>--session</code>, or the reverse, is an error rather than a silent no-op. Use <code>init</code> to establish the agent row; later events update that row, or establish one when the terminal runtime identifies the session as a coding agent.
-        </p>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Agent labels come from what the agent reports at <code>init</code>, or from the terminal runtime when it identifies known Codex, Claude Code, and opencode foreground commands.
-        </p>
-      </Section>
-
-      <Section title="Agent Orchestration">
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Beyond reporting state, the CLI lets one terminal drive other coding agents. <Cmd>spaces agent list</Cmd> and <Cmd>spaces agent status</Cmd> show tracked agents (add <Cmd>--json</Cmd> for machine output); <Cmd>spaces agent brief write</Cmd>/<Cmd>read</Cmd>/<Cmd>clear</Cmd> let an agent keep a short markdown status page beside its terminal, and let you read or clear it; <Cmd>brief write</Cmd> takes the markdown as an argument or on stdin (put <Cmd>--</Cmd> before markdown that starts with <Cmd>-</Cmd>), and writing an empty brief clears it. <Cmd>spaces agent spawn</Cmd> starts a supported agent (claude, codex, or opencode) in a new workspace terminal and blocks until Spaces detects it running, no hooks required. Spawn delivers no prompt: once it returns, send the first prompt with <Cmd>spaces terminal send</Cmd>. <Cmd>spaces agent subscribe</Cmd> watches a child and injects a clickable notice block into your terminal when it goes blocked, done, or exits. <Cmd>spaces agent kill</Cmd> ends a child and its terminal; it refuses a session that is not a coding agent. To steer a child, send it keystrokes with <Cmd>spaces terminal send</Cmd>, an agent&apos;s status still reflects only what the agent itself reports. Every command except <Cmd>signal</Cmd> accepts <Cmd>--device</Cmd> to target a paired device (remote spawn requires <Cmd>--workspace</Cmd>).
-        </p>
-        <CodeBlock>{`spaces agent list [--workspace <id>] [--json]
-spaces agent status [--session <id>] [--json]
-spaces agent brief write "# Fixing the login bug" [--session <id>]
+      <Section id="agents" title="Agents">
+        <CodeBlock>{`spaces agent list [--workspace <id>] [--json] [--device <name-or-id>]
+spaces agent status [--session <id>] [--json] [--device <name-or-id>]
+spaces agent brief write "<markdown>" [--session <id>] [--device <name-or-id>]
 spaces agent brief write < brief.md
-spaces agent brief read [--session <id>]
-spaces agent brief clear [--session <id>]
-spaces agent spawn --command claude [--workspace <id>] [--timeout <s>]
+spaces agent brief read [--session <id>] [--device <name-or-id>]
+spaces agent brief clear [--session <id>] [--device <name-or-id>]
+spaces agent spawn --command <cmd> [--workspace <id>] [--title <title>] [--timeout <seconds>] [--json] [--device <name-or-id>]
+spaces agent kill <session> [--device <name-or-id>]
 spaces agent subscribe <child-session> [--subscriber <id>] [--device <name>]
 spaces agent unsubscribe <child-session> [--subscriber <id>] [--device <name>]
-spaces agent kill <session>`}</CodeBlock>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Subscriptions can watch a child on this device or, with <Cmd>--device</Cmd>, on a paired one. Notices are delivered only while the subscriber is idle, so one never lands mid-task, and a subscription that would form a watch cycle is rejected. The same actions are available to an MCP client, but <code>spaces agent signal</code> is deliberately never an MCP tool.
-        </p>
+spaces agent signal <event> [--workspace <id>] [--session <id>] [--agent-session <id>]`}</CodeBlock>
+        <Prose>
+          <Cmd>spaces agent brief write</Cmd> reads the markdown from the argument or from
+          standard input (put <Cmd>--</Cmd> before markdown that starts with{" "}
+          <InlineCode>-</InlineCode>); an empty document clears the brief. Every agent command
+          except <Cmd>signal</Cmd> accepts <InlineCode>--device</InlineCode> to target a paired
+          device. See{" "}
+          <DocLink href="/docs/orchestration">Orchestrate agents</DocLink> for what each command
+          does, and <DocLink href="/docs/orchestration#brief">Briefs</DocLink> for the brief
+          commands specifically.
+        </Prose>
+        <RefTable
+          columns={["Flag", "Description"]}
+          rows={[
+            [
+              <InlineCode key="command">--command &lt;cmd&gt;</InlineCode>,
+              "Command that launches a supported coding agent (claude, codex, or opencode).",
+            ],
+            [
+              <InlineCode key="workspace">--workspace &lt;id&gt;</InlineCode>,
+              "Workspace id for spawn. Defaults to the workspace containing the current directory; required with --device.",
+            ],
+            [<InlineCode key="title">--title &lt;title&gt;</InlineCode>, "Window or session title for spawn. Defaults to the agent's name."],
+            [<InlineCode key="timeout">--timeout &lt;seconds&gt;</InlineCode>, "Seconds spawn waits for the agent to be ready for input. Defaults to 90."],
+            [
+              <InlineCode key="session">--session &lt;id&gt;</InlineCode>,
+              "Spaces terminal session id for status, brief, and signal. Defaults to SPACES_TERMINAL_TRACKING_ID.",
+            ],
+            [
+              <InlineCode key="subscriber">--subscriber &lt;id&gt;</InlineCode>,
+              "The watching terminal's session id, for subscribe and unsubscribe (the child being watched is the positional argument). Defaults to SPACES_TERMINAL_TRACKING_ID.",
+            ],
+            [
+              <InlineCode key="agent-session">--agent-session &lt;id&gt;</InlineCode>,
+              "The agent's own conversation id, for signal, when its hooks pass one as an argument. Defaults to the id in the hook payload.",
+            ],
+            [<InlineCode key="device">--device &lt;name-or-id&gt;</InlineCode>, "Paired device selector. Defaults to this machine's local sessions."],
+            [<InlineCode key="json">--json</InlineCode>, "Emits machine-readable output where offered."],
+          ]}
+        />
       </Section>
 
-      <Section title="Pairing">
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>spaces device pair</Cmd> with no source opens a short-lived pairing window on the same-machine daemon and prints a <code>spaces://pair</code> link for connecting an iOS client from the terminal. Add <Cmd>--json</Cmd> for machine-readable output. Pass <Cmd>--link</Cmd> to redeem a link from another device, or <Cmd>--ssh user@host</Cmd> to pair with a remote daemon over SSH. Use <Cmd>--ssh-port</Cmd> for SSH ports other than 22.
-        </p>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          On Ubuntu 24.04 devices, the Linux installer exposes the CLI at <Cmd>~/.local/bin/spaces</Cmd> for terminal use and keeps the managed helper at <Cmd>~/.spaces/bin/spaces</Cmd>.
-        </p>
-        <CodeBlock>{`spaces device pair [--json]
+      <Section id="devices" title="Devices">
+        <CodeBlock>{`spaces device list
+spaces device pair [--json]
 spaces device pair --ssh user@host [--ssh-port <port>]
 spaces device pair --link <spaces-pair-link>
-spaces device list
 spaces device remove <name-or-id>`}</CodeBlock>
+        <Prose>
+          Lists, pairs, and removes paired devices. See{" "}
+          <DocLink href="/docs/remote-access#pairing">Pairing</DocLink> for how each form of{" "}
+          <Cmd>spaces device pair</Cmd> works.
+        </Prose>
       </Section>
 
-      <Section title="Typical Flow">
-        <CodeBlock>{`spaces project list
-spaces workspace create --project <project-id> --branch bugfix/login-timeout
-cd <workspace-directory>
-spaces workspace start
-spaces agent signal init
-spaces agent signal working
-# ... later ...
-spaces agent signal blocked`}</CodeBlock>
+      <Section id="mcp" title="MCP">
+        <CodeBlock>{`spaces mcp`}</CodeBlock>
         <Prose>
-          The GUI remains the primary place to configure templates and edit workspace details. The CLI stays focused on explicit profile, workspace, terminal, and agent automation.
+          Runs the Spaces MCP server over standard input and output, so an MCP client such as
+          Claude Code, Codex, or opencode can connect. See{" "}
+          <DocLink href="/docs/mcp">MCP tools</DocLink> for setup and the tool list.
+        </Prose>
+      </Section>
+
+      <Section id="service-updates" title="Service updates">
+        <CodeBlock>{`spaces daemon apply-update`}</CodeBlock>
+        <Prose>
+          Applies a downloaded update to the Spaces service on this machine in place, without
+          ending its sessions. See{" "}
+          <DocLink href="/docs/installation#updates">Updates</DocLink>.
         </Prose>
       </Section>
     </DocsShell>

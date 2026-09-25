@@ -1,80 +1,81 @@
 import type { Metadata } from "next";
+import type { ReactNode } from "react";
+import { DocLink } from "../components/doc-link";
 import { DocsShell } from "../components/docs-shell";
+import { RefTable } from "../components/ref-table";
 import { Prose, Section } from "../components/section";
 
 export const metadata: Metadata = {
-  title: "Keyboard Shortcuts",
-  description: "Global and in-app shortcuts for workspace navigation.",
+  title: "Keyboard shortcuts",
+  description: "Spaces' shortcuts, which ones work from any app, and how to change them.",
 };
 
-const shortcutRows = [
-  { shortcut: "cmd+alt+=", action: "Show or hide Spaces", scope: "Global" },
-  { shortcut: "cmd+alt+-", action: "Open the command palette", scope: "Global" },
-  { shortcut: "cmd+alt+]", action: "Next already-open window in the current workspace", scope: "Global + App" },
-  { shortcut: "cmd+alt+[", action: "Previous already-open window in the current workspace", scope: "Global + App" },
-  { shortcut: "cmd+alt+down", action: "Select the next workspace in the sidebar (Alerts and workspaces)", scope: "App" },
-  { shortcut: "cmd+alt+up", action: "Select the previous workspace in the sidebar (Alerts and workspaces)", scope: "App" },
-  { shortcut: "cmd+alt+a", action: "Open Alerts", scope: "App" },
-  { shortcut: "cmd+n", action: "New workspace for the selected project", scope: "App" },
-  { shortcut: "cmd+alt+e", action: "Open the selected workspace in your configured editor", scope: "Global + App" },
-  { shortcut: "cmd+alt+t", action: "Open a terminal for the selected workspace", scope: "App" },
-  { shortcut: "cmd+alt+f", action: "Reveal the selected workspace in Finder", scope: "App" },
-  { shortcut: "cmd+1 … cmd+0", action: "Open or focus workspace target by number", scope: "App" },
-  { shortcut: "cmd+= / cmd+shift+=", action: "Zoom terminal text in one point", scope: "Terminal pane" },
-  { shortcut: "cmd+- / cmd+shift+-", action: "Zoom terminal text out one point", scope: "Terminal pane" },
+const rows: ReactNode[][] = [
+  ["Show or hide Spaces", "⌘⌥=", "Any app"],
+  ["Open the command palette", "⌘⌥-", "Any app"],
+  ["Next window", "⌘⌥]", "Any app"],
+  ["Previous window", "⌘⌥[", "Any app"],
+  ["Open in Editor", "⌘⌥E", "Any app"],
+  ["Show alerts", "⌘⌥A", "In Spaces"],
+  ["Create workspace", "⌘N", "In Spaces"],
+  ["Reload", "⌘⌥R", "In Spaces"],
+  ["Open terminal", "⌘⌥T", "In Spaces"],
+  ["Open session picker", "⌘T", "In Spaces"],
+  ["Open in Finder", "⌘⌥F", "In Spaces"],
+  ["Settings", "⌘,", "In Spaces"],
+  ["Cycle mode", "⌘⌥\\", "In Spaces"],
+  ["Next workspace", "⌘⌥↓", "In Spaces"],
+  ["Previous workspace", "⌘⌥↑", "In Spaces"],
+  ["Focus target 1 through 10", "⌘1 … ⌘0", "In Spaces"],
 ];
 
 export default function ShortcutsDocsPage() {
   return (
     <DocsShell
-      title="Keyboard Shortcuts"
-      description="Spaces is designed for keyboard-first context switching between running workspaces and captured windows."
+      title="Keyboard shortcuts"
+      description="Spaces' own shortcuts share a configurable leader; the leader defaults to ⌘⌥."
       pagePath="/docs/shortcuts"
     >
-      <Section title="Default Shortcuts">
-        <div className="mt-3 overflow-x-auto rounded-sm border border-line/70">
-          <table className="min-w-full border-collapse text-left text-sm">
-            <thead className="bg-background-soft/70 text-foreground">
-              <tr>
-                <th className="px-3 py-2 font-mono text-xs uppercase tracking-[0.12em]">Shortcut</th>
-                <th className="px-3 py-2 font-mono text-xs uppercase tracking-[0.12em]">Action</th>
-                <th className="px-3 py-2 font-mono text-xs uppercase tracking-[0.12em]">Scope</th>
-              </tr>
-            </thead>
-            <tbody>
-              {shortcutRows.map((row) => (
-                <tr key={row.shortcut} className="border-t border-line">
-                  <td className="px-3 py-2 font-mono text-xs text-foreground">{row.shortcut}</td>
-                  <td className="px-3 py-2 text-foreground-soft">{row.action}</td>
-                  <td className="px-3 py-2 text-foreground-soft">{row.scope}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Section>
-
-      <Section title="Focus vs Cycle">
+      <Section id="spaces-shortcuts" title="Spaces' shortcuts">
         <Prose>
-          Numbered shortcuts open or focus the selected workspace&apos;s ordered targets, including configured browser sessions, stopped process rows, and live coding agents. Next/previous window shortcuts cycle only through targets that already have an open tracked Chrome tab or Spaces terminal pane.
+          The leader supplies the shared modifiers for the shortcuts below; it defaults to{" "}
+          <code>⌘⌥</code>.
         </Prose>
+        <RefTable columns={["Action", "Default", "Works from"]} rows={rows} />
       </Section>
 
-      <Section title="The Leader">
-        <Prose>
-          The leader is the shared modifier — <code>cmd+alt</code> by default — used for workspace and app shortcuts like next/previous window, next/previous workspace, Alerts, editor, new terminal, and Finder. Change the leader once and all of those move with it. Moving the sidebar selection is bound only to leader+up/leader+down, so plain arrow keys stay out of navigation.
-        </Prose>
+      <Section id="fixed-keys" title="Fixed keys">
+        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
+          <li>
+            • <code>⌘W</code> closes the focused pane.
+          </li>
+          <li>
+            • <code>⌘X</code> dismisses the highlighted alert in the command palette.
+          </li>
+          <li>
+            • <code>⌥⌘B</code> hides or shows a coding agent&apos;s brief beside its terminal; see{" "}
+            <DocLink href="/docs/coding-agents#briefs">Agent status: Agent briefs</DocLink>.
+          </li>
+        </ul>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Keys inside a terminal pane (copy, paste, find, zoom) are their own set; see{" "}
+          <DocLink href="/docs/terminals#keys-inside-a-terminal">
+            Terminals, tabs, and panes: Keys inside a terminal
+          </DocLink>
+          .
+        </p>
       </Section>
 
-      <Section title="Terminal Text Zoom">
+      <Section id="changing-shortcuts" title="Changing shortcuts">
         <Prose>
-          The zoom shortcuts work while a terminal pane has focus, and range from 9 to 18 points; Spaces starts at 12 points and there is no reset key, so you step back down to return to it. One size is shared across the app, so zooming resizes text in every open terminal pane at once, and it is remembered the next time you launch Spaces. <code>cmd+0</code> is not a zoom key: it keeps focusing the tenth numbered target, in a terminal pane the same as everywhere else.
-        </Prose>
-      </Section>
-
-      <Section title="Customization">
-        <Prose>
-          The workspace and app shortcuts are configurable from Settings (<code>cmd+,</code>) Menu. The terminal text zoom shortcuts are fixed.
+          Change a shortcut from Settings → Shortcuts. Spaces&apos; own shortcuts are
+          configurable, including the leader itself. Standard macOS keys, and the handful of
+          fixed Spaces keys above, are not. A shortcut another app already owns may do nothing;
+          see{" "}
+          <DocLink href="/docs/troubleshooting#shortcuts">
+            Troubleshooting: A shortcut does nothing
+          </DocLink>
+          .
         </Prose>
       </Section>
     </DocsShell>

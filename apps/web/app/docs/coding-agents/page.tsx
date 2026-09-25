@@ -1,129 +1,130 @@
 import type { Metadata } from "next";
 import { DocsShell } from "../components/docs-shell";
-import { CopyablePrompt } from "../components/copyable-prompt";
+import { DocLink } from "../components/doc-link";
+import { Cmd, InlineCode } from "../components/code-block";
 import { Prose, Section } from "../components/section";
 
-// Keep in step with `AgentHookCommand.hookVersion`: hooks written without the current version read
-// back in the app as out of date.
-const HOOK_MARKER = "# spaces-agent-hook v1";
-
-// Spaces embeds the absolute path it resolved for the CLI; `/usr/local/bin/spaces` stands in here.
-const spacesAgentSignalCommand = (event: string) =>
-  `'/usr/local/bin/spaces' agent signal ${event} >/dev/null 2>&1 || true ${HOOK_MARKER}`;
-
-const CLAUDE_PROMPT = `Add global Spaces lifecycle hooks to ~/.claude/settings.json so this agent
-reports its state to Spaces.
-
-  SessionStart      ->  ${spacesAgentSignalCommand("init")}
-  UserPromptSubmit  ->  ${spacesAgentSignalCommand("working")}
-  Stop              ->  ${spacesAgentSignalCommand("done")}
-  PermissionRequest ->  ${spacesAgentSignalCommand("blocked")}
-  SessionEnd        ->  ${spacesAgentSignalCommand("exit")}
-
-Use an empty matcher ("") for every entry. Do not add or remove any
-other keys. Replace '/usr/local/bin/spaces' with the absolute path to my
-spaces CLI. These hooks run quietly, ignore transient Spaces failures,
-and keep the ${HOOK_MARKER} marker.
-After writing the file, show me the diff.`;
-
-const CODEX_PROMPT = `Enable Codex hooks with [features].hooks in ~/.codex/config.toml and add global Spaces lifecycle hooks so this agent
-reports its state to Spaces.
-
-  SessionStart      ->  ${spacesAgentSignalCommand("init")}
-  UserPromptSubmit  ->  ${spacesAgentSignalCommand("working")}
-  Stop              ->  ${spacesAgentSignalCommand("done")}
-  PermissionRequest ->  ${spacesAgentSignalCommand("blocked")}
-
-Use an empty matcher ("") for every entry. Do not add or remove any
-other keys. Replace '/usr/local/bin/spaces' with the absolute path to my
-spaces CLI. These hooks run quietly, ignore transient Spaces failures,
-and keep the ${HOOK_MARKER} marker.
-After writing the file, show me the diff.
-`;
-
 export const metadata: Metadata = {
-  title: "Coding Agents",
-  description: "Track Claude Code, Codex, opencode, and other coding agents per workspace.",
+  title: "Agent status",
+  description:
+    "How Spaces knows whether Claude Code, Codex, or opencode is working, waiting for you, or done.",
 };
 
 export default function CodingAgentsDocsPage() {
   return (
     <DocsShell
-      title="Coding Agents"
-      description="Coding agents run alongside a workspace and report their lifecycle to Spaces, so you always know which one is waiting for you next."
+      title="Agent status"
+      description="Spaces tracks a coding agent's state in your sidebar, so you always know which one needs you next."
       pagePath="/docs/coding-agents"
     >
-      <Section title="What Is a Coding Agent?">
+      <Section id="supported-agents" title="Supported agents">
         <Prose>
-          A coding agent is a tool like Claude Code, Codex, or opencode that you run in a terminal to help you write code. Spaces tracks each agent as a row in the workspace so you can focus its terminal by shortcut and see at a glance whether it is working, blocked on you, or done.
+          Spaces tracks Claude Code, Codex, and opencode. Start any of them in a Spaces terminal and it
+          shows up as its own row, listed under Coding Agents in that terminal&apos;s workspace.
         </Prose>
+      </Section>
+
+      <Section id="hooks" title="Status hooks">
+        <Prose>
+          Spaces reports agent state through a small hook it installs into each agent&apos;s own
+          configuration. Spaces offers to install these the first time it detects an agent, in the
+          skippable coding-agents step at first launch, and any time after that from{" "}
+          <strong>Settings &rarr; Coding Agents</strong>. It touches{" "}
+          <InlineCode>~/.claude/settings.json</InlineCode> for Claude Code,{" "}
+          <InlineCode>~/.codex/hooks.json</InlineCode> for Codex (which also turns on Codex&apos;s hooks
+          feature), and a plugin file under{" "}
+          <InlineCode>~/.config/opencode/plugin/</InlineCode> for opencode.
+        </Prose>
+        <Prose>
+          Settings &rarr; Coding Agents shows, per agent, one of five states: not installed, out of
+          date, switched off in the agent, awaiting Codex trust review (Codex asks you to approve a hook
+          before it will run it), or installed. A detected agent gets an Install, Update, or Reinstall
+          action to match.
+        </Prose>
+      </Section>
+
+      <Section id="states" title="States">
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Run one in any workspace terminal; Spaces attaches it to the workspace when it reports an event or its process is detected running.</li>
-          <li>• Rows render under <strong>Coding Agents</strong> in the workspace, after browser and process rows.</li>
+          <li>• <strong>Working</strong> (green): the agent is running a turn.</li>
+          <li>
+            • <strong>Blocked</strong> (amber): the agent is waiting on a permission prompt or your
+            answer. Counts toward Alerts and the Dock badge until it clears on its own.
+          </li>
+          <li>
+            • <strong>Done</strong> (blue): the agent finished a turn. Stays in Alerts and the Dock
+            badge until you dismiss it.
+          </li>
+          <li>
+            • <strong>Idle</strong> (gray): not doing anything at the moment, whether it is sitting at
+            its prompt or has not started a turn yet.
+          </li>
         </ul>
+        <Prose>
+          When the agent&apos;s process exits, its row reads &quot;Exited&quot; while the terminal stays
+          open, and disappears once its terminal session ends; closing its pane only detaches the
+          terminal and leaves the exited row in place. An agent that asks a question in plain
+          text, without going through a permission prompt, shows as done rather than blocked, since
+          Spaces has no hook for a plain-text question.
+        </Prose>
+        <Prose>
+          Status shows on the sidebar row, in <DocLink href="/docs/alerts">Alerts</DocLink>, in the
+          command palette, in the All agents cycling mode, and on the iPhone Agents tab.
+        </Prose>
       </Section>
 
-      <Section title="Lifecycle Events">
+      <Section id="briefs" title="Agent briefs">
         <Prose>
-          Agents report their own state through <code>spaces agent signal &lt;event&gt;</code>. In a Spaces-managed terminal, the command reads the workspace and session from environment; outside one, it exits successfully without reporting an event. Spaces uses each event to update the agent row. Both <code>blocked</code> and <code>done</code> raise Alerts and dock attention; <code>blocked</code> clears when the agent&apos;s state changes, while <code>done</code> stays in Alerts until you dismiss it.
+          A coding agent can keep one short brief: a status page it writes about itself, covering what
+          it is doing, when a long step should finish, questions for you, and its task list. Spaces
+          shows it read-only beside the agent&apos;s terminal, and it is the agent&apos;s own writing,
+          never something Spaces adds for it. Any terminal where Spaces has detected a supported coding
+          agent can keep one.
         </Prose>
+        <Prose>
+          On the Mac it renders as a column at the trailing edge of the agent&apos;s pane. Show or hide
+          it with <InlineCode>⌥⌘B</InlineCode>, the footer&apos;s brief glyph, the pane&apos;s
+          &quot;&#8943;&quot; menu (&quot;Hide Brief&quot; or &quot;Show Brief&quot;), or a global panel
+          window&apos;s title strip. On iPhone and iPad, a brief button in the terminal&apos;s top bar
+          opens a sheet, which also opens on its own for an agent whose brief you have not dismissed.
+          The sidebar and the iPhone agent rows show a small glyph when the agent has a brief.
+        </Prose>
+        <Prose>
+          A brief&apos;s first line is its one-line summary, shown wherever there is no room for the
+          whole document: <Cmd>spaces agent list</Cmd>, <Cmd>spaces agent status</Cmd>, and subscribe
+          notifications. For the commands that read and write a brief, see{" "}
+          <DocLink href="/docs/orchestration#brief">briefs</DocLink>. For your own notes on a workspace,
+          see <DocLink href="/docs/workspaces#notes">workspace notes</DocLink>.
+        </Prose>
+      </Section>
+
+      <Section id="stopping" title="Stopping an agent">
+        <Prose>
+          End an agent and its terminal from its sidebar row, from the iPhone Agents tab, or with{" "}
+          <Cmd>spaces agent kill</Cmd>.
+        </Prose>
+      </Section>
+
+      <Section title="Driving several agents">
+        <Prose>
+          Once agents report their state, one agent, or you from a single terminal, can watch and drive
+          the others across your workspaces and devices. See{" "}
+          <DocLink href="/docs/orchestration">Orchestrate agents</DocLink>.
+        </Prose>
+      </Section>
+
+      <Section title="See also">
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>init</strong> &mdash; identify the terminal and attach it to a tracked row.</li>
-          <li>• <strong>working</strong> &mdash; agent is working; row shows a spinner.</li>
-          <li>• <strong>blocked</strong> &mdash; agent is blocked on you; row shows a warning and raises attention.</li>
-          <li>• <strong>done</strong> &mdash; agent finished; row shows a green dot and raises attention until dismissed.</li>
-          <li>• <strong>exit</strong> &mdash; agent ended; row returns to idle, or is removed if the terminal is gone.</li>
-        </ul>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Events are accepted only from Spaces-managed terminal sessions. Start agents in a workspace terminal opened by Spaces so the session can be tracked and focused reliably. Events after <code>init</code> update the row that <code>init</code> created or attached; a foreground process Spaces recognizes as a known agent can also establish the row before the monitor tick runs.
-        </p>
-      </Section>
-
-      <Section title="Setting Up Hooks">
-        <Prose>
-          Spaces sets these lifecycle hooks up for you, but never behind your back: it asks first. On first launch it offers to install <code>spaces agent signal</code> hooks for every supported agent CLI it detects — Claude Code in <code>~/.claude/settings.json</code>, Codex in <code>~/.codex/hooks.json</code>, and opencode as a plugin in <code>~/.config/opencode/plugin/</code>. You can skip that step and install later, or never. Each hook calls the Spaces CLI by the absolute path found when the hooks were installed, so it runs no matter what <code>PATH</code> your agent hands it; if you move or reinstall the CLI, reinstall the hooks from Settings &rarr; Coding Agents. The command only reports from Spaces-managed terminals and does nothing anywhere else, so nothing else in your setup changes.
-        </Prose>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Installation preserves your existing hooks and settings and never duplicates an entry, so it is safe to run again. If a later Spaces release changes the hooks it installs, your agents show as out of date and Spaces offers to update them once — updating replaces the old hooks rather than adding to them.
-        </p>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Agents install independently, so one that Spaces will not touch — a Codex <code>config.toml</code> that already defines <code>features</code> in a shape Spaces refuses to rewrite, say — does not stop the others. That agent&apos;s row explains what stopped it.
-        </p>
-      </Section>
-
-      <Section title="Managing Hooks in Settings">
-        <Prose>
-          Open <strong>Settings &rarr; Coding Agents</strong> to see, for This Mac or any paired remote, which supported agent CLIs are detected and whether their Spaces hooks are installed, out of date, or missing. Detected agents have an Install, Update, or Reinstall button; unsupported or missing CLIs remain visible without an install action.
-        </Prose>
-      </Section>
-
-      <Section title="Manual Setup">
-        <Prose>
-          You normally never need this — Spaces installs and manages the hooks for you. If you want to configure an agent by hand, paste one of these prompts into it. Both preserve any existing hooks and only add the Spaces entries. Claude Code edits <code>~/.claude/settings.json</code>; Codex edits <code>~/.codex/config.toml</code> to enable hooks and adds the lifecycle entries. Codex has no session-end event, so its setup omits <code>exit</code>.
-        </Prose>
-        <div className="mt-4 space-y-4">
-          <CopyablePrompt label="Prompt for Claude Code" text={CLAUDE_PROMPT} />
-          <CopyablePrompt label="Prompt for Codex" text={CODEX_PROMPT} />
-        </div>
-      </Section>
-
-      <Section title="Orchestrate Agents From One Terminal">
-        <Prose>
-          Once agents report their state, one agent, or you at a single terminal, can drive the others. <code>spaces agent list</code> and <code>spaces agent status</code> show every agent and whether it is working, blocked, or done, and each agent can keep a brief, a short status page it updates as it works, which you read beside its terminal on Mac and iPhone or with <code>spaces agent brief read</code>. Each row includes a clickable <code>spaces://terminal/&lt;id&gt;</code> link that jumps straight to that agent&apos;s pane.
-        </Prose>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>Start one that&apos;s ready.</strong> <code>spaces agent spawn --command claude</code> opens a supported agent (Claude Code, Codex, or opencode) in a new workspace terminal and waits until Spaces detects it running before returning — no hooks required. Spawn sends no prompt of its own; deliver the first prompt with <code>spaces terminal send</code> once it returns.</li>
-          <li>• <strong>Get told when one needs you.</strong> <code>spaces agent subscribe</code> watches a child agent from your terminal; when it goes blocked, done, or exits, Spaces drops a single line into your terminal with a link to open it — only while you are idle, so it never lands mid-task.</li>
-          <li>• <strong>Steer or stop it.</strong> <code>spaces terminal send</code> types into a child — a follow-up turn, an answer, or a keystroke such as Escape. What a key does is up to the agent&apos;s own interface, so a keystroke never changes what Spaces says the agent is doing; only the agent&apos;s own reports do. <code>spaces agent kill</code> ends it and its terminal outright.</li>
-          <li>• <strong>Across devices.</strong> These commands take <code>--device</code> to drive agents on a paired Mac or Linux box, and the same actions are available to an MCP client such as Claude Code (agent lifecycle <em>signals</em> stay off the tool surface, so an agent can read another&apos;s state but never forge it).</li>
-        </ul>
-      </Section>
-
-      <Section title="See Also">
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <a className="text-accent hover:underline" href="/docs/cli">CLI Reference</a> — full flag list for <code>spaces agent signal</code>.</li>
-          <li>• <a className="text-accent hover:underline" href="/docs/processes">Processes</a> — how agents launched as processes share the process runtime.</li>
-          <li>• <a className="text-accent hover:underline" href="/docs/window-management">Window Management</a> — how tracked agent terminals become focusable by shortcut.</li>
+          <li>
+            • <DocLink href="/docs/orchestration">Orchestrate agents</DocLink>, for spawning, watching,
+            and stopping agents from another agent.
+          </li>
+          <li>
+            • <DocLink href="/docs/automations">Automations</DocLink>, for running an agent on a
+            schedule.
+          </li>
+          <li>
+            • <DocLink href="/docs/cli#agents">CLI</DocLink>, for every <Cmd>spaces agent</Cmd> command.
+          </li>
         </ul>
       </Section>
     </DocsShell>

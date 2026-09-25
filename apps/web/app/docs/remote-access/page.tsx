@@ -1,196 +1,302 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { CodeBlock, InlineCode } from "../components/code-block";
+import { DocLink } from "../components/doc-link";
 import { DocsShell } from "../components/docs-shell";
-import { Prose, Section } from "../components/section";
+import { Prose, Section, SubHeading } from "../components/section";
 
 const tailscaleInstallURL = "https://tailscale.com/kb/1017/install";
 const tailscaleFirewallURL = "https://tailscale.com/kb/1082/firewall-ports";
 const tailscaleKeyExpiryURL = "https://tailscale.com/kb/1028/key-expiry";
 
 const listClass = "mt-3 space-y-2 text-sm leading-7 text-foreground-soft";
-const subheadingClass = "mt-6 text-sm font-semibold text-foreground";
 const paragraphClass = "mt-3 text-sm leading-7 text-foreground-soft";
 
 export const metadata: Metadata = {
-  title: "Remote Access",
+  title: "Remote machines",
   description:
-    "Reach a remote machine or cloud VM from your Mac and iPhone wherever you are: pair over Tailscale, keep the daemon running, and verify the connection survives a change of network.",
+    "Install Spaces on a Linux machine or another Mac, pair it, and reach it from anywhere.",
 };
 
 export default function RemoteAccessDocsPage() {
   return (
     <DocsShell
-      title="Remote Access"
-      description="Set up a Linux box or cloud VM so your Mac and iPhone reach it from home Wi-Fi, a coffee shop, and cellular alike. The setup here uses Tailscale for the network path and leaves nothing on the machine open to the public internet."
+      title="Remote machines"
+      description="Install Spaces on a Linux machine or another Mac, pair it, and reach it from anywhere."
       pagePath="/docs/remote-access"
     >
-      <Section title="Two connections, not one">
+      <Section title="What a remote machine is">
         <Prose>
-          A remote machine is reached over two different connections, and a working first one says nothing about the second.
+          A remote machine is another Mac or a Linux machine running Spaces. It gets its own section in
+          the sidebar, alongside &ldquo;Local&rdquo; for this Mac, once paired.
         </Prose>
-        <ul className={listClass}>
-          <li>• <strong>SSH, from the Mac.</strong> Pairing from a Mac, installing the daemon, and updating it over SSH ride your SSH access, usually TCP <InlineCode>22</InlineCode>. Two Mac features keep using it after pairing: a browser session for a remote workspace&apos;s service opens through an SSH local forward, and opening a remote workspace in an external editor goes through that editor&apos;s SSH remote support. Your phone never uses SSH: pairing a phone hands over a credential through a QR code or a link, and everything the phone does afterwards goes over the second connection.</li>
-          <li>• <strong>Port 47847, for Spaces itself.</strong> Once paired, your Mac and your phone each talk to the machine&apos;s Spaces daemon directly on TCP <InlineCode>47847</InlineCode>. Terminals, coding agents, the built-in Editor, and the phone&apos;s browser sessions all go over this connection. It is authenticated end to end: a client pins the daemon&apos;s certificate and presents a per-client token, so nothing on the machine trusts an address by itself.</li>
-        </ul>
+        <SubHeading id="disconnect-vs-stop">Losing the connection is not the same as stopping the work</SubHeading>
         <p className={paragraphClass}>
-          When SSH works and Spaces reports the device as unreachable, it is the second connection that is failing. A cloud console, an IAP tunnel, or a jump host proves the machine is up; it does not carry Spaces traffic.
-        </p>
-        <p className={paragraphClass}>
-          A paired device is not stored as one address. The pairing link carries a short list of candidate addresses, most preferred first: the host you paired over SSH, the machine&apos;s primary local-network address, and its Tailscale address when it has one. A secondary interface on the machine is not in that list. Each client tries them in that order, keeps whichever answers, remembers it for next time, and learns the daemon&apos;s current addresses again on every connection. That is what lets one pairing follow you between networks.
+          Everything you run on a remote machine lives in the Spaces service on that machine, not in the
+          client that opened it. A Mac that sleeps or a phone that loses signal disconnects a viewer; the
+          terminal, the process, or the coding agent keeps running and is there when the client comes
+          back. What ends the work is the machine itself stopping: shutting down or rebooting it ends
+          every session on it, and it starts with nothing running afterward.
         </p>
       </Section>
 
-      <Section title="Recommended setup: Tailscale on every device">
+      <Section id="install-on-linux" title="Install on Linux">
         <Prose>
-          Put the remote machine, your Mac, and your iPhone on one tailnet and pair using the machine&apos;s Tailscale address. The address stays the same on every network you move to, nothing has to be opened to the public internet, and the Spaces daemon needs no configuration to be reached this way: it listens on every interface, including the Tailscale one.
+          On the Linux machine, install the latest release:
         </Prose>
+        <CodeBlock>{`curl -fsSL https://usespaces.dev/install.sh | bash`}</CodeBlock>
+        <p className={paragraphClass}>
+          The installer registers <InlineCode>spacesd.service</InlineCode> as a systemd user service and
+          starts it, and enables lingering (<InlineCode>loginctl enable-linger</InlineCode>) so it keeps
+          running after you disconnect, without a login session open. Ubuntu 24.04 on x86_64 or arm64 is
+          supported.
+        </p>
+        <p className={paragraphClass}>
+          To pair another Mac instead, install the Mac app there the same way you installed it on this
+          one; see <DocLink href="/docs/installation">Install on your Mac</DocLink>.
+        </p>
+      </Section>
 
-        <h3 className={subheadingClass}>1. Install Tailscale</h3>
+      <Section id="update-and-uninstall-on-linux" title="Update and uninstall on Linux">
+        <SubHeading>Update</SubHeading>
+        <Prose>
+          Re-run the install command with a specific version to update in place, replacing{" "}
+          <InlineCode>&lt;version&gt;</InlineCode> with a released version such as{" "}
+          <InlineCode>0.1.0</InlineCode>:
+        </Prose>
+        <CodeBlock>{`curl -fsSL https://usespaces.dev/install.sh | bash -s -- <version>`}</CodeBlock>
+        <p className={paragraphClass}>
+          The Mac app and the <InlineCode>spaces</InlineCode> CLI print this command with the right
+          version already filled in whenever they reach a Linux machine that is behind. Terminals,
+          processes, and coding agents keep running across the update. For a machine paired over SSH,
+          the Mac app also offers an &ldquo;Update over SSH&rdquo; action that runs the same command for
+          you.
+        </p>
+        <SubHeading>Uninstall</SubHeading>
+        <Prose>On the Linux machine:</Prose>
+        <CodeBlock>{`systemctl --user disable --now spacesd.service
+rm -f ~/.config/systemd/user/spacesd.service
+systemctl --user daemon-reload
+rm -f ~/.local/bin/spaces
+rm -rf ~/.spaces ~/spaces`}</CodeBlock>
+        <Prose>
+          <InlineCode>~/.spaces</InlineCode> holds the local database; <InlineCode>~/spaces</InlineCode>{" "}
+          holds its repos and workspace worktrees. Leave them alone if you want to keep that state.
+        </Prose>
+      </Section>
+
+      <Section id="pairing" title="Pairing">
+        <SubHeading id="pair-a-remote-machine">Pair a remote machine</SubHeading>
+        <Prose>
+          On the Mac, open Settings → Devices → &ldquo;Add remote device over SSH&rdquo; and enter the
+          host; an &ldquo;Advanced&rdquo; disclosure adds the user and port. Or from the CLI:
+        </Prose>
+        <CodeBlock>{`spaces device pair --ssh user@host`}</CodeBlock>
+        <p className={paragraphClass}>
+          SSH has to work with no prompts: key-based access (or an unlocked SSH agent), and the
+          machine&apos;s host key already recorded. Connect to it once by hand (
+          <InlineCode>ssh user@host</InlineCode>) to record the key, verifying its fingerprint
+          through the cloud console or another trusted channel before accepting it.
+        </p>
+        <SubHeading id="pair-your-iphone">Pair your iPhone</SubHeading>
+        <Prose>
+          On the Mac, find the device&apos;s row in Settings → Devices and press &ldquo;Pair
+          iPhone&rdquo; for its QR code; scan it with the Spaces iOS app. Without a Mac in the loop, run{" "}
+          <InlineCode>spaces device pair</InlineCode> on the machine itself, which prints a{" "}
+          <InlineCode>spaces://pair</InlineCode> link to open on the phone.
+        </Prose>
+        <p className={paragraphClass}>
+          Pairing links are short-lived and single-use. Both sides also need compatible Spaces versions
+          to pair; update whichever is older.
+        </p>
+      </Section>
+
+      <Section id="connections" title="How the connection works">
+        <Prose>
+          Pairing over SSH uses SSH once, to fetch the pairing details; pairing by QR code or a{" "}
+          <InlineCode>spaces://pair</InlineCode> link does not use SSH at all. After pairing, your Mac or
+          iPhone connects directly to the machine&apos;s Spaces service on port{" "}
+          <InlineCode>47847</InlineCode>. A paired device carries a short list of addresses: an SSH
+          pairing puts the SSH host name first, ahead of the addresses the machine itself reports (local
+          network, then its Tailscale address when it has one); a QR-code or link pairing carries just
+          those reported addresses, in that order. Each client tries them in order, keeps whichever
+          answers, and learns the current addresses again on every connection, which is what lets one
+          pairing follow you between networks.
+        </Prose>
+        <p className={paragraphClass}>
+          Spaces remembers the machine&apos;s identity at pairing and refuses to connect to a machine
+          that does not match it, even if something else answers on the same address.
+        </p>
+      </Section>
+
+      <Section id="tailscale" title="Tailscale">
+        <Prose>
+          Put the remote machine, your Mac, and your iPhone on one tailnet and pair using the
+          machine&apos;s Tailscale address. The address stays the same on every network you move to, and
+          nothing has to be opened to the public internet.
+        </Prose>
+        <SubHeading>1. Install Tailscale</SubHeading>
         <p className={paragraphClass}>
           Follow the{" "}
-          <Link href={tailscaleInstallURL} className="text-accent hover:underline" target="_blank" rel="noopener noreferrer">
+          <Link
+            href={tailscaleInstallURL}
+            className="text-accent hover:underline"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
             official installation instructions
           </Link>{" "}
-          on the remote machine, on your Mac, and on your iPhone, and sign each one into the same tailnet. On the machine, confirm it is up and note its address:
+          on the machine, your Mac, and your iPhone, and sign each into the same tailnet. On the
+          machine, confirm it is up and note its address:
         </p>
         <CodeBlock>{`tailscale status
 tailscale ip -4`}</CodeBlock>
         <p className={paragraphClass}>
-          Tailscale itself has to keep running on the machine after you disconnect, so check that its service is enabled to start at boot: <InlineCode>systemctl is-enabled tailscaled</InlineCode>. Node keys expire by default; for a server you plan to leave running, disable key expiry for that machine in the Tailscale admin console (see{" "}
-          <Link href={tailscaleKeyExpiryURL} className="text-accent hover:underline" target="_blank" rel="noopener noreferrer">
+          On a Linux machine, confirm Tailscale itself starts at boot (
+          <InlineCode>systemctl is-enabled tailscaled</InlineCode>).
+          Node keys expire by default; for a machine you plan to leave running, disable key expiry for
+          it in the Tailscale admin console (see{" "}
+          <Link
+            href={tailscaleKeyExpiryURL}
+            className="text-accent hover:underline"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
             key expiry
           </Link>
-          ), or the machine drops off the tailnet months later with nothing else having changed.
+          ).
         </p>
-
-        <h3 className={subheadingClass}>2. Install Spaces on the machine</h3>
+        <SubHeading>2. Install Spaces on the machine</SubHeading>
         <p className={paragraphClass}>
-          Pairing from a Mac installs the daemon for you if it is missing, or run the installer yourself first. Both are covered under <strong>Linux</strong> on the{" "}
-          <Link href="/docs/installation" className="text-accent hover:underline">
-            Installation
-          </Link>{" "}
-          page. Either way the machine ends up with <InlineCode>spacesd.service</InlineCode> running as a systemd user service with lingering enabled, which is what keeps your sessions alive after you disconnect.
+          See <DocLink href="/docs/remote-access#install-on-linux">Install on Linux</DocLink> above, or
+          install the Mac app on a second Mac.
         </p>
-
-        <h3 className={subheadingClass}>3. Pair your Mac over the Tailscale address</h3>
+        <SubHeading>3. Pair your Mac over the Tailscale address</SubHeading>
         <p className={paragraphClass}>
-          Connect over SSH once by hand so the machine&apos;s host key is recorded, verifying the key through the cloud console or another trusted channel before accepting it. Then pair using the Tailscale address (or the machine&apos;s MagicDNS name) as the host, either from <strong>Settings → Devices → Add remote device over SSH</strong> in the Mac app or from the CLI:
+          Connect over SSH once by hand so the machine&apos;s host key is recorded, then pair using the
+          Tailscale address (or its MagicDNS name) as the host:
         </p>
         <CodeBlock>{`ssh user@100.x.y.z
 spaces device pair --ssh user@100.x.y.z`}</CodeBlock>
+        <SubHeading>4. Pair your iPhone</SubHeading>
         <p className={paragraphClass}>
-          Pairing works with key-based SSH only; a password prompt cannot be answered. The device record stores the address you paired over first and the machine&apos;s other addresses after it, so the Mac reaches the machine over Tailscale wherever it is.
+          Keep Tailscale connected on the phone, then follow{" "}
+          <DocLink href="/docs/remote-access#pair-your-iphone">Pair your iPhone</DocLink> above. Its QR
+          code lists the machine&apos;s Tailscale address alongside the others.
         </p>
-
-        <h3 className={subheadingClass}>4. Pair your iPhone</h3>
+        <SubHeading>Firewall and access policy</SubHeading>
         <ul className={listClass}>
-          <li>• Keep Tailscale connected on the phone. Without it, the phone can reach the machine only from a network that routes to it directly.</li>
-          <li>• On the Mac, open <strong>Settings → Devices</strong>, find the remote machine&apos;s row, and press <strong>Pair iPhone</strong>. The QR code lists the addresses it carries; the machine&apos;s Tailscale address is among them. Scan it with the Spaces iOS app.</li>
-          <li>• Without a Mac in the loop, run <InlineCode>spaces device pair</InlineCode> on the machine itself. It prints a <InlineCode>spaces://pair</InlineCode> link to open on the phone.</li>
-          <li>• The Mac only hands over the credential. Once paired, the phone connects to the machine on its own: the Mac can be asleep, closed, or on another continent. The Mac app&apos;s Devices list and the phone&apos;s device list both show which path a device is currently reached on, &quot;Local network&quot; or &quot;Tailscale&quot;.</li>
-        </ul>
-
-        <h3 className={subheadingClass}>Firewall and access policy</h3>
-        <ul className={listClass}>
-          <li>• No public ingress rule is needed for TCP <InlineCode>22</InlineCode> or <InlineCode>47847</InlineCode>. A cloud VM with both closed to the internet is the intended end state.</li>
-          <li>• The tailnet&apos;s access policy has to allow your Mac and phone to reach the machine on TCP <InlineCode>47847</InlineCode>, and the Mac on TCP <InlineCode>22</InlineCode> as well, for pairing, SSH-driven updates, browser sessions, and the external editor. The default policy allows everything between your own devices.</li>
-          <li>• A host firewall on the machine (<InlineCode>ufw</InlineCode>, <InlineCode>nftables</InlineCode>) has to accept those ports on the Tailscale interface, <InlineCode>tailscale0</InlineCode>.</li>
-          <li>• The machine needs outbound connectivity for Tailscale itself; see{" "}
-            <Link href={tailscaleFirewallURL} className="text-accent hover:underline" target="_blank" rel="noopener noreferrer">
+          <li>
+            • No public ingress rule is needed for TCP <InlineCode>22</InlineCode> or{" "}
+            <InlineCode>47847</InlineCode>. A machine with both closed to the internet is the intended
+            end state.
+          </li>
+          <li>
+            • The tailnet&apos;s access policy has to allow your Mac and phone to reach the machine on
+            TCP <InlineCode>47847</InlineCode>, and the Mac on TCP <InlineCode>22</InlineCode> as well.
+            The default policy allows everything between your own devices.
+          </li>
+          <li>
+            • On a Linux machine, a host firewall has to accept those ports on the Tailscale interface,{" "}
+            <InlineCode>tailscale0</InlineCode>.
+          </li>
+          <li>
+            • The machine needs outbound connectivity for Tailscale itself; see{" "}
+            <Link
+              href={tailscaleFirewallURL}
+              className="text-accent hover:underline"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
               Tailscale&apos;s firewall requirements
             </Link>
-            . Cloud VMs allow this by default.</li>
+            .
+          </li>
         </ul>
       </Section>
 
-      <Section title="Using a public address instead">
+      <Section id="public-address" title="Public address">
         <Prose>
-          You can pair a cloud VM over its public address, with ingress rules allowing TCP <InlineCode>22</InlineCode> and <InlineCode>47847</InlineCode> from the addresses you connect from. Understand what that setup does and does not fix before relying on it.
+          You can pair a machine over its public address instead, with ingress rules allowing TCP{" "}
+          <InlineCode>22</InlineCode> and <InlineCode>47847</InlineCode> from the addresses you connect
+          from.
         </Prose>
         <ul className={listClass}>
-          <li>• A reserved static IP keeps the <em>machine&apos;s</em> address stable. It does nothing for the <em>client&apos;s</em> address, which changes every time your Mac or phone joins a different network. An allowlist built around the address you had at home stops matching the moment you leave it.</li>
-          <li>• Cellular carriers and many public networks put clients behind shared, shifting addresses, so an allowlist cannot be kept current by hand.</li>
-          <li>• Opening <InlineCode>47847</InlineCode> to the whole internet makes the address reachable everywhere, at the cost of exposing the daemon&apos;s listener to everyone. The daemon authenticates every client, and it is still not the recommended answer to an unreachable device; Tailscale is.</li>
-          <li>• A device paired over its public address gains the Tailscale path automatically once the machine has one: clients learn the daemon&apos;s current addresses on every connection. That only helps if the public path still works at that moment. If it is already unreachable, pair again over the Tailscale address as described under <strong>Moving a device off its public address</strong> below.</li>
+          <li>
+            • A reserved static IP keeps the machine&apos;s address stable, but not the client&apos;s: an
+            allowlist built around the address you had at home stops matching once you leave it, and
+            cellular networks put clients behind shifting addresses an allowlist cannot track.
+          </li>
+          <li>
+            • Opening <InlineCode>47847</InlineCode> to the whole internet makes the address reachable
+            everywhere, at the cost of exposing that port to everyone. Every client is still
+            authenticated, but Tailscale is the setup this page recommends.
+          </li>
         </ul>
-      </Section>
-
-      <Section title="What to expect on restrictive networks">
+        <SubHeading>What to expect on restrictive networks</SubHeading>
         <ul className={listClass}>
-          <li>• When two devices cannot reach each other directly, Tailscale relays the encrypted connection through its DERP servers over HTTPS. A relayed connection is a working connection: Spaces behaves the same, with somewhat higher latency. <InlineCode>tailscale status</InlineCode> on the machine shows whether a peer is direct or relayed.</li>
-          <li>• Public Wi-Fi with a captive portal blocks everything until you complete the sign-in page. Spaces shows the device as unreachable until then and reconnects on its own afterwards.</li>
-          <li>• A network that blocks Tailscale&apos;s outbound traffic altogether keeps the machine out of reach while you are on it. No setup makes every network work.</li>
-          <li>• Moving between networks costs one slower connection while the client re-races the machine&apos;s addresses; it then sticks to the one that answered. The Mac app reconnects immediately when its own network changes, and the iOS app re-checks the local path each time it returns to the foreground.</li>
+          <li>
+            • When two devices cannot reach each other directly, Tailscale relays the connection. A
+            relayed connection still works, with somewhat higher latency.
+          </li>
+          <li>• Public Wi-Fi with a captive portal blocks everything until you complete its sign-in page.</li>
+          <li>
+            • Moving between networks costs one slower connection while the client re-races the
+            machine&apos;s addresses, then sticks to the one that answered.
+          </li>
         </ul>
+        <SubHeading>Moving a device off its public address</SubHeading>
+        <p className={paragraphClass}>
+          Pair the machine again over its Tailscale address, using &ldquo;Add remote device over
+          SSH&rdquo; or <InlineCode>spaces device pair --ssh user@100.x.y.z</InlineCode>. The
+          machine&apos;s identity has not changed, so this updates the existing device rather than adding
+          a second one: its projects, workspaces, and sessions stay as they were, and the Tailscale
+          address becomes the one the Mac tries first. On the phone, scan the machine&apos;s QR code
+          again from Settings → Devices on the Mac.
+        </p>
       </Section>
 
-      <Section title="Losing the connection is not the same as stopping the work">
+      <Section id="removing-a-device" title="Renaming and removing">
         <Prose>
-          Everything you run on the machine lives in its Spaces daemon, not in the client that opened it. A Mac that sleeps or a phone that loses signal disconnects a viewer; the terminal, the process, or the coding agent keeps running and is there when the client comes back. What does end the work is the machine itself stopping: shutting down or rebooting the VM ends every process on it, and the daemon that comes back after a reboot starts with nothing running.
+          A device row&apos;s menu offers &ldquo;Rename…&rdquo; and &ldquo;Remove Device…&rdquo;. Removing
+          asks first: &ldquo;Its projects, workspaces, and running terminals stay on &lt;device&gt; and
+          keep running. This Mac deletes the pairing and its stored credential, and stops listing that
+          device. Pair it again to get it back.&rdquo;
         </Prose>
-        <p className={paragraphClass}>
-          For that to hold, three things have to come back on their own after a reboot, and the checks under <strong>Verify</strong> below confirm each one: <InlineCode>tailscaled</InlineCode>, the <InlineCode>spacesd.service</InlineCode> user service, and lingering for your account, without which systemd stops user services when your last SSH session ends. Keep an out-of-band way in as well (the cloud provider&apos;s console or its SSH tunnel), so a Tailscale outage or an expired key never locks you out of your own machine.
-        </p>
       </Section>
 
-      <Section title="Verify">
-        <h3 className={subheadingClass}>On the machine</h3>
-        <CodeBlock>{`tailscale status
-tailscale ip -4
-systemctl is-enabled tailscaled
-systemctl is-active tailscaled
-systemctl --user is-enabled spacesd.service
-systemctl --user is-active spacesd.service
-loginctl show-user "$USER" -p Linger`}</CodeBlock>
-        <p className={paragraphClass}>
-          Expect <InlineCode>enabled</InlineCode>, <InlineCode>active</InlineCode>, and <InlineCode>Linger=yes</InlineCode>.
-        </p>
-
-        <h3 className={subheadingClass}>On the Mac</h3>
-        <p className={paragraphClass}>
-          Substitute the machine&apos;s Tailscale address and your Linux username. Configure key-based SSH first; the second line fails if a prompt would be needed, which is exactly what pairing cannot handle.
-        </p>
-        <CodeBlock>{`ssh user@100.x.y.z
-ssh -o BatchMode=yes user@100.x.y.z true
-nc -z -G 10 100.x.y.z 47847
-spaces device pair --ssh user@100.x.y.z
-spaces device list`}</CodeBlock>
-        <p className={paragraphClass}>
-          <InlineCode>spaces device list</InlineCode> shows the address each device is reached on and every address it can fall back to. A reachable port is not the final check: open the remote project in Spaces and start a terminal in one of its workspaces.
-        </p>
-
-        <h3 className={subheadingClass}>Then, the behavior you actually care about</h3>
-        <ul className={listClass}>
-          <li>• Move the Mac to a different network (a phone hotspot is enough) and confirm the device reconnects and the terminal is still there.</li>
-          <li>• Turn off Wi-Fi on the iPhone and open the same remote workspace over cellular.</li>
-          <li>• Put the Mac to sleep and confirm the phone still reaches the machine.</li>
-          <li>• Start a harmless long-running command in a Spaces terminal, disconnect the client, reconnect, and confirm the command ran on without it.</li>
-        </ul>
-      </Section>
-
-      <Section title="Moving a device off its public address">
+      <Section id="troubleshooting" title="Troubleshooting">
         <Prose>
-          A machine paired over a public address that has since become unreachable is repaired by pairing it again over its Tailscale address. On the Mac, use <strong>Add remote device over SSH</strong> with the Tailscale address as the host, or run <InlineCode>spaces device pair --ssh user@100.x.y.z</InlineCode>. The daemon&apos;s identity has not changed, so this updates the existing device rather than adding a second one: its projects, workspaces, and sessions stay exactly as they were, and the Tailscale address now leads the list of addresses the Mac tries.
-        </Prose>
-        <p className={paragraphClass}>
-          On the phone, scan the machine&apos;s QR code again from <strong>Settings → Devices</strong> on the Mac. A rescan of a device the phone already knows updates that device&apos;s addresses in place.
-        </p>
-      </Section>
-
-      <Section title="Troubleshooting">
-        <Prose>
-          &quot;Device unreachable&quot; has a short list of causes. Work down it in order; each check rules out the ones above it.
+          A device shown as unreachable has a short list of causes. Work down it in order; each check
+          rules out the ones above it.
         </Prose>
         <ul className={listClass}>
-          <li>• <strong>The machine is stopped.</strong> Check the cloud console. A stopped VM answers nothing, on any address.</li>
-          <li>• <strong>Tailscale is down or the key expired.</strong> <InlineCode>tailscale status</InlineCode> on the machine, and the admin console for an expired node. Re-authenticate with <InlineCode>tailscale up</InlineCode> if it is signed out.</li>
-          <li>• <strong>Wrong tailnet or a blocking access policy.</strong> The Mac, the phone, and the machine have to be signed into the same tailnet, and the policy has to allow TCP <InlineCode>47847</InlineCode> to the machine.</li>
-          <li>• <strong>SSH fails.</strong> A password prompt, a missing key, or a changed host key on a rebuilt VM (replace the stale <InlineCode>known_hosts</InlineCode> entry). A failing SSH connection breaks pairing, SSH-driven updates, and the Mac&apos;s browser sessions and external editor for that device. Terminals, coding agents, and the built-in Editor do not use it, so if those still work the device itself is reachable.</li>
-          <li>• <strong>The Spaces service is stopped.</strong> <InlineCode>systemctl --user status spacesd.service</InlineCode> on the machine; restart it with <InlineCode>systemctl --user restart spacesd.service</InlineCode>.</li>
-          <li>• <strong>Port 47847 does not answer.</strong> <InlineCode>nc -z -G 10 ADDRESS 47847</InlineCode> from the Mac. If SSH to the same address works, the service is active, and this still fails, a host firewall on the machine is dropping the port.</li>
-          <li>• <strong>Client and daemon speak different protocol versions.</strong> Spaces refuses the connection and says which side is behind. Update the Mac app, or the daemon as described under <strong>Linux</strong> on the Installation page. Releases that share a protocol version connect fine, so a differing version number on its own is not the cause.</li>
-          <li>• <strong>The device still points at a public address.</strong> <InlineCode>spaces device list</InlineCode> shows no Tailscale address for it. Pair it again as described above.</li>
+          <li>• <strong>The machine is stopped or asleep.</strong> Nothing answers on any address.</li>
+          <li>
+            • <strong>Tailscale is down or the key expired.</strong>{" "}
+            <InlineCode>tailscale status</InlineCode> on the machine; re-authenticate with{" "}
+            <InlineCode>tailscale up</InlineCode> if it is signed out.
+          </li>
+          <li>
+            • <strong>The Spaces service is stopped.</strong> On Linux:{" "}
+            <InlineCode>systemctl --user status spacesd.service</InlineCode> on the machine; restart it
+            with <InlineCode>systemctl --user restart spacesd.service</InlineCode>. Also check lingering
+            is on: <InlineCode>loginctl show-user &quot;$USER&quot; -p Linger</InlineCode> should read{" "}
+            <InlineCode>Linger=yes</InlineCode>. On a remote Mac, open Spaces there.
+          </li>
+          <li>
+            • <strong>Port 47847 does not answer.</strong>{" "}
+            <InlineCode>nc -vz &lt;host&gt; 47847</InlineCode> from the Mac. If SSH to the same address
+            works and the service is active, a host firewall on the machine is dropping the port.
+          </li>
+          <li>
+            • <strong>The machine&apos;s identity changed</strong> (a rebuilt VM, a reinstalled OS).
+            Re-pair the device.
+          </li>
+          <li>
+            • <strong>The two sides are on incompatible versions.</strong> Spaces shows both versions and
+            the fix; see <DocLink href="/docs/installation#updates">Updates</DocLink>.
+          </li>
         </ul>
       </Section>
     </DocsShell>

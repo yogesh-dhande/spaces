@@ -4,9 +4,9 @@ import { DocsShell } from "../components/docs-shell";
 import { cookbookGuides } from "../content";
 
 export const metadata: Metadata = {
-  title: "Cookbook Guides",
+  title: "Recipes",
   description:
-    "End-to-end project setup recipes you can copy and adapt for common stacks.",
+    "Worked setups for common stacks, as a spaces.yaml and in project settings.",
 };
 
 const guides = cookbookGuides;
@@ -14,16 +14,16 @@ const guides = cookbookGuides;
 export default function GuidesDocsPage() {
   return (
     <DocsShell
-      title="Cookbook Guides"
-      description="Real-world project setups you can copy and adapt. Each guide is a separate page with full use-case context and an explanation of every project setting."
+      title="Recipes"
+      description="Worked project setups you can copy and adapt. Each recipe is a separate page with a use case and an explanation of every project setting it uses."
       pagePath="/docs/guides"
     >
       <article>
         <p className="font-mono text-[0.62rem] uppercase tracking-[0.18em] text-accent">
-          What&apos;s in each guide
+          What&apos;s in each recipe
         </p>
         <h2 className="mt-3 text-2xl font-semibold tracking-tight">
-          A use case plus every knob, explained.
+          A use case plus every setting, explained.
         </h2>
         <ul className="mt-5 grid gap-3 text-sm leading-7 text-foreground-soft md:grid-cols-2">
           <li className="flex gap-3">
@@ -32,7 +32,7 @@ export default function GuidesDocsPage() {
           </li>
           <li className="flex gap-3">
             <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
-            <span>Project-setting by project-setting explanation of what it solves and how it works.</span>
+            <span>Setting-by-setting explanation of what it solves and how it works.</span>
           </li>
           <li className="flex gap-3">
             <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
@@ -50,7 +50,7 @@ export default function GuidesDocsPage() {
           Index
         </p>
         <h2 className="mt-3 text-2xl font-semibold tracking-tight">
-          Browse guides
+          Browse recipes
         </h2>
         <div className="mt-6 grid gap-3">
           {guides.map((guide, i) => (

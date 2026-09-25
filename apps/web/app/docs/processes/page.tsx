@@ -1,100 +1,84 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import { CodeBlock, InlineCode } from "../components/code-block";
 import { DocsShell } from "../components/docs-shell";
+import { DocLink } from "../components/doc-link";
 import { Prose, Section } from "../components/section";
 
 export const metadata: Metadata = {
   title: "Processes",
-  description: "Process templates and runtime behavior per workspace.",
+  description:
+    "The long-running commands a workspace starts, and what happens when one exits.",
 };
 
 export default function ProcessesDocsPage() {
   return (
     <DocsShell
       title="Processes"
-      description="Processes are defined as project templates, copied into workspace settings, and launched in dedicated terminal windows for each running workspace."
+      description="A process is a command you want running whenever the workspace is running, like a dev server, a worker, or a test watcher."
       pagePath="/docs/processes"
     >
-      <Section title="What Is a Process?">
+      <Section title="What a process is">
         <Prose>
-          A process is a command you want running whenever the workspace is running — a dev server, a worker, a test watcher, a coding agent. You configure processes on the project; each workspace gets its own copy it can tweak without affecting the project.
+          You configure processes on the project; each workspace gets its own copy it can tweak
+          without affecting the project. Each process is a pane in the{" "}
+          <DocLink href="/docs/terminals">workspace panel</DocLink>, a target row with a number.
         </Prose>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Spaces gives each process its own terminal window when the workspace launches.</li>
-          <li>• Each process runs in a Spaces terminal, so if you close the window the process keeps running and Spaces can reopen the session view without restarting the work.</li>
-        </ul>
       </Section>
 
-      <Section title="Shell Commands">
+      <Section id="commands" title="Commands">
         <Prose>
-          Every process command is shell input, like typing into a terminal. Spaces runs the command through your resolved login shell with the workspace environment already exported.
+          Each process command is shell input, run through your login shell in the workspace
+          directory with the workspace variables set (see{" "}
+          <DocLink href="/docs/environment-variables">Environment variables</DocLink>). Plain
+          commands such as <InlineCode>npm run dev</InlineCode> run naturally, and so do{" "}
+          <InlineCode>cd</InlineCode>, <InlineCode>&amp;&amp;</InlineCode>, pipes, redirects, and
+          environment assignments:
         </Prose>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Plain commands such as <code>npm run dev</code> and <code>python manage.py runserver</code> run naturally.</li>
-          <li>• Composite commands can use <code>cd</code>, <code>&amp;&amp;</code>, pipes, redirects, and normal shell expansion.</li>
-        </ul>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-sm border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
-          <code>{`# Env assignment
-PORT=$SPACES_WEB_PORT npm run dev
-
-# Braced expansion
-PORT=\${SPACES_WEB_PORT:-3000} npm run dev
-
-# Directory changes
+        <CodeBlock>{`PORT=$SPACES_WEB_PORT npm run dev
 cd frontend && PORT=$SPACES_WEB_PORT npm run dev
-
-# Pipelines
-npm run dev | tee .logs/frontend.log`}</code>
-        </pre>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Spaces validates that the command is non-empty and leaves parsing to your shell.
-        </p>
+npm run dev | tee .logs/frontend.log`}</CodeBlock>
+        <Prose>A command must be non-empty; Spaces leaves parsing to your shell.</Prose>
       </Section>
 
-      <Section title="On Exit">
-        <Prose>
-          Pick what Spaces should do when a process exits:
-        </Prose>
+      <Section id="on-exit" title="On exit">
+        <Prose>Pick what happens when the process exits:</Prose>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>none</strong> &mdash; mark it exited and move on.</li>
-          <li>• <strong>notify</strong> &mdash; show a macOS notification so you know it died.</li>
-          <li>• <strong>restart</strong> &mdash; start it back up automatically.</li>
+          <li>
+            <strong>none</strong>: mark it exited and move on.
+          </li>
+          <li>
+            <strong>notify</strong>: show a macOS notification, &ldquo;Process Exited&rdquo;, on
+            the device that runs the process.
+          </li>
+          <li>
+            <strong>restart</strong>: show &ldquo;Process Restarting&rdquo;, then start it again.
+          </li>
         </ul>
-      </Section>
-
-      <Section title="Environment Variables">
         <Prose>
-          Every process runs with the workspace&apos;s per-service variables and directory variables in its environment:
+          A Linux device has no notification center, so <InlineCode>notify</InlineCode> shows
+          nothing there; the process still shows exited in the sidebar. An exited process shows red
+          and raises an alert, see <DocLink href="/docs/alerts">Alerts</DocLink>.
         </Prose>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-sm border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
-          <code>{`SPACES_WEB_PORT, SPACES_API_PORT, ...   # assigned port per service
-SPACES_WEB_URL, SPACES_API_URL, ...     # Caddy URL per service
-SPACES_WEB_HOST, SPACES_API_HOST, ...   # Caddy hostname per service (no scheme or port)
-SPACES_PROJECT_DIR                      # project directory
-SPACES_WORKSPACE_DIR                    # this workspace's directory`}</code>
-        </pre>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Reference them directly in your command, for example <code>PORT=$SPACES_WEB_PORT npm run dev</code>. The shell expands those variables when the process starts. See{" "}
-          <Link href="/docs/services" className="text-accent hover:underline">
-            Services
-          </Link>{" "}
-          for how these ports and URLs are assigned and routed.
-        </p>
       </Section>
 
-      <Section title="Editing While Running">
+      <Section id="controlling" title="Controlling one process">
+        <Prose>
+          The row&apos;s context menu offers Start, Stop, and Restart when they apply. A restart
+          keeps its pane in place. If a process exits while it is starting, its output shows in its
+          pane.
+        </Prose>
+      </Section>
+
+      <Section id="editing" title="Editing a process">
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Add a process &mdash; it appears immediately. You can launch it directly if the workspace is already running.</li>
-          <li>• Change a command &mdash; Spaces asks for restart confirmation because the running process must be relaunched.</li>
-          <li>• Change only the name or on-exit policy &mdash; Spaces applies the edit immediately when it can.</li>
-          <li>• Remove a process &mdash; Spaces stops it and closes its terminal window.</li>
+          <li>Adding a process: it appears immediately, and you can launch it directly if the workspace is already running.</li>
+          <li>Changing its command: Spaces asks for restart confirmation, since the running process has to be relaunched.</li>
+          <li>Changing only its name or on-exit policy: Spaces applies the edit immediately.</li>
+          <li>
+            Removing a process: Spaces removes it from the workspace&apos;s settings. A copy that
+            is running keeps running, and its pane stays open, until you stop it yourself.
+          </li>
         </ul>
-      </Section>
-
-      <Section title="Coding Agents">
-        <Prose>
-          Coding agents run as processes like any other, but they can also report their own lifecycle — started, waiting on you, done — through <code>spaces agent signal</code>. Alerts surfaces those states so you know which agent needs you next.
-        </Prose>
       </Section>
     </DocsShell>
   );
