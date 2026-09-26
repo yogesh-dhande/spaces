@@ -1193,6 +1193,10 @@ public final class WorkspaceOrchestrator {
     /// Stop-then-launch, holding each configured process's pane across the gap so its replacement lands
     /// in the layout position the user arranged instead of at the end of the tab strip. Every reservation
     /// is released before this returns, including when the launch throws part way through.
+    ///
+    /// The workspace stays marked running from the stop through the launch (see `stopWorkspaceUnlocked`),
+    /// so no client ever sees a restart as a stop (#799). A restart whose launch fails ends stopped, which
+    /// only this function can do, since its stop left the flag set.
     private func restartWorkspaceUnlocked(workspaceID: String, background: Bool = false) throws {
         let reservations = try replacedTerminalSessionReservations(workspaceID: workspaceID)
         // Releases only the holds the stop actually sent. Installed before the stop rather than after it,
@@ -1202,7 +1206,13 @@ public final class WorkspaceOrchestrator {
         // has nothing to release and leaves its still-running panes alone.
         defer { releaseUnclaimedReplacedTerminalSessions(reservations) }
         _ = try stopWorkspaceUnlocked(workspaceID: workspaceID, reservations: reservations)
-        try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background, reservations: reservations)
+        do {
+            try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background, reservations: reservations)
+        } catch {
+            // `try?` so a failed write here cannot replace the launch's error, which is what the caller reports.
+            if let workspace = try? resolveWorkspace(id: workspaceID).1 { try? markWorkspaceStopped(workspace) }
+            throw error
+        }
     }
 
     public func upWorkspace(workspaceID: String, restartIfRunning: Bool = false, background: Bool = false) throws {
@@ -1276,11 +1286,15 @@ public final class WorkspaceOrchestrator {
         // This cold-launch path unconditionally relaunches every configured process, which would kill and
         // restart already-running ones and would be destructive if reached with runtime present. Every
         // caller (`restartWorkspace`, and `upWorkspace`'s not-already-running branch) already guarantees no
-        // tracked runtime exists before calling in, so this guard should never fire; it stays as an
-        // invariant check rather than something a user can hit. Start (`launchWorkspace`) routes through
-        // `upWorkspace` instead, which launches only what is missing and leaves already-running processes
-        // and any ad hoc or agent runtime untouched instead of refusing.
-        guard !(workspace.isRunning || hasTrackedRuntime) else {
+        // tracked runtime exists before calling in, so the tracked-runtime half of this guard should never
+        // fire; it stays as an invariant check rather than something a user can hit. Start
+        // (`launchWorkspace`) routes through `upWorkspace` instead, which launches only what is missing and
+        // leaves already-running processes and any ad hoc or agent runtime untouched instead of refusing.
+        //
+        // A restart's relaunch (`reservations != nil`) passes with `workspace.isRunning` still true, since
+        // its stop leaves the flag set (see `restartWorkspaceUnlocked`). A cold launch carries no
+        // reservations, so it is still refused while the workspace is running.
+        guard !hasTrackedRuntime, reservations != nil || !workspace.isRunning else {
             throw WorkspaceError.invalidArgument(message: "Workspace is already running. Use restart.")
         }
         let config = try loadWorkspaceSettings(project: project, workspace: workspace)
@@ -1438,7 +1452,11 @@ public final class WorkspaceOrchestrator {
         // was already terminated above): the child's subscribers are told it exited before its row is
         // deleted, and the stopped terminal's own watch state is torn down.
         for agent in workspaceAgentWindows { try finalizeAgentRow(agent, reason: .destroyed(terminateTerminalSession: false)) }
-        try markWorkspaceStopped(workspace)
+        // A restart (the only caller carrying reservations) leaves the running flag set: every client reads
+        // running state from it, and a stopped flag in the gap before the relaunch reads as a real stop,
+        // closing the Mac's tracked Chrome tabs and code panes (#799). It also keeps the port reconciler
+        // from binding placeholders on ports the relaunch is about to take.
+        if reservations == nil { try markWorkspaceStopped(workspace) }
         return WorkspaceStopOutcome(skippedStopScriptBecauseWorkspaceDirectoryMissing: skippedStopScriptBecauseWorkspaceDirectoryMissing)
     }
 

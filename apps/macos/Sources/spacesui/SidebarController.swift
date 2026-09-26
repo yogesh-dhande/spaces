@@ -35,20 +35,19 @@ private struct DeviceSyncState {
     /// connection to a device that is still answering (or still timing out).
     var pullInFlight = false
     /// Counter stamped onto each pull, bumped whenever something moves the ground it was dialing
-    /// on — a user retry, a network-path change, or a subscription push applying newer data; see
-    /// `SidebarController.invalidateInFlightRemoteOverviewPulls`. Gates only a pull's *failure*: a
-    /// retry or network change installs no data of its own, so a failure that predates one of those
-    /// tells us nothing (the ground moved before we heard back) and is discarded, but a *success* is
-    /// discarded only when a push actually applied something newer — gated separately by
-    /// `pushApplyGeneration`, since a success is otherwise the freshest answer regardless of what
-    /// else moved.
+    /// on (a user retry, a network-path change, or a push or mutation response installing newer data);
+    /// see `SidebarController.invalidateInFlightRemoteOverviewPulls`. Gates only a pull's *failure*: a
+    /// failure that predates one of those tells us nothing (the ground moved before we heard back) and is
+    /// discarded. A *success* is discarded only when something else actually installed something newer,
+    /// gated separately by `overviewInstallGeneration`, since a success is otherwise the freshest answer
+    /// regardless of what else moved.
     var pullGeneration = 0
-    /// Counter bumped only where a subscription push applies its overview (`onOverview`, alongside
-    /// the `invalidateInFlightRemoteOverviewPulls` call). A pull captures this at its start and
-    /// compares it at completion: if it advanced, a push applied newer data while the pull was in
-    /// flight, so the pull's success is stale and is discarded instead of overwriting what is
-    /// already showing.
-    var pushApplyGeneration = 0
+    /// Bumped wherever this device's overview is installed from something other than a pull: a
+    /// subscription push, or a mutation response this Mac applied. Both carry data at least as new as
+    /// any pull already in flight, so a pull whose success lands after such an install is stale and is
+    /// discarded instead of overwriting what is already showing; see
+    /// `SidebarController.recordRemoteOverviewInstalledOutsidePull`.
+    var overviewInstallGeneration = 0
 }
 
 /// Owns the left-hand project/workspace/device outline tree (an `NSOutlineView`) and
@@ -606,8 +605,8 @@ private struct DeviceSyncState {
         // daemon answers with the offline placeholder, whose empty map reads as every running workspace
         // having stopped — which would close the user's browser tabs for all of them on a daemon blip.
         // The installed map is the retained one during an outage, so nothing appears to transition.
-        tearDownBrowserSessionsForLocallyStoppedWorkspaces(
-            previous: previousLocalSection?.workspaceRuntimeStatusByID, current: localSection.workspaceRuntimeStatusByID,
+        tearDownBrowserSessionsForStoppedOrDeletedWorkspaces(
+            previous: previousLocalSection?.workspaceRuntimeStatusByID ?? [:], current: localSection.workspaceRuntimeStatusByID,
             previousOverview: previousLocalSection?.overview)
         // Terminal panes close on an externally initiated stop via session pruning above (their sessions
         // leave the overview's keep-set); a code pane has no session, so this same run-state transition is
@@ -616,12 +615,10 @@ private struct DeviceSyncState {
         //
         // The signal is the observed transition, never the stopped state itself, because a code pane may be
         // legitimately opened on a workspace that is already stopped (its working tree is still there to
-        // review). Two limits of transition-observation are accepted rather than patched with state checks:
-        // a cross-client restart whose stopped moment the daemon's coalesced overview broadcast never
-        // surfaces keeps the pane open — matching terminal panes keeping their place across restarts, and
-        // harmless since the pane's content stays valid for the running workspace — and a stop completed
-        // while this app was not running is never observed, so a persisted pane restores alongside its
-        // stopped-but-existing workspace (see `PanelLayoutEngine.prunedLayout`).
+        // review). A restart is never a transition, because the daemon keeps the workspace marked running
+        // through it (#799). One limit of transition-observation is accepted rather than patched with state
+        // checks: a stop completed while this app was not running is never observed, so a persisted pane
+        // restores alongside its stopped-but-existing workspace (see `PanelLayoutEngine.prunedLayout`).
         if let previousLocalSection {
             host.panelCoordinator.closeCodePanes(
                 deviceID: snapshot.localDeviceID,
@@ -681,19 +678,17 @@ private struct DeviceSyncState {
         host.reopenPersistedPanelWindowsIfPossible()
     }
 
-    /// Closes browser-session tabs for local-device workspaces that the daemon now reports as no
-    /// longer running, comparing the previous local-section runtime state against the just-fetched
-    /// snapshot. This reload is the only channel through which the GUI learns about stop/delete
-    /// actions taken outside it (the CLI, MCP, the Device API, or another device), so without this
-    /// diff those externally-stopped workspaces would leave their tracked Chrome tabs and the
-    /// client `browser_session_window_ids` rows alive. The GUI's own stop/restart/delete handlers
-    /// already tear the tabs down eagerly; `closeLocalBrowserSessionWindows` is idempotent, so a
-    /// workspace stopped through the GUI that also surfaces here closes nothing the second time.
-    private func tearDownBrowserSessionsForLocallyStoppedWorkspaces(
-        previous: [String: WorkspaceRuntimeStatus]?, current: [String: WorkspaceRuntimeStatus], previousOverview: SpacesDeviceOverviewPayload?
+    /// Closes this Mac's browser-session tabs for workspaces, on this Mac or a paired device, that the
+    /// owning daemon now reports as stopped or that dropped out of the runtime map entirely (stopped, then
+    /// deleted). A section's overview is the only channel through which the GUI learns about a stop or
+    /// delete made outside it (the CLI, MCP, the Device API, or another client), so without this diff such
+    /// a workspace would leave its tracked Chrome tabs and `browser_session_window_ids` rows alive (#800).
+    /// A stop made in this GUI also closes the tabs eagerly; the close is idempotent, so seeing that stop
+    /// here closes nothing more.
+    private func tearDownBrowserSessionsForStoppedOrDeletedWorkspaces(
+        previous: [String: WorkspaceRuntimeStatus], current: [String: WorkspaceRuntimeStatus], previousOverview: SpacesDeviceOverviewPayload?
     ) {
-        guard let previous else { return }
-        for workspaceID in Self.workspaceIDsTransitionedToNotRunning(previous: previous, current: current) {
+        for workspaceID in Self.workspaceIDsForBrowserSessionTeardown(previous: previous, current: current) {
             host.browserSessions.closeLocalBrowserSessionWindows(
                 workspaceID: workspaceID,
                 configuredBrowserSessionTargetURLs: BrowserSessionCoordinator.browserSessionTargetURLs(
@@ -710,6 +705,19 @@ private struct DeviceSyncState {
         previous.compactMap { workspaceID, previousStatus in
             previousStatus.lifecycleState == .running && current[workspaceID]?.lifecycleState != .running ? workspaceID : nil
         }
+    }
+
+    /// Workspace ids the browser-session teardown must sweep: every id `workspaceIDsTransitionedToNotRunning`
+    /// reports, union every id present in `previous` but absent from `current`. The union is needed because
+    /// a workspace already stopped when this app was not running, then deleted later, never satisfies the
+    /// transitioned-to-not-running check (its `previous` status was never `.running`) but still leaves
+    /// tracked tabs nothing else will ever close: a hidden workspace stays in the overview with `isHidden`,
+    /// so absence here means deleted, not merely hidden.
+    nonisolated static func workspaceIDsForBrowserSessionTeardown(
+        previous: [String: WorkspaceRuntimeStatus], current: [String: WorkspaceRuntimeStatus]
+    ) -> Set<String> {
+        Set(workspaceIDsTransitionedToNotRunning(previous: previous, current: current))
+            .union(previous.keys.filter { current[$0] == nil })
     }
 
     /// Adds a section for every paired remote device and fetches each one's overview
@@ -816,7 +824,7 @@ private struct DeviceSyncState {
         guard !syncState.pullInFlight else { return }
         syncState.pullInFlight = true
         let generation = syncState.pullGeneration
-        let pushApplyGenerationAtStart = syncState.pushApplyGeneration
+        let overviewInstallGenerationAtStart = syncState.overviewInstallGeneration
         remoteOverviewSyncStates[record.id] = syncState
         // Captured at pull start, the moment this attempt's eventual data begins going stale relative to
         // any pane replacement that lands while it is in flight; see `PanelCoordinator.paneReplacementEpoch`.
@@ -843,20 +851,20 @@ private struct DeviceSyncState {
             switch result {
             case .success:
                 self.remoteOverviewSyncStates[record.id, default: DeviceSyncState()].lastFetchInstant = ContinuousClock.now
-                // A success is a fresh read of the device and applies unless a push actually installed
-                // newer data while this pull was in flight — a retry or network-path change moves the
-                // ground but installs no data of its own, so it must not discard a success on its own; see
-                // `DeviceSyncState.pushApplyGeneration`.
+                // A success is a fresh read of the device and applies unless something else actually
+                // installed newer data while this pull was in flight. A retry or network-path change moves
+                // the ground but installs no data of its own, so it must not discard a success on its own;
+                // see `DeviceSyncState.overviewInstallGeneration`.
                 guard
                     Self.pullSuccessStillFreshest(
-                        pushApplyGeneration: pushApplyGenerationAtStart,
-                        currentPushApplyGeneration: self.remoteOverviewSyncStates[record.id]?.pushApplyGeneration ?? 0)
+                        overviewInstallGeneration: overviewInstallGenerationAtStart,
+                        currentOverviewInstallGeneration: self.remoteOverviewSyncStates[record.id]?.overviewInstallGeneration ?? 0)
                 else {
-                    // A subscription push already applied a newer overview while this pull was in flight.
-                    // Applying this snapshot now would retarget/prune the sidebar's open panes against data
-                    // older than what is already showing, which can close a pane that the newer overview
-                    // just retargeted to a replacement session, because the replacement does not exist in
-                    // this stale snapshot.
+                    // A subscription push or a mutation response already applied a newer overview while
+                    // this pull was in flight. Applying this snapshot now would retarget/prune the sidebar's
+                    // open panes against data older than what is already showing, which can close a pane
+                    // that the newer overview just retargeted to a replacement session, because the
+                    // replacement does not exist in this stale snapshot.
                     DeviceLinkTrace.log(deviceID: record.id, event: "pull_success_superseded")
                     self.settleSupersededPullSuccess(deviceID: record.id)
                     return
@@ -879,12 +887,13 @@ private struct DeviceSyncState {
     /// Retires whatever pull is currently in flight for `deviceID`, so its eventual *failure* can no
     /// longer report the device offline on stale grounds. Called wherever the ground the in-flight attempt
     /// was dialing on has moved: this Mac's network path changed, the user asked for the device again, or
-    /// a subscription push just applied a newer overview for it.
+    /// this device's overview was just installed from outside the pull (see
+    /// `recordRemoteOverviewInstalledOutsidePull`).
     ///
     /// Deliberately does not gate a pull's *success*: a retry or network-path change moves the ground but
     /// installs no data of its own, so an in-flight pull's success is still the freshest answer for the
-    /// device and must apply. Only a push, which does install data, can make a success stale — tracked
-    /// separately by `DeviceSyncState.pushApplyGeneration`, bumped alongside this call in `onOverview`.
+    /// device and must apply. Only an install of newer data can make a success stale, which
+    /// `DeviceSyncState.overviewInstallGeneration` tracks separately.
     ///
     /// The in-flight attempt is deliberately not cancelled or replaced. Its connect is a blocking dial
     /// inside a detached task, and letting a second one start alongside it is exactly the connection
@@ -893,6 +902,22 @@ private struct DeviceSyncState {
     /// that.
     private func invalidateInFlightRemoteOverviewPulls(deviceID: String) {
         remoteOverviewSyncStates[deviceID, default: DeviceSyncState()].pullGeneration += 1
+    }
+
+    /// Called wherever this device's overview is installed from something other than a pull: a
+    /// subscription push (`onOverview`), or a mutation response `AppKitController.applyDeviceOverview`
+    /// applied for a remote device. Both retire any pull mid-flight (so its eventual failure cannot report
+    /// the device offline on stale grounds) and bump `overviewInstallGeneration` (so its eventual success,
+    /// if captured before this call, is judged stale and discarded instead of rolling the section back).
+    func recordRemoteOverviewInstalledOutsidePull(deviceID: String) {
+        invalidateInFlightRemoteOverviewPulls(deviceID: deviceID)
+        remoteOverviewSyncStates[deviceID, default: DeviceSyncState()].overviewInstallGeneration += 1
+    }
+
+    /// Test seam for `recordRemoteOverviewInstalledOutsidePull`'s effect on `pullSuccessStillFreshest`'s
+    /// gate, since `DeviceSyncState` itself is private to this file.
+    func overviewInstallGenerationForTesting(deviceID: String) -> Int {
+        remoteOverviewSyncStates[deviceID]?.overviewInstallGeneration ?? 0
     }
 
     /// Whether a completed pull's *failure* still describes the device, or belongs to an attempt
@@ -912,18 +937,19 @@ private struct DeviceSyncState {
     }
 
     /// Whether a completed pull's *success* is still the freshest answer for the device, or was made stale
-    /// by a subscription push that applied newer data while the pull was in flight.
+    /// by an install from outside the pull (a subscription push, or a mutation response) that applied newer
+    /// data while the pull was in flight.
     ///
     /// Unlike a failure, a success is discarded only on evidence that something newer actually landed — a
     /// retry or network-path change alone does not disqualify it, because neither installs data of its
-    /// own; the pull remains the freshest read of the device until a push proves otherwise. Applying a
-    /// stale success would overwrite newer data with an older snapshot and re-run retarget/prune against
-    /// it, closing a pane the newer overview just retargeted to a replacement session, because the
+    /// own; the pull remains the freshest read of the device until such an install proves otherwise.
+    /// Applying a stale success would overwrite newer data with an older snapshot and re-run retarget/prune
+    /// against it, closing a pane the newer overview just retargeted to a replacement session, because the
     /// replacement does not exist in the stale snapshot. A superseded success is dropped before it reaches
     /// that path; see `settleSupersededPullSuccess` for the minimal cleanup it still performs. Pure so the
     /// rule is directly testable.
-    nonisolated static func pullSuccessStillFreshest(pushApplyGeneration: Int, currentPushApplyGeneration: Int) -> Bool {
-        pushApplyGeneration >= currentPushApplyGeneration
+    nonisolated static func pullSuccessStillFreshest(overviewInstallGeneration: Int, currentOverviewInstallGeneration: Int) -> Bool {
+        overviewInstallGeneration >= currentOverviewInstallGeneration
     }
 
     /// What a superseded pull's success still owes the sidebar: nothing about its data (that is stale by
@@ -1164,10 +1190,8 @@ private struct DeviceSyncState {
                 let capturedEpoch = self.host.panelCoordinator.paneReplacementEpoch
                 // A push is always the newer answer for this device: retire whatever pull is mid-flight so
                 // its eventual failure cannot report this device offline on stale grounds, and record that
-                // this push is about to apply data newer than any pull success already in flight (see
-                // `DeviceSyncState.pushApplyGeneration`).
-                self.invalidateInFlightRemoteOverviewPulls(deviceID: deviceID)
-                self.remoteOverviewSyncStates[deviceID, default: DeviceSyncState()].pushApplyGeneration += 1
+                // this push is about to apply data newer than any pull success already in flight.
+                self.recordRemoteOverviewInstalledOutsidePull(deviceID: deviceID)
                 self.applyRemoteDeviceSection(
                     deviceID: deviceID,
                     result: .success(RemoteDeviceLoad(overview: overview, daemonStatus: daemonStatus, compatibility: compatibility)),
@@ -1446,17 +1470,21 @@ private struct DeviceSyncState {
             // Terminal panes close on an externally initiated stop via session pruning above (their
             // sessions leave the overview's keep-set); a code pane has no session, so this same run-state
             // transition is its only close signal. Deliberately outside the `epochWasFreshBeforeRetarget`
-            // gate above, mirroring the local-path close beside `tearDownBrowserSessionsForLocallyStoppedWorkspaces`:
+            // gate above, mirroring the local-path close beside `tearDownBrowserSessionsForStoppedOrDeletedWorkspaces`:
             // a run-state transition is unrelated to pane replacement. Only reached here, in the
             // successfully-loaded-with-overview branch — never for the reachable-but-incompatible or
             // offline `.failure` paths, whose overviews are not this device's authoritative state. The
-            // transition-observation limits accepted at the local-path close (coalesced restarts, stops
-            // completed while this app was not running) apply identically here.
+            // transition-observation limit accepted at the local-path close (a stop completed while this
+            // app was not running) applies identically here.
             host.panelCoordinator.closeCodePanes(
                 deviceID: deviceID,
                 workspaceIDs: Set(
                     Self.workspaceIDsTransitionedToNotRunning(
                         previous: previousWorkspaceRuntimeStatusByID, current: content.workspaceRuntimeStatusByID)))
+            // The remote daemon cannot close this Mac's Chrome tabs, so a stop or delete made by another
+            // client reaches them only through this diff (#800).
+            tearDownBrowserSessionsForStoppedOrDeletedWorkspaces(
+                previous: previousWorkspaceRuntimeStatusByID, current: content.workspaceRuntimeStatusByID, previousOverview: previousOverview)
         case .failure(let error):
             let reason = error.localizedDescription
             let update = Self.offlineSectionUpdate(loadState: host.deviceModel.deviceSections[index].loadState, reason: reason)

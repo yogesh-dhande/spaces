@@ -3559,7 +3559,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // pane-prune keep-set — into the local section.
         // Captured before the section is overwritten: the pairing between an ended session and the one
         // that replaced it exists only in the difference between these two overviews.
-        if deviceID == SpacesPairedDeviceRecord.localDeviceID { deviceModel.localOverviewInstallGeneration += 1 }
+        if deviceID == SpacesPairedDeviceRecord.localDeviceID {
+            deviceModel.localOverviewInstallGeneration += 1
+        } else {
+            // A pull for this device may already be in flight and dialing on data older than this
+            // mutation's answer. Left ungated, that pull's eventual (older) success would apply after this
+            // overview installs and read as a running-to-stopped transition, closing this Mac's tracked
+            // tabs and code panes for a workspace the daemon still reports running.
+            sidebar.recordRemoteOverviewInstalledOutsidePull(deviceID: deviceID)
+        }
         let previousOverview = deviceSection(id: deviceID)?.overview
         let liveWorkspaceIDs = Set(overview.workspaces.map(\.id))
         removeCodePaneRecoveryStateForDeletedWorkspaces(
@@ -5646,7 +5654,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func restartWorkspace(id: String) { Task { @MainActor [weak self] in await self?.performRestartWorkspace(id: id) } }
 
     private func performRestartWorkspace(id: String) async {
-        let browserSessionTargetURLs = browserSessions.configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
         guard let device = deviceForWorkspaceMutation(workspaceID: id) else {
             showWorkspaceDeviceUnavailableError(workspaceID: id)
             return
@@ -5659,11 +5666,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         switch result {
         case .success(let response):
-            // Restart goes through the daemon stop path; the daemon does not own the
-            // client-side Chrome browser-session tabs, so close them here too for a clean
-            // restarted state (a later browser focus then opens fresh tabs).
-            self.browserSessions.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
-            self.closeWorkspacePanes(workspaceID: id)
+            // Unlike Stop and Delete, nothing is closed here: a restart keeps the workspace's Chrome tabs and
+            // code panes, and its terminal panes follow what the daemon reports (a replaced session's pane is
+            // retargeted from this response's overview, an ended one closes).
             applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: id)
         case .failure(let error): showError(error)
         }
@@ -5702,9 +5707,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// Closes the workspace's open terminal and code panes after the owning daemon confirms a
-    /// workspace stop/restart/delete. The terminal sessions are already being stopped by that
-    /// mutation, so pane teardown skips the client-detach cleanup path; a code pane has no session to
-    /// stop, so it is a pure layout edit either way. Internal rather than `private`: also called from
+    /// workspace stop or delete. The terminal sessions are already being stopped by that mutation, so
+    /// pane teardown skips the client-detach cleanup path; a code pane has no session to stop, so it is
+    /// a pure layout edit either way. Internal rather than `private`: also called from
     /// `WorkspaceDeletionCoordinator.resolveAwaitingWorkspaceDeletions`, which performs the same cleanup
     /// for a delete confirmed by a deferred resolution rather than `deleteWorkspace`'s own response.
     func closeWorkspacePanes(workspaceID: String) {

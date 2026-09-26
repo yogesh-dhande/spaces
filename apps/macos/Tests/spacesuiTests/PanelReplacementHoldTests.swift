@@ -366,6 +366,41 @@ extension ProcessProfileEnvironmentSuites {
             #expect(controller.panelCoordinator.paneReplacementEpoch == epochBeforeRetarget)
         }
 
+        /// A Mac Restart installs the daemon's response through `applyDeviceMutationResponse` and closes
+        /// nothing itself: with a restart-shaped response (the process row's session replaced, the
+        /// workspace still running), an open code pane and a tracked Chrome tab stay.
+        @Test func aRestartResponseLeavesCodePaneAndTrackedTabOpen() throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            try ClientBrowserWindowIDStore().setWindowID(workspaceID: "workspace-1", targetURL: "http://localhost:3000", windowID: 101)
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "predecessor")), to: PanelLayout())
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            controller.deviceModel.deviceSections = [section(deviceID: deviceID, processSessionID: "predecessor", retained: ["predecessor"])]
+            controller.rebuildFlatSidebarData()
+            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
+            #expect(controller.panelCoordinator.openCodePaneInNewTab(deviceID: deviceID, workspaceID: "workspace-1", initialMode: .diff, in: scope))
+            let codePaneID = try #require(
+                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: scope)).first {
+                    controller.panelCoordinator.codePaneContent(forPaneID: $0.id) != nil
+                }?.id)
+            let epoch = controller.panelCoordinator.paneReplacementEpoch
+            let restarted = try #require(
+                section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement"], createdAt: "2026-01-01T00:01:00Z").overview)
+
+            controller.applyDeviceMutationResponse(
+                SpacesDeviceAPIResponse(
+                    ok: true, message: "", result: .mutation(SpacesDeviceMutationResult(overview: restarted, workspaceID: "workspace-1"))),
+                deviceID: deviceID, epoch: epoch)
+
+            #expect(controller.panelCoordinator.codePaneContent(forPaneID: codePaneID) != nil, "the code pane open before the restart is still there")
+            #expect(
+                try ClientBrowserWindowIDStore().windowIDs(workspaceID: "workspace-1").count == 1,
+                "the workspace's tracked Chrome tab is untouched by installing the restart's overview")
+        }
+
         /// One local device holding the workspace the retarget runs against: enough sidebar data to resolve
         /// the workspace's device and panel scope, the session behind its process row, and a retention
         /// keep-set for its restore. `createdAt` defaults to a fixed instant; the overview-diffing retarget

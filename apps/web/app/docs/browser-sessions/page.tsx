@@ -47,9 +47,11 @@ export default function BrowserSessionsDocsPage() {
 
       <Section id="stopping" title="When a workspace stops">
         <Prose>
-          Stop from the Mac closes the workspace&apos;s tabs. Today, when another device, the
-          iPhone or the CLI on another machine, stops a workspace on a paired device, this Mac
-          leaves that workspace&apos;s tabs open.
+          Stopping or deleting a workspace closes its tabs, whether you do it on the Mac, on the
+          iPhone, or from the CLI, and whichever device the workspace lives on. The Mac app closes
+          them when it sees the workspace stop or go away, so a workspace stopped while the app
+          isn&apos;t running leaves its tabs open until you delete it. Restarting a workspace keeps
+          its tabs open.
         </Prose>
       </Section>
 
