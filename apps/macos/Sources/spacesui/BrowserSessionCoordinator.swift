@@ -211,18 +211,21 @@ import workspacecore
     /// daemon cannot close them when a workspace stops — the GUI tears them down here. A no-op when
     /// the workspace has no tracked browser-session tabs.
     ///
-    /// Called from two disjoint triggers: the GUI's own stop/restart/delete handlers (eager, and
-    /// the only reliable signal for a restart's transient stop), and the sidebar's daemon-observed
-    /// transition diff (the net for stop/delete initiated outside this GUI — CLI, MCP, the Device
-    /// API, or another device). Idempotent: it clears the tracking rows, so a later reload that
-    /// re-observes the same stopped workspace finds nothing to close.
+    /// Called from two disjoint triggers: the GUI's own stop/delete handlers (eager), and the
+    /// sidebar's daemon-observed stop-or-delete diff, on this Mac's section or a paired device's (the
+    /// net for a stop or delete made outside this GUI: CLI, MCP, the Device API, or another client). A restart reaches neither, since the daemon keeps the workspace marked running
+    /// through it (#799). Idempotent: it clears the tracking rows, so a later reload that re-observes
+    /// the same stopped workspace finds nothing to close.
     func closeLocalBrowserSessionWindows(workspaceID: String, configuredBrowserSessionTargetURLs: [String]) {
-        Task.detached(priority: .utility) { [weak host] in
+        // `host` is captured strongly, as in `WindowFocusController.scheduleDeferredHotkeySelectionRefresh`:
+        // `invalidateBrowserCycleState` reads `windowFocus`'s `unowned host`, so a weak capture could hand back
+        // a `windowFocus` whose host deallocates mid-call. A short-lived test host crashed this way.
+        Task.detached(priority: .utility) { [host] in
             Self.closeLocalBrowserSessionWindowsSynchronously(
                 workspaceID: workspaceID, configuredBrowserSessionTargetURLs: configuredBrowserSessionTargetURLs)
             // Tabs just closed drop out of the cached Chrome snapshot the cycling row reads; invalidate
             // it instead of waiting out the refresh interval.
-            await host?.windowFocus.invalidateBrowserCycleState()
+            await host.windowFocus.invalidateBrowserCycleState()
         }
     }
 
@@ -257,10 +260,10 @@ import workspacecore
         try? clearTrackedWindowIDs()
     }
 
-    /// Internal rather than `private`: `AppKitController.performRestartWorkspace`,
-    /// `performStopWorkspace`, and `deleteWorkspace` each capture a workspace's configured browser
-    /// target URLs before their mutation starts, so the ones closed on success reflect the overview at
-    /// that point rather than whatever it becomes by the time the mutation resolves.
+    /// Internal rather than `private`: `AppKitController.performStopWorkspace` and `deleteWorkspace`
+    /// each capture a workspace's configured browser target URLs before their mutation starts, so the
+    /// ones closed on success reflect the overview at that point rather than whatever it becomes by the
+    /// time the mutation resolves.
     func configuredBrowserSessionTargetURLsForTeardown(workspaceID: String) -> [String] {
         Self.browserSessionTargetURLs(workspaceID: workspaceID, overview: host.overview(forWorkspaceID: workspaceID))
     }

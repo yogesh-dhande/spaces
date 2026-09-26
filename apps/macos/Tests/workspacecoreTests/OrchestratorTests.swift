@@ -56,6 +56,30 @@ final class TerminalTerminateCapture: @unchecked Sendable { var sessionIDs: [Str
 
 final class TerminalLaunchAttemptCapture: @unchecked Sendable { var count = 0 }
 
+/// Samples the workspace's running flag at the moment a terminal hook fires, gated by `isRecording` so a
+/// sample taken during a fixture's own cold launch (legitimately not yet running) does not read as the
+/// bug the restart-in-flight assertion is checking for. Holds the store itself (`@unchecked Sendable`,
+/// like the other capture helpers here) because the hooks these samples come from are `@Sendable`
+/// closures that cannot otherwise capture `SQLiteStore`, which the product code never asks to be
+/// `Sendable`; every access is serial in these single-threaded fixtures.
+final class WorkspaceRunningStateSampleCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private let store: SQLiteStore
+    /// Set once the workspace exists, since the hooks are wired before `createWorkspace` returns its id.
+    var workspaceID = ""
+    var isRecording = false
+    private(set) var samples: [Bool] = []
+
+    init(store: SQLiteStore) { self.store = store }
+
+    func sample() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard isRecording, let isRunning = try? store.workspace(id: workspaceID)?.isRunning else { return }
+        samples.append(isRunning)
+    }
+}
+
 func managedProjectStorageDirname(namespace: String, source: String, preferredName: String) -> String {
     let digest = SHA256.hash(data: Data("\(namespace)\u{0}\(source)".utf8)).map { String(format: "%02x", $0) }.joined()
     let cleaned = preferredName.map { char -> String in

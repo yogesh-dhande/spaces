@@ -99,13 +99,15 @@ export default function WorkspacesDocsPage() {
           </li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Restarting keeps a target&apos;s pane in place: the replacement session takes over the
-          same tab and split the old one had. Today, restarting a whole workspace from the Mac
-          closes its open panes instead of reusing them; restarting from the iPhone, the CLI, or
-          MCP keeps each process&apos;s pane. Restarting a single process, from any client, keeps
-          its pane. Starting or restarting a workspace from the CLI or MCP never moves focus in
-          the Mac app. See <DocLink href="/docs/restarts">What survives a restart</DocLink> for
-          quitting and rebooting.
+          Restarting a single process, from any client, keeps its pane in place: the replacement
+          session takes over the same tab and split the old one had. Restarting a whole workspace
+          keeps its Chrome tabs and the Editor open, and closes the panes of ad hoc terminals and
+          agents, since their sessions end. Its process panes stay in place when you restart from
+          the CLI or MCP on the Mac; today, restarting from the Mac app or the iPhone can close
+          them. Starting or restarting a workspace from the CLI or MCP never moves focus in the Mac
+          app. See{" "}
+          <DocLink href="/docs/restarts">What survives a restart</DocLink> for quitting and
+          rebooting.
         </p>
       </Section>
 

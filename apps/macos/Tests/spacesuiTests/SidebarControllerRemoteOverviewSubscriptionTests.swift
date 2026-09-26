@@ -408,28 +408,28 @@ private enum StubDisconnectError: Error, Equatable { case dropped }
         #expect(SidebarController.pullFailureStillDescribesDevice(pullGeneration: 3, currentGeneration: 3))
     }
 
-    /// A success is gated on a *different* counter than a failure: `DeviceSyncState.pushApplyGeneration`,
-    /// bumped only where a subscription push actually applies an overview, not
-    /// `DeviceSyncState.pullGeneration`, bumped by a retry or a network-path change that install no data of
-    /// their own. A retry-style invalidation must not touch whether an in-flight pull's eventual success
-    /// still applies: it would otherwise strand the sidebar on nothing until the next watchdog tick, even
-    /// though the pull's answer is the freshest one available.
+    /// A success is gated on a *different* counter than a failure: `DeviceSyncState.overviewInstallGeneration`,
+    /// bumped only where this device's overview is installed from outside the pull (a subscription push, or
+    /// a mutation response), not `DeviceSyncState.pullGeneration`, bumped by a retry or a network-path
+    /// change that install no data of their own. A retry-style invalidation must not touch whether an
+    /// in-flight pull's eventual success still applies: it would otherwise strand the sidebar on nothing
+    /// until the next watchdog tick, even though the pull's answer is the freshest one available.
     @Test func aPullInvalidatedByARetryStillAppliesItsSuccess() {
-        #expect(SidebarController.pullSuccessStillFreshest(pushApplyGeneration: 0, currentPushApplyGeneration: 0))
+        #expect(SidebarController.pullSuccessStillFreshest(overviewInstallGeneration: 0, currentOverviewInstallGeneration: 0))
     }
 
-    /// The case the split exists for: a subscription push applied a newer overview while this pull was
-    /// still in flight. Applying the pull's answer afterwards would retarget/prune the sidebar's open
-    /// panes against data older than what is already showing, which can close a pane the newer overview
-    /// just retargeted to a replacement session that does not exist in the stale snapshot.
-    @Test func aSuccessFromAPullThatAPushAppliedOverMidFlightIsSuperseded() {
-        #expect(!SidebarController.pullSuccessStillFreshest(pushApplyGeneration: 0, currentPushApplyGeneration: 1))
+    /// The case the split exists for: a subscription push (or a mutation response) applied a newer overview
+    /// while this pull was still in flight. Applying the pull's answer afterwards would retarget/prune the
+    /// sidebar's open panes against data older than what is already showing, which can close a pane the
+    /// newer overview just retargeted to a replacement session that does not exist in the stale snapshot.
+    @Test func aSuccessFromAPullThatAnOutsideInstallAppliedOverMidFlightIsSuperseded() {
+        #expect(!SidebarController.pullSuccessStillFreshest(overviewInstallGeneration: 0, currentOverviewInstallGeneration: 1))
     }
 
     /// The ordinary case for a success: nothing applied newer data while it was in flight, so its snapshot
     /// is current and applies normally.
     @Test func aSuccessFromTheCurrentPullStillApplies() {
-        #expect(SidebarController.pullSuccessStillFreshest(pushApplyGeneration: 2, currentPushApplyGeneration: 2))
+        #expect(SidebarController.pullSuccessStillFreshest(overviewInstallGeneration: 2, currentOverviewInstallGeneration: 2))
     }
 
     /// An offline section, and equally one left at "loading…" by an attempt whose result never
@@ -957,6 +957,34 @@ extension ProcessProfileEnvironmentSuites {
                 "the stale mutation response's prune was skipped, so the already-claimed pane stayed put")
         }
 
+        /// The bug this generation guards against: a remote pull started before a mutation response (e.g.
+        /// a remote Start) can carry an answer older than what that mutation just installed. Left
+        /// ungated, the pull's eventual (older, stopped) success would apply afterwards, reading as a
+        /// running-to-stopped transition and closing this Mac's tracked tabs and code panes for a
+        /// workspace the daemon still reports running. `SpacesDeviceClient.resolveOverview` dials the
+        /// network, so a live pull cannot be held open and released on demand from a unit test; this
+        /// instead proves the generation-level contract `pullSuccessStillFreshest`'s gate depends on: a
+        /// mutation response for a remote device bumps `overviewInstallGeneration` the same way a
+        /// subscription push already does, so a pull captured before the mutation response is judged
+        /// stale once it lands.
+        @Test func aMutationResponseBumpsTheGenerationAPredatingPullIsJudgedAgainst() throws {
+            let controller = makeController()
+            controller.deviceModel.deviceSections = [section(processSessionID: "api-session")]
+            controller.rebuildFlatSidebarData()
+            let generationCapturedByAPullStartedBeforeTheMutation = controller.sidebar.overviewInstallGenerationForTesting(deviceID: deviceID)
+
+            let runningOverview = overview(processSessionID: "api-session", createdAt: "2026-01-01T00:01:00Z", retained: ["api-session"])
+            let response = SpacesDeviceAPIResponse(ok: true, message: "ok", result: .mutation(SpacesDeviceMutationResult(overview: runningOverview)))
+            controller.applyDeviceMutationResponse(response, deviceID: deviceID, epoch: controller.panelCoordinator.paneReplacementEpoch)
+
+            let generationAfterTheMutationResponse = controller.sidebar.overviewInstallGenerationForTesting(deviceID: deviceID)
+            #expect(
+                !SidebarController.pullSuccessStillFreshest(
+                    overviewInstallGeneration: generationCapturedByAPullStartedBeforeTheMutation,
+                    currentOverviewInstallGeneration: generationAfterTheMutationResponse),
+                "a pull captured before this mutation response must be judged stale once it lands, the same way a subscription push already is")
+        }
+
         /// This device's two workspaces, the second one's project reported as `adoptedProjectKind` so a
         /// test can install the same rows before and after the daemon adopts that project as its home
         /// project. Workspace ids are unique to the adoption test below: closing a live code pane flushes
@@ -1025,6 +1053,107 @@ extension ProcessProfileEnvironmentSuites {
             #expect(
                 controller.panelCoordinator.codePaneContent(forPaneID: standard) != nil,
                 "the standard project's pane on the same device is untouched by the install")
+        }
+
+        // MARK: - Browser-session teardown (issue #800)
+
+        /// A remote device's daemon cannot close this Mac's Chrome tabs, so a workspace it reports going
+        /// running-to-not-running has to be caught the same way the local path catches it
+        /// (`SidebarController.tearDownBrowserSessionsForStoppedOrDeletedWorkspaces`). `ClientBrowserWindowIDStore`
+        /// scopes every tracked tab to the local device regardless of which device hosts the workspace
+        /// (a Chrome window is desktop-local state), so seeding it directly here is the same tracking a
+        /// real browser-session focus would have left behind. The close itself dispatches a detached task
+        /// (real product behavior, since it may shell out to Chrome), so this polls for its synchronous
+        /// database-clearing side effect rather than asserting immediately after the apply returns.
+        @Test func aRemoteWorkspaceThatStoppedClosesThisMacsTrackedTab() async throws {
+            let controller = makeController()
+            try ClientBrowserWindowIDStore().setWindowID(workspaceID: "workspace-1", targetURL: "http://localhost:3000", windowID: 101)
+            controller.deviceModel.deviceSections = [section(processSessionID: "api-session")]
+            controller.rebuildFlatSidebarData()
+            let stoppedOverview = SpacesDeviceOverviewPayload(
+                projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
+                workspaces: [
+                    SpacesDeviceWorkspaceSummary(
+                        id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
+                        dir: "/tmp/workspace-1", isRunning: false, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false,
+                        processRows: [])
+                ], sessions: [], retainedTerminalSessionIDs: [])
+
+            controller.sidebar.applyRemoteDeviceSection(
+                deviceID: deviceID,
+                result: .success(
+                    SidebarController.RemoteDeviceLoad(
+                        overview: SpacesDeviceOverview(device: device(), overview: stoppedOverview), daemonStatus: nil, compatibility: .compatible)),
+                epoch: controller.panelCoordinator.paneReplacementEpoch)
+
+            var remaining = try ClientBrowserWindowIDStore().windowIDs(workspaceID: "workspace-1")
+            for _ in 0..<200 where !remaining.isEmpty {
+                try await Task.sleep(nanoseconds: 5_000_000)
+                remaining = try ClientBrowserWindowIDStore().windowIDs(workspaceID: "workspace-1")
+            }
+            #expect(remaining.isEmpty, "the observed running-to-stopped transition closed this Mac's tracked tab for the remote workspace")
+        }
+
+        /// The workspace is already stopped in the section installed before this apply, so the
+        /// running-to-stopped transition above never fires for it; only its disappearance from the next
+        /// overview (a delete made elsewhere while this app was not running) signals the teardown.
+        @Test func aRemoteWorkspaceDeletedWhileStoppedClosesThisMacsTrackedTab() async throws {
+            let controller = makeController()
+            try ClientBrowserWindowIDStore().setWindowID(workspaceID: "workspace-1", targetURL: "http://localhost:3000", windowID: 101)
+            let stoppedOverview = SpacesDeviceOverviewPayload(
+                projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
+                workspaces: [
+                    SpacesDeviceWorkspaceSummary(
+                        id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
+                        dir: "/tmp/workspace-1", isRunning: false, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false,
+                        processRows: [])
+                ], sessions: [], retainedTerminalSessionIDs: [])
+            let mapped = AppKitController.deviceSidebarData(from: stoppedOverview, deviceID: deviceID)
+            controller.deviceModel.deviceSections = [
+                AppKitController.DeviceSection(
+                    deviceID: deviceID, deviceName: "Linux Box", isLocal: false, loadState: .loaded, device: device(), projects: mapped.projects,
+                    workspacesByProject: mapped.workspacesByProject, workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID,
+                    overview: stoppedOverview)
+            ]
+            controller.rebuildFlatSidebarData()
+            let emptyOverview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [], retainedTerminalSessionIDs: [])
+
+            controller.sidebar.applyRemoteDeviceSection(
+                deviceID: deviceID,
+                result: .success(
+                    SidebarController.RemoteDeviceLoad(
+                        overview: SpacesDeviceOverview(device: device(), overview: emptyOverview), daemonStatus: nil, compatibility: .compatible)),
+                epoch: controller.panelCoordinator.paneReplacementEpoch)
+
+            var remaining = try ClientBrowserWindowIDStore().windowIDs(workspaceID: "workspace-1")
+            for _ in 0..<200 where !remaining.isEmpty {
+                try await Task.sleep(nanoseconds: 5_000_000)
+                remaining = try ClientBrowserWindowIDStore().windowIDs(workspaceID: "workspace-1")
+            }
+            #expect(remaining.isEmpty, "a delete of an already-stopped remote workspace closed this Mac's tracked tab")
+        }
+
+        /// The companion negative case: a restart reported through the same channel, where the workspace
+        /// stays running and only its process row's session changes (#799), closes nothing. There is no
+        /// follow-up signal to prove a negative against, so this waits out a generous window for a
+        /// wrongly-spawned teardown task before asserting the tracked tab survived.
+        @Test func aRemoteWorkspaceRestartSequenceClosesNoTrackedTab() async throws {
+            let controller = makeController()
+            try ClientBrowserWindowIDStore().setWindowID(workspaceID: "workspace-1", targetURL: "http://localhost:3000", windowID: 101)
+            controller.deviceModel.deviceSections = [section(processSessionID: "predecessor")]
+            controller.rebuildFlatSidebarData()
+            let restarted = overview(processSessionID: "replacement", createdAt: "2026-01-01T00:01:00Z", retained: ["replacement"])
+
+            controller.sidebar.applyRemoteDeviceSection(
+                deviceID: deviceID,
+                result: .success(
+                    SidebarController.RemoteDeviceLoad(
+                        overview: SpacesDeviceOverview(device: device(), overview: restarted), daemonStatus: nil, compatibility: .compatible)),
+                epoch: controller.panelCoordinator.paneReplacementEpoch)
+
+            try await Task.sleep(nanoseconds: 150_000_000)
+            let remaining = try ClientBrowserWindowIDStore().windowIDs(workspaceID: "workspace-1")
+            #expect(remaining.count == 1, "a restart never observed as a running-to-stopped transition must not close this Mac's tracked tab")
         }
     }
 }
