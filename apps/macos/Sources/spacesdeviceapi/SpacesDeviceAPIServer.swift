@@ -4131,26 +4131,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
             return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' is not available.", errorCode: .sessionNotAvailable)
         }
-        guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths),
-            TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: snapshot) == clientID
-        else {
-            return SpacesDeviceAPIResponse(
-                ok: false, message: "Only the active owner can paste images into the terminal.", errorCode: .ownershipRejected)
-        }
-        // Epoch-gate only when the client sent an epoch: a request without one is not stale, it was
-        // composed by a client whose cached session payload carries no render owner epoch (the same
-        // contract the other input paths follow).
-        if let requestedOwnerEpoch = payload.ownerEpoch,
-            let ownerEpoch = (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.renderOwnerEpoch,
-            ownerEpoch != requestedOwnerEpoch
-        {
-            return SpacesDeviceAPIResponse(
-                ok: false, message: "Ignoring stale owner epoch \(requestedOwnerEpoch); current owner epoch is \(ownerEpoch).",
-                errorCode: .ownershipRejected)
-        }
 
         let remotePath = "/tmp/spaces-paste-\(UUID().uuidString).\(fileExtension)"
         try Self.writeUserOnlyPasteImage(payload.imageData, toPath: remotePath)
+        // Ownership and the owner epoch are gated by the session host's in-memory `send` handler
+        // (`ownerRequestRejection`), the same check every other terminal control command goes through, not
+        // by a read here: a takeover updates that in-memory state immediately and only enqueues its durable
+        // mirror, so for a moment after a takeover a DB read still names the previous owner and epoch and
+        // would refuse the new owner's paste.
         let terminalRequest = TerminalControlRequest(
             command: .send(
                 TerminalControlSendPayload(
@@ -4164,7 +4152,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         TerminalPerformance.logMetric(
             "device_api_terminalPasteImage", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: response.ok, detail: "bytes=\(payload.imageData.count) extension=\(fileExtension)")
-        return SpacesDeviceAPIResponse(ok: response.ok, message: response.ok ? "Pasted image path." : response.message)
+        return SpacesDeviceAPIResponse(ok: response.ok, message: response.ok ? "Pasted image path." : response.message, errorCode: response.errorCode)
     }
 
     private static func normalizedClientID(_ value: String?) -> String? {
