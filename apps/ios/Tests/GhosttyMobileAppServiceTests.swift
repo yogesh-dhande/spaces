@@ -618,6 +618,9 @@
             }
             var clearCount = 0
             hostView.onClearSelectionTapped = { clearCount += 1 }
+            // The viewport fits the whole grid, so no crop can leave the selection off screen: only a
+            // visible selection turns a tap into a clear.
+            hostView.setSurfaceViewportSizeForTesting(columns: 40, rows: 10)
             let selection = GhosttyTerminalSelectionRange(
                 startColumn: 0, startRow: 0, endColumn: 5, endRow: 0, isRectangle: false, extendsAbove: false, extendsBelow: false)
             hostView.update(snapshot: filledSnapshot(columns: 40, rows: 10, selection: selection), renderStateKey: "selection", fallbackText: "")
@@ -642,6 +645,7 @@
             hostView.debugTapLinkHandlerForTesting = { _ in false }
             var clearCount = 0
             hostView.onClearSelectionTapped = { clearCount += 1 }
+            hostView.setSurfaceViewportSizeForTesting(columns: 40, rows: 10)
             let selection = GhosttyTerminalSelectionRange(
                 startColumn: 0, startRow: 0, endColumn: 5, endRow: 0, isRectangle: false, extendsAbove: false, extendsBelow: false)
             let endedRender = GhosttyRemoteTerminalEndedRender(id: "ended", snapshot: filledSnapshot(columns: 40, rows: 10, selection: selection))

@@ -189,7 +189,7 @@ public enum GhosttyTerminalSnapshotViewport {
     /// `retainedRowOffset` is the row offset the caller drew the frame before this one at. A caller that
     /// keeps no such state (one whose viewport always covers the whole snapshot) passes the default; the
     /// iOS host view, whose viewport shrinks under the software keyboard, passes the offset its last
-    /// render used. See ``rowOffset(for:viewportRows:retainedRowOffset:)`` for what it decides.
+    /// render used. See ``rowOffset(for:viewportRows:visibleColumns:retainedRowOffset:)`` for what it decides.
     public static func window(
         for snapshot: GhosttyTerminalSnapshot, columns: Int, rows: Int, horizontalAlignment: HorizontalAlignment = .followCursor,
         retainedRowOffset: Int = 0
@@ -205,8 +205,10 @@ public enum GhosttyTerminalSnapshotViewport {
                 cursor: snapshot.cursorColumn, viewport: resolvedColumns, content: snapshot.columns, trailingContext: max(2, resolvedColumns / 5))
         }
 
+        let visibleColumns = columnOffset..<min(columnOffset + resolvedColumns, snapshot.columns)
         return Window(
-            columnOffset: columnOffset, rowOffset: rowOffset(for: snapshot, viewportRows: resolvedRows, retainedRowOffset: retainedRowOffset),
+            columnOffset: columnOffset,
+            rowOffset: rowOffset(for: snapshot, viewportRows: resolvedRows, visibleColumns: visibleColumns, retainedRowOffset: retainedRowOffset),
             columns: resolvedColumns, rows: resolvedRows)
     }
 
@@ -216,14 +218,8 @@ public enum GhosttyTerminalSnapshotViewport {
     /// grid it was given, and the rows the keyboard covers are taken off the top rather than off the
     /// session (see `GhosttyRemoteTerminalHostView.reportedViewportBounds()`).
     ///
-    /// Two rules, by whether the frame has a cursor to follow:
+    /// Three rules:
     ///
-    /// - A frame at the bottom of its scrollback follows the cursor, so the offset is the smaller of
-    ///   what the viewport hides (`content - viewport`) and what it takes to keep the cursor row, plus
-    ///   its trailing rows of context, on screen. A cursor already inside the first `viewport` rows
-    ///   needs nothing, so the content does not move at all. This is what keeps the prompt on screen
-    ///   while typing, and a frame back at the bottom re-follows the cursor however far the offset had
-    ///   travelled while scrolled back.
     /// - A frame the user has scrolled back has its cursor somewhere outside the exported viewport, so
     ///   there is nothing to follow. It keeps `retainedRowOffset`, the offset the frame before it was
     ///   drawn at, clamped to what this viewport can show. Holding the offset still is what makes the
@@ -232,13 +228,61 @@ public enum GhosttyTerminalSnapshotViewport {
     ///   that recomputed an offset per scrolled frame instead (pinning to the viewport's bottom rows,
     ///   say) would jump the content by the difference between the two rules on the first scrolled
     ///   frame and jump it back on the return to the bottom.
-    private static func rowOffset(for snapshot: GhosttyTerminalSnapshot, viewportRows: Int, retainedRowOffset: Int) -> Int {
+    /// - A full-screen (alternate screen) program owns the whole grid and its cursor is the only thing
+    ///   worth anchoring to: such a program moves its cursor far more often than it redraws its own
+    ///   chrome, so following a status line instead would scroll the view on nearly every keystroke. This
+    ///   keeps the plain cursor-follow rule: the offset is the smaller of what the viewport hides and
+    ///   what it takes to keep the cursor row, plus its trailing rows of context, on screen.
+    /// - A main-screen frame at the bottom of its scrollback (an ordinary shell, or a coding agent that
+    ///   parks its cursor mid-screen while it draws status lines or multiple-choice options below it)
+    ///   keeps both the cursor and the bottommost row that draws something in the visible columns, since
+    ///   either one can be what the user needs to see. The offset is the larger of the cursor-follow
+    ///   offset above and the one that brings that bottom row on screen, so with nothing drawn below the
+    ///   cursor it is exactly the cursor-follow offset (a prompt inside the first `viewport` rows does not
+    ///   move). When both cannot fit, a visible cursor wins, since it is where the user is typing. A hidden
+    ///   cursor (a coding agent that turns the terminal cursor off while it draws its own UI) leaves only
+    ///   the bottom content row to anchor to.
+    private static func rowOffset(for snapshot: GhosttyTerminalSnapshot, viewportRows: Int, visibleColumns: Range<Int>, retainedRowOffset: Int)
+        -> Int
+    {
         guard snapshot.rows > viewportRows else { return 0 }
         let maximumOffset = snapshot.rows - viewportRows
         let isScrolledBack = Int(snapshot.scrollbarOffset) + snapshot.rows < Int(snapshot.scrollbarTotal)
         guard !isScrolledBack else { return min(max(retainedRowOffset, 0), maximumOffset) }
-        return viewportOffset(
+
+        let cursorOffset = viewportOffset(
             cursor: snapshot.cursorRow, viewport: viewportRows, content: snapshot.rows, trailingContext: min(max(1, viewportRows / 8), 2))
+        guard !snapshot.alternateScreenActive else { return cursorOffset }
+
+        let contentBottomRow = lastVisibleContentRow(in: snapshot, columns: visibleColumns)
+        let contentOffset = min(max(contentBottomRow - viewportRows + 1, 0), maximumOffset)
+        guard snapshot.cursorVisible else { return contentOffset }
+        let cursorRow = min(max(snapshot.cursorRow, 0), snapshot.rows - 1)
+        return min(max(cursorOffset, contentOffset), cursorRow)
+    }
+
+    /// Row index of the bottommost cell within `columns` that would draw something: a non-space codepoint or
+    /// grapheme cluster that is not concealed, a non-default background, or an inverse/underline/strikethrough flag. Scanning
+    /// bottom-up lets the common case (a shell or agent whose live output reaches near the bottom of the
+    /// grid) return after only a few rows. It runs only while the keyboard is cropping the grid, so a
+    /// full-size viewport never pays this scan.
+    private static func lastVisibleContentRow(in snapshot: GhosttyTerminalSnapshot, columns: Range<Int>) -> Int {
+        guard snapshot.columns > 0, snapshot.rows > 0, snapshot.cells.count >= snapshot.columns * snapshot.rows else { return 0 }
+        let contentFlags = GhosttyTerminalSnapshotGrid.inverseFlag | GhosttyTerminalSnapshotGrid.underlineFlag | GhosttyTerminalSnapshotGrid.strikeFlag
+        for row in stride(from: snapshot.rows - 1, through: 0, by: -1) {
+            for column in columns {
+                let index = row * snapshot.columns + column
+                let cell = snapshot.cells[index]
+                // A concealed (SGR 8) glyph renders as a space, so only its background or decoration counts.
+                if cell.flags & GhosttyTerminalSnapshotGrid.invisibleFlag == 0 {
+                    if cell.codepoint != 0, cell.codepoint != 0x20 { return row }
+                    if snapshot.clusters[index] != nil { return row }
+                }
+                if cell.backgroundRGB != snapshot.defaultBackgroundRGB { return row }
+                if cell.flags & contentFlags != 0 { return row }
+            }
+        }
+        return 0
     }
 
     private static func viewportOffset(cursor: Int, viewport: Int, content: Int, trailingContext: Int) -> Int {

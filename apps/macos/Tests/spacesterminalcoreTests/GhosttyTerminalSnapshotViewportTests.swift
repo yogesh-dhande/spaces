@@ -259,24 +259,109 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
 
     /// The row offset is the whole of the iOS keyboard's effect on the terminal: the session keeps its
     /// grid and the visible rows move down it by the smaller of what the viewport hides and what it takes
-    /// to keep the cursor, plus its trailing context, on screen.
+    /// to keep the cursor, plus its trailing context, on screen. Content stops at the cursor's own row in
+    /// each of these fixtures (a shell that has printed nothing past its prompt), so the bottom-content
+    /// rule this same function also applies contributes nothing beyond the cursor rule being exercised
+    /// here; ``testWindowFollowsTheBottommostDrawnRowOnTheMainScreenWhenTheCursorIsHidden`` and
+    /// ``testWindowKeepsTheCursorInsteadOfTheBottomRowWhenBothCannotFit`` exercise that rule on its own.
     func testWindowShiftsByTheSmallerOfTheHiddenRowsAndWhatTheCursorNeeds() {
-        let glyphs = (0..<10).map { index in "ROW\(index)" }
-
-        let cursorAtBottom = makeSnapshot(columns: 4, rows: 10, cursorColumn: 0, cursorRow: 9, glyphs: glyphs)
+        let cursorAtBottom = makeSnapshot(columns: 4, rows: 10, cursorColumn: 0, cursorRow: 9, glyphs: glyphsWithContent(throughRow: 9))
         XCTAssertEqual(
             GhosttyTerminalSnapshotViewport.window(for: cursorAtBottom, columns: 4, rows: 4, horizontalAlignment: .leading).rowOffset, 6,
             "a cursor on the last row needs every hidden row, so the shift is the whole hidden height")
 
-        let cursorNearTop = makeSnapshot(columns: 4, rows: 10, cursorColumn: 0, cursorRow: 2, glyphs: glyphs)
+        let cursorNearTop = makeSnapshot(columns: 4, rows: 10, cursorColumn: 0, cursorRow: 2, glyphs: glyphsWithContent(throughRow: 2))
         XCTAssertEqual(
             GhosttyTerminalSnapshotViewport.window(for: cursorNearTop, columns: 4, rows: 4, horizontalAlignment: .leading).rowOffset, 0,
             "a cursor already on screen needs no shift at all")
 
-        let cursorMidway = makeSnapshot(columns: 4, rows: 10, cursorColumn: 0, cursorRow: 5, glyphs: glyphs)
+        let cursorMidway = makeSnapshot(columns: 4, rows: 10, cursorColumn: 0, cursorRow: 5, glyphs: glyphsWithContent(throughRow: 5))
         XCTAssertEqual(
             GhosttyTerminalSnapshotViewport.window(for: cursorMidway, columns: 4, rows: 4, horizontalAlignment: .leading).rowOffset, 3,
             "a cursor partway down shifts only as far as it takes to show it with its trailing row")
+    }
+
+    /// A main-screen frame with a hidden cursor (a coding agent that draws its own UI and turns the
+    /// terminal cursor off) has nothing to follow but the bottommost row that actually draws something, so
+    /// the window's last row lands exactly on that content: option lines or subagent status a coding agent
+    /// parks below where it would otherwise leave the cursor stay visible instead of sliding under the
+    /// software keyboard.
+    func testWindowFollowsTheBottommostDrawnRowOnTheMainScreenWhenTheCursorIsHidden() {
+        var glyphs = glyphsWithContent(throughRow: 3)
+        glyphs[7] = "OPT7"
+
+        let snapshot = makeSnapshot(columns: 4, rows: 10, cursorColumn: 0, cursorRow: 3, glyphs: glyphs, cursorVisible: false)
+
+        let window = GhosttyTerminalSnapshotViewport.window(for: snapshot, columns: 4, rows: 4, horizontalAlignment: .leading)
+        XCTAssertEqual(window.rowOffset, 4, "the window's last row (offset + 3) lands on row 7, the last row with content")
+    }
+
+    /// Concealed (SGR 8) text renders as blank cells, so a row holding only concealed glyphs on the default
+    /// background is not content: it must not pull the window down past the rows that actually show.
+    func testConcealedGlyphsBelowTheCursorDoNotCountAsContent() {
+        var glyphs = glyphsWithContent(throughRow: 3)
+        glyphs[7] = "HIDE"
+        let plain = makeSnapshot(columns: 4, rows: 10, cursorColumn: 0, cursorRow: 3, glyphs: glyphs, cursorVisible: false)
+        let concealedCells = plain.cells.enumerated().map { index, cell in
+            index / 4 == 7
+                ? GhosttyTerminalSnapshot.Cell(
+                    codepoint: cell.codepoint, foregroundRGB: cell.foregroundRGB, backgroundRGB: cell.backgroundRGB,
+                    flags: GhosttyTerminalSnapshotGrid.invisibleFlag) : cell
+        }
+        let snapshot = GhosttyTerminalSnapshot(
+            columns: 4, rows: 10, cursorColumn: 0, cursorRow: 3, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
+            defaultBackgroundRGB: 0x111111, cells: concealedCells)
+
+        let window = GhosttyTerminalSnapshotViewport.window(for: snapshot, columns: 4, rows: 4, horizontalAlignment: .leading)
+        XCTAssertEqual(window.rowOffset, 0, "row 3 is the last row that shows anything, and it already fits in the first four rows")
+    }
+
+    /// A visible cursor on the viewport's last row with nothing drawn beneath it needs no shift, the same
+    /// as the plain cursor-follow rule: its trailing context is only claimed once the cursor itself would
+    /// otherwise leave the viewport.
+    func testMainScreenCursorOnTheViewportsLastRowWithNothingBelowDoesNotShift() {
+        let snapshot = makeSnapshot(
+            columns: 4, rows: 10, cursorColumn: 0, cursorRow: 3, glyphs: glyphsWithContent(throughRow: 3), cursorVisible: true)
+
+        let window = GhosttyTerminalSnapshotViewport.window(for: snapshot, columns: 4, rows: 4, horizontalAlignment: .leading)
+        XCTAssertEqual(window.rowOffset, 0)
+    }
+
+    /// Content the horizontal crop leaves out is not visible content: a lower row drawn only in columns
+    /// the window does not show must not pull the rows down to a stretch that would render blank.
+    func testContentOutsideTheVisibleColumnsDoesNotAnchorTheRows() {
+        let glyphs = (0..<10).map { row in row <= 3 ? "ROW\(row)    " : row == 7 ? "    WIDE" : "        " }
+        let snapshot = makeSnapshot(columns: 8, rows: 10, cursorColumn: 0, cursorRow: 3, glyphs: glyphs, cursorVisible: false)
+
+        let window = GhosttyTerminalSnapshotViewport.window(for: snapshot, columns: 4, rows: 4, horizontalAlignment: .leading)
+        XCTAssertEqual(window.rowOffset, 0, "row 7 draws only in columns 4-7, outside the four columns shown")
+    }
+
+    /// When the cursor is visible and the bottommost drawn row sits far enough below it that the two
+    /// cannot both fit in the viewport, the cursor wins: a visible cursor is where the user is typing, so
+    /// the window never rises past its row even if that means the drawn content below it stays cropped.
+    func testWindowKeepsTheCursorInsteadOfTheBottomRowWhenBothCannotFit() {
+        var glyphs = glyphsWithContent(throughRow: 3)
+        glyphs[9] = "OPT9"
+
+        let snapshot = makeSnapshot(columns: 4, rows: 10, cursorColumn: 0, cursorRow: 3, glyphs: glyphs, cursorVisible: true)
+
+        let window = GhosttyTerminalSnapshotViewport.window(for: snapshot, columns: 4, rows: 4, horizontalAlignment: .leading)
+        XCTAssertEqual(window.rowOffset, 3, "the cursor's own row is the window's top row rather than following row 9 down")
+    }
+
+    /// A full-screen (alternate screen) program keeps the cursor-only rule: its own status line sitting on
+    /// the grid's last row must not pull the window down, since a full-screen app moves its cursor far more
+    /// often than it redraws its chrome, and following the chrome would scroll the view on every keypress.
+    func testAlternateScreenIgnoresBottomContentAndKeepsFollowingOnlyTheCursor() {
+        var glyphs = glyphsWithContent(throughRow: 1)
+        glyphs[9] = "STAT"
+
+        let snapshot = makeSnapshot(
+            columns: 4, rows: 10, cursorColumn: 0, cursorRow: 1, glyphs: glyphs, cursorVisible: true, alternateScreenActive: true)
+
+        let window = GhosttyTerminalSnapshotViewport.window(for: snapshot, columns: 4, rows: 4, horizontalAlignment: .leading)
+        XCTAssertEqual(window.rowOffset, 0, "a cursor already on screen needs no shift, regardless of a status line further down the grid")
     }
 
     /// Scrolling has to move the visible rows exactly as far as it moves the content. A scrolled-back
@@ -284,7 +369,9 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
     /// was drawn at and the scroll already in the frame is the whole of the movement. Only a frame back
     /// at the bottom of its scrollback follows the cursor again.
     func testScrolledBackWindowKeepsTheOffsetTheFrameBeforeItWasDrawnAt() {
-        let glyphs = (0..<10).map { index in "ROW\(index)" }
+        // Content stops at row 2 (a shell prompt with nothing printed past it), so the bottom-content rule
+        // contributes nothing here and only the cursor/scroll behavior under test is exercised.
+        let glyphs = glyphsWithContent(throughRow: 2)
 
         // Four of ten rows visible, cursor near the top: nothing to shift for.
         let atBottom = makeSnapshot(
@@ -322,7 +409,9 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
     /// travelled while the user was scrolled back: a frame that is not scrolled back re-follows its
     /// cursor instead of inheriting anything.
     func testWindowAtTheBottomRefollowsTheCursorRatherThanTheRetainedOffset() {
-        let glyphs = (0..<10).map { index in "ROW\(index)" }
+        // Content stops at row 2, so the bottom-content rule contributes nothing here; see the comment on
+        // `testScrolledBackWindowKeepsTheOffsetTheFrameBeforeItWasDrawnAt`.
+        let glyphs = glyphsWithContent(throughRow: 2)
 
         let cursorAtBottom = makeSnapshot(
             columns: 4, rows: 10, cursorColumn: 0, cursorRow: 9, glyphs: glyphs, scrollbarTotal: 100, scrollbarOffset: 90)
@@ -353,8 +442,9 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
     }
 
     private func makeSnapshot(
-        columns: Int, rows: Int, cursorColumn: Int, cursorRow: Int, glyphs: [String], selection: GhosttyTerminalSelectionRange? = nil,
-        scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0
+        columns: Int, rows: Int, cursorColumn: Int, cursorRow: Int, glyphs: [String], cursorVisible: Bool = true,
+        alternateScreenActive: Bool = false, selection: GhosttyTerminalSelectionRange? = nil, scrollbarTotal: UInt32 = 0,
+        scrollbarOffset: UInt32 = 0
     ) -> GhosttyTerminalSnapshot {
         let cells = glyphs.flatMap { row in
             row.unicodeScalars.map { scalar in
@@ -363,7 +453,16 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
         }
 
         return GhosttyTerminalSnapshot(
-            columns: columns, rows: rows, cursorColumn: cursorColumn, cursorRow: cursorRow, cursorVisible: true, defaultForegroundRGB: 0xFFFFFF,
-            defaultBackgroundRGB: 0x111111, cells: cells, selection: selection, scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset)
+            columns: columns, rows: rows, cursorColumn: cursorColumn, cursorRow: cursorRow, cursorVisible: cursorVisible,
+            defaultForegroundRGB: 0xFFFFFF, defaultBackgroundRGB: 0x111111, cells: cells, alternateScreenActive: alternateScreenActive,
+            selection: selection, scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset)
+    }
+
+    /// Ten rows of four columns each: `"ROW\(n)"` through `throughRow`, blank (space-filled) after it. A
+    /// blank row carries no visible content under ``GhosttyTerminalSnapshotViewport``'s bottom-content
+    /// rule, so this models a program that has drawn nothing past `throughRow`, the fixture the plain
+    /// cursor-follow tests need to keep that rule from contributing to their expectations.
+    private func glyphsWithContent(throughRow: Int) -> [String] {
+        (0..<10).map { index in index <= throughRow ? "ROW\(index)" : "    " }
     }
 }
