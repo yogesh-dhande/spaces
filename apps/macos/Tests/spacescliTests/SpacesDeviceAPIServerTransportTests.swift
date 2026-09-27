@@ -529,6 +529,90 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         }
     }
 
+    /// A request that fails for an ordinary, recoverable reason (bad payload, session unavailable, and so
+    /// on) is not an authorization problem: the client stays paired and the daemon keeps running, so the
+    /// connection must stay open and answer the next request on it, matching `LinuxServer.handleClient`.
+    func testOrdinaryRequestErrorKeepsConnectionOpenForNextRequest() throws {
+        try withTemporaryProfile { _ in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-ORDINARY-ERROR", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
+                deviceName: "Mac", appVersion: "1.0")
+
+            // A terminal-link chunk read for a link id the server never authorized (no prior resolve)
+            // throws `SpacesDeviceTerminalLinkResolverError.invalidLinkID` rather than returning an
+            // `ok: false` response, so it reaches `finishRequest`'s `.failure` branch; validation errors
+            // returned as `ok: false` responses take the `.success` branch instead.
+            let responses = try sequentialTLSResponses(
+                [
+                    SpacesDeviceAPIRequest(
+                        command: .readTerminalLinkChunk(.init(sessionID: "session-1", terminalLinkID: "never-resolved", offset: 0, limit: 4)),
+                        authToken: pairingStore.authToken, clientApp: clientApp),
+                    SpacesDeviceAPIRequest(command: .ping, authToken: pairingStore.authToken, clientApp: clientApp),
+                ], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+            XCTAssertFalse(responses[0].ok, responses[0].message)
+            XCTAssertTrue(responses[0].message.localizedStandardContains("terminal link transfer id is invalid"), responses[0].message)
+            XCTAssertTrue(responses[1].ok, responses[1].message)
+            XCTAssertEqual(responses[1].message, "pong")
+        }
+    }
+
+    /// An authorization failure means the client cannot be trusted with anything else it sends, so unlike
+    /// an ordinary request error it must end the connection instead of keeping it open.
+    func testUnauthorizedRequestClosesConnection() throws {
+        try withTemporaryProfile { _ in
+            let identity = try testTLSIdentity()
+            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-UNAUTHORIZED-CLOSE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+
+            // No auth token: the pairing store's real `authorize(clientApp:authToken:)` rejects this.
+            let (response, connectionClosed) = try sendTLSRequestReportingWhetherConnectionClosed(
+                SpacesDeviceAPIRequest(command: .resolveTerminalLink(.init(sessionID: "session-1", terminalLink: "image.png")), clientApp: clientApp),
+                port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint, server: server)
+
+            XCTAssertFalse(response.ok)
+            XCTAssertEqual(response.errorCode, .unauthorized)
+            XCTAssertTrue(connectionClosed)
+        }
+    }
+
+    /// A hijacking command (a subscribe) that fails before it takes over the connection never starts its
+    /// stream, and `processBufferedLines`'s `didHijackConnection` guard already stopped the read loop for
+    /// it, so the connection must close rather than sit unread and unwritten forever.
+    func testFailedHijackingRequestClosesConnection() throws {
+        try withTemporaryProfile { _ in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-HIJACK-FAIL", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
+                deviceName: "Mac", appVersion: "1.0")
+
+            // `refName` and `lastCommit` are mutually exclusive, an ordinary validation error thrown before
+            // any workspace lookup, well after `didHijackConnection` was already set for this subscription.
+            let (response, connectionClosed) = try sendTLSRequestReportingWhetherConnectionClosed(
+                SpacesDeviceAPIRequest(
+                    command: .subscribeWorkspaceDiffSignature(.init(workspaceID: "workspace-hijack-fail", refName: "some-ref", lastCommit: true)),
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint, server: server)
+
+            XCTAssertFalse(response.ok)
+            XCTAssertTrue(response.message.localizedStandardContains("mutually exclusive"), response.message)
+            XCTAssertTrue(connectionClosed)
+        }
+    }
+
     func testTerminalLinkResolveRequiresAuthentication() throws {
         try withTemporaryProfile { _ in
             let identity = try testTLSIdentity()
@@ -1658,6 +1742,157 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
         connection.cancel()
         return waitForRequestConnectionCount(0, on: server, timeout: 5)
+    }
+
+    /// Sends each request in order over one TLS connection, reading a full response line before sending
+    /// the next. A connection the server closed after an earlier response cannot answer a later one, so
+    /// this is what proves (rather than asserts) that the connection stayed open across requests.
+    private func sequentialTLSResponses(_ requests: [SpacesDeviceAPIRequest], port: Int, certificateFingerprint: String) throws
+        -> [SpacesDeviceAPIResponse]
+    {
+        let ready = DispatchSemaphore(value: 0)
+        let queue = DispatchQueue(label: "spaces.device.api.transport.sequential.test")
+        let connectResultBox = DeviceAPITransportTestResultBox()
+        let connection = NWConnection(
+            host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: UInt16(port))),
+            using: SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: certificateFingerprint))
+
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready: ready.signal()
+            case .failed(let error):
+                connectResultBox.setError(error)
+                ready.signal()
+            default: break
+            }
+        }
+        connection.start(queue: queue)
+        defer { connection.cancel() }
+        XCTAssertEqual(ready.wait(timeout: .now() + 5), .success)
+        if let error = connectResultBox.error() { throw error }
+
+        var responses: [SpacesDeviceAPIResponse] = []
+        for request in requests {
+            let sent = DispatchSemaphore(value: 0)
+            let received = DispatchSemaphore(value: 0)
+            let resultBox = DeviceAPITransportTestResultBox()
+
+            var requestData = try SpacesDeviceAPICodec.encodeRequest(request)
+            requestData.append(0x0A)
+            connection.send(
+                content: requestData,
+                completion: .contentProcessed { error in
+                    if let error { resultBox.setError(error) }
+                    sent.signal()
+                })
+            XCTAssertEqual(sent.wait(timeout: .now() + 5), .success)
+            if let error = resultBox.error() { throw error }
+
+            @Sendable func receiveNext(_ data: Data) {
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
+                    if let error {
+                        resultBox.setError(error)
+                        received.signal()
+                        return
+                    }
+                    var nextData = data
+                    if let content { nextData.append(content) }
+                    if let newlineIndex = nextData.firstIndex(of: 0x0A) {
+                        resultBox.setResponseData(Data(nextData.prefix(upTo: newlineIndex)))
+                        received.signal()
+                        return
+                    }
+                    if isComplete {
+                        resultBox.setResponseData(nextData)
+                        received.signal()
+                        return
+                    }
+                    receiveNext(nextData)
+                }
+            }
+            receiveNext(Data())
+            XCTAssertEqual(received.wait(timeout: .now() + 5), .success)
+            if let error = resultBox.error() { throw error }
+            responses.append(try SpacesDeviceAPICodec.decodeResponse(resultBox.responseData()))
+        }
+        return responses
+    }
+
+    /// Sends one request that authorization must reject and checks that the server's own side of the
+    /// connection tears down, independent of anything the client does with its half of the socket
+    /// afterward (the client never cancels until this function's own `defer`, which runs after the count
+    /// is already checked).
+    /// Sends one request over a connection the caller never cancels and reports whether the server's own
+    /// side tore the connection down. The client only cancels in this function's own `defer`, which runs
+    /// after the count is already checked, so the count reflects the server's decision, not the client's.
+    private func sendTLSRequestReportingWhetherConnectionClosed(
+        _ request: SpacesDeviceAPIRequest, port: Int, certificateFingerprint: String, server: SpacesDeviceAPIServer
+    ) throws -> (response: SpacesDeviceAPIResponse, connectionClosed: Bool) {
+        let ready = DispatchSemaphore(value: 0)
+        let sent = DispatchSemaphore(value: 0)
+        let received = DispatchSemaphore(value: 0)
+        let queue = DispatchQueue(label: "spaces.device.api.close-report.test")
+        let resultBox = DeviceAPITransportTestResultBox()
+        let connection = NWConnection(
+            host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: UInt16(port))),
+            using: SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: certificateFingerprint))
+
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready: ready.signal()
+            case .failed(let error):
+                resultBox.setError(error)
+                ready.signal()
+                sent.signal()
+                received.signal()
+            default: break
+            }
+        }
+        connection.start(queue: queue)
+        defer { connection.cancel() }
+        XCTAssertEqual(ready.wait(timeout: .now() + 5), .success)
+        if let error = resultBox.error() { throw error }
+        XCTAssertTrue(waitForRequestConnectionCount(1, on: server, timeout: 5))
+
+        var requestData = try SpacesDeviceAPICodec.encodeRequest(request)
+        requestData.append(0x0A)
+        connection.send(
+            content: requestData,
+            completion: .contentProcessed { error in
+                if let error { resultBox.setError(error) }
+                sent.signal()
+            })
+        XCTAssertEqual(sent.wait(timeout: .now() + 5), .success)
+        if let error = resultBox.error() { throw error }
+
+        @Sendable func receiveNext(_ data: Data) {
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
+                if let error {
+                    resultBox.setError(error)
+                    received.signal()
+                    return
+                }
+                var nextData = data
+                if let content { nextData.append(content) }
+                if let newlineIndex = nextData.firstIndex(of: 0x0A) {
+                    resultBox.setResponseData(Data(nextData.prefix(upTo: newlineIndex)))
+                    received.signal()
+                    return
+                }
+                if isComplete {
+                    resultBox.setResponseData(nextData)
+                    received.signal()
+                    return
+                }
+                receiveNext(nextData)
+            }
+        }
+        receiveNext(Data())
+        XCTAssertEqual(received.wait(timeout: .now() + 5), .success)
+        if let error = resultBox.error() { throw error }
+        let response = try SpacesDeviceAPICodec.decodeResponse(resultBox.responseData())
+
+        return (response, waitForRequestConnectionCount(0, on: server, timeout: 5))
     }
 
     private func waitForRequestConnectionCount(_ expectedCount: Int, on server: SpacesDeviceAPIServer, timeout: TimeInterval) -> Bool {

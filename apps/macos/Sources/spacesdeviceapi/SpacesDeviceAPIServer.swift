@@ -478,7 +478,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     if request.command.hijacksConnection { didHijackConnection = true }
                     let residual = request.command.isTunnelCommand ? buffer : Data()
                     server.queue.async { [weak self] in self?.dispatchOnDeviceAPIQueue(request, residual: residual) }
-                } catch { finishRequest(.failure(error)) }
+                } catch {
+                    // A line that fails to decode ends the connection on both transports: `LinuxServer.handleClient`
+                    // returns on this same failure rather than trying to keep reading.
+                    server.trace("request_error peer=\(peerID) error=\(String(describing: error).replacingOccurrences(of: "\n", with: "\\n"))")
+                    let response = SpacesDeviceAPIServer.failureResponse(for: error)
+                    server.sendResponse(response, to: connection, on: connectionQueue) { [weak self] _ in self?.connection.cancel() }
+                }
             }
 
             /// Authorizes and routes one request. Runs on the shared Device API queue; the connection's
@@ -531,12 +537,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 } catch { finishRequest(.failure(error)) }
             }
 
-            /// Sends one request result, then either resumes the reusable request session or closes it
-            /// after a thrown request error. Called from whichever queue produced the result — this
-            /// connection's own queue for `.ping`, the Device API queue for everything else, including
-            /// completions handed back from the worker queues — and only touches the connection, so it
-            /// needs no particular queue itself. The send is issued on `connectionQueue` so its
-            /// completion, which resumes the read loop, lands back where the connection's state lives.
+            /// Sends one request result, then either resumes the read loop or closes the connection.
+            /// Called from whichever queue produced the result: this connection's own queue for `.ping`,
+            /// the Device API queue for everything else, including completions handed back from the
+            /// worker queues. Only touches the connection, so it needs no particular queue itself; the
+            /// send is issued on `connectionQueue` so its completion, which resumes the read loop, lands
+            /// back where the connection's state lives, `didHijackConnection` included.
             private func finishRequest(_ result: Result<SpacesDeviceAPIResponse, any Error>) {
                 switch result {
                 case .success(let response):
@@ -552,7 +558,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 case .failure(let error):
                     server.trace("request_error peer=\(peerID) error=\(String(describing: error).replacingOccurrences(of: "\n", with: "\\n"))")
                     let response = SpacesDeviceAPIServer.failureResponse(for: error)
-                    server.sendResponse(response, to: connection, on: connectionQueue) { [weak self] _ in self?.connection.cancel() }
+                    let endsConnection = SpacesDeviceAPIServer.closesConnectionOnFailure(error)
+                    server.sendResponse(response, to: connection, on: connectionQueue) { [weak self] sendError in
+                        guard let self else { return }
+                        // A failed hijacking request never started its stream, and its read loop already
+                        // stopped, so it closes rather than leaking open. A failed send closes too, as on
+                        // the success path above.
+                        guard !endsConnection, sendError == nil, !self.didHijackConnection else {
+                            self.connection.cancel()
+                            return
+                        }
+                        self.processBufferedLines()
+                    }
                 }
             }
         }
@@ -799,7 +816,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     }
 
                     let response: SpacesDeviceAPIResponse
-                    var admissionRefused = false
+                    var requestError: (any Error)?
                     do {
                         // Authorization stays on the state queue; only the long or engine-blocking work
                         // moves off it. A command answered from a worker queue can finish after one that
@@ -874,19 +891,19 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                             }
                         }
                     } catch {
-                        admissionRefused = error is SpacesDeviceAPIServer.AdmissionRefused
+                        requestError = error
                         response = SpacesDeviceAPIServer.failureResponse(for: error)
                     }
                     let responseLine = try SpacesDeviceAPICodec.encodeResponseLine(response)
                     try writeLoggedTLSResponse(responseLine, ssl: ssl, request: request, responseOK: response.ok, fileDescriptor: fileDescriptor)
                     // A refusal ends the connection, not just this exchange, and returning here runs the
-                    // `defer` that closes the socket. `.unauthorized` means the client must re-pair before
-                    // anything it sends can be served. An admission refusal means the server has stopped:
-                    // this transport never hands a plain request socket to `registerActiveConnection`, so
-                    // `stopOnQueue`'s sweep does not close it, and a session client — which reuses one
-                    // connection for every request — would keep sending into a stopped server instead of
-                    // dialing the replacement listener the supervisor builds.
-                    if !response.ok, response.errorCode == .unauthorized || admissionRefused { return }
+                    // `defer` that closes the socket. The admission refusal matters most on this transport:
+                    // a plain request socket is never handed to `registerActiveConnection`, so
+                    // `stopOnQueue`'s sweep does not close it, and a session client, which reuses one
+                    // connection for every request, would keep sending into a stopped server instead of
+                    // dialing the replacement listener the supervisor builds. Every other failure is
+                    // ordinary and recoverable, so the loop reads the next request on this same connection.
+                    if let requestError, SpacesDeviceAPIServer.closesConnectionOnFailure(requestError) { return }
                 }
             }
 
@@ -3728,6 +3745,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         return SpacesDeviceAPIResponse(ok: false, message: message, errorCode: errorCode(for: error))
     }
+
+    /// True for the two failures that end a request connection instead of leaving it open for the next
+    /// request: an authorization failure means the client cannot be trusted with anything else it sends
+    /// until it re-pairs, and `AdmissionRefused` means this server has stopped accepting requests at all.
+    /// Every other thrown request error is an ordinary, recoverable failure (bad argument, missing
+    /// session, and so on) that both transports answer and then keep the connection open for. Both
+    /// transports ask this one predicate so they cannot drift on which failures end a connection.
+    static func closesConnectionOnFailure(_ error: any Error) -> Bool { error is AdmissionRefused || errorCode(for: error) == .unauthorized }
 
     private func handleTerminalControlRequest(_ payload: SpacesDeviceTerminalControlRequest) throws -> SpacesDeviceAPIResponse {
         let sessionID = payload.sessionID
