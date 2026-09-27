@@ -200,7 +200,9 @@ final class SpacesMCPStdioServer {
                         .workspaceStart(.init(cwd: FileManager.default.currentDirectoryPath, workspaceID: args.workspace))))
             },
             MCPToolDescriptor(
-                name: "spaces_workspace_restart", description: "Force a full stop and relaunch for a workspace on this or a paired device.",
+                name: "spaces_workspace_restart",
+                description:
+                    "Relaunch a workspace's configured processes on this or a paired device. Leaves ad hoc terminals and coding agents running.",
                 properties: [
                     "workspace": stringSchema("Workspace ID."), "device": stringSchema("Paired device name or ID. Defaults to this machine."),
                 ], required: ["workspace"]

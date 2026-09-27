@@ -837,6 +837,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         }
     }
 
+    /// A Device API restart relaunches the configured process in place (same row id, new session) and
+    /// leaves the ad hoc terminal and the coding agent running (#799).
     func testRestartWorkspaceLifecycleUsesDeviceAPIOrchestratorPath() throws {
         try withTemporaryProfile { root in
             let identity = try testTLSIdentity()
@@ -904,23 +906,23 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
             XCTAssertTrue(response.ok, response.message)
             XCTAssertEqual(response.workspaceID, workspace.id)
-            XCTAssertEqual(terminations.sessionIDs(), ["old-session", "agent-session", "shell-session"])
+            XCTAssertEqual(Set(terminations.sessionIDs()), ["old-session"], "only the configured process's session ends")
             XCTAssertEqual(launches.titles(), ["api"])
             let updatedWorkspace = try XCTUnwrap(try store.workspace(id: workspace.id))
             XCTAssertTrue(updatedWorkspace.isRunning)
             let processes = try store.runningProcesses(workspaceID: workspace.id)
             XCTAssertEqual(processes.count, 1)
             let relaunchedProcess = try XCTUnwrap(processes.first)
+            XCTAssertEqual(relaunchedProcess.id, "old-process", "the row is reused in place")
             XCTAssertEqual(relaunchedProcess.templateID, "process-api")
             XCTAssertEqual(relaunchedProcess.templateName, "api")
             XCTAssertEqual(relaunchedProcess.status, .running)
             XCTAssertNotEqual(relaunchedProcess.terminalTrackingID, "old-session")
-            XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
-            XCTAssertEqual(try store.windows(workspaceID: workspace.id).map(\.name), ["api"])
+            XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).map(\.id), ["old-agent"])
+            XCTAssertEqual(Set(try store.windows(workspaceID: workspace.id).map(\.name)), ["docs", "api", "shell", "Mock Agent"])
             let overviewWorkspace = try XCTUnwrap(response.overview?.workspaces.first(where: { $0.id == workspace.id }))
             XCTAssertTrue(overviewWorkspace.isRunning)
-            XCTAssertEqual(overviewWorkspace.processRows.count, 1)
-            XCTAssertTrue(overviewWorkspace.terminalRows.isEmpty)
+            XCTAssertEqual(overviewWorkspace.processRows.map(\.id), ["process-api"])
         }
     }
 

@@ -986,12 +986,13 @@ import workspacecore
         return preparedPaneHoldsKeyboardFocus ? .restoreToPreparedPane : .none
     }
 
-    /// The held predecessor an open has orphaned, if any. A replacement's open is the only thing that can
-    /// release the hold its restart placed: the daemon consumed that reservation the moment it launched
+    /// The held predecessor an open has orphaned, if any, for Start's revival of an exited configured
+    /// process (a Restart's relaunch opens no pane and places no hold, #799). A replacement's open is the
+    /// only thing that can release the hold: the daemon consumed the reservation the moment it launched
     /// the replacement, so it will never send a teardown for the old session, and the client's overview
-    /// pruning deliberately skips held panes. An open that names a replaced session and then fails for
-    /// any reason therefore has to release the pane itself, or the terminated predecessor stays on screen
-    /// for good. Pure so the "claimed it or released it" rule is directly testable.
+    /// pruning deliberately skips held panes. An open that names a replaced session and then fails for any
+    /// reason therefore has to release the pane itself, or the terminated predecessor stays on screen for
+    /// good. Pure so the "claimed it or released it" rule is directly testable.
     nonisolated static func heldPredecessorSessionToRelease(replacesSessionID: String?, openAction: TerminalPaneOpenAction?) -> String? {
         guard let replacesSessionID, openAction != .claimReplacedPane else { return nil }
         return replacesSessionID

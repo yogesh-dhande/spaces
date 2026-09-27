@@ -39,6 +39,10 @@ struct TerminalDetailView: View {
     @State private var pendingStopRow: SpacesMobileWorkspaceRuntimeRow?
     @State private var renderedText = ""
     @State private var model: TerminalViewerModel
+    /// The process row this viewer opened on, latched the first time the overview resolves `session.id`
+    /// to a process row. It has to be latched early: once a restart replaces the session, `session.id`
+    /// no longer resolves to any row.
+    @State private var followedProcessRow: TerminalSessionFollowDiff.ProcessRowIdentity?
     /// Measured size of the Copy pill's visible capsule (see `TerminalSelectionCopyPill`), captured via
     /// `SelectionCopyPillSizePreferenceKey` so the overlay can right-align the capsule's trailing edge to
     /// the selection's anchor point without knowing the label's rendered width ahead of time. Resets to
@@ -88,7 +92,12 @@ struct TerminalDetailView: View {
                 isDemoMode: appModel.isDemoModeEnabled, openSource: openSource, retainedScreens: appModel.retainedTerminalScreens))
     }
 
-    var body: some View {
+    /// The overview observer sits outside `detailContent` because that modifier chain is at the type
+    /// checker's limit: one more `.onChange` inside it fails with "unable to type-check this expression in
+    /// reasonable time".
+    var body: some View { detailContent.onChange(of: appModel.overview) { _, _ in followReplacementSessionIfNeeded() } }
+
+    private var detailContent: some View {
         VStack(spacing: 0) {
             topOverlay.padding(.horizontal, 8).padding(.top, 4).padding(.bottom, 4)
 
@@ -158,6 +167,7 @@ struct TerminalDetailView: View {
             if scenePhase == .inactive { model.noteMountedWhileSceneInactive() }
             model.start()
             if scenePhase == .active { model.resumeAfterBackgrounding() }
+            followReplacementSessionIfNeeded()
         }.task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }.task(id: e2eCommandRequestPath) { await consumeE2ECommandRequestsIfNeeded() }.onChange(
             of: model.showsTerminalSurface
         ) { showsTerminalSurface in
@@ -520,6 +530,20 @@ struct TerminalDetailView: View {
 
     private func restartRuntime(_ row: SpacesMobileWorkspaceRuntimeRow) async {
         if let session = await appModel.restart(row: row) { onSessionChanged(session) }
+    }
+
+    /// Follows a restart made from any client the same way `restartRuntime` follows one this phone made:
+    /// `onSessionChanged` replaces the route in place (no push or pop), and the detail rebuilds on the
+    /// replacement session, which dismisses the keyboard just as the phone's own Restart does.
+    private func followReplacementSessionIfNeeded() {
+        if followedProcessRow == nil, let runtimeRow = appModel.runtimeRow(forSessionID: session.id) {
+            followedProcessRow = TerminalSessionFollowDiff.processRowIdentity(for: runtimeRow)
+        }
+        guard let followedProcessRow, let overview = appModel.overview,
+            let replacement = TerminalSessionFollowDiff.replacementSession(
+                for: followedProcessRow, displayedSessionID: session.id, displayedCreatedAt: session.createdAt, overview: overview)
+        else { return }
+        onSessionChanged(replacement)
     }
 
     private func beginBackNavigation() {

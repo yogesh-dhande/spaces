@@ -26,7 +26,7 @@ public struct SpacesCommand: ParsableCommand {
               - `project list`, `workspace list`, and `workspace create`/`start`/`stop`/`restart` accept `--device <name-or-id>` to read or act on a paired device; the discovery listings read the device's overview. Omitting `--device` targets this device's spacesd daemon.
               - `workspace start` waits for pending/running setup to complete and fails with the setup error if setup failed. It is convergent: it launches whichever configured processes are not already running (a never-started one launches fresh, an exited one restarts) and leaves already-running processes, ad hoc terminals, and coding-agent sessions untouched; a workspace whose configured processes are all already running succeeds as a no-op. Windows open without activating the app.
               - `workspace stop` stops a workspace: the daemon terminates its processes and terminal sessions. A running Spaces app closes that workspace's panes and tracked browser tabs when it sees the transition, the same cleanup the app's own Stop gets; with no app running, the tracked tabs stay open.
-              - `workspace restart` forces a full stop and relaunch for a workspace.
+              - `workspace restart` runs the stop script, then relaunches every configured process (running or not) in place, keeping each one's identity across the swap. Ad hoc terminals, coding-agent sessions, and running automations are left untouched.
               - `terminal stop <session>` ends one terminal session on this machine the way stopping its runtime target in the app does: the daemon tears the session down, its row disappears, and its pane closes. A session that has already ended is refused.
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for the current Spaces terminal session, or no-ops outside one.
               - `agent list`/`agent status` report coding-agent sessions with status, the first line of the agent's brief, project/workspace context, and a spaces://terminal deep link. `agent brief write [markdown]` replaces the agent's brief, a markdown status page Spaces shows beside its terminal (markdown read from stdin when omitted; empty clears it); `agent brief read` prints it and `agent brief clear` removes it. `status` and `brief` default the session to SPACES_TERMINAL_TRACKING_ID.
@@ -199,7 +199,8 @@ struct WorkspaceStopCommand: ParsableCommand {
 
 struct WorkspaceRestartCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "restart", abstract: "Force a full stop and relaunch for a workspace on this or a paired device.")
+        commandName: "restart",
+        abstract: "Relaunch a workspace's configured processes on this or a paired device. Leaves ad hoc terminals and coding agents running.")
 
     @Option(name: .long, help: "Workspace ID. Defaults to the workspace containing the current directory.") var workspace: String?
     @Option(name: .long, help: "Paired device name or ID. Defaults to this machine.") var device: String?

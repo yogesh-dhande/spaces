@@ -1579,8 +1579,9 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests restart workspace clears agent windows by arranging a running workspace with an Spaces2 agent window and asserting the record and built-in terminal window are removed before relaunch.
-    func testRestartWorkspaceClearsAgentWindows() throws {
+    /// A restart relaunches configured processes only (#799): a coding agent is neither a configured
+    /// process nor an ad hoc terminal, so its row and session keep running through the restart untouched.
+    func testRestartWorkspaceLeavesAgentWindowsRunning() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
@@ -1594,7 +1595,8 @@ extension OrchestratorTests {
 
         try orchestrator.restartWorkspace(workspaceID: workspace.id)
 
-        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty, "Agent window records should be cleared during restart")
+        XCTAssertEqual(
+            try store.agentWindows(workspaceID: workspace.id).map(\.id), [agentRecord.id], "the coding agent's row keeps running through the restart")
     }
 
     /// A live agent row's name is part of the workspace's name space, so a settings write that would give

@@ -16,10 +16,24 @@ extension WorkspaceOrchestrator {
     static let configuredProcessOpenFocusIntent = TerminalOpenFocusIntent.withoutFocus
 
     /// The open intent for a configured process launch: never focusing, and naming the session it takes
-    /// over from when the launch is a restart's replacement, so the pane keeps its place in the layout.
+    /// over from when the launch is Start reviving an exited run, so the pane keeps its place in the
+    /// layout. A Restart's relaunch never reaches this at all: it launches with no open intent (see
+    /// `ProcessRelaunchReason`), because its row keeps naming a session throughout and every client
+    /// retargets the pane itself from the overview diff.
     static func configuredProcessOpenIntent(replacing replacedSessionID: String? = nil) -> TerminalPaneOpenIntent {
         TerminalPaneOpenIntent(focus: configuredProcessOpenFocusIntent, replacesSessionID: replacedSessionID)
     }
+
+    /// Whether a configured process's relaunch is fulfilling Start (reviving an exited process, or
+    /// converging tracked runtime forward) or an explicit Restart (workspace-level or single-process, from
+    /// any client).
+    ///
+    /// Start closes the old pane as held and reopens it (`replacesSessionID`), the only way the client
+    /// learns a fresh launch should claim an already-pruned pane. A Restart's row is never pruned in
+    /// between (its id survives the relaunch), so every client's own overview diff
+    /// (`TerminalSessionReplacementDiff`) already retargets the pane; a Restart posts neither the close nor
+    /// the open.
+    enum ProcessRelaunchReason { case start, restart }
 
     public func updateRunningWorkspaceProcesses(workspaceID: String, processes: [ProcessTemplate], restartChangedCommands: Bool) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
@@ -153,8 +167,7 @@ extension WorkspaceOrchestrator {
             })
         else { return }
         switch processTemplate.onExit {
-        case .none:
-            break
+        case .none: break
         case .notify: notificationDeliverer("Process Exited", "Process '\(process.templateName)' has exited", nil)
         case .restart:
             // The one exit action that LAUNCHES, and it runs on the detached process-exit monitor rather
@@ -178,7 +191,7 @@ extension WorkspaceOrchestrator {
                 try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
                     Self.writeStandardError("spaces: Restarting process '\(process.templateName)' due to exit\n")
                     notificationDeliverer("Process Restarting", "Process '\(process.templateName)' is being restarted", nil)
-                    try restartProcessInTerminal(workspaceID: workspaceID, process: process)
+                    try restartProcessInTerminal(workspaceID: workspaceID, process: process, reason: .start)
                 }
             } catch  where WorkspaceOrchestrator.isWorkspaceLifecycleBusyError(error) { return }
         }
@@ -217,7 +230,7 @@ extension WorkspaceOrchestrator {
             // template has no live row anywhere yet, this exited row is the one live-launchable path back to
             // it (the self-healing case), so it still restarts.
             guard !liveTemplateIDs.contains(resolvedTemplate.id) else { continue }
-            try restartProcessInTerminal(workspaceID: workspaceID, process: process, background: background)
+            try restartProcessInTerminal(workspaceID: workspaceID, process: process, background: background, reason: .start)
             liveTemplateIDs.insert(resolvedTemplate.id)
         }
     }
@@ -271,13 +284,14 @@ extension WorkspaceOrchestrator {
         for template in missingTemplates {
             _ = try launchConfiguredProcess(
                 template: template, workspace: workspace, env: env, background: background,
-                restoreReservedPortsOnFailure: batchHasLiveLaunch ? false : nil)
+                restoreReservedPortsOnFailure: batchHasLiveLaunch ? false : nil, openIntent: Self.configuredProcessOpenIntent())
             batchHasLiveLaunch = true
         }
     }
 
     @discardableResult func restartProcessInTerminal(
-        workspaceID: String, process: RunningProcessRecord, templateOverride: ProcessTemplate? = nil, background: Bool = false
+        workspaceID: String, process: RunningProcessRecord, templateOverride: ProcessTemplate? = nil, background: Bool = false,
+        reason: ProcessRelaunchReason
     ) throws -> RunningProcessRecord {
         try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         _ = background
@@ -294,13 +308,28 @@ extension WorkspaceOrchestrator {
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) }, runtimeManifest: runtimeManifest
         )
         let session: SpacesTerminalSessionHandle
-        // The replacement takes over this process's pane, so its session is closed as held rather than
-        // torn down. `replacedSessionID` stays set until the launch claims it; a launch that throws
-        // releases the hold on the way out so no pane is left waiting for a session that never arrives.
+        // Start closes the old session as held for its replacement; `replacedSessionID` stays set until the
+        // launch claims it, and a launch that throws releases the hold on the way out. A Restart posts no
+        // pane message at all (see `ProcessRelaunchReason`).
         var replacedSessionID: String?
         if isManagedTerminalApp(process.terminalApp) {
-            replacedSessionID = replacedTerminalSessionID(for: process)
-            terminateBuiltInTerminalSession(for: process, closeDisposition: replacedSessionID == nil ? .teardown : .awaitReplacement)
+            switch reason {
+            case .start:
+                replacedSessionID = replacedTerminalSessionID(for: process)
+                terminateBuiltInTerminalSession(for: process, closeDisposition: replacedSessionID == nil ? .teardown : .awaitReplacement)
+            case .restart:
+                // The terminator no-ops during a daemon handoff, so relaunching then would mislabel a
+                // session the successor daemon inherits as exited.
+                guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
+                terminateBuiltInTerminalSessionWithoutClosingPane(for: process)
+                // The agent ran inside this configured process, so it ends with it.
+                if let endedSessionID = builtInTerminalSessionID(for: process) {
+                    try deleteAgentRows(forBuiltInTerminalSession: endedSessionID, workspaceID: workspaceID)
+                    // Termination is asynchronous and can take seconds; a replacement launched sooner
+                    // finds its port still held. Returns at once when a workspace restart already waited.
+                    waitForBuiltInTerminalSessionsToExit([endedSessionID])
+                }
+            }
         } else {
             _ = terminateProcessForRestart(process)
         }
@@ -317,10 +346,26 @@ extension WorkspaceOrchestrator {
         // workspace is marked running.
         var launchSucceeded = false
         defer { if !launchSucceeded && workspaceWasRunning { PortReserver.shared.clearRuntimeStartHold(ports: runtimeStartPorts) } }
-        session = try launchSpacesTerminalSession(
-            title: process.templateName, workingDirectory: workspace.dir, command: command, showMode: .owner,
-            openIntent: Self.configuredProcessOpenIntent(replacing: replacedSessionID), backend: .ghosttyEmbedded, readinessPolicy: .sessionReady,
-            workspaceID: workspace.id, kind: .process)
+        let openIntent: TerminalPaneOpenIntent? = reason == .start ? Self.configuredProcessOpenIntent(replacing: replacedSessionID) : nil
+        do {
+            session = try launchSpacesTerminalSession(
+                title: process.templateName, workingDirectory: workspace.dir, command: command, showMode: .owner, openIntent: openIntent,
+                backend: .ghosttyEmbedded, readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
+        } catch {
+            // A Restart's row keeps naming its ended session after a failed relaunch, so it is marked
+            // exited rather than left reading `.running`. Unless a handoff began after the guard above:
+            // then the terminator no-op'd and the session lives on in the successor daemon.
+            if reason == .restart, daemonHandoffInProgress() { throw WorkspaceError.daemonHandoffInProgress }
+            if reason == .restart {
+                let failedProcess = RunningProcessRecord(
+                    id: process.id, workspaceID: process.workspaceID, templateID: process.templateID, templateName: process.templateName,
+                    command: process.command, terminalApp: process.terminalApp, terminalTrackingID: process.terminalTrackingID, pid: nil,
+                    status: .exited, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
+                    exitedAt: nowISO8601())
+                try? store.upsert(runningProcess: failedProcess)
+            }
+            throw error
+        }
         replacedSessionID = nil
         launchSucceeded = true
         if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
@@ -529,7 +574,7 @@ extension WorkspaceOrchestrator {
                     terminalTrackingID: runningProcess.terminalTrackingID, pid: runningProcess.pid, status: runningProcess.status,
                     logPath: runningProcess.logPath, lastOutputAt: runningProcess.lastOutputAt, startedAt: runningProcess.startedAt,
                     exitedAt: runningProcess.exitedAt)
-                try restartProcessInTerminal(workspaceID: workspace.id, process: restartedProcess, templateOverride: edit.updated)
+                try restartProcessInTerminal(workspaceID: workspace.id, process: restartedProcess, templateOverride: edit.updated, reason: .start)
             } else if edit.keyChanged {
                 try relabelRunningProcess(
                     workspaceID: workspace.id, process: runningProcess, templateID: edit.updated.id, templateName: edit.updatedKey,
@@ -577,12 +622,13 @@ extension WorkspaceOrchestrator {
         return (logFile, pidFile)
     }
 
-    /// - Parameter reservations: On a restart, the pane each configured process's previous session left
-    ///   held, claimed here so the replacement takes it over in place.
-    func launchProcesses(
-        workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String], background: Bool = false,
-        reservations: ReplacedTerminalSessionReservations? = nil
-    ) throws -> [WindowRecord] {
+    /// The cold-launch path: every configured process starts fresh, with no predecessor pane to claim.
+    /// Reached only for a workspace with no tracked runtime at all (`launchWorkspaceUnlocked`'s guard), so
+    /// a restart of a running workspace never calls in here: it relaunches each configured process in
+    /// place through `restartProcessInTerminal` instead, which is what keeps a running workspace's panes.
+    func launchProcesses(workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String], background: Bool = false) throws
+        -> [WindowRecord]
+    {
         try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
         guard !templates.isEmpty else {
             try terminateBuiltInTerminalSessionsForConfiguredProcesses(workspaceID: workspace.id)
@@ -597,8 +643,8 @@ extension WorkspaceOrchestrator {
             let sessionCommand = try spacesTerminalCommand(template: template, env: env)
             let session = try launchSpacesTerminalSession(
                 title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner,
-                openIntent: Self.configuredProcessOpenIntent(replacing: reservations?.claimSessionID(processKey: runningProcessMatchKey(name: name))),
-                backend: .ghosttyEmbedded, readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
+                openIntent: Self.configuredProcessOpenIntent(), backend: .ghosttyEmbedded, readinessPolicy: .sessionReady, workspaceID: workspace.id,
+                kind: .process)
             let now = nowISO8601()
             let running = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
@@ -689,7 +735,7 @@ extension WorkspaceOrchestrator {
     public func restartWorkspaceProcess(workspaceID: String, processID: String) throws {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
             guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
-            try restartProcessInTerminal(workspaceID: workspaceID, process: process)
+            try restartProcessInTerminal(workspaceID: workspaceID, process: process, reason: .restart)
         }
     }
 
@@ -735,7 +781,7 @@ extension WorkspaceOrchestrator {
         if let existing = running.first(where: { runningProcessMatchesTemplate($0, template: template, fallbackKey: expectedKey) }) {
             let process =
                 if existing.status == .exited {
-                    try restartProcessInTerminal(workspaceID: workspaceID, process: existing, templateOverride: template)
+                    try restartProcessInTerminal(workspaceID: workspaceID, process: existing, templateOverride: template, reason: .start)
                 } else { existing }
             try markWorkspaceRunningIfNeeded(workspace)
             return process
@@ -746,7 +792,7 @@ extension WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) }, runtimeManifest: runtimeManifest
         )
-        let process = try launchConfiguredProcess(template: template, workspace: workspace, env: env)
+        let process = try launchConfiguredProcess(template: template, workspace: workspace, env: env, openIntent: Self.configuredProcessOpenIntent())
         try markWorkspaceRunningIfNeeded(workspace)
         logPerfMetric(
             "process_recover", workspaceID: workspaceID, target: configuredProcessMatchKey(name: template.name),
@@ -817,9 +863,10 @@ extension WorkspaceOrchestrator {
     ///   batch; the reconciler clears it once the workspace is marked running. Passing `false` is
     ///   therefore the one case where a failed launch neither rebinds nor clears the hold: clearing it
     ///   would let a reconcile pass rebind a placeholder over the sibling's still-starting server.
+    /// - Parameter openIntent: Nil posts no pane open; a restart passes nil so it never opens one.
     @discardableResult func launchConfiguredProcess(
         template: ProcessTemplate, workspace: WorkspaceRecord, env: [String: String], background: Bool = false,
-        restoreReservedPortsOnFailure: Bool? = nil
+        restoreReservedPortsOnFailure: Bool? = nil, openIntent: TerminalPaneOpenIntent?
     ) throws -> RunningProcessRecord {
         try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
         _ = background
@@ -852,7 +899,7 @@ extension WorkspaceOrchestrator {
             }
         }
         let session = try launchSpacesTerminalSession(
-            title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, openIntent: Self.configuredProcessOpenIntent(),
+            title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, openIntent: openIntent,
             backend: .ghosttyEmbedded, readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
         let now = nowISO8601()
         let record = RunningProcessRecord(

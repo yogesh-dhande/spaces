@@ -180,6 +180,103 @@ extension ProcessProfileEnvironmentSuites {
             #expect(TerminalPaneService.heldPredecessorSessionToRelease(replacesSessionID: nil, openAction: .installUnselectedTab) == nil)
         }
 
+        /// The gap a workspace restart passes through between terminating a configured process's old
+        /// session and its relaunch landing: the process's `running_processes` row keeps naming the old
+        /// session throughout (`restartProcessInTerminal` upserts the row onto the new session only once
+        /// the launch succeeds, never deleting it in between, #799), so a background overview pulled from
+        /// exactly this gap still carries the row naming "predecessor" and still retains it (a row's
+        /// tracking id stays in `retainedTerminalSessionIDs` whether or not its session is still live). The
+        /// pane must survive being diffed against that gap overview and then against the replacement's.
+        @Test func aPaneSurvivesAnOverviewPulledMidRestart() async throws {
+            let controller = makeController()
+            let deviceID = controller.deviceModel.localDeviceID
+            // Unlike the rest of this suite, the sidebar snapshots below install a paired local device, so
+            // a pane built without a stub would prepare real daemon-backed content: the local bootstrap
+            // starts a spacesd for this test's temp profile, and nothing stops it after the test.
+            for sessionID in ["predecessor", "replacement"] {
+                controller.panelCoordinator.installContentControllerForTesting(
+                    RecordingTerminalPaneContentStub(
+                        descriptor: .terminalSession(deviceID: deviceID, sessionID: sessionID), workspaceID: "workspace-1", sessionID: sessionID),
+                    sessionID: sessionID)
+            }
+            let layout = PanelLayoutEngine.appendTab(
+                tabID: "tab-1", pane: Pane(id: "a", content: .terminalSession(deviceID: deviceID, sessionID: "predecessor")), to: PanelLayout())
+            let json = String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
+            try controller.clientDatabase().writeWorkspacePanelLayout(deviceID: deviceID, workspaceID: "workspace-1", layoutJSON: json)
+            let running = try #require(section(deviceID: deviceID, processSessionID: "predecessor", retained: ["predecessor"]).overview)
+            // Installs through the full snapshot lane (as a cold launch does), which is what makes the
+            // controller's sidebar reload coordinator route a later local-only refresh through the
+            // terminal-overview lane below instead of falling back to a full reload.
+            controller.sidebar.applySidebarDataSnapshot(fullSnapshot(overview: running, deviceID: deviceID))
+            let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: "workspace-1")
+            controller.panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .withoutFocus)
+            #expect(controller.panelCoordinator.placement(forSessionID: "predecessor") != nil, "precondition: the pane is placed before the restart")
+
+            // The mid-restart gap overview, applied through the same lane a background local overview pull
+            // uses (`SidebarController.applyLocalDeviceSidebarSnapshot`, reached via
+            // `localOverviewLoadOverrideForTesting`) rather than `applyDeviceMutationResponse`: nothing in
+            // the real gap is a mutation this client made, it is a background pull racing the daemon's own
+            // terminate/relaunch sequence.
+            let gap = gapOverview(deviceID: deviceID)
+            controller.sidebar.localOverviewLoadOverrideForTesting = { .success(self.localSnapshot(overview: gap, deviceID: deviceID)) }
+            controller.sidebar.handleTerminalOverviewDidChange()
+            await controller.sidebar.drainSidebarRefreshForTesting()
+
+            // The relaunch's own response, applied exactly as a Mac Restart applies it (#799).
+            let restarted = try #require(
+                section(deviceID: deviceID, processSessionID: "replacement", retained: ["replacement"], createdAt: "2026-01-01T00:01:00Z").overview)
+            let epoch = controller.panelCoordinator.paneReplacementEpoch
+            controller.applyDeviceMutationResponse(
+                SpacesDeviceAPIResponse(
+                    ok: true, message: "", result: .mutation(SpacesDeviceMutationResult(overview: restarted, workspaceID: "workspace-1"))),
+                deviceID: deviceID, epoch: epoch)
+
+            #expect(
+                PanelLayoutEngine.orderedTerminalSessionIDs(in: controller.panelCoordinator.layout(for: scope)) == ["replacement"],
+                "the configured process's pane survived the mid-restart gap overview and followed the restart onto its replacement")
+        }
+
+        /// A paired device record good enough to satisfy `LocalDeviceSidebarSnapshot.localPairedDevice`;
+        /// nothing in this suite reads its fields back.
+        private func localDeviceRecord(deviceID: String) -> SpacesPairedDeviceRecord {
+            SpacesPairedDeviceRecord(
+                id: deviceID, name: "This Mac", platform: "macos", hosts: ["127.0.0.1"], port: 47847, certificateFingerprint: "fingerprint",
+                createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
+        }
+
+        private func fullSnapshot(overview: SpacesDeviceOverviewPayload, deviceID: String) -> AppKitController.SidebarDataSnapshot {
+            AppKitController.SidebarDataSnapshot(config: AppConfig(portRange: .default), local: localSnapshot(overview: overview, deviceID: deviceID))
+        }
+
+        private func localSnapshot(overview: SpacesDeviceOverviewPayload, deviceID: String) -> AppKitController.LocalDeviceSidebarSnapshot {
+            let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: deviceID)
+            return AppKitController.LocalDeviceSidebarSnapshot(
+                projects: mapped.projects, workspacesByProject: mapped.workspacesByProject,
+                workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, alertsGroups: [], localDeviceID: deviceID, localDeviceName: "This Mac",
+                localPairedDevice: localDeviceRecord(deviceID: deviceID), localDeviceOverview: overview, localDaemonStatus: nil,
+                localCompatibility: nil, localOfflineMessage: nil)
+        }
+
+        /// The overview shape of the gap between a restart's terminate step (ending the configured
+        /// process's old session) and its relaunch landing: the workspace is still running, the process
+        /// row is present and still names the old session (the row is never cleared or deleted in
+        /// between), and that session stays in the retention keep-set because the row names it. The
+        /// device would also list the ended session in `sessions`; the fixture leaves it out, so the pane
+        /// has only the row and the keep-set to survive on.
+        private func gapOverview(deviceID: String) -> SpacesDeviceOverviewPayload {
+            let workspace = SpacesDeviceWorkspaceSummary(
+                id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/workspace-1",
+                isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true,
+                processRows: [
+                    SpacesDeviceWorkspaceProcessRow(
+                        id: "api", workspaceID: "workspace-1", name: "api", command: "echo api", processID: "process-1", sessionID: "predecessor",
+                        runState: .exited, canRun: true, canStop: false, canRestart: true)
+                ])
+            return SpacesDeviceOverviewPayload(
+                projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
+                workspaces: [workspace], sessions: [], retainedTerminalSessionIDs: ["predecessor"])
+        }
+
         // MARK: - Overview-driven retarget
 
         private func openRequest(sessionID: String, workspaceID: String = "workspace-1") -> AppKitController.DeviceTerminalOpenRequest {

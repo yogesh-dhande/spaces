@@ -34,20 +34,23 @@ import spacesterminalcore
     private var codePaneControllers: [String: any PaneContentHosting] = [:]
     private var contentPreparationTasks: [String: Task<Void, Never>] = [:]
     /// Sessions the daemon closed as `awaitReplacement`: their panes are held where they are until the
-    /// replacement's open claims them, so a restart's new session lands in the tab, split, and window the
-    /// user arranged rather than at the end of the tab strip.
+    /// replacement's open claims them, so the new session lands in the tab, split, and window the user
+    /// arranged rather than at the end of the tab strip. Placed only by Start's revival of an exited
+    /// configured process; a workspace Restart posts neither a close nor an open for the session it
+    /// replaces (#799), so it never reaches this hold, and its replacement's pane is retargeted purely
+    /// from the overview diff (`retargetPaneForReplacement`, below).
     ///
     /// Held by session id rather than by placement, because a hold has to outlive not having a pane in
-    /// memory at all. The common programmatic restart is of a workspace the user is not currently
-    /// viewing, whose panel was never materialized this launch: there is no in-memory pane to point at,
-    /// only a persisted layout. Recording the id alone lets both pruning paths honor the hold, so the
-    /// persisted pane survives until the replacement's open restores the layout and claims it in place.
+    /// memory at all: Start can revive a process in a workspace the user is not currently viewing, whose
+    /// panel was never materialized this launch, so there is no in-memory pane to point at, only a
+    /// persisted layout. Recording the id alone lets both pruning paths honor the hold, so the persisted
+    /// pane survives until the replacement's open restores the layout and claims it in place.
     ///
     /// Exactly one of three things removes an entry: the replacement claims it, a plain teardown close
     /// releases it (which the daemon guarantees for every reservation its relaunch did not claim), or the
-    /// pane is closed some other way. Both live and restore-time pruning skip a held session, because the
-    /// stop deleted its row and pruning would otherwise drop the pane out from under the replacement that
-    /// is on its way.
+    /// pane is closed some other way. Both live and restore-time pruning skip a held session: the
+    /// terminated predecessor can drop out of the device's keep-set before the replacement's open arrives,
+    /// and pruning would otherwise close the pane out from under it.
     private var panesHeldForReplacement: Set<String> = []
 
     /// The sessions whose panes are being held for a replacement, for the restore-time pruning that would
@@ -633,22 +636,25 @@ import spacesterminalcore
     /// Points a runtime target's replacement at the pane its predecessor occupied, when the pairing
     /// reaches this client as an overview diff instead of as the replacement's own open.
     ///
-    /// Every start and restart of a runtime target is served by the Device API, whose orchestrator has no
-    /// opener to any client, so `openOrFocusTerminalPane`'s claim route is never reached for one. The
-    /// device's refreshed overview names the same pairing (`TerminalSessionReplacementDiff`), and this
-    /// applies it: the pane keeps its tab, its position in any split, and its window, and starts showing
-    /// the replacement instead of the ended session's last frame.
+    /// A workspace or single-process `restart` (#799) never posts a close or an open for the session it
+    /// replaces, on any orchestrator, so this diff is its only channel: the pairing reaches every client,
+    /// this Mac included, exclusively through the device's refreshed overview
+    /// (`TerminalSessionReplacementDiff`). A Start served by the Device API (the Mac app, the iPhone, or a
+    /// paired device) posts no open, so its hold is settled here instead; a Start served by the profile
+    /// orchestrator (the CLI, MCP) posts a real open and claims the pane directly, without ever reaching
+    /// this function. Either way, applying the pairing here keeps the pane's tab, its position in any
+    /// split, and its window, and starts showing the replacement instead of the ended session's last frame.
     ///
     /// Deliberately never installs a pane. Only a predecessor that has one — placed, held, restorable
     /// from a persisted workspace layout, or waiting inside a panel window whose device has not connected
     /// yet — hands it over; a target restarted with no pane open stays with no pane, where the open path
     /// would have installed one.
     ///
-    /// A hold placed by the predecessor's `awaitReplacement` close always ends here, since this is the
-    /// last thing the client will hear about that restart. A remote device's daemon posts no close at
-    /// all, so there is never a hold for a remote restart: the predecessor's pane is found the same way a
-    /// held one is, by checking whether it is already placed, restoring it from a persisted workspace
-    /// layout, or finding it in a pending panel window record — none of which needs a hold on record.
+    /// A hold placed by the predecessor's `awaitReplacement` close (Start only) always ends here, since
+    /// this is the last thing the client will hear about it. A restart places no hold to begin with, so
+    /// there is never one to settle: the predecessor's pane is found the same way a held one is, by
+    /// checking whether it is already placed, restoring it from a persisted workspace layout, or finding
+    /// it in a pending panel window record, none of which needs a hold on record.
     @discardableResult func retargetPaneForReplacement(replacedSessionID: String, request: AppKitController.DeviceTerminalOpenRequest) -> Bool {
         let wasHeld = panesHeldForReplacement.contains(replacedSessionID)
         guard placement(forSessionID: request.sessionID) == nil else {
@@ -1202,9 +1208,11 @@ import spacesterminalcore
     /// and with it the attachment-driven unattached ad hoc cleanup — is skipped.
     ///
     /// It also marks a close the user did not ask for, which is why it decides whether the caret moves:
-    /// a stop, a restart, an exited process, or a pruned session must not pull focus out of wherever the
-    /// user is and into a terminal. A programmatic `workspace restart` closes every one of a workspace's
-    /// panes in a row, so the alternative is the caret hopping through each survivor in turn.
+    /// a stop, an exited process, or a pruned session must not pull focus out of wherever the user is and
+    /// into a terminal. A `workspace stop` closes every one of a workspace's panes in a row, so the
+    /// alternative is the caret hopping through each survivor in turn. A workspace `restart` never reaches
+    /// this function at all for the sessions it replaces (#799): it posts no close IPC for them, and its
+    /// panes follow the replacement purely through `retargetPaneForReplacement`'s overview diff.
     func closePane(forSessionID sessionID: String, sessionIsTerminating: Bool = false, disposition: TerminalPaneCloseDisposition = .teardown) {
         // Every close by session id ends this session, so its in-flight content preparation is work for a
         // session that is already gone. Cancelled here, once, ahead of the disposition branch: a hold
@@ -1220,9 +1228,9 @@ import spacesterminalcore
                 pendingReplacementClaims.remove(sessionID)
                 return
             case .hold:
-                // Recorded before the placement lookup: the workspace being restarted is usually one the
-                // user is not viewing, whose panel has no in-memory pane to find, and the hold is exactly
-                // what protects its persisted pane until the replacement claims it.
+                // Recorded before the placement lookup: the workspace whose process Start is reviving is
+                // usually one the user is not viewing, whose panel has no in-memory pane to find, and the
+                // hold is exactly what protects its persisted pane until the replacement claims it.
                 holdPaneForReplacement(sessionID: sessionID)
                 return
             // Falls through to the ordinary teardown below.

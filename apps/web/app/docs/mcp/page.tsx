@@ -19,7 +19,7 @@ const TOOL_ROWS: [string, string][] = [
     "Create a workspace: project and branch required, plus a base branch or existingBranch to reuse a branch, and an optional device. Not started automatically.",
   ],
   ["spaces_workspace_start", "Ensure a workspace is running."],
-  ["spaces_workspace_restart", "Force a full stop and relaunch for a workspace."],
+  ["spaces_workspace_restart", "Relaunch a workspace's configured processes."],
   ["spaces_terminal_list", "List available terminal sessions."],
   ["spaces_terminal_tail", "Read a session's recent output, defaulting to the last 20 lines."],
   [
