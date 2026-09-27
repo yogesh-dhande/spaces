@@ -250,7 +250,7 @@ import spacesterminalcore
     ) -> SpacesDeviceEndpointResolver {
         SpacesDeviceEndpointResolver(
             hosts: hosts, port: port, certificateFingerprint: fingerprint, activeHost: nil, onProvenHost: { _ in },
-            connect: { host, _, _, _ in try dialer.connect(host: host) }, plainTCPProbe: { _, _, _ in false })
+            connect: { host, _, _, _ in try dialer.connect(host: host) })
     }
 }
 

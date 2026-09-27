@@ -28,7 +28,6 @@ import spacesterminalcore
         // failure as its own error, so none of these ever carried a request.
         #expect(!SpacesDeviceAPIRequestOutcome.mayHaveBeenPerformed(SpacesDeviceEndpointResolverError.allCandidatesUnreachable(hosts: ["1.2.3.4"])))
         #expect(!SpacesDeviceAPIRequestOutcome.mayHaveBeenPerformed(SpacesDeviceEndpointResolverError.noCandidateHosts))
-        #expect(!SpacesDeviceAPIRequestOutcome.mayHaveBeenPerformed(SpacesDeviceEndpointResolverError.transportAuthenticationFailed(host: "1.2.3.4")))
         #expect(!SpacesDeviceAPIRequestOutcome.mayHaveBeenPerformed(SpacesDeviceAPIRequestClientError.invalidPort))
         #expect(!SpacesDeviceAPIRequestOutcome.mayHaveBeenPerformed(SpacesPinnedTLSConnectionError.invalidPort(0)))
     }

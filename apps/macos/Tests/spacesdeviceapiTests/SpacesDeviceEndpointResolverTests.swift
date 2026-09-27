@@ -77,20 +77,19 @@ final class SpacesDeviceEndpointResolverTests: XCTestCase {
         }
     }
 
-    func testStalledHandshakeOnAnOpenPortIsAPinnedIdentityFailure() {
+    /// A stalled handshake never ran the pinned verify block, so it cannot say anything about the
+    /// daemon's identity: whether or not the port answers plain TCP, this is an ordinary outage the
+    /// caller retries, not a signal that routes to the re-pair recovery flow. Mirrors iOS, which takes
+    /// its verdict from the verify block's own `SpacesPinnedTLSPinRejection` rather than from the shape
+    /// of the failure (see `SpacesDeviceEndpointResolver.attempt`).
+    func testStalledHandshakeIsRetryableNotAPinnedIdentityFailure() {
         let connector = ConnectRecorder()
         connector.setBehavior(host: "lan", .fails(SpacesPinnedTLSConnectionError.timeout))
-        let answering = makeResolver(hosts: ["lan"], connector: connector, plainTCPProbeAnswers: true)
+        let resolver = makeResolver(hosts: ["lan"], connector: connector)
 
-        XCTAssertThrowsError(try answering.connect(timeout: 1)) { error in
-            XCTAssertEqual(error as? SpacesDeviceEndpointResolverError, .transportAuthenticationFailed(host: "lan"))
-            XCTAssertTrue(SpacesDeviceAPIAuthentication.isTransportAuthenticationFailure(error))
-        }
-
-        // The same timeout with nothing listening is an ordinary outage, not an identity failure.
-        let silent = makeResolver(hosts: ["lan"], connector: connector, plainTCPProbeAnswers: false)
-        XCTAssertThrowsError(try silent.connect(timeout: 1)) { error in
+        XCTAssertThrowsError(try resolver.connect(timeout: 1)) { error in
             XCTAssertEqual(error as? SpacesDeviceEndpointResolverError, .allCandidatesUnreachable(hosts: ["lan"]))
+            XCTAssertFalse(SpacesDeviceAPIAuthentication.isTransportAuthenticationFailure(error))
         }
     }
 
@@ -350,13 +349,11 @@ final class SpacesDeviceEndpointResolverTests: XCTestCase {
     }
 
     private func makeResolver(
-        hosts: [String], activeHost: String? = nil, connector: ConnectRecorder, plainTCPProbeAnswers: Bool = false,
-        onProvenHost: @escaping @Sendable (String) -> Void = { _ in }
+        hosts: [String], activeHost: String? = nil, connector: ConnectRecorder, onProvenHost: @escaping @Sendable (String) -> Void = { _ in }
     ) -> SpacesDeviceEndpointResolver {
         SpacesDeviceEndpointResolver(
             hosts: hosts, port: Self.port, certificateFingerprint: Self.fingerprint, activeHost: activeHost, onProvenHost: onProvenHost,
-            connect: { host, _, _, timeout in try connector.connect(host: host, timeout: timeout) },
-            plainTCPProbe: { _, _, _ in plainTCPProbeAnswers })
+            connect: { host, _, _, timeout in try connector.connect(host: host, timeout: timeout) })
     }
 }
 
