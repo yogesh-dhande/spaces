@@ -33,6 +33,54 @@
             XCTAssertTrue(menu(stopped).offersLifecycle)
             XCTAssertTrue(menu(stopped).offersStart)
         }
+
+        /// The home project's workspace under Demo Mode: no lifecycle (checked above), no ad hoc terminal
+        /// (Demo Mode's backend cannot open one), no Hide, and no Delete (home workspaces are undeletable).
+        /// Every item condition is false, so the pill this menu backs must not be shown at all; rendering
+        /// it anyway is the bug (an ellipsis pill opening to an empty "~" section).
+        func testHomeWorkspaceInDemoModeHasNoActions() {
+            let home = makeHomeWorkspace()
+            let menu = WorkspaceActionsMenu(
+                workspace: home, isMutating: false, isDeleting: false, onStart: {}, onRestart: {}, onStop: {}, onNewTerminal: nil, onHide: nil,
+                onDelete: nil)
+
+            XCTAssertFalse(menu.hasActions)
+        }
+
+        /// One available item is enough to keep the pill: `hasActions` must not require lifecycle control,
+        /// only that at least one of the per-item predicates is true.
+        func testWorkspaceWithOnlyHideHasActions() {
+            let home = makeHomeWorkspace()
+            let menu = WorkspaceActionsMenu(
+                workspace: home, isMutating: false, isDeleting: false, onStart: {}, onRestart: {}, onStop: {}, onNewTerminal: nil, onHide: {},
+                onDelete: nil)
+
+            XCTAssertTrue(menu.hasActions)
+        }
+
+        /// Same as above for New Terminal, the item Demo Mode specifically withholds: a non-Demo-Mode
+        /// workspace with no other item still keeps its pill.
+        func testWorkspaceWithOnlyNewTerminalHasActions() {
+            let home = makeHomeWorkspace()
+            let menu = WorkspaceActionsMenu(
+                workspace: home, isMutating: false, isDeleting: false, onStart: {}, onRestart: {}, onStop: {}, onNewTerminal: {}, onHide: nil,
+                onDelete: nil)
+
+            XCTAssertTrue(menu.hasActions)
+        }
+
+        /// A stopped standard workspace offering only Start (no New Terminal/Hide/Delete wired) still has
+        /// actions: `hasActions` must fold in the lifecycle items, not just the three optional closures.
+        func testStoppedWorkspaceOfferingOnlyStartHasActions() {
+            let stopped = SpacesDeviceWorkspaceSummary(
+                id: "workspace-feature", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/repo/feature",
+                isRunning: false, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: false)
+            let menu = WorkspaceActionsMenu(
+                workspace: stopped, isMutating: false, isDeleting: false, onStart: {}, onRestart: {}, onStop: {}, onNewTerminal: nil, onHide: nil,
+                onDelete: nil)
+
+            XCTAssertTrue(menu.hasActions)
+        }
     }
 
     /// `SpacesDeviceWorkspaceSummary.displayName` for the home project's workspace.
