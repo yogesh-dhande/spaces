@@ -4701,6 +4701,59 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
+    /// A Device API image paste reaches the session as a `.send` control command with `asPaste`, gated by
+    /// the same `ownerRequestRejection` check as every other input command, and the handler relies on that
+    /// gate alone (#804). A takeover decides ownership in memory immediately and only enqueues its durable
+    /// mirror behind it (write-behind), so this parks the persistence queue across the takeover to prove
+    /// the gate accepts the just-promoted owner's paste while the durable attachment row still names the
+    /// previous owner.
+    func testControlAcceptsImagePasteFromJustPromotedOwnerWhileDurableTakeoverMirrorLags() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-image-paste-live-owner", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+                shell: "/bin/zsh", command: "zsh", createdAt: "2026-09-27T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            let previousOwner = TerminalClient(
+                id: "remote-previous-owner", kind: .remote, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-09-27T00:00:00Z")
+            let newOwner = TerminalClient(
+                id: "remote-new-owner", kind: .remote, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-09-27T00:00:00Z")
+            try TerminalSessionPersistence.attachClient(
+                sessionID: launchConfiguration.sessionID, client: previousOwner, mode: .owner, paths: paths, attachedAt: "2026-09-27T00:00:00Z")
+            XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: newOwner, attachmentMode: .viewer)).ok)
+
+            // Park the durable mirror so the takeover below is decided in memory but its write is enqueued
+            // behind the held queue: the DB keeps naming `previousOwner` until the gate is released.
+            let gate = host.debugHoldPersistenceQueue()
+            defer {
+                gate.signal()
+                host.debugDrainPersistenceQueue()
+            }
+
+            XCTAssertTrue(host.handleControlRequest(.init(command: "takeover", clientID: newOwner.id)).ok)
+            XCTAssertEqual(host.activeOwnerClientID(), newOwner.id, "the takeover is decided in memory before its durable mirror commits")
+
+            let durableSnapshot = try TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
+            XCTAssertEqual(
+                TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: durableSnapshot), previousOwner.id,
+                "the durable attachment row must still name the previous owner while the takeover's mirror write is parked")
+
+            // Composed exactly as a live client would right after observing its own takeover: the current
+            // (post-takeover) owner epoch, not one read back from the lagging durable row.
+            let currentEpoch = host.core.debugOwnerEpoch
+            let response = host.handleControlRequest(
+                .init(command: "send", text: "/tmp/spaces-paste-example.png", clientID: newOwner.id, ownerEpoch: currentEpoch, asPaste: true))
+
+            XCTAssertTrue(response.ok, response.message)
+        }
+    }
+
     func testControlScrollAcceptsZeroDeltaLifecyclePackets() async throws {
         try await TerminalEngineActor.run {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)

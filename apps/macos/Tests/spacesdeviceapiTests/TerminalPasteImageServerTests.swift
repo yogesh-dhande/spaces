@@ -67,6 +67,9 @@
             }
         }
 
+        /// The control socket is the sole ownership gate: when it rejects (the live session host decided
+        /// the requester is not the current owner), the handler must still clean up the temp file it wrote
+        /// before forwarding the paste.
         func testTerminalPasteImageRemovesTempFileWhenControlRejectsInjectedPath() throws {
             try withTemporaryProfile { _ in
                 let sessionID = "session-image-paste-reject-\(UUID().uuidString)"
@@ -134,20 +137,31 @@
             }
         }
 
-        /// The epoch check still has to reject a paste a client composed against an owner generation that
-        /// has since been superseded, so a stale non-nil epoch never reaches the session.
-        func testTerminalPasteImageRejectsStaleOwnerEpoch() throws {
+        /// A takeover updates the session host's in-memory owner and owner epoch immediately and only
+        /// enqueues its durable mirror behind it (write-behind), so the durable attachment and remote-state
+        /// rows can still name the previous owner and epoch for a moment after a legitimate takeover (#804).
+        /// `handleTerminalPasteImageRequest` must not gate on that lagging row itself: it forwards to the
+        /// session host's control socket and lets the host's own in-memory owner/epoch gate
+        /// (`ownerRequestRejection`, the same one every other terminal control command goes through) decide.
+        /// The durable owner and epoch seeded here disagree with the request, and a permissive control stub
+        /// stands in for a host that has already accepted the new owner's takeover, so the paste reaching
+        /// the socket proves the handler does not short-circuit on the stale row.
+        func testTerminalPasteImageAcceptedWhenLiveOwnerAndEpochDisagreeWithLaggingDurableRow() throws {
             try withTemporaryProfile { _ in
-                let sessionID = "session-image-paste-stale-epoch-\(UUID().uuidString)"
-                let clientID = "client-image-paste"
-                let paths = try seedOwnedRunningSession(sessionID: sessionID, clientID: clientID, ownerEpoch: 9)
+                let sessionID = "session-image-paste-live-owner-\(UUID().uuidString)"
+                let previousOwnerClientID = "client-previous-owner"
+                let newOwnerClientID = "client-new-owner"
+                let paths = try seedOwnedRunningSession(sessionID: sessionID, clientID: previousOwnerClientID, ownerEpoch: 9)
 
-                try withPasteImageStack(paths: paths, queueLabel: "spaces.device.api.paste-image.stale-epoch.test") { send, recorder in
-                    let response = try send(8, sessionID, clientID)
+                try withPasteImageStack(paths: paths, queueLabel: "spaces.device.api.paste-image.live-owner.test") { send, recorder in
+                    let response = try send(10, sessionID, newOwnerClientID)
 
-                    XCTAssertFalse(response.ok)
-                    XCTAssertEqual(response.errorCode, .ownershipRejected)
-                    XCTAssertNil(recorder.waitForRequest(timeout: 1), "A stale-epoch paste must never reach the session.")
+                    XCTAssertTrue(response.ok, response.message)
+                    let terminalRequest = try XCTUnwrap(recorder.waitForRequest(timeout: 5))
+                    let remotePath = try XCTUnwrap(terminalRequest.text)
+                    defer { try? FileManager.default.removeItem(atPath: remotePath) }
+                    XCTAssertEqual(terminalRequest.clientID, newOwnerClientID)
+                    XCTAssertEqual(terminalRequest.ownerEpoch, 10)
                 }
             }
         }
