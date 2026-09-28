@@ -417,7 +417,7 @@ Selection is session state owned by the session host, not by any client surface.
 **Transport and viewport.**
 
 - A viewer's session requests ride its own `SpacesDeviceAPICommandChannel` (one cached pinned-TLS connection), so a cold open dials once for commands and once for the stream. A takeover keeps the channel; only the input retry replaces it.
-- The daemon grid is measured against `reportedViewportBounds()` (minus the accessory toolbar, keyboard ignored); rendering crops into `visibleRenderBounds()` (minus the keyboard) with a retained row offset. A keyboard toggle sends no resize and reflows no other client.
+- The daemon grid is measured against `reportedViewportBounds()` (minus the accessory toolbar, keyboard ignored); rendering crops into `visibleRenderBounds()` (minus the keyboard) with a retained row offset. A keyboard toggle sends no resize and reflows no other client. `GhosttyTerminalSnapshotViewport.rowOffset` picks the crop's top row: on the main screen it keeps both the cursor and the bottommost row with visible content (a coding agent's status lines or options can sit below where it parks the cursor), falling back to the cursor alone once both no longer fit; the alternate screen keeps the plain cursor-follow rule, since a full-screen program's cursor moves far more than its chrome redraws.
 
 **Connection stages.** `TerminalViewerModel` drives the pure `TerminalConnectionStageTracker` and owns its grace and reconnect tasks (`TerminalUnreachableBackoff`), mirroring the Mac's `DeviceTerminalSessionStateModel` and `RemoteGhosttySessionHost`.
 
