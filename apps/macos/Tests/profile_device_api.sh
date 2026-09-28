@@ -207,7 +207,7 @@ render_update_baselines: dict[str, dict] = {}
 
 # GhosttyRenderUpdate.currentVersion. Bumped in lockstep with the Swift codec; there is deliberately no
 # compatibility path for older versions, so a mismatch is rejected rather than misread.
-RENDER_UPDATE_VERSION = 6
+RENDER_UPDATE_VERSION = 7
 
 # The two high bits of a cell's wire flags word are codec-reserved payload markers, not style flags: the
 # cell is followed, in its block's sparse text section, by its grapheme cluster (bit 15) and/or its OSC 8
@@ -299,6 +299,7 @@ def read_render_update_snapshot(reader: RenderUpdateReader, columns: int, rows: 
     default_background_rgb = reader.u32()
     _ = reader.u8()  # mouse reporting active
     _ = reader.u8()  # mouse shift capture
+    _ = reader.u8()  # alternate screen active
     _ = reader.read(17)  # selection and scrollbar section (flag byte, four coordinates, two scrollbar counters)
     cell_count = reader.u32()
     return {
@@ -323,6 +324,7 @@ def read_render_update_delta(
     default_background_rgb = reader.u32()
     _ = reader.u8()  # mouse reporting active
     _ = reader.u8()  # mouse shift capture
+    _ = reader.u8()  # alternate screen active
     _ = reader.read(17)  # selection and scrollbar section (flag byte, four coordinates, two scrollbar counters)
     _ = reader.u8()  # scroll rects overflowed
     changed_cell_count = reader.u32()

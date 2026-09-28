@@ -29,7 +29,7 @@ TERMINAL_BACKGROUND_RGB = {
 }
 
 # GhosttyRenderUpdate.currentVersion. Bumped in lockstep with the Swift codec.
-RENDER_UPDATE_VERSION = 6
+RENDER_UPDATE_VERSION = 7
 
 
 def parse_args() -> argparse.Namespace:
@@ -427,7 +427,7 @@ def decode_full_frame_default_background_rgb(render_update_b64: str) -> int:
 
     The `state` Device API command always exports a full self-contained frame, so only the full-frame
     header + snapshot prologue up to the background colour is parsed here; deltas are never returned by
-    `state` and nothing past the colour is read. Mirrors the GRTU v6 wire format written by
+    `state` and nothing past the colour is read. Mirrors the GRTU v7 wire format written by
     GhosttyRenderUpdateBinaryCodec and decoded by profile_device_api.sh / e2e_mobile_latency.sh.
     """
     blob = base64.b64decode(render_update_b64)
