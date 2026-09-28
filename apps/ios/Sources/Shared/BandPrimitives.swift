@@ -7,10 +7,15 @@ import spacesdevicecore
 // MARK: - Header band
 
 struct HeaderBand<Content: View>: View {
+    /// Overridable per tab: the Spaces tab runs tighter (6) than every other band list (8, the default),
+    /// since its bands sit far more densely (an actions menu and a lifecycle-gated chevron beside the
+    /// name, one band per workspace) and the default would waste vertical space there.
+    var verticalPadding: CGFloat = 8
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        HStack(spacing: 8) { content() }.padding(.vertical, 8).padding(.horizontal, 20).frame(maxWidth: .infinity).background(Theme.surface2)
+        HStack(spacing: 8) { content() }.padding(.vertical, verticalPadding).padding(.horizontal, 20).frame(maxWidth: .infinity).background(
+            Theme.surface2)
     }
 }
 
@@ -58,8 +63,11 @@ extension View {
 
     /// A header band as a list row, carrying the gap that separates it from the group above and the
     /// smaller gap to the first row beneath it. Both are drawn on the app background, so the band's own
-    /// `surface2` fill stays full-bleed.
-    func bandListHeaderRow(topGap: CGFloat = 14) -> some View { padding(.top, topGap).padding(.bottom, 4).bandListRow() }
+    /// `surface2` fill stays full-bleed. `bottomGap` defaults to the shared 4pt; the Spaces tab tightens
+    /// it to 2pt (or 0 when the band has no rows beneath it to lead into) rather than changing this default.
+    func bandListHeaderRow(topGap: CGFloat = 14, bottomGap: CGFloat = 4) -> some View {
+        padding(.top, topGap).padding(.bottom, bottomGap).bandListRow()
+    }
 }
 
 // MARK: - Band row

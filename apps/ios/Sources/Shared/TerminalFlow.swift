@@ -223,7 +223,7 @@ extension View {
 // MARK: - Stop confirmation wording
 
 /// Wording for the Stop confirmation dialog, shared by every entry point that can stop a session or a
-/// workspace (the runtime row's swipe tray and long-press menu, the workspace control bar, the terminal
+/// workspace (the runtime row's swipe tray and long-press menu, the workspace actions menu, the terminal
 /// detail toolbar) so the phrasing stays identical no matter which one asked. A row stop names the
 /// session it kills; a workspace stop states the wider blast radius, since it takes every process,
 /// coding agent, and terminal the workspace owns down with it.
