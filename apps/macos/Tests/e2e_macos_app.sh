@@ -701,10 +701,21 @@ wait_for_spaces_launch_ready() {
 }
 
 # The launch hotkey becomes available before the optional setup flow has handed the window back to
-# the workspace UI. Code-pane-only lanes open the seeded workspace through the CLI, so wait for the
-# same sidebar row a user would see first. If the coding-agent step is offered, skip it through its
-# real accessibility control; this keeps the fixture focused on code-pane behavior without making
-# an implicit product decision or adding a timing delay.
+# the workspace UI, and an isolated-HOME lane's dev daemon still reads coding-agent hook status from
+# the real home directory (hook files are machine state, not per-profile), so a machine whose hooks
+# are stale offers this step regardless of the lane's own isolated HOME. Skip is preferred over
+# Continue because Continue installs hook configs into that real home; Skip leaves the machine
+# untouched. Falling back to Continue only covers a build where Skip is unavailable.
+drive_coding_agents_setup_step_if_offered() {
+  if ui_identifier_exists "setup-coding-agents-skip"; then
+    ui_click_identifier "setup-coding-agents-skip" || true
+  elif ui_identifier_exists "setup-coding-agents-continue"; then
+    ui_click_identifier "setup-coding-agents-continue" || true
+  fi
+}
+
+# Code-pane-only lanes open the seeded workspace through the CLI, so wait for the same sidebar row a
+# user would see first, driving the optional coding-agent setup step out of the way if it appears.
 wait_for_code_pane_workspace_ready() {
   local workspace_id="$1"
   # SetupFlowController's documented local-agent probe is 25 seconds. The generic action timeout is
@@ -717,11 +728,7 @@ wait_for_code_pane_workspace_ready() {
     if ui_identifier_exists "sidebar-workspace-title-$workspace_id"; then
       return 0
     fi
-    if ui_identifier_exists "setup-coding-agents-skip"; then
-      ui_click_identifier "setup-coding-agents-skip" || true
-    elif ui_identifier_exists "setup-coding-agents-continue"; then
-      ui_click_identifier "setup-coding-agents-continue" || true
-    fi
+    drive_coding_agents_setup_step_if_offered
     sleep 0.2
   done
   fail "timed out waiting for seeded code-pane workspace row: $workspace_id"
@@ -839,11 +846,16 @@ wait_for_spaces_frontmost_pid() {
 }
 
 wait_for_spaces_splitter_ready() {
-  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  # Same combined window as wait_for_code_pane_workspace_ready: the setup step's local-agent probe
+  # can still be running when this wait starts, so its budget is added on top of the ordinary
+  # UI-render bound rather than replacing it.
+  local setup_status_timeout_seconds=25
+  local deadline=$((SECONDS + setup_status_timeout_seconds + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
     if [[ "$(spaces_splitter_ready_state)" == "1" ]]; then
       return 0
     fi
+    drive_coding_agents_setup_step_if_offered
     sleep 0.2
   done
   fail "timed out waiting for Spaces splitter layout"
@@ -1557,9 +1569,19 @@ http_get_body() {
   local url="$1"
   python3 - "$url" <<'PY'
 import sys
+import urllib.parse
 import urllib.request
 
-with urllib.request.urlopen(sys.argv[1], timeout=2) as response:
+url = sys.argv[1]
+parts = urllib.parse.urlsplit(url)
+headers = {}
+# macOS getaddrinfo need not resolve "*.localhost" subdomains, while browsers treat any
+# ".localhost" name as loopback (RFC 6761). Caddy routes on the Host header, so dial loopback
+# directly and keep the URL's host in that header.
+if parts.hostname == "localhost" or (parts.hostname or "").endswith(".localhost"):
+    headers["Host"] = parts.netloc
+    url = urllib.parse.urlunsplit(parts._replace(netloc=f"127.0.0.1:{parts.port or 80}"))
+with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=2) as response:
     print(response.read().decode("utf-8"))
 PY
 }
