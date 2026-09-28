@@ -178,8 +178,6 @@ struct SpacesTabView: View {
                     for group in projectGroup.workspaceGroups {
                         var workspaceSection = ["band@\(SpacesListRowID.workspaceBand(group.id))"]
                         if !model.collapsedWorkspaceIDs.contains(group.id) {
-                            workspaceSection.append("controlBar@\(SpacesListRowID.workspaceControlBar(group.id))")
-                            if group.rows.isEmpty { workspaceSection.append("noRows@\(SpacesListRowID.workspaceEmptyRows(group.id))") }
                             workspaceSection.append(contentsOf: group.rows.map { "runtimeRow@\(SpacesListRowID.runtimeRow($0.id))" })
                         }
                         sections.append(workspaceSection)
@@ -317,17 +315,18 @@ struct SpacesTabView: View {
         ForEach(Array(projectGroup.workspaceGroups.enumerated()), id: \.element.id) { index, group in
             // The project caption already separates the first workspace from what is above it, so only
             // the workspaces after it carry the full band lead-in gap. The home project has no caption to
-            // do that separating, so its first (and only) band carries the full gap instead.
-            Section { workspaceSection(group, topGap: index == 0 ? (isHomeProject ? 14 : 8) : 14) }
+            // do that separating, and it is always the first thing in the whole list, so its one band
+            // carries the largest gap of the three instead.
+            Section { workspaceSection(group, topGap: index == 0 ? (isHomeProject ? 12 : 6) : 8) }
         }
     }
 
-    /// A workspace's band plus, when it is expanded, its control bar and runtime rows.
+    /// A workspace's band plus, when it is expanded, its runtime rows.
     ///
     /// Marking a workspace as deleting changes only what its rows draw and what they accept — it adds no
     /// row and takes none away. Collapsing the workspace for the duration would read better, and was tried
-    /// three times, but removing its control bar and runtime rows at the moment the delete is confirmed
-    /// crashes the collection view (`attempt to delete item 6 from section 3 which only contains 6 items
+    /// three times, but removing its runtime rows at the moment the delete is confirmed crashes the
+    /// collection view (`attempt to delete item 6 from section 3 which only contains 6 items
     /// before the update`): it counts one item fewer than the section actually holds, so a removal inside
     /// a section walks off its end. Wrapping the publishes in an animation, which is the one code path
     /// that never crashed, does not change that. Removing a whole section — what the daemon confirming
@@ -336,49 +335,59 @@ struct SpacesTabView: View {
     @ViewBuilder private func workspaceSection(_ group: SpacesMobileWorkspaceGroup, topGap: CGFloat) -> some View {
         let isDeleting = model.isWorkspacePendingDeletion(group.id)
         let isCollapsed = model.collapsedWorkspaceIDs.contains(group.id)
-        Button {
-            withAnimation(.easeInOut(duration: 0.2)) { model.toggleWorkspaceCollapsed(group.id) }
-        } label: {
-            HeaderBand {
-                WorkspaceBandLabel(glyph: .from(group.workspace), displayName: group.workspace.displayName)
-                Spacer(minLength: 0)
-                // The spinner takes the collapse chevron's place, so a deleting band reads as busy rather
-                // than merely collapsed.
-                if isDeleting {
-                    ProgressView().controlSize(.small).tint(Theme.mutedSecondary)
-                } else {
+        // An empty workspace has nothing to collapse, so its band carries no chevron and its name button is
+        // disabled: a collapse recorded while it is empty would silently hide the first row it gains (a
+        // terminal opened from its own menu, say) under a band that showed no chevron. Disabled rather than
+        // plain text so the band keeps one element type for every workspace, and VoiceOver reads it as
+        // dimmed instead of offering a button that does nothing.
+        let hasRows = !group.rows.isEmpty
+        let toggleCollapse: () -> Void = { withAnimation(.easeInOut(duration: 0.2)) { model.toggleWorkspaceCollapsed(group.id) } }
+        let hideAction: () -> Void = { Task { await model.setWorkspaceHidden(workspaceID: group.workspace.id, isHidden: true) } }
+        let deleteAction: () -> Void = { pendingDeleteWorkspace = group.workspace }
+        HeaderBand(verticalPadding: 6) {
+            // The name area and the chevron are borderless controls of their own rather than the whole
+            // band being one `Button`: the actions menu between them needs its own tap target, and nesting
+            // a `Menu` inside a `Button`'s label leaves the inner control unresponsive. All stay list-row
+            // children of the same `HeaderBand`, so `WorkspaceBandActions`'s swipe/long-press still covers
+            // the whole row.
+            Button(action: toggleCollapse) {
+                HStack(spacing: 8) {
+                    WorkspaceBandLabel(glyph: .from(group.workspace), displayName: group.workspace.displayName)
+                    Spacer(minLength: 0)
+                }.contentShape(Rectangle())
+            }.buttonStyle(.plain).disabled(isDeleting || !hasRows).accessibilityIdentifier("workspace.band.\(group.id)").accessibilityValue(
+                isDeleting ? "Deleting" : "")
+            WorkspaceActionsMenu(
+                // A delete never sets `isMutating` (it runs on its own private channel), so another
+                // workspace's delete never dims this menu (#450); this workspace's own delete dims it via
+                // `isDeleting`.
+                workspace: group.workspace, isMutating: model.isMutating, isDeleting: isDeleting,
+                onStart: { Task { await model.launchWorkspace(group.workspace) } },
+                onRestart: { Task { await model.restartWorkspace(group.workspace) } }, onStop: { pendingStop = .workspace(group.workspace) },
+                // Demo Mode's backend does not open ad hoc terminals; hide the action there.
+                onNewTerminal: model.isDemoModeEnabled ? nil : { pendingTerminalLaunch = PendingTerminalLaunch(workspace: group.workspace) },
+                onHide: workspaceBandActionsSuppressed(model: model, workspaceID: group.id) ? nil : hideAction,
+                onDelete: workspaceBandActionsSuppressed(model: model, workspaceID: group.id) || !workspaceCanBeDeleted(group.workspace)
+                    ? nil : deleteAction)
+            // The spinner takes the collapse chevron's place, so a deleting band reads as busy rather
+            // than merely collapsed.
+            if isDeleting {
+                ProgressView().controlSize(.small).tint(Theme.mutedSecondary)
+            } else if hasRows {
+                Button(action: toggleCollapse) {
                     Image(systemName: isCollapsed ? "chevron.right" : "chevron.down").font(.system(size: 12, weight: .semibold)).foregroundStyle(
-                        Theme.mutedSecondary)
-                }
-            }.contentShape(Rectangle()).opacity(isDeleting ? 0.5 : 1)
-        }.buttonStyle(.plain).disabled(isDeleting).accessibilityIdentifier("workspace.band.\(group.id)").accessibilityValue(
-            isDeleting ? "Deleting" : ""
-        ).bandListHeaderRow(topGap: topGap).modifier(
-            WorkspaceBandActions(
-                model: model, workspace: group.workspace,
-                onHide: { Task { await model.setWorkspaceHidden(workspaceID: group.workspace.id, isHidden: true) } },
-                onDelete: { pendingDeleteWorkspace = group.workspace })
+                        Theme.mutedSecondary
+                    ).frame(width: 24, height: 24).contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityLabel(isCollapsed ? "Expand" : "Collapse").accessibilityIdentifier(
+                    "workspace.collapse.\(group.id)")
+            }
+        }.opacity(isDeleting ? 0.5 : 1).bandListHeaderRow(topGap: topGap, bottomGap: hasRows ? 2 : 0).modifier(
+            WorkspaceBandActions(model: model, workspace: group.workspace, onHide: hideAction, onDelete: deleteAction)
         ).id(SpacesListRowID.workspaceBand(group.id))
         if !isCollapsed {
             // Dimmed and inert with the band while the delete runs: the rows stay listed (removing them is
             // the structural change this deliberately avoids) but nothing under a workspace on its way out
             // is worth acting on.
-            WorkspaceControlBar(
-                // Every action here rides the shared `commandChannel`, whose gate drops a second mutation
-                // without sending it, so the bar must read busy while any shared-channel mutation is in
-                // flight or its taps would silently do nothing. A delete never sets `isMutating` (it runs
-                // on its own private channel), so another workspace's delete never dims this bar (#450);
-                // this workspace's own delete dims it via `isDeleting`.
-                workspace: group.workspace, isBusy: model.isMutating || isDeleting,
-                onStart: { Task { await model.launchWorkspace(group.workspace) } },
-                onRestart: { Task { await model.restartWorkspace(group.workspace) } }, onStop: { pendingStop = .workspace(group.workspace) },
-                // Demo Mode's backend does not open ad hoc terminals; hide the action there.
-                onNewTerminal: model.isDemoModeEnabled ? nil : { pendingTerminalLaunch = PendingTerminalLaunch(workspace: group.workspace) }
-            ).opacity(isDeleting ? 0.5 : 1).bandListRow().id(SpacesListRowID.workspaceControlBar(group.id))
-            if group.rows.isEmpty {
-                Text("No configured rows").font(.system(size: 12)).foregroundStyle(Theme.muted).frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 9).padding(.horizontal, 20).bandListRow().id(SpacesListRowID.workspaceEmptyRows(group.id))
-            }
             ForEach(group.rows) { row in
                 // Lifecycle actions reach a row two ways: a long press opens the full menu (Rename
                 // included), a trailing swipe offers the lifecycle subset. Full swipe is off so an
@@ -559,7 +568,7 @@ struct SpacesTabView: View {
         // what is marked here is always a workspace still listed beside these rows.
         let isDeleting = model.isWorkspacePendingDeletion(group.workspaceID)
         Section {
-            HeaderBand {
+            HeaderBand(verticalPadding: 6) {
                 WorkspaceBandLabel(glyph: workspace.map(WorkspaceBandGlyph.from) ?? .directory, displayName: group.workspaceTitle)
                 Spacer(minLength: 0)
                 Text(group.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
@@ -569,7 +578,7 @@ struct SpacesTabView: View {
                 // `SpacesMobileTerminalWorkspaceGroup.id` exists to avoid.
             }.opacity(isDeleting ? 0.5 : 1).accessibilityIdentifier("workspace.looseBand.\(group.workspaceID)").accessibilityValue(
                 isDeleting ? "Deleting" : ""
-            ).bandListHeaderRow().id(SpacesListRowID.looseBand(group.workspaceID))
+            ).bandListHeaderRow(bottomGap: 2).id(SpacesListRowID.looseBand(group.workspaceID))
         }
         ForEach(group.sessions) { session in
             Section { terminalSessionRow(session, isDeleting: isDeleting).bandListRow().id(SpacesListRowID.looseSession(session.id)) }
@@ -591,7 +600,7 @@ struct SpacesTabView: View {
 }
 
 /// A stop the user has asked for but not yet confirmed: either one runtime row's session or a whole
-/// workspace. Both live in this tab (the row swipe tray/context menu and the workspace control bar), so
+/// workspace. Both live in this tab (the row swipe tray/context menu and the workspace actions menu), so
 /// they share this one pending-state/dialog pair rather than each entry point carrying its own.
 private enum PendingStop {
     case row(SpacesMobileWorkspaceRuntimeRow)
@@ -633,12 +642,24 @@ private enum SpacesListRowID {
 
     static func projectCaption(_ projectID: String) -> String { "project.caption.\(projectID)" }
     static func workspaceBand(_ workspaceID: String) -> String { "workspace.band.\(workspaceID)" }
-    static func workspaceControlBar(_ workspaceID: String) -> String { "workspace.controlBar.\(workspaceID)" }
-    static func workspaceEmptyRows(_ workspaceID: String) -> String { "workspace.noRows.\(workspaceID)" }
     static func runtimeRow(_ rowID: String) -> String { "runtime.row.\(rowID)" }
     static func looseBand(_ workspaceID: String) -> String { "loose.band.\(workspaceID)" }
     static func looseSession(_ sessionID: String) -> String { "loose.session.\(sessionID)" }
 }
+
+/// Whether a workspace's Hide/Delete surfaces are suppressed entirely, shared by `WorkspaceBandActions`'s
+/// long-press/swipe and `WorkspaceActionsMenu`'s Hide/Delete section: Demo Mode's backend can serve
+/// neither, and a workspace already marked for deletion is inert by contract.
+@MainActor private func workspaceBandActionsSuppressed(model: SpacesMobileAppModel, workspaceID: String) -> Bool {
+    model.isDemoModeEnabled || model.isWorkspacePendingDeletion(workspaceID)
+}
+
+/// The daemon refuses to delete a default workspace (a project's own directory goes when the project
+/// does), so the action is hidden rather than offered and rejected. No workspace of the home project is
+/// deletable either: its own workspace is the default one, and a project adopted at the home path can
+/// carry further workspace records that are no longer a git project's worktrees to remove, so this reads
+/// `projectKind` rather than leaning on `isDefault` to cover both.
+private func workspaceCanBeDeleted(_ workspace: SpacesDeviceWorkspaceSummary) -> Bool { !workspace.isDefault && workspace.projectKind != .home }
 
 /// The workspace band's actions, Hide and Delete, offered both on long press and on trailing swipe.
 /// Demo Mode's backend can do neither, so there the band presents no menu and no swipe rather than
@@ -651,13 +672,6 @@ private struct WorkspaceBandActions: ViewModifier {
     let onHide: () -> Void
     let onDelete: () -> Void
 
-    /// The daemon refuses to delete a default workspace (a project's own directory goes when the project
-    /// does), so the action is hidden rather than offered and rejected. No workspace of the home project
-    /// is deletable either: its own workspace is the default one, and a project adopted at the home path
-    /// can carry further workspace records that are no longer a git project's worktrees to remove, so
-    /// this reads `projectKind` rather than leaning on `isDefault` to cover both.
-    private var canDelete: Bool { !workspace.isDefault && workspace.projectKind != .home }
-
     func body(content: Content) -> some View {
         // Suppressed, not disabled, for both cases — the Demo Mode backend cannot serve these, and a
         // workspace already marked for deletion is inert by contract. Disabling would still open the swipe
@@ -666,14 +680,14 @@ private struct WorkspaceBandActions: ViewModifier {
         // and Hide need here: a delete whose outcome could not be confirmed keeps this mark on well after
         // the mutation itself has finished, so this is checked on its own rather than folded into a busy
         // flag that has already cleared.
-        if model.isDemoModeEnabled || model.isWorkspacePendingDeletion(workspace.id) {
+        if workspaceBandActionsSuppressed(model: model, workspaceID: workspace.id) {
             content
         } else {
             content.contextMenu {
                 hideButton
-                if canDelete { menuDeleteButton }
+                if workspaceCanBeDeleted(workspace) { menuDeleteButton }
             }.swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                if canDelete { swipeDeleteButton }
+                if workspaceCanBeDeleted(workspace) { swipeDeleteButton }
                 hideButton.tint(Theme.muted)
             }
         }
