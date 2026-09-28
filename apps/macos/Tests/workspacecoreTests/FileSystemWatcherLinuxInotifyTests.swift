@@ -55,15 +55,13 @@
 
         /// Awaits `stream` until `matches` accepts an element, racing a 30s timeout so a regression that
         /// stops delivering events fails the test instead of hanging the suite.
-        private func waitForEvent<Element: Sendable>(in stream: AsyncStream<Element>, matching matches: @escaping @Sendable (Element) -> Bool)
-            async -> Element?
+        private func waitForEvent<Element: Sendable>(in stream: AsyncStream<Element>, matching matches: @escaping @Sendable (Element) -> Bool) async
+            -> Element?
         {
             await withTaskGroup(of: Element?.self) { group in
                 group.addTask {
                     var iterator = stream.makeAsyncIterator()
-                    while let element = await iterator.next() {
-                        if matches(element) { return element }
-                    }
+                    while let element = await iterator.next() { if matches(element) { return element } }
                     return nil
                 }
                 group.addTask {
@@ -182,18 +180,23 @@
         /// directory ended up, still mapped to its stale OLD path: this moves `a` to a sibling directory
         /// OUTSIDE the watched root (so nothing re-registers it, unlike a destination still inside the
         /// workspace, which `WorkspaceWatch` picks up again through the parent's `IN_MOVED_TO`), then writes
-        /// inside it at the new location and asserts nothing is ever reported under the old path. Also
-        /// checks the move itself is reported exactly once (root's own `IN_MOVED_FROM` for the child name
-        /// and `a`'s own `IN_MOVE_SELF` both name the same old path and land in the same drain batch, since
-        /// both fire from one `rename()` call). `watchedDirectoriesByDescriptor` is `private` with no
-        /// test-only accessor, so this does not also assert on the descriptor table's size directly.
+        /// inside it at the new location and asserts nothing is ever reported under the old path.
+        /// `watchedDirectoriesByDescriptor` is `private` with no test-only accessor, so this does not also
+        /// assert on the descriptor table's size directly.
+        ///
+        /// Root's `IN_MOVED_FROM` for the child name and `a`'s own `IN_MOVE_SELF` both come from the one
+        /// `rename()` and both name the bare old path, but they are separate kernel events: the reader can
+        /// wake between them and report each in its own batch, which CI once caught arriving after the
+        /// writes below. The stale-path checks therefore look only for a child of an old path
+        /// (`<old>/<name>`), which is what a write under a stale mapping reports, and never for the bare old
+        /// path, which the move itself legitimately reports any number of times.
         ///
         /// Also watches `a/b`, a descendant registered as its OWN separate descriptor (inotify is not
         /// recursive): `IN_MOVE_SELF` fires only for `a`'s own descriptor when `a` moves, never for `b`'s,
         /// even though `b` moves right along with it, so `IN_MOVE_SELF` handling must also drop every
         /// descendant descriptor whose path sits beneath the moved directory, not just the moved directory's
-        /// own. A write inside
-        /// the moved `b` at its new location must never be reported under its old path either.
+        /// own. A write inside the moved `b` at its new location must never be reported under its old path
+        /// either.
         @Test func movingAWatchedDirectoryOutsideTheRootDropsItsStaleWatchMapping() async throws {
             let root = try makeTempDirectory()
             let a = root.appendingPathComponent("a", isDirectory: true)
@@ -212,18 +215,15 @@
             // Poll rather than a fixed sleep: the move's events land within milliseconds on a local
             // tmpfs, and a bounded 5s poll fails outright on a real regression instead of flaking under
             // host load the way a single short fixed sleep would.
-            var moveBatches: [[String]] = []
+            var sawMoveReport = false
             for _ in 0..<500 {
-                moveBatches = collector.all.filter { $0.contains(a.path) }
-                if !moveBatches.isEmpty { break }
+                if collector.all.contains(where: { $0.contains(a.path) }) {
+                    sawMoveReport = true
+                    break
+                }
                 try await Task.sleep(nanoseconds: 10_000_000)
             }
-            #expect(!moveBatches.isEmpty, "no onChange reported the moved directory's old path within 5s")
-            #expect(moveBatches.count == 1, "the move must be reported in exactly one onChange batch")
-            // Everything gathered so far is the move's own reporting (already asserted on above); only
-            // batches recorded AFTER this point can be the write's, so the stale-path checks below must not
-            // re-examine the move batch itself, which legitimately names the old path once.
-            let batchesBeforeWrite = collector.all.count
+            #expect(sawMoveReport, "no onChange reported the moved directory's old path within 5s")
 
             let movedB = destination.appendingPathComponent("b", isDirectory: true)
             try "hello".write(to: destination.appendingPathComponent("probe.txt"), atomically: true, encoding: .utf8)
@@ -233,10 +233,9 @@
             // these writes at the moved directories' new, unwatched locations would still land on their
             // same kernel watch descriptors and be reported under their STALE old paths.
             try await Task.sleep(nanoseconds: 1_000_000_000)
-            let batchesAfterWrite = collector.all.dropFirst(batchesBeforeWrite)
-            let staleBatches = batchesAfterWrite.filter { batch in batch.contains { $0.hasPrefix(a.path) } }
+            let staleBatches = collector.all.filter { batch in batch.contains { $0.hasPrefix(a.path + "/") } }
             #expect(staleBatches.isEmpty, "a write at either moved directory's new location must never be reported under its old path")
-            let staleDescendantBatches = batchesAfterWrite.filter { batch in batch.contains { $0.hasPrefix(b.path) } }
+            let staleDescendantBatches = collector.all.filter { batch in batch.contains { $0.hasPrefix(b.path + "/") } }
             #expect(
                 staleDescendantBatches.isEmpty,
                 "a write inside the moved descendant directory's new location must never be reported under its old path")
