@@ -2341,6 +2341,132 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
     }
 
+    /// Every client (Mac, iOS, CLI, MCP) reads a workspace's running state off this flag, so a restart
+    /// that transiently reports the workspace stopped would make every one of them react to a stop the
+    /// user never asked for, closing tracked browser tabs and code panes along the way (#799).
+    /// This samples the flag at the two points a restart's stop-then-launch actually touches it: closing
+    /// each configured process's old session, and launching its replacement. Neither ever observes the
+    /// workspace stopped, even though `running_processes`/`windows` rows are briefly empty in between
+    /// (the stop's teardown has run, but the launch has not inserted the replacement's rows yet).
+    func testRestartWorkspaceNeverReportsStoppedWhileInFlight() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let samples = WorkspaceRunningStateSampleCapture(store: store)
+        let orchestrator = makeTestOrchestrator(
+            store: store,
+            builtInTerminalWindowOpener: { sessionID, _, _ in
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                try? paths.ensureDirectories()
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                try? seedTerminalSessionRow(sessionID: sessionID, paths: paths)
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 9876, state: .running,
+                        updatedAt: "2026-05-11T18:00:00Z"), paths: paths)
+            },
+            builtInTerminalWindowCloser: { _, _ in samples.sample() },
+            builtInTerminalSessionTerminator: { sessionID in
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .exited,
+                        updatedAt: "2026-05-11T18:05:00Z"), paths: paths)
+            },
+            builtInTerminalSessionLauncher: { configuration in
+                samples.sample()
+                let paths = try TerminalSessionPaths.forSession(id: configuration.sessionID)
+                try paths.ensureDirectories()
+                try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+                return TerminalServiceSessionSummary(
+                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: getpid(),
+                    childPID: 9876, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath)
+            })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        samples.workspaceID = workspace.id
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "echo api")])
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
+            // Only the restart below is under test; the cold launch above legitimately samples "not yet
+            // running" from inside its own launcher call.
+            samples.isRecording = true
+            try orchestrator.restartWorkspace(workspaceID: workspace.id)
+        }
+
+        XCTAssertFalse(samples.samples.isEmpty, "the restart's close and relaunch hooks both fired and were sampled")
+        XCTAssertTrue(samples.samples.allSatisfy { $0 }, "no sample taken while the restart was in flight ever saw the workspace stopped")
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true, "the successful restart still ends running")
+    }
+
+    /// A restart's stop phase deliberately leaves the workspace marked running for the whole restart
+    /// (issue #799), so a relaunch that fails is the only place left to fall back to the stopped state a
+    /// failed restart has always produced; otherwise the workspace would be stranded marked running with
+    /// nothing behind it. Same fixture shape as `testFailedRestartReleasesTheHeldPaneOfATemplateItNeverReached`.
+    func testFailedRestartLeavesTheWorkspaceStopped() throws {
+        struct TerminalLaunchFailure: Error {}
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let launchCount = TerminalLaunchAttemptCapture()
+        let orchestrator = makeTestOrchestrator(
+            store: store,
+            builtInTerminalWindowOpener: { sessionID, _, _ in
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                try? paths.ensureDirectories()
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                try? seedTerminalSessionRow(sessionID: sessionID, paths: paths)
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 9876, state: .running,
+                        updatedAt: "2026-05-11T18:00:00Z"), paths: paths)
+            },
+            builtInTerminalWindowCloser: { _, _ in },
+            builtInTerminalSessionTerminator: { sessionID in
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .exited,
+                        updatedAt: "2026-05-11T18:05:00Z"), paths: paths)
+            },
+            // The cold launch succeeds; the relaunch throws immediately, before it opens any replacement pane.
+            builtInTerminalSessionLauncher: { configuration in
+                launchCount.count += 1
+                if launchCount.count > 1 { throw TerminalLaunchFailure() }
+                let paths = try TerminalSessionPaths.forSession(id: configuration.sessionID)
+                try paths.ensureDirectories()
+                try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+                return TerminalServiceSessionSummary(
+                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: getpid(),
+                    childPID: 9876, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath)
+            })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "echo api")])
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
+            XCTAssertThrowsError(try orchestrator.restartWorkspace(workspaceID: workspace.id))
+        }
+
+        XCTAssertEqual(
+            try store.workspace(id: workspace.id)?.isRunning, false, "a restart whose relaunch fails ends stopped, like a plain stop would")
+        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty, "the failed relaunch leaves no running-process row behind")
+    }
+
     /// Restart's semantics are unchanged by Start's convergence (issue #438): unlike Start, restart still
     /// forces a full stop first, which tears down ad hoc terminals and coding-agent sessions too, then
     /// relaunches configured processes fresh rather than leaving the already-running one alone.

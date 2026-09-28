@@ -45,6 +45,33 @@ struct SidebarBrowserSessionTeardownTests {
         #expect(ids.isEmpty)
     }
 
+    @Test func teardownIncludesAWorkspaceDeletedWhileAlreadyStopped() {
+        // Never `.running` in `previous`, so `workspaceIDsTransitionedToNotRunning` alone would miss it;
+        // this is the case nothing else ever closes (a stop completed while the app was not running,
+        // followed by a delete).
+        let ids = SidebarController.workspaceIDsForBrowserSessionTeardown(
+            previous: ["ws-1": status("ws-1", isRunning: false)], current: [:])
+        #expect(ids == ["ws-1"])
+    }
+
+    @Test func teardownIncludesAWorkspaceThatStopped() {
+        let ids = SidebarController.workspaceIDsForBrowserSessionTeardown(
+            previous: ["ws-1": status("ws-1", isRunning: true)], current: ["ws-1": status("ws-1", isRunning: false)])
+        #expect(ids == ["ws-1"])
+    }
+
+    @Test func teardownExcludesAWorkspaceStillStoppedAndStillPresent() {
+        let ids = SidebarController.workspaceIDsForBrowserSessionTeardown(
+            previous: ["ws-1": status("ws-1", isRunning: false)], current: ["ws-1": status("ws-1", isRunning: false)])
+        #expect(ids.isEmpty)
+    }
+
+    @Test func teardownExcludesAWorkspaceStillRunning() {
+        let ids = SidebarController.workspaceIDsForBrowserSessionTeardown(
+            previous: ["ws-1": status("ws-1", isRunning: true)], current: ["ws-1": status("ws-1", isRunning: true)])
+        #expect(ids.isEmpty)
+    }
+
     @Test func synchronousQuitBrowserCleanupClosesTrackedURLScopedTabsAndClearsTracking() {
         let tracked = [
             BrowserSessionCoordinator.BrowserSessionWindowTracking(targetURL: "http://127.0.0.1:3000", windowID: 101),
