@@ -80,11 +80,22 @@
             private let homePath: String
 
             init(home: URL) {
-                self.homePath = home.path
+                self.homePath = Self.resolved(home.path)
                 super.init()
             }
 
-            override func isExecutableFile(atPath path: String) -> Bool { path.hasPrefix(homePath + "/") && super.isExecutableFile(atPath: path) }
+            /// Both sides are symlink-resolved: macOS temp homes have a `/var/...` and a `/private/var/...`
+            /// spelling, and the probe's `pwd -P` and the installer's path standardization each produce a
+            /// different one for the same file.
+            override func isExecutableFile(atPath path: String) -> Bool {
+                Self.resolved(path).hasPrefix(homePath + "/") && super.isExecutableFile(atPath: path)
+            }
+
+            private static func resolved(_ path: String) -> String {
+                guard let resolved = realpath(path, nil) else { return path }
+                defer { free(resolved) }
+                return String(cString: resolved)
+            }
         }
 
         /// Every install resolves the Spaces CLI to embed in the hook commands, so a home that has agents
@@ -1053,7 +1064,7 @@
                     printf '\\n\(AgentHookInstaller.pathMarkerPrefix)%s\\n' "/opt/tools/bin:/usr/bin"
                     """)
 
-            let resolved = AgentHookInstaller.resolvedLoginShellPATH(shellPath: noisyShell.path, home: home, environment: [:])
+            let resolved = AgentHookInstaller.resolvedLoginShellProbe(shellPath: noisyShell.path, home: home, environment: [:])?.path
 
             #expect(resolved == "/opt/tools/bin:/usr/bin")
         }
@@ -1069,7 +1080,7 @@
                     exit 3
                     """)
 
-            #expect(AgentHookInstaller.resolvedLoginShellPATH(shellPath: failingShell.path, home: home, environment: [:]) == nil)
+            #expect(AgentHookInstaller.resolvedLoginShellProbe(shellPath: failingShell.path, home: home, environment: [:]) == nil)
         }
 
         @Test func loginShellPATHTimeoutKillsTheShellAndItsChild() throws {
@@ -1086,7 +1097,7 @@
                     """#)
 
             let startedAt = Date()
-            #expect(AgentHookInstaller.resolvedLoginShellPATH(shellPath: hangingShell.path, home: home, environment: [:], timeoutSeconds: 2) == nil)
+            #expect(AgentHookInstaller.resolvedLoginShellProbe(shellPath: hangingShell.path, home: home, environment: [:], timeoutSeconds: 2) == nil)
 
             #expect(Date().timeIntervalSince(startedAt) < 6)
             let childPID = try #require(pid_t(read(home.appendingPathComponent("shell-child.pid")).trimmingCharacters(in: .whitespacesAndNewlines)))
@@ -1094,6 +1105,117 @@
             let processExitDeadline = Date().addingTimeInterval(1)
             while processExists(childPID) && Date() < processExitDeadline { usleep(10_000) }
             #expect(!processExists(childPID))
+        }
+
+        // MARK: - Ephemeral per-shell PATH directories (fnm multishell)
+
+        /// A fake login shell that emulates fnm's `zshexit` hook: it puts a per-invocation directory
+        /// (named by its own PID, mirroring fnm's `fnm_multishells/<pid>_<ts>`) with a `bin` symlink into
+        /// `realBinDirectory` first on PATH, runs the probe command it was given, and, only when
+        /// `deleteOnExit` is set, deletes that per-invocation directory as its last act, the way a user's
+        /// `zshexit` hook does to keep fnm from leaking one such directory per shell. `trailingPathDirectory`,
+        /// when given, sits on PATH right after the per-invocation directory: it lets a test put another
+        /// installation of the same executable later on PATH, to check precedence against that directory's
+        /// canonical fallback rather than against the per-invocation directory itself.
+        private func makeEphemeralMultishellLoginShell(
+            home: URL, multishellParent: URL, realBinDirectory: URL, deleteOnExit: Bool, trailingPathDirectory: URL? = nil
+        ) throws -> URL {
+            try FileManager.default.createDirectory(at: multishellParent, withIntermediateDirectories: true)
+            let cleanup = deleteOnExit ? "trap 'rm -rf \"$link\"' EXIT\n" : ""
+            let trailingSegment = trailingPathDirectory.map { "\($0.path):" } ?? ""
+            return try makeExecutable(
+                name: "fake-login-shell", directory: home,
+                contents: """
+                    #!/bin/sh
+                    while [ "$1" != "-c" ]; do shift; done
+                    shift
+                    cmd="$1"
+                    link="\(multishellParent.path)/$$"
+                    mkdir -p "$link"
+                    ln -s "\(realBinDirectory.path)" "$link/bin"
+                    export PATH="$link/bin:\(trailingSegment)$PATH"
+                    \(cleanup)eval "$cmd"
+                    """)
+        }
+
+        /// Reproduces the real failure: fnm puts `codex` on PATH through a per-shell symlink directory,
+        /// and the user's shell deletes that directory when it exits. By the time the resolver checks the
+        /// directory the login shell reported, the shell (and the probe's own `/bin/sh` child) has already
+        /// exited and the directory is gone, so `codex` reads "Not detected" even though it is installed.
+        /// This fails on the pre-fix resolver, which only ever tries the directories the shell reported
+        /// (all deleted by the time it looks), and passes once the probe also reports each directory's
+        /// canonical form, captured while the shell was still alive.
+        @Test func executableInADeletedPerShellSymlinkDirectoryStillResolvesThroughItsCanonicalPath() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            let realBinDirectory = home.appendingPathComponent("real-agent-bin", isDirectory: true)
+            try makeExecutable(name: "codex", directory: realBinDirectory)
+            let fakeLoginShell = try makeEphemeralMultishellLoginShell(
+                home: home, multishellParent: home.appendingPathComponent("multishell", isDirectory: true), realBinDirectory: realBinDirectory,
+                deleteOnExit: true)
+
+            let available = AgentHookInstaller.isAvailable(
+                .codex, home: home, fileManager: HomeScopedFileManager(home: home),
+                environment: ["PATH": "/usr/bin:/bin", "SHELL": fakeLoginShell.path],
+                shellPathDirectoryResolver: AgentHookInstaller.loginShellPathDirectories)
+
+            #expect(available)
+        }
+
+        /// The deleted per-shell directory's canonical fallback must sit ahead of a later, unrelated PATH
+        /// directory that happens to hold an executable of the same name, not after the whole PATH has
+        /// been exhausted: PATH order is how a user chooses which of several installs wins, and an fnm-
+        /// selected `codex` silently losing to a later `codex` on PATH defeats that choice. The later
+        /// directory's `codex` always fails, so the install only succeeds when the canonical fallback (the
+        /// working script under `realBinDirectory`) is the one actually picked.
+        @Test func canonicalFallbackForADeletedPerShellDirectoryOutranksALaterPathDirectoryWithTheSameExecutableName() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            let realBinDirectory = home.appendingPathComponent("real-agent-bin", isDirectory: true)
+            try makeExecutable(name: "codex", directory: realBinDirectory, contents: Self.codexFeatureCLIScript)
+            try makeExecutable(name: AgentHookCommand.spacesExecutableName, directory: realBinDirectory)
+            let laterDirectory = home.appendingPathComponent("later-bin", isDirectory: true)
+            try makeExecutable(name: "codex", directory: laterDirectory, contents: "#!/bin/sh\nexit 1\n")
+            let multishellParent = home.appendingPathComponent("multishell", isDirectory: true)
+            let fakeLoginShell = try makeEphemeralMultishellLoginShell(
+                home: home, multishellParent: multishellParent, realBinDirectory: realBinDirectory, deleteOnExit: true,
+                trailingPathDirectory: laterDirectory)
+
+            let outcome = try AgentHookInstaller.install(
+                [.codex], home: home, fileManager: HomeScopedFileManager(home: home),
+                environment: ["PATH": "/usr/bin:/bin", "SHELL": fakeLoginShell.path],
+                shellPathDirectoryResolver: AgentHookInstaller.loginShellPathDirectories)
+
+            #expect(outcome.failures.isEmpty)
+            #expect(outcome.agents.first { $0.kind == .codex }?.installState == .awaitingTrust)
+        }
+
+        /// The companion contract: when the per-shell directory is never deleted (the common case: most
+        /// users have no exit hook that removes it), the resolver
+        /// must still prefer that original path over the canonical one, because that is the exact path a
+        /// hook config's persisted `spaces` command already names.
+        @Test func executableResolvedThroughASurvivingPerShellSymlinkKeepsItsOriginalPathOverTheCanonicalOne() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            let realBinDirectory = home.appendingPathComponent("real-agent-bin", isDirectory: true)
+            try makeExecutable(name: "claude", directory: realBinDirectory)
+            try makeExecutable(name: AgentHookCommand.spacesExecutableName, directory: realBinDirectory)
+            let multishellParent = home.appendingPathComponent("multishell", isDirectory: true)
+            let fakeLoginShell = try makeEphemeralMultishellLoginShell(
+                home: home, multishellParent: multishellParent, realBinDirectory: realBinDirectory, deleteOnExit: false)
+
+            let outcome = try AgentHookInstaller.install(
+                [.claudeCode], home: home, fileManager: HomeScopedFileManager(home: home),
+                environment: ["PATH": "/usr/bin:/bin", "SHELL": fakeLoginShell.path],
+                shellPathDirectoryResolver: AgentHookInstaller.loginShellPathDirectories)
+
+            #expect(outcome.failures.isEmpty)
+            let settings = read(home.appendingPathComponent(".claude/settings.json"))
+            // The persisted command names the per-shell symlink path (still under `multishellParent`):
+            // `ExecutableResolver` tries original directories before canonical ones, and the original
+            // directory here was never deleted, so it wins.
+            #expect(settings.contains(multishellParent.path))
+            #expect(!settings.contains(realBinDirectory.path))
         }
     }
 #endif
