@@ -220,6 +220,28 @@ final class RestorableSessionStoreTests: XCTestCase {
         XCTAssertEqual(capture.agentSessionKey, "conv-stranded")
     }
 
+    /// The capture's title is the agent row's own name, which is what the sidebar already shows this agent
+    /// under, rather than the shell's generic captured title. A rename applied through
+    /// `setAgentSessionUserLabel` wins over the row's own reported label, matching how the row is named
+    /// everywhere else.
+    func testStrandedCaptureTitleIsTheAgentRowsLabelAndFollowsARename() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let sessionID = "stranded-typed-agent-title"
+        try seedEndedSession(sessionID: sessionID, workspaceID: workspace.id, kind: .shell, launchCommand: nil)
+        try upsertAgentRow(
+            store: store, workspaceID: workspace.id, terminalSessionID: sessionID, status: .waiting, sessionKey: "conv-title", launchCommand: "claude"
+        )
+
+        let capture = try XCTUnwrap(try store.agentSessionCaptures(sessionIDs: [sessionID]).first)
+        XCTAssertEqual(capture.title, "claude", "the agent row's label wins over the terminal's own captured title")
+
+        XCTAssertTrue(try store.setAgentSessionUserLabel(id: "agent-\(sessionID)", userLabel: "reviewer"))
+
+        let renamed = try XCTUnwrap(try store.agentSessionCaptures(sessionIDs: [sessionID]).first)
+        XCTAssertEqual(renamed.title, "reviewer", "a rename on the agent row wins over its own reported label")
+    }
+
     /// The stranded capture skips a shell whose agent had finished before the daemon died, and one whose
     /// agent row carries no command: the first ran its agent to the end and the second has nothing to
     /// relaunch, which is the state of a row detection has seen but not yet sampled a command onto.
@@ -474,6 +496,38 @@ final class RestorableSessionStoreTests: XCTestCase {
         XCTAssertEqual(try store.restorableSessions().map(\.sessionID), ["session-b"], "answering an older offer leaves a newer one standing")
     }
 
+    // MARK: - deleteRestorableSessions
+
+    /// A delete naming the record's own generation drops the automation's row; one naming a generation a
+    /// newer capture replaced leaves that capture's row for the same automation in place, since it holds
+    /// the agent the superseding run just launched.
+    func testDeleteRestorableSessionsIsScopedToTheNamedGeneration() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let automationID = "automation-1"
+
+        try store.replaceRestorableSessions(
+            generation: "gen-a", capturedAt: "2026-09-11T00:00:00Z",
+            captures: [makeCapture(sessionID: "session-a", workspaceID: workspace.id, agentSessionKey: nil, automationID: automationID)])
+        try store.deleteRestorableSessions(automationID: automationID, generation: "gen-a")
+        XCTAssertTrue(try store.restorableSessions().isEmpty, "deleting the row's own generation drops it")
+
+        // A capture replaces gen-a with gen-b, carrying the automation's newly launched agent, before the
+        // drop for gen-a runs.
+        try store.replaceRestorableSessions(
+            generation: "gen-a", capturedAt: "2026-09-11T00:01:00Z",
+            captures: [makeCapture(sessionID: "session-a2", workspaceID: workspace.id, agentSessionKey: nil, automationID: automationID)])
+        try store.replaceRestorableSessions(
+            generation: "gen-b", capturedAt: "2026-09-11T00:02:00Z",
+            captures: [makeCapture(sessionID: "session-b", workspaceID: workspace.id, agentSessionKey: nil, automationID: automationID)])
+
+        try store.deleteRestorableSessions(automationID: automationID, generation: "gen-a")
+
+        XCTAssertEqual(
+            try store.restorableSessions().map(\.sessionID), ["session-b"],
+            "a delete naming the superseded generation is a no-op; the newer generation's row for the same automation survives")
+    }
+
     // MARK: - RestorableSessionRecord.summary
 
     /// `hasResumeKey` is true only when a conversation id was actually captured.
@@ -593,9 +647,11 @@ final class RestorableSessionStoreTests: XCTestCase {
         }
     }
 
-    private func makeCapture(sessionID: String, workspaceID: String, agentSessionKey: String?) -> RestorableSessionCapture {
+    private func makeCapture(sessionID: String, workspaceID: String, agentSessionKey: String?, automationID: String? = nil)
+        -> RestorableSessionCapture
+    {
         RestorableSessionCapture(
             sessionID: sessionID, workspaceID: workspaceID, agentKind: nil, agentSessionKey: agentSessionKey, launchCommand: "claude --resume",
-            workingDirectory: "/tmp", title: sessionID)
+            workingDirectory: "/tmp", title: sessionID, automationID: automationID)
     }
 }

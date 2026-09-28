@@ -95,6 +95,7 @@ final class RestorableSessionRestoreLoopTests: XCTestCase {
         let offer = try XCTUnwrap(try store.restorableSessions().first)
         XCTAssertEqual(offer.sessionID, shell.id)
         XCTAssertEqual(offer.workingDirectory, agentDirectory.path)
+        XCTAssertEqual(offer.title, "claude", "the agent row's own name wins over the shell's generic title")
         let resume = CodingAgent.resumeCommand(launchCommand: offer.launchCommand, sessionKey: offer.agentSessionKey)
         XCTAssertEqual(resume, "claude --resume conversation-1 --model opus", "the resumed conversation already holds the prompt")
 
@@ -108,6 +109,7 @@ final class RestorableSessionRestoreLoopTests: XCTestCase {
         XCTAssertEqual(restoredConfiguration.workingDirectory, agentDirectory.path)
         XCTAssertNil(restoredConfiguration.automationRunID)
         XCTAssertEqual(restoredConfiguration.launchCommand, #"claude --model opus 'fix the build'"#)
+        XCTAssertEqual(restoredConfiguration.title, "claude", "the relaunch carries the agent's own name forward, not \"shell-N\"")
         try store.clearRestorableSessions(generation: offer.generation)
 
         // The restored agent is an ordinary agent session from here, captured off its own session row.

@@ -81,6 +81,9 @@ import workspacecore
     /// The offer `answer` is in the middle of delivering, which holds its panes for the length of the call.
     /// See `heldSessionIDs`.
     private var inFlightAnswerOffer: SessionRestoreOffer?
+    /// True while an answer is being delivered. That answer clears the record itself, so a supersession
+    /// check must not end a surface mid-answer, before its pane retargeting lands.
+    var isAnswering: Bool { inFlightAnswerOffer != nil }
     /// Stands in for the fresh daemon-status read in `probedDaemonStatus`, so a test can answer without a
     /// daemon to dial.
     var daemonStatusProbeOverrideForTesting: ((String) -> TerminalServiceDaemonStatus?)?
@@ -250,15 +253,20 @@ import workspacecore
         }
     }
 
-    /// What every device on screen reports right now, straight off its status. A device with no section at
-    /// all is simply absent, which reads as `.unknown`.
+    /// What one device's status says about the record it holds. A missing or failed read is `.unknown`,
+    /// never `.noRecord`, so it is never mistaken for an answer.
+    nonisolated static func reportedRecord(status: TerminalServiceDaemonStatus?) -> ReportedRecord {
+        guard let status else { return .unknown }
+        guard let generation = status.restorableSessions.first?.generation else { return .noRecord }
+        return .generation(generation)
+    }
+
+    /// What every device on screen reports right now, straight off its cached status. A device with no
+    /// section at all is simply absent, which reads as `.unknown`.
     private func reportedRecords() -> [String: ReportedRecord] {
         Dictionary(
-            host.deviceModel.deviceSections.map { section in
-                guard let status = section.daemonStatus else { return (section.deviceID, ReportedRecord.unknown) }
-                guard let generation = status.restorableSessions.first?.generation else { return (section.deviceID, ReportedRecord.noRecord) }
-                return (section.deviceID, ReportedRecord.generation(generation))
-            }, uniquingKeysWith: { first, _ in first })
+            host.deviceModel.deviceSections.map { section in (section.deviceID, Self.reportedRecord(status: section.daemonStatus)) },
+            uniquingKeysWith: { first, _ in first })
     }
 
     /// Re-runs the check when the window's current sheet ends, so an offer blocked by an unrelated sheet
@@ -457,7 +465,7 @@ import workspacecore
     /// round-trip is worth its cost: it happens once per device per answer, immediately before a call that
     /// relaunches every agent on the record. Bounded by the same probe timeout the launch's own status
     /// read uses, and nil when the device does not answer in time.
-    private func probedDaemonStatus(deviceID: String) async -> TerminalServiceDaemonStatus? {
+    func probedDaemonStatus(deviceID: String) async -> TerminalServiceDaemonStatus? {
         if let probe = daemonStatusProbeOverrideForTesting { return probe(deviceID) }
         guard let record = try? host.clientDatabase().pairedDevice(id: deviceID) else { return nil }
         let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()

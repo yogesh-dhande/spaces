@@ -4,6 +4,7 @@ import spacesclientcore
 import spacesdevicecore
 import spacesterminalcore
 import systembridge
+import workspacecore
 
 /// Sequences the launch setup steps, replacing the main window's content until every pending step is
 /// done, then handing back to the workspace UI through `onComplete`. A launch with no pending step
@@ -57,6 +58,25 @@ import systembridge
     /// is the slow one (it resolves the user's login shell `PATH`), and a launch where it hangs or fails
     /// must still be able to offer the restore step off the status that did come back.
     private var agentStatusWait: LaunchProbeWait<[AgentHookStatus]>?
+    /// This launch's profile filter for `IPCNotification.databaseDidChange`, resolved once in `begin()`.
+    /// Matches how every other IPC handler on this process filters the notification (see
+    /// `AppKitController.matchesProfileIPCObject`): a paired device's own profile posts on the same
+    /// distributed center, so without this filter its change would trigger this launch's re-check too.
+    /// Nil when the profile could not be resolved, in which case the restore step observes nothing and
+    /// simply waits for the user to answer or dismiss it.
+    private var ipcNotificationObject: String?
+    /// Observes `databaseDidChange` while the restore step is on screen, so another client (a paired
+    /// iPhone, most commonly) answering the same offer is noticed and closes this step instead of leaving
+    /// it up, blocking the workspace UI, until the user clicks through it themselves.
+    private var restoreStepDatabaseChangeObserver: (any NSObjectProtocol)?
+    /// The restore step's own offer while it is on screen, re-read by every `databaseDidChange` this step
+    /// observes. Nil once the step ends.
+    private var restoreOfferOnScreen: SessionRestoreOffer?
+    /// Whether a supersession re-check is already reading the devices, so a burst of `databaseDidChange`
+    /// notices arriving mid-read does not pile up concurrent probes. At most one extra run is queued
+    /// behind the one in flight.
+    private var isRecheckingRestoreOffer = false
+    private var restoreOfferRecheckQueued = false
 
     init(host: any CodingAgentsHost, database: SpacesClientDatabase?, sessionRestore: SessionRestoreController) {
         self.host = host
@@ -106,6 +126,7 @@ import systembridge
         // Start the probes before the first step renders, so a cold `spacesd` warms up while the user
         // works through the Chrome Automation screen instead of after it.
         let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()
+        ipcNotificationObject = profile?.ipcNotificationObject
         let deadline = ContinuousClock.now.advanced(by: Self.localProbeTimeout)
         // One bootstrap for both reads: a launch must start `spacesd` once, not twice. The agent probe
         // waits on the context this one produces, and its failure or hang stays its own.
@@ -135,6 +156,8 @@ import systembridge
         chromeSetup?.stop()
         chromeSetup = nil
         stopCodingAgentsStep()
+        stopObservingRestoreStepDatabaseChanges()
+        restoreOfferOnScreen = nil
     }
 
     /// Tears the coding-agents step down as it is left. `finish()` reaches this through `stop()`, but the
@@ -281,10 +304,74 @@ import systembridge
         }
     }
 
-    private func showRestoreSessionsStep(offer: SessionRestoreOffer) {
+    /// Internal rather than private so a test can enter this step without a daemon to probe.
+    func showRestoreSessionsStep(offer: SessionRestoreOffer) {
         let view = SessionRestoreOfferView(offer: offer, host: host) { [weak self] answer in self?.answerRestoreOffer(answer, offer: offer) }
         restoreOffer = view
+        restoreOfferOnScreen = offer
         setContent(view.view)
+        startObservingRestoreStepDatabaseChanges()
+        // The status this offer was built from can already be stale when an earlier step held the launch,
+        // and the observer only sees changes from here on, so check once now.
+        Task { @MainActor [weak self] in await self?.recheckRestoreOfferForSupersession() }
+    }
+
+    private func startObservingRestoreStepDatabaseChanges() {
+        guard restoreStepDatabaseChangeObserver == nil, let ipcNotificationObject else { return }
+        restoreStepDatabaseChangeObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.databaseDidChange, object: ipcNotificationObject, queue: .main
+        ) { [weak self] _ in Task { @MainActor [weak self] in await self?.recheckRestoreOfferForSupersession() } }
+    }
+
+    private func stopObservingRestoreStepDatabaseChanges() {
+        guard let restoreStepDatabaseChangeObserver else { return }
+        DistributedNotificationCenter.default().removeObserver(restoreStepDatabaseChangeObserver)
+        self.restoreStepDatabaseChangeObserver = nil
+    }
+
+    /// Re-reads status for the restore step's own offer and finishes the step silently when every device
+    /// it named has settled the record some other way, the same `sheetIsSuperseded` rule the running app's
+    /// sheet applies to a `databaseDidChange` of its own.
+    ///
+    /// A no-op while `sessionRestore.isAnswering`: the step's own answer clears the record too, and
+    /// finishing here mid-answer would race the pane retargeting `answerRestoreOffer` still owes before
+    /// `onComplete`. Checked again after the reads land, since an answer can start while this is probing.
+    /// At most one probe runs at a time; a notification that lands mid-read queues a single trailing
+    /// re-run, spaced at least a second after the probe already in flight started rather than firing back
+    /// to back with it.
+    func recheckRestoreOfferForSupersession() async {
+        guard let offer = restoreOfferOnScreen, !sessionRestore.isAnswering else { return }
+        guard !isRecheckingRestoreOffer else {
+            restoreOfferRecheckQueued = true
+            return
+        }
+        isRecheckingRestoreOffer = true
+        let probeStartedAt = Date()
+        var reported: [String: SessionRestoreController.ReportedRecord] = [:]
+        for device in offer.devices {
+            // A read that fails or times out maps to `.unknown`, never to "no record": a probe that
+            // could not reach the device is not evidence anybody settled the offer, and treating it as
+            // one would finish the step out from under agents that are, for all this launch knows, still
+            // waiting on the device.
+            let status = await sessionRestore.probedDaemonStatus(deviceID: device.deviceID)
+            reported[device.deviceID] = SessionRestoreController.reportedRecord(status: status)
+        }
+        if restoreOfferRecheckQueued {
+            restoreOfferRecheckQueued = false
+            // Still marked as rechecking through the wait, so a notice landing mid-wait only re-queues
+            // instead of starting a probe of its own.
+            let remainingMilliseconds = 1_000 - Int(Date().timeIntervalSince(probeStartedAt) * 1_000)
+            if remainingMilliseconds > 0 { try? await Task.sleep(for: .milliseconds(remainingMilliseconds)) }
+            isRecheckingRestoreOffer = false
+            guard restoreOfferOnScreen == offer else { return }
+            await recheckRestoreOfferForSupersession()
+            return
+        }
+        isRecheckingRestoreOffer = false
+        guard restoreOfferOnScreen == offer, !sessionRestore.isAnswering,
+            SessionRestoreController.sheetIsSuperseded(presented: offer, reported: reported)
+        else { return }
+        finish()
     }
 
     /// Answers the offer and continues. The wait is deliberate: Restore relaunches the agents on the
@@ -300,6 +387,9 @@ import systembridge
             guard let self else { return }
             if case .failed(let message) = await sessionRestore.answer(answer, offer: offer, panePlacement: .persistedLayouts) {
                 restoreOffer?.showAnswerFailed(message)
+                // A lost reply can fail an answer the daemon already applied, and the change notice for it
+                // arrived mid-answer, when re-checks are skipped, so check once now.
+                await recheckRestoreOfferForSupersession()
                 return
             }
             finish()

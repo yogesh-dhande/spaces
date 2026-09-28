@@ -783,7 +783,8 @@ public final class AutomationService: @unchecked Sendable {
 
     /// Begins executing a run: insert (or promote an existing queued) row to `running`, sweep the ended
     /// coding-agent sessions of this automation's prior runs, then launch the workspace-bound command
-    /// session and record its terminal session id. A launch failure records the run `failed`.
+    /// session and record its terminal session id. A launch failure records the run `failed`. An agent
+    /// automation's launched run supersedes the automation's agent on the outstanding restore offer.
     @discardableResult private func startRun(automation: Automation, trigger: AutomationRunTrigger, promoting existing: AutomationRun? = nil) throws
         -> AutomationRun
     {
@@ -802,14 +803,27 @@ public final class AutomationService: @unchecked Sendable {
 
         sweepPriorRunSessions(automationID: automation.id, excludingRunID: runID)
 
+        // Read before the launch: a capture that lands mid-launch writes a newer generation already holding
+        // this run's agent, which the drop below must leave alone.
+        let outstandingGenerationBeforeLaunch = automation.kind == .agent ? currentRestorableSessionGeneration() : nil
+
         switch automation.kind {
         case .script: try launchScriptRun(automation: automation, runID: runID, startedAt: currentTime)
         case .agent: try launchAgentRun(automation: automation, runID: runID, startedAt: currentTime)
         }
         // The launch paths update the stored row with the session id (or a launch failure), so return the
         // persisted row rather than the pre-launch local value, which still reads `running` with no session.
-        return try requireAutomationRun(id: runID)
+        let persisted = try requireAutomationRun(id: runID)
+        // A launch failure records the run with no session id.
+        if automation.kind == .agent, persisted.terminalSessionID != nil, let generation = outstandingGenerationBeforeLaunch {
+            dropSupersededRestorableSession(automationID: automation.id, generation: generation)
+        }
+        return persisted
     }
+
+    /// The generation of the outstanding restore record, or nil when there is none. Best-effort like
+    /// `dropSupersededRestorableSession`: a read failure here just leaves the drop skipped.
+    private func currentRestorableSessionGeneration() -> String? { (try? store.restorableSessions())?.first?.generation }
 
     /// Launches a script-kind run at its selected workspace root and records its terminal session id. A
     /// launch failure records the run `failed`.
@@ -1350,6 +1364,22 @@ public final class AutomationService: @unchecked Sendable {
                 }
             }
         } catch { logError("automation_sweep_error automation=\(automationID) error=\(error)") }
+    }
+
+    /// Drops this automation's row from `generation`, the record outstanding before this run's agent
+    /// launched: that agent supersedes the one the record named, so the row leaves the offer now instead of
+    /// being refused later by the live-run guard in `restoreTargetLocked`. Best-effort like the sweep beside
+    /// it, because a dropped offer row is not the reason a run should fail.
+    ///
+    /// Called only after the launch produced a session, since a failed launch leaves the captured agent as
+    /// the only way to get that work back. Scoped to the pre-launch generation because a capture that races
+    /// the launch writes a newer generation already holding the new agent. The generation itself is kept, so
+    /// a client already showing the offer can still list the dropped agent; restoring skips it without a
+    /// report, matching the rule that a superseded automation agent leaves the record silently.
+    private func dropSupersededRestorableSession(automationID: String, generation: String) {
+        do { try store.deleteRestorableSessions(automationID: automationID, generation: generation) } catch {
+            logError("automation_restorable_session_drop_error automation=\(automationID) error=\(error)")
+        }
     }
 
     /// Finalizes the coding-agent orchestration row bound to an attributed terminal session through the

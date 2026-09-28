@@ -57,8 +57,13 @@ extension SQLiteStore {
     /// queries (see `typedAgentIdentity(_:)` for the one case a row is not read), which is why a typed
     /// agent captured in the window before the classification pass has written its row carries neither:
     /// the offer lists it, says it comes back as a new conversation, and relaunches the command the
-    /// runtime row recorded. A session's manual rename wins over its launch title, matching how a session
-    /// is named everywhere else.
+    /// runtime row recorded.
+    ///
+    /// The title follows the same row-authority rule: the agent row's own name (its rename, else the
+    /// label it reports) wins when a row exists and is not the stale predecessor `typedAgentIdentity(_:)`
+    /// excludes, because that is the name the sidebar already shows this agent under. Only a session with
+    /// no live agent row falls back to the terminal's own name (its rename, else its launch title), which
+    /// is what a captured plain terminal or a not-yet-classified typed agent gets.
     ///
     /// The command is decided by what the session is, not by which row happens to hold a value: an agent
     /// Spaces launched relaunches from its own session row, and an agent typed into a terminal from the
@@ -86,7 +91,12 @@ extension SQLiteStore {
         \(typedAgentIdentity("agent_sessions.session_key")),
         CASE terminal_sessions.kind WHEN 'shell' THEN \(source.command) ELSE terminal_sessions.launch_command END,
         COALESCE(NULLIF(terminal_runtime_states.working_directory, ''), terminal_sessions.working_directory),
-        COALESCE(NULLIF(terminal_sessions.user_title, ''), terminal_sessions.title),
+        COALESCE(
+          NULLIF(\(typedAgentIdentity("agent_sessions.user_label")), ''),
+          NULLIF(\(typedAgentIdentity("agent_sessions.label")), ''),
+          NULLIF(terminal_sessions.user_title, ''),
+          terminal_sessions.title
+        ),
         COALESCE(CASE WHEN automations.kind = 'agent' THEN automation_runs.automation_id END, '')
         """
     }
@@ -268,6 +278,14 @@ extension SQLiteStore {
     /// different set of sessions, and an unscoped delete would drop it before anyone saw it.
     public func clearRestorableSessions(generation: String) throws {
         try execute(sql: "DELETE FROM restorable_sessions WHERE generation = ?", bindings: [generation])
+    }
+
+    /// Drops the named automation's rows from `generation` only. Scoped rather than unconditional because a
+    /// capture that races an agent run's launch (a shutdown or Stop All landing between the launch and this
+    /// call) writes a newer generation that already holds the agent the launch just produced; reaching into
+    /// that generation would erase the very agent it is meant to keep.
+    public func deleteRestorableSessions(automationID: String, generation: String) throws {
+        try execute(sql: "DELETE FROM restorable_sessions WHERE automation_id = ? AND generation = ?", bindings: [automationID, generation])
     }
 
     /// Drops from `generation` the rows whose terminal session is still live, and reports how many rows

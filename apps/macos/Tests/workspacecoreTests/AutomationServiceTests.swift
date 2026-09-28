@@ -1002,6 +1002,36 @@ import spacesterminalcore
         XCTAssertEqual(harness.host.terminated.count, 1)
     }
 
+    /// Only a newer agent run supersedes a captured agent row: a script run of an automation switched away
+    /// from agent must not drop it, or the "no longer an agent automation" refusal above would have nothing
+    /// left to refuse and the row would vanish from the offer without ever being reported.
+    func testASwitchedToScriptAutomationsScriptRunDoesNotDropItsCapturedAgentRow() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+        XCTAssertEqual(try harness.store.captureLiveAgentSessionsForRestore(generation: "gen-1", capturedAt: "2026-09-20T00:00:00Z"), 1)
+        let offer = try XCTUnwrap(try harness.store.restorableSessions().first)
+
+        harness.service.cancelRun(runID: run.id)
+        harness.host.markSessionEnded(sessionID: sessionID)
+
+        let asScript = AutomationDraft(
+            name: automation.name, enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script, script: "true", agentCommand: nil,
+            agentPrompt: nil, workspaceID: automation.workspaceID, timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce)
+        XCTAssertEqual(try harness.service.updateAutomation(id: automation.id, draft: asScript).kind, .script)
+
+        let scriptRun = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        XCTAssertEqual(scriptRun.kind, .script, "the automation's own next run starts under its current kind")
+
+        XCTAssertNotNil(
+            try harness.store.restorableSessions().first { $0.sessionID == offer.sessionID },
+            "a script run must not drop the captured agent row; only a newer agent run supersedes it")
+        XCTAssertThrowsError(try harness.restoreOne(offer)) { error in XCTAssertTrue("\(error)".contains("no longer an agent automation"), "\(error)")
+        }
+    }
+
     /// An automation that has moved on while its agent sat on an outstanding offer fails that row's relaunch.
     /// Startup missed-run reconciliation, the schedule, or a manual trigger can start a newer run before
     /// anyone answers the offer, and relaunching on top of it would put a second agent beside the one the
@@ -1012,8 +1042,15 @@ import spacesterminalcore
         let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
         let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
         let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
-        XCTAssertEqual(try harness.store.captureLiveAgentSessionsForRestore(generation: "gen-1", capturedAt: "2026-09-20T00:00:00Z"), 1)
-        let offer = try XCTUnwrap(try harness.store.restorableSessions().first)
+
+        // An unrelated automation's own live agent, captured into the same offer, proves the drop below is
+        // scoped to the automation that started a new run rather than emptying the whole offer.
+        let other = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let otherRun = try XCTUnwrap(harness.service.triggerManually(automationID: other.id))
+        let otherSessionID = try XCTUnwrap(harness.store.automationRun(id: otherRun.id)?.terminalSessionID)
+
+        XCTAssertEqual(try harness.store.captureLiveAgentSessionsForRestore(generation: "gen-1", capturedAt: "2026-09-20T00:00:00Z"), 2)
+        let offer = try XCTUnwrap(try harness.store.restorableSessions().first { $0.sessionID == sessionID })
 
         // The teardown that made this agent something to offer back.
         harness.service.cancelRun(runID: run.id)
@@ -1026,6 +1063,15 @@ import spacesterminalcore
         let catchUpSessionID = try XCTUnwrap(harness.store.automationRun(id: catchUp.id)?.terminalSessionID)
         XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: catchUpSessionID))
 
+        // The new run drops this automation's own row from the offer as soon as it starts; the unrelated
+        // automation's row is untouched.
+        let remaining = try harness.store.restorableSessions()
+        XCTAssertTrue(remaining.allSatisfy { $0.automationID != automation.id }, "the superseded row leaves the offer as soon as the new run starts")
+        XCTAssertTrue(remaining.contains { $0.sessionID == otherSessionID }, "an unrelated automation's row is untouched")
+
+        // The offer a client already read before the new run started still refuses its relaunch: a run can
+        // start in the window between a client reading the offer and answering it, and this guard is what
+        // covers that window now that the row itself is gone by the time most clients would see it.
         XCTAssertThrowsError(try harness.restoreOne(offer)) { error in XCTAssertTrue("\(error)".contains("already has a live run"), "\(error)") }
         XCTAssertTrue(
             try harness.store.automationRuns(automationID: automation.id).allSatisfy { $0.trigger != .restore }, "a refused relaunch opens no run")
@@ -1035,6 +1081,73 @@ import spacesterminalcore
         XCTAssertEqual(liveSessionIDs, [catchUpSessionID], "the automation is left running the one agent it already had")
 
         harness.service.cancelRun(runID: catchUp.id)
+        harness.service.cancelRun(runID: otherRun.id)
+    }
+
+    /// The same drop applies when the new run is an offline catch-up rather than one started while the
+    /// daemon was up: a reboot's startup reconciliation can start a `runOnce` automation's catch-up run a
+    /// moment after its predecessor's session was captured into the restore offer, and that catch-up must
+    /// supersede the old row exactly as an online restart of the automation does.
+    func testMissedRunCatchUpForAnAgentAutomationDropsItsSupersededRestorableSession() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(
+            workspaceID: workspace.id, triggerKind: .cron, cronExpression: "* * * * *", nextFireTime: harness.now().addingTimeInterval(-60))
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+        XCTAssertEqual(try harness.store.captureLiveAgentSessionsForRestore(generation: "gen-1", capturedAt: "2026-09-20T00:00:00Z"), 1)
+        XCTAssertNotNil(try harness.store.restorableSessions().first { $0.automationID == automation.id }, "the ended run's agent is on the offer")
+
+        // The teardown that made this agent something to offer back, then a reboot: the cron anchor is
+        // still the overdue fixture value, exactly as it would be after a daemon that never ticked again.
+        // No `tick()` runs in between: a tick would fire the overdue occurrence itself as an ordinary
+        // `.cron` run and re-anchor the schedule, leaving nothing for the catch-up below to reconcile.
+        harness.service.cancelRun(runID: run.id)
+        harness.host.markSessionEnded(sessionID: sessionID)
+        XCTAssertFalse(harness.orchestrator.automationSessionIsLive(sessionID: sessionID))
+
+        harness.service.reconcileMissedRunsOnStart()
+
+        let runs = try harness.store.automationRuns(automationID: automation.id)
+        XCTAssertTrue(runs.contains { $0.trigger == .missedCatchUp }, "the overdue occurrence starts a catch-up run")
+        XCTAssertTrue(
+            try harness.store.restorableSessions().allSatisfy { $0.automationID != automation.id },
+            "the catch-up's new run drops the superseded agent's row from the offer, the same as an online restart")
+    }
+
+    /// A run that fails to launch has no replacement agent, so the captured agent stays on the restore
+    /// record: it is then the only way to get that interrupted work back.
+    func testAnAgentRunThatFailsToLaunchKeepsItsCapturedAgentRestorable() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+        XCTAssertEqual(try harness.store.captureLiveAgentSessionsForRestore(generation: "gen-1", capturedAt: "2026-09-20T00:00:00Z"), 1)
+        XCTAssertNotNil(try harness.store.restorableSessions().first { $0.automationID == automation.id }, "the ended run's agent is on the offer")
+
+        // The teardown that made this agent something to offer back.
+        harness.service.cancelRun(runID: run.id)
+        harness.host.markSessionEnded(sessionID: sessionID)
+
+        // Repoint the automation at a workspace that no longer exists, the same seam
+        // `testTriggerReturnsPersistedFailedRunOnAgentLaunchFailure` uses to fail a launch at spawn. Written
+        // straight to the store, bypassing `updateAutomation`'s workspace-existence check: the point here is
+        // a launch that fails after its row is already `.running`, not a rejected edit.
+        try harness.store.upsertAutomation(
+            Automation(
+                id: automation.id, name: automation.name, enabled: automation.enabled, triggerKind: automation.triggerKind,
+                cronExpression: automation.cronExpression, kind: automation.kind, script: automation.script, agentCommand: automation.agentCommand,
+                agentPrompt: automation.agentPrompt, workspaceID: "missing-workspace", timeoutSeconds: automation.timeoutSeconds,
+                concurrencyPolicy: automation.concurrencyPolicy, missedRunPolicy: automation.missedRunPolicy, nextFireTime: automation.nextFireTime,
+                createdAt: automation.createdAt, updatedAt: automation.updatedAt))
+
+        let failedRun = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        XCTAssertEqual(failedRun.status, .failed, "the missing workspace fails the launch")
+        XCTAssertNil(failedRun.terminalSessionID)
+        XCTAssertNotNil(
+            try harness.store.restorableSessions().first { $0.automationID == automation.id },
+            "a failed launch has no replacement agent, so the captured row must survive")
     }
 
     /// One offer can hold several agents of the same automation: an `allow` automation runs concurrently,
@@ -2627,12 +2740,13 @@ import spacesterminalcore
 
     func insertAgentAutomation(
         workspaceID: String, command: String = "codex", prompt: String = "investigate the failing test",
-        concurrency: AutomationConcurrencyPolicy = .allow, timeoutSeconds: Int? = nil
+        concurrency: AutomationConcurrencyPolicy = .allow, timeoutSeconds: Int? = nil, triggerKind: AutomationTriggerKind = .manual,
+        cronExpression: String? = nil, nextFireTime: Date? = nil
     ) throws -> Automation {
         let automation = Automation(
-            id: UUID().uuidString, name: "Agent Test", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .agent, script: "",
-            agentCommand: command, agentPrompt: prompt, workspaceID: workspaceID, timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrency,
-            missedRunPolicy: .runOnce, nextFireTime: nil, createdAt: now(), updatedAt: now())
+            id: UUID().uuidString, name: "Agent Test", enabled: true, triggerKind: triggerKind, cronExpression: cronExpression, kind: .agent,
+            script: "", agentCommand: command, agentPrompt: prompt, workspaceID: workspaceID, timeoutSeconds: timeoutSeconds,
+            concurrencyPolicy: concurrency, missedRunPolicy: .runOnce, nextFireTime: nextFireTime, createdAt: now(), updatedAt: now())
         try store.upsertAutomation(automation)
         return automation
     }
