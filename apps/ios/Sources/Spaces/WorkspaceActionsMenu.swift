@@ -52,17 +52,29 @@ struct WorkspaceActionsMenu: View {
     /// `.running` (exited or never launched), so its presence is exactly "Start has something to do."
     var offersStart: Bool { offersLifecycle && (!workspace.isRunning || workspace.processRows.contains { $0.canRun }) }
 
+    /// The two lifecycle items' show conditions, factored out so `hasActions` and `body` read the same
+    /// predicate instead of two copies that could drift. The other three items (New Terminal, Hide,
+    /// Delete) are already a single source of truth: each is shown exactly when its closure is non-nil, so
+    /// `hasActions` and `body` both just test the closure directly.
+    private var showsStart: Bool { offersStart }
+    private var showsRestartAndStop: Bool { workspace.isRunning && offersLifecycle }
+
+    /// Whether the menu has anything to show. A workspace can offer no lifecycle, no ad hoc terminal
+    /// (Demo Mode), no Hide, and no Delete (the home project) all at once, in which case the caller must
+    /// render no pill at all rather than a menu whose only content is its section title.
+    var hasActions: Bool { showsStart || showsRestartAndStop || onNewTerminal != nil || onHide != nil || onDelete != nil }
+
     var body: some View {
         Menu {
             Section(workspace.displayName) {
-                if offersStart {
+                if showsStart {
                     Button {
                         onStart()
                     } label: {
                         Label("Start", systemImage: "play.fill")
                     }.disabled(isMutating).accessibilityIdentifier("workspace.start.\(workspace.id)")
                 }
-                if workspace.isRunning && offersLifecycle {
+                if showsRestartAndStop {
                     Button {
                         onRestart()
                     } label: {

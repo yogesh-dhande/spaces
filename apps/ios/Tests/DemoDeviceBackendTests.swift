@@ -37,6 +37,29 @@
             XCTAssertTrue(events.contains { $0.kind == .exited })
         }
 
+        /// Every real device carries exactly one home project (PR #793), so Demo Mode has to look like a
+        /// real device: one `kind == .home` row, with its single workspace the default one and idle (no
+        /// sessions), or the demo tour is not representative of what App Store review or a screenshot
+        /// actually sees.
+        func testOverviewIncludesExactlyOneHomeProjectWithOneDefaultWorkspace() throws {
+            let library = try loadLibrary()
+            let overview = library.overview
+
+            let homeProjects = overview.projects.filter { $0.kind == .home }
+            XCTAssertEqual(homeProjects.count, 1, "Expected exactly one home project.")
+            let homeProject = try XCTUnwrap(homeProjects.first)
+
+            let homeWorkspaces = overview.workspaces.filter { $0.projectID == homeProject.id }
+            XCTAssertEqual(homeWorkspaces.count, 1, "A home project owns exactly one workspace.")
+            let homeWorkspace = try XCTUnwrap(homeWorkspaces.first)
+            XCTAssertTrue(homeWorkspace.isDefault)
+            XCTAssertEqual(homeWorkspace.projectKind, .home)
+            XCTAssertFalse(homeWorkspace.isRunning, "The home workspace ships idle: no sessions recorded against it.")
+            XCTAssertTrue(homeWorkspace.processRows.isEmpty)
+            XCTAssertTrue(homeWorkspace.codingAgentRows.isEmpty)
+            XCTAssertTrue(homeWorkspace.terminalRows.isEmpty)
+        }
+
         func testEveryRecordedFrameDecodesAndApplies() throws {
             let library = try loadLibrary()
             XCTAssertFalse(library.recordings.isEmpty)

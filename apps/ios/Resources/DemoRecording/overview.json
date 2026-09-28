@@ -26,6 +26,22 @@
         {
           "config" : {
             "ports" : [
+
+            ],
+            "processes" : [
+
+            ]
+          },
+          "dir" : "/Users/lighthouse/Projects/home",
+          "id" : "5293EF09-F436-4567-A7BC-AA197B109B5A",
+          "isGitRepo" : false,
+          "isHidden" : false,
+          "kind" : "home",
+          "name" : "~"
+        },
+        {
+          "config" : {
+            "ports" : [
               {
                 "id" : "01AB7F79-99EA-4819-9D19-FD1C4C79D78B",
                 "name" : "app"
@@ -309,6 +325,37 @@
 
       ],
       "workspaces" : [
+        {
+          "codingAgentRows" : [
+
+          ],
+          "config" : {
+            "ports" : [
+
+            ],
+            "processes" : [
+
+            ]
+          },
+          "dir" : "/Users/lighthouse/Projects/home",
+          "hasTrackedRuntimeIndicators" : false,
+          "id" : "5342524A-6E62-419C-89BA-DD8A7435D60B",
+          "isDefault" : true,
+          "isHidden" : false,
+          "isRunning" : false,
+          "processRows" : [
+
+          ],
+          "projectID" : "5293EF09-F436-4567-A7BC-AA197B109B5A",
+          "projectKind" : "home",
+          "projectName" : "~",
+          "setupState" : {
+            "status" : "succeeded"
+          },
+          "terminalRows" : [
+
+          ]
+        },
         {
           "baseBranch" : "main",
           "branch" : "main",

@@ -339,7 +339,10 @@ struct SpacesTabView: View {
         // disabled: a collapse recorded while it is empty would silently hide the first row it gains (a
         // terminal opened from its own menu, say) under a band that showed no chevron. Disabled rather than
         // plain text so the band keeps one element type for every workspace, and VoiceOver reads it as
-        // dimmed instead of offering a button that does nothing.
+        // dimmed instead of offering a button that does nothing. It still draws in the band's normal
+        // colors (`WorkspaceBandNameButtonStyle`, not `.plain`'s automatic disabled dimming): an empty band
+        // is typically the home row before its first terminal, a normal reachable workspace rather than an
+        // unavailable one, and greying it out would read as broken.
         let hasRows = !group.rows.isEmpty
         let toggleCollapse: () -> Void = { withAnimation(.easeInOut(duration: 0.2)) { model.toggleWorkspaceCollapsed(group.id) } }
         let hideAction: () -> Void = { Task { await model.setWorkspaceHidden(workspaceID: group.workspace.id, isHidden: true) } }
@@ -355,9 +358,9 @@ struct SpacesTabView: View {
                     WorkspaceBandLabel(glyph: .from(group.workspace), displayName: group.workspace.displayName)
                     Spacer(minLength: 0)
                 }.contentShape(Rectangle())
-            }.buttonStyle(.plain).disabled(isDeleting || !hasRows).accessibilityIdentifier("workspace.band.\(group.id)").accessibilityValue(
-                isDeleting ? "Deleting" : "")
-            WorkspaceActionsMenu(
+            }.buttonStyle(WorkspaceBandNameButtonStyle()).disabled(isDeleting || !hasRows).accessibilityIdentifier("workspace.band.\(group.id)")
+                .accessibilityValue(isDeleting ? "Deleting" : "")
+            let actionsMenu = WorkspaceActionsMenu(
                 // A delete never sets `isMutating` (it runs on its own private channel), so another
                 // workspace's delete never dims this menu (#450); this workspace's own delete dims it via
                 // `isDeleting`.
@@ -369,6 +372,10 @@ struct SpacesTabView: View {
                 onHide: workspaceBandActionsSuppressed(model: model, workspaceID: group.id) ? nil : hideAction,
                 onDelete: workspaceBandActionsSuppressed(model: model, workspaceID: group.id) || !workspaceCanBeDeleted(group.workspace)
                     ? nil : deleteAction)
+            // A workspace whose every action is unavailable (Demo Mode's home project, for one) gets no
+            // pill rather than a menu that opens to an empty section title: `hasActions` mirrors the menu's
+            // own item conditions, so the two can never disagree about whether there is anything to show.
+            if actionsMenu.hasActions { actionsMenu }
             // The spinner takes the collapse chevron's place, so a deleting band reads as busy rather
             // than merely collapsed.
             if isDeleting {
@@ -597,6 +604,15 @@ struct SpacesTabView: View {
         }.buttonStyle(.plain).disabled(isDeleting || (!session.isControlAvailable && !session.hasFinalRender)).opacity(isDeleting ? 0.5 : 1)
             .accessibilityIdentifier("terminal.row.\(session.id)")
     }
+}
+
+/// The workspace band's name button, styled like `.plain` (no fill or border, dims briefly on press) but
+/// without `.plain`'s automatic dimming while `disabled`. An empty band disables the button only to drop
+/// its tap action and read as inert to VoiceOver: it is still a normal, reachable workspace (typically the
+/// home row, before its first terminal), not an unavailable control, so it keeps the band's regular colors
+/// rather than greying out.
+private struct WorkspaceBandNameButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { configuration.label.opacity(configuration.isPressed ? 0.5 : 1) }
 }
 
 /// A stop the user has asked for but not yet confirmed: either one runtime row's session or a whole
