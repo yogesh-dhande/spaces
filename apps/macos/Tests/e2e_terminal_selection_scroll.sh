@@ -6,6 +6,7 @@ APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
 source "$SCRIPT_DIR/terminal_harness_lock.sh"
 source "$REPO_ROOT/scripts/spaces-profile-helpers.sh"
+source "$SCRIPT_DIR/e2e_ui_automation.sh"
 
 BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="$BUILD_DIR/SpacesApp"
@@ -105,6 +106,8 @@ wait_for_terminal_surface_ready() {
     if [[ "$(dump_value found)" == "true" ]] && [[ "$(dump_value showsTerminalSurface)" == "true" ]]; then
       return 0
     fi
+    # A fresh profile launch can offer the coding-agents setup step; skip it or the window never becomes key.
+    drive_coding_agents_setup_step_if_offered
     sleep 0.2
   done
   fail "Timed out waiting for the terminal pane surface to become available"
@@ -242,6 +245,7 @@ FIXTURE_WORKSPACE_ID="$(printf '%s' "$FIXTURE_WORKSPACE_JSON" | python3 -c 'impo
 
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
 APP_PID="$!"
+SPACES_PID="$APP_PID"
 sleep 3
 
 command_output="$(
