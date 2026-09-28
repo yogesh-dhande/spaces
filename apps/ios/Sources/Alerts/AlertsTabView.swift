@@ -99,8 +99,9 @@ struct AlertsTabView: View {
             // its own cadence even when the overview payload itself is unchanged (#540) — see
             // `SpacesMobileAppModel.relativeTimeReference`. `abbreviatedAge` already floors anything under
             // 60 seconds to "now", so a reference trailing `event.date` cannot render a negative age.
-            Text(SpacesMobileAttention.abbreviatedAge(of: event.date, relativeTo: model.relativeTimeReference)).font(.system(size: 11))
-                .foregroundStyle(Theme.mutedSecondary).monospacedDigit()
+            Text(AlertsAgeFormatting.abbreviatedAge(of: event.date, relativeTo: model.relativeTimeReference)).font(.system(size: 11)).foregroundStyle(
+                Theme.mutedSecondary
+            ).monospacedDigit()
         }
         if let session = event.sessionID.flatMap({ model.session(forSessionID: $0) }) {
             Button {

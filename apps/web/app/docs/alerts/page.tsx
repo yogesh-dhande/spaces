@@ -45,6 +45,11 @@ export default function AlertsDocsPage() {
           everywhere else it is hidden from (see{" "}
           <DocLink href="/docs/workspaces#hiding">hiding</DocLink>).
         </Prose>
+        <Prose>
+          On the Mac, Alerts is one list across every device, newest first. <InlineCode>⌘1</InlineCode>{" "}
+          through <InlineCode>⌘9</InlineCode>, and <InlineCode>⌘0</InlineCode> for the tenth, follow
+          that same order, and clicking a row does the same thing its number does.
+        </Prose>
       </Section>
 
       <Section id="dismissing" title="Dismissing an alert">

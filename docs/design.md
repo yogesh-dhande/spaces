@@ -60,6 +60,8 @@ The visual system and reusable interaction patterns for the Spaces Mac and iOS a
 - Keep spacing tight and intentional, using a small set of repeated rhythms.
 - Avoid large empty regions in information-dense views.
 - In wide tables, cap leading identity columns at a readable width and give spare width to a descriptive middle column, so fixed trailing controls do not bunch together.
+- A dense multi-column table (Automations, Alerts) is a header line plus row lines sharing one column grid: the header sizes each column, and every row pins its matching column to that width, so the columns cannot drift apart between lines. Alternate rows carry a subtle zebra fill on `surface2`; hover still overrides it. A table whose rows can name several devices (Alerts) shows a Device column only once more than one device is paired, the same threshold the sidebar's device headers use.
+- A row's combined identity column (Alerts' Alert column: `project / workspace / name / title`) compresses its segments in a fixed give-way order rather than all at once: title first, then workspace, then project, then name last, since name is the row's own identity. Each compressing segment truncates with a tail ellipsis; separators never compress. The order guarantees the cell can always be satisfied down to the column's width, so a narrow column loses its least identifying detail first instead of clipping an arbitrary segment.
 
 ## Sections And Grouping
 
@@ -81,7 +83,7 @@ The visual system and reusable interaction patterns for the Spaces Mac and iOS a
 - Operational sidebar rows tint the name and kind glyph instead of adding pills or row fills: green working or running, orange blocked, blue done, red exited, gray inactive. A workspace header rolls up its rows with priority red, orange, blue, green, gray. Selection uses its own neutral fill and accent rail without hiding that tint.
 - An alert wears the same color as the row it came from and keeps that item's own kind glyph.
 - When a state has exactly one recovery action, show the action alone, tinted with the state's color and with the detail in its tooltip, rather than a status label beside a button that says the same thing.
-- Rows that belong to an unreachable device stay listed at 55% opacity, with the device named in the tooltip. The dimming is the whole marking; the device's own header reports the state.
+- Rows that belong to an unreachable device stay listed at 55% opacity, with the device named in the tooltip. The dimming is the whole marking; the device's own header reports the state. A table with no grouping header to carry that state (the Alerts table's Device column) instead names it directly on the row, in red, beside the device name.
 - Progressive content reveals structure before detail (for example, a diff's file list appears before its patches) and never replaces a pane with a blank loading state.
 
 ### Banners

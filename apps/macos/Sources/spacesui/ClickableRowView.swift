@@ -12,13 +12,24 @@ final class ClickableRowView: NSView {
     }
 
     private var isHovered = false
+    /// Tracks only the hover area this view added, so `updateTrackingAreas` can replace it without
+    /// touching AppKit's own tooltip tracking area (installed by setting `toolTip`). Removing every
+    /// tracking area on each update, as a naive rebuild does, silently drops the tooltip on the next
+    /// resize or scroll.
+    private var hoverTrackingArea: NSTrackingArea?
 
-    /// The row's two text fields, assigned by `AppKitController.windowRow` as it builds them. Held so a
-    /// re-render that changed nothing but the strings can write into the row already on screen instead of
-    /// replacing it. Which fields the row has, their fonts, and their visibility are decided at build time
-    /// and stay fixed, so only the strings are writable here.
+    /// The row's two text fields, assigned by the row builder (the Alerts table's
+    /// `AlertsController.alertsCombinedCell`) as it builds them. Held so a re-render that changed nothing
+    /// but the strings can write into the row already on screen instead of replacing it. Which fields the
+    /// row has, their fonts, and their visibility are decided at build time and stay fixed, so only the
+    /// strings are writable here.
     weak var labelField: NSTextField?
     weak var detailField: NSTextField?
+
+    /// A dense table row's non-hover background (the Alerts table's zebra striping on alternate rows).
+    /// nil, the default, means no striping, so every other `ClickableRowView` use is unaffected. Hover
+    /// still takes over on top of it, the same as an unstriped row.
+    var zebraFill: NSColor? { didSet { updateBackgroundColor() } }
 
     init(isInteractive: Bool) {
         self.isInteractive = isInteractive
@@ -49,7 +60,7 @@ final class ClickableRowView: NSView {
     }
 
     private func resolvedBackground() -> NSColor {
-        guard isInteractive && isHovered else { return .clear }
+        guard isInteractive && isHovered else { return zebraFill ?? .clear }
         return NSColor(name: nil) { appearance in
             let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             return isDark ? NSColor(white: 1.0, alpha: 0.08) : NSColor(white: 0.0, alpha: 0.05)
@@ -67,10 +78,12 @@ final class ClickableRowView: NSView {
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        for area in trackingAreas { removeTrackingArea(area) }
+        if let hoverTrackingArea { removeTrackingArea(hoverTrackingArea) }
+        hoverTrackingArea = nil
         guard isInteractive else { return }
-        addTrackingArea(
-            NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil))
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
+        hoverTrackingArea = area
+        addTrackingArea(area)
     }
 
     // MARK: - Hover events

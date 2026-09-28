@@ -740,14 +740,6 @@
             XCTAssertEqual(model.attentionGroups.first?.events.map(\.sourceID), ["agent:agent-b"])
         }
 
-        func testAbbreviatedAge() {
-            let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
-            XCTAssertEqual(SpacesMobileAttention.abbreviatedAge(of: now.addingTimeInterval(-30), relativeTo: now), "now")
-            XCTAssertEqual(SpacesMobileAttention.abbreviatedAge(of: now.addingTimeInterval(-5 * 60), relativeTo: now), "5m")
-            XCTAssertEqual(SpacesMobileAttention.abbreviatedAge(of: now.addingTimeInterval(-3 * 3600), relativeTo: now), "3h")
-            XCTAssertEqual(SpacesMobileAttention.abbreviatedAge(of: now.addingTimeInterval(-2 * 86400), relativeTo: now), "2d")
-        }
-
         // MARK: - Bell events
 
         func testSessionWithBellYieldsBellEvent() {
