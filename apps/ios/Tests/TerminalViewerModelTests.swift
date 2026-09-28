@@ -11321,12 +11321,28 @@
 
         /// A relaunch truncates `output.log`, so every byte offset the replay holds stops naming the
         /// content it was read from. The replay is dropped with the run it belonged to.
+        ///
+        /// The frame that drops the replay also starts the relaunched run's own read, which the in-process
+        /// transport can finish before `applyLatestState` returns. That read is held until after the
+        /// assertion, so the test observes the drop rather than the new run's replay.
         func testARelaunchDropsTheReplay() async throws {
             let recorder = DeviceAPIRequestRecorder()
             let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
-            let model = try await Self.ownerModelShowingALiveScreen(
-                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            let relaunchReadGate = TranscriptReadGate()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalTranscript(let payload) = request.command else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                // The first read is the initial live screen's own prefetch and must run free so the test can
+                // reach a ready replay to relaunch away from; only the second, the relaunch's own re-arm, is held.
+                if await recorder.transcriptRequests().count == 2 { await relaunchReadGate.wait() }
+                return await transcript.response(for: payload)
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
             defer { model.stop() }
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            _ = await model.applyLatestState(try Self.liveScreenState(emittedAt: "2026-06-04T14:23:31Z"), isOutOfBand: false)
             await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
             await waitUntil("the page to be replayed") { model.hasReadyLocalScrollbackForTesting }
 
@@ -11334,7 +11350,9 @@
                 try Self.liveScreenState(emittedAt: "2026-06-04T14:23:40Z", sessionRevision: 2, childPID: 777), isOutOfBand: false)
 
             XCTAssertFalse(model.hasReadyLocalScrollbackForTesting, "a replay armed against the previous run holds bytes that no longer exist")
-            await waitUntilAsync("the relaunched run to read its own page") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+            await waitUntilAsync("the relaunched run to start its own read") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+            await relaunchReadGate.release()
+            await waitUntil("the relaunched run's own page to be replayed") { model.hasReadyLocalScrollbackForTesting }
         }
 
         /// A gesture that owes a continuation read must not wait for it. The replay the phone already holds
