@@ -337,8 +337,9 @@ else
   # concern and Docker is already required by the builder image resolved just above; a deploy that
   # reuses a cached archive touches no cache volume and needs no sweep. Docker being unavailable is
   # the helper's own no-op, so anything it does report as a failure is a real one and stops the
-  # deploy along with everything else under `set -e`.
-  "$repo_root/scripts/prune-linux-e2e-cache-volumes.sh"
+  # deploy along with everything else under `set -e`. Its report goes to stderr because callers `eval`
+  # this script's stdout as the artifact assignments.
+  "$repo_root/scripts/prune-linux-e2e-cache-volumes.sh" >&2
   # The worktree label is what that helper prunes by: Docker volumes are global to the daemon, so a
   # volume stamped with the worktree it was built from can be judged by that path alone, while a
   # hash inventory only ever describes the clone doing the pruning and would reclaim another clone's
