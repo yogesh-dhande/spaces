@@ -1123,6 +1123,16 @@ import workspacecore
     func runWindowShortcut(index: Int, startedAt: Date) async {
         activeWindowShortcutProfile = WindowShortcutProfile(index: index, startedAt: startedAt)
         logWindowShortcutProfile("stage=received index=\(index) alerts=\(host.showingAlerts ? 1 : 0)")
+        // An automation-run alert has no workspace runtime target to focus: its click (and so its
+        // shortcut) deep-links to the Runs tab instead, so it is routed before the window-focus
+        // resolution/perf-tracking machinery below, which assumes every shortcut target is one.
+        if host.showingAlerts, let automationRunTarget = host.alerts.alertsAutomationRunTarget(for: index) {
+            host.automations.showRunsForAlert(deviceID: automationRunTarget.deviceID, runID: automationRunTarget.runID)
+            logWindowShortcutProfile(
+                "stage=route_done index=\(index) kind=automation_run elapsed_ms=\(host.windowShortcutElapsedMS(since: startedAt))")
+            activeWindowShortcutProfile = nil
+            return
+        }
         let shortcutDispatchMS = host.windowShortcutElapsedMS(since: startedAt)
         let resolutionStartedAt = Date()
         let resolutionContext = windowShortcutResolutionContext(index: index)

@@ -103,7 +103,12 @@ struct AutomationUnreachableDevice: Sendable, Equatable, Identifiable {
 /// A derived attention entry for a failed or timed-out run, fed into the alerts pipeline.
 struct AutomationAlertEntry: Sendable, Equatable {
     let attentionID: String
-    let text: String
+    /// The automation's name, shown as the alert row's name (the Alerts table's primary-colored segment).
+    let automationName: String
+    /// The run's outcome ("failed (exit 3)", "timed out"), shown as the alert row's title (the Alerts
+    /// table's secondary, truncating segment).
+    let outcome: String
+    let deviceName: String
     let deviceID: String
     let runID: String
     /// The run's status raw value (`failed` or `timed_out`).
@@ -227,15 +232,14 @@ enum AutomationsViewModel {
 
     /// The failed/timed-out runs for one device, derived into dismissible attention entries newest first.
     /// Only these two statuses draw attention: a succeeded/canceled/skipped run needs none, and a
-    /// queued/running one is not yet an outcome. The entry text names the automation, the failure, and the
-    /// device (e.g. "Nightly audit failed (exit 3) on This Mac").
+    /// queued/running one is not yet an outcome.
     static func alertEntries(deviceID: String, deviceName: String, runs: [TerminalServiceAutomationRunSummary]) -> [AutomationAlertEntry] {
         runs.compactMap { run -> AutomationAlertEntry? in
             let status = AutomationRunStatus(rawValue: run.status)
             guard status == .failed || status == .timedOut else { return nil }
             return AutomationAlertEntry(
-                attentionID: "alert:\(deviceID):automationrun:\(run.id):\(run.status)",
-                text: alertText(run: run, status: status, deviceName: deviceName), deviceID: deviceID, runID: run.id, status: run.status,
+                attentionID: "alert:\(deviceID):automationrun:\(run.id):\(run.status)", automationName: run.automationName ?? "Automation",
+                outcome: alertOutcome(run: run, status: status), deviceName: deviceName, deviceID: deviceID, runID: run.id, status: run.status,
                 eventDate: (run.endedAt ?? run.createdAt).flatMap(TerminalSessionTimestamp.date(from:)))
         }.sorted { lhs, rhs in
             switch (lhs.eventDate, rhs.eventDate) {
@@ -246,18 +250,15 @@ enum AutomationsViewModel {
         }
     }
 
-    /// The human-readable attention text for a failed/timed-out run. `status` is always `.failed` or
+    /// The human-readable outcome for a failed/timed-out run. `status` is always `.failed` or
     /// `.timedOut` given the `alertEntries` filter above; the `default` case falls back to the run's raw
     /// status verbatim, matching what a caller would see before this run's status was ever parsed.
-    private static func alertText(run: TerminalServiceAutomationRunSummary, status: AutomationRunStatus?, deviceName: String) -> String {
-        let name = run.automationName ?? "Automation"
-        let outcome: String
+    private static func alertOutcome(run: TerminalServiceAutomationRunSummary, status: AutomationRunStatus?) -> String {
         switch status {
-        case .timedOut: outcome = "timed out"
-        case .failed: outcome = run.exitCode.map { "failed (exit \($0))" } ?? "failed"
-        default: outcome = run.status
+        case .timedOut: "timed out"
+        case .failed: run.exitCode.map { "failed (exit \($0))" } ?? "failed"
+        default: run.status
         }
-        return "\(name) \(outcome) on \(deviceName)"
     }
 
     // MARK: - Automations table columns (pure, unit-testable)

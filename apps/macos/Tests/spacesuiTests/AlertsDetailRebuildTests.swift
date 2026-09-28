@@ -152,5 +152,36 @@ extension ProcessProfileEnvironmentSuites {
 
             #expect(renderedRows(controller).first !== rendered)
         }
+
+        /// An automation-run alert has no workspace target to focus, so its window shortcut is looked up
+        /// in a separate map (`alertsAutomationShortcutMap`) from every other row's (`alertsFocusRequestMap`).
+        /// Both maps key off the same sequential table-order numbering, so the shortcut a row's badge shows
+        /// is the same number that resolves its action, whichever map it lands in.
+        @Test func shortcutNumbersFollowTableOrderAndAnAutomationRowResolvesItsRunTarget() throws {
+            let controller = makeController()
+            // Both rows are undated here, so the stable sort keeps them in the order `alertsGroups` lists
+            // them: the automation group first, claiming shortcut 1, then the bell group's row at 2.
+            let automationEntry = AppKitController.AlertsAttentionEntry(
+                attentionID: "alert:linux:automationrun:run-1:failed", icon: "xmark.octagon.fill", iconTint: .warning, label: "Nightly audit",
+                detail: "failed (exit 3)", shortcut: "", countsTowardBadge: true, eventDate: nil,
+                automationRunTarget: AlertsController.AutomationRunAlertTarget(deviceID: "linux", runID: "run-1"))
+            let automationGroup = AppKitController.AlertsGroup(
+                projectName: "Automations", workspaceID: "automations:linux", workspaceName: "Linux box", workspaceBranch: nil,
+                isFromHiddenWorkspace: false, items: [automationEntry], deviceID: "linux")
+
+            controller.deviceModel.alertsGroups = [automationGroup, bellGroup(liveTitle: "vim main.swift")]
+            controller.alerts.showAlertsDetail()
+
+            #expect(
+                controller.alerts.alertsAutomationRunTarget(for: 1) == AlertsController.AutomationRunAlertTarget(deviceID: "linux", runID: "run-1"))
+            #expect(controller.alerts.alertsFocusRequest(for: 1) == nil, "an automation row has no workspace target to focus")
+            if case .terminalSession(let workspaceID, let sessionID)? = controller.alerts.alertsFocusRequest(for: 2) {
+                #expect(workspaceID == "workspace-1")
+                #expect(sessionID == "session-1")
+            } else {
+                Issue.record("expected the bell row to claim shortcut 2 with its terminal-session focus request")
+            }
+            #expect(controller.alerts.alertsAutomationRunTarget(for: 2) == nil)
+        }
     }
 }

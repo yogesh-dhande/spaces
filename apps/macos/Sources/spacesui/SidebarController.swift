@@ -716,8 +716,7 @@ private struct DeviceSyncState {
     nonisolated static func workspaceIDsForBrowserSessionTeardown(
         previous: [String: WorkspaceRuntimeStatus], current: [String: WorkspaceRuntimeStatus]
     ) -> Set<String> {
-        Set(workspaceIDsTransitionedToNotRunning(previous: previous, current: current))
-            .union(previous.keys.filter { current[$0] == nil })
+        Set(workspaceIDsTransitionedToNotRunning(previous: previous, current: current)).union(previous.keys.filter { current[$0] == nil })
     }
 
     /// Adds a section for every paired remote device and fetches each one's overview
@@ -916,9 +915,7 @@ private struct DeviceSyncState {
 
     /// Test seam for `recordRemoteOverviewInstalledOutsidePull`'s effect on `pullSuccessStillFreshest`'s
     /// gate, since `DeviceSyncState` itself is private to this file.
-    func overviewInstallGenerationForTesting(deviceID: String) -> Int {
-        remoteOverviewSyncStates[deviceID]?.overviewInstallGeneration ?? 0
-    }
+    func overviewInstallGenerationForTesting(deviceID: String) -> Int { remoteOverviewSyncStates[deviceID]?.overviewInstallGeneration ?? 0 }
 
     /// Whether a completed pull's *failure* still describes the device, or belongs to an attempt
     /// invalidated after it started by a retry or a network-path change.
@@ -2566,9 +2563,9 @@ private struct DeviceSyncState {
                 if self.host.selectedWorkspaceID != workspace.id { self.selectWorkspace(workspace) }
                 self.host.focusSidebarRuntimeTarget(workspaceID: workspace.id, key: item.key)
             }
-            // Name then secondary text, the two-part shape a process row already uses (see
-            // `AppKitController.windowRow`): the name goes semibold once something trails it, so the
-            // two halves stay tellable apart at the sidebar's one type size.
+            // Name then secondary text, the two-part shape a process row already uses (see the Alerts
+            // table's combined column, `AlertsController.alertsCombinedCell`): the name goes semibold once
+            // something trails it, so the two halves stay tellable apart at the sidebar's one type size.
             titleLabel.font = item.detail == nil ? Typography.metadata : Typography.metadataTitle
             titleLabel.textColor = runtimeTargetTextColor(item: item, isSelected: isWorkspaceSelected)
             titleLabel.lineBreakMode = .byTruncatingTail

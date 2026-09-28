@@ -3037,9 +3037,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// The status glyph name and tint for a settled (non-spinning) agent status. Single source of truth shared
-    /// by `windowRow`'s indicator, the alerts rows built on it, and the automations run agent chips so agent
-    /// state reads identically. The active states borrow `SidebarAttentionStatus.indicatorColor` so a dot never
-    /// disagrees with the sidebar row for the same agent; the settled-neutral states stay label-gray.
+    /// by sidebar runtime-target rows, the Alerts table's status column, and the automations run agent chips
+    /// so agent state reads identically everywhere. The active states borrow `SidebarAttentionStatus.indicatorColor`
+    /// so a dot never disagrees with the sidebar row for the same agent; the settled-neutral states stay label-gray.
     static func agentStatusSymbolAndColor(_ status: AgentWindowStatus) -> (symbol: String, color: NSColor) {
         switch status {
         case .waiting: ("exclamationmark.triangle.fill", SidebarAttentionStatus.blocked.indicatorColor)
@@ -5185,20 +5185,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return label
     }
 
-    private func attachAsyncClickAction(to view: NSView, label: String, shortcut: String, action: @escaping () async -> Void) {
-        let profiledAction = { [weak self] in
-            let startedAt = Date()
-            self?.logWindowRowClickProfile("stage=received label=\(label) shortcut=\(shortcut)")
-            await action()
-            self?.logWindowRowClickProfile(
-                "stage=completed label=\(label) shortcut=\(shortcut) elapsed_ms=\(self?.windowShortcutElapsedMS(since: startedAt) ?? 0)")
-        }
-        let target = ClickTarget(profiledAction)
-        let recognizer = NSClickGestureRecognizer(target: target, action: #selector(ClickTarget.clicked(_:)))
-        view.addGestureRecognizer(recognizer)
-        objc_setAssociatedObject(view, &Self.clickTargetAssocKey, target, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-    }
-
     /// Row text for a terminal row: its stable name, described by the live title its program reported
     /// (nothing when it reported none). Both arrive stripped of the `*`/`-` prefixes tracked window
     /// names historically carried.
@@ -5221,164 +5207,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             !command.isEmpty
         else { return nil }
         return command
-    }
-
-    func windowRow(
-        icon: String, iconColor: NSColor, label: String, detail: String? = nil, shortcut: String, processStatus: RunningProcessState? = nil,
-        agentStatus: AgentWindowStatus? = nil, automationID: String? = nil, trailingAccessory: NSView? = nil, action: (() async -> Void)? = nil
-    ) -> ClickableRowView {
-        let container = ClickableRowView(isInteractive: action != nil)
-        container.setAccessibilityElement(true)
-        container.setAccessibilityRole(.group)
-        container.setAccessibilityLabel(label)
-        if let detail, !detail.isEmpty { container.setAccessibilityValue(detail) }
-        if let automationID { container.setAccessibilityIdentifier("\(automationID)-row") }
-
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        row.translatesAutoresizingMaskIntoConstraints = false
-        row.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
-
-        let iconView = NSImageView()
-        iconView.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
-        iconView.contentTintColor = iconColor
-        iconView.setContentHuggingPriority(.required, for: .horizontal)
-        iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        let labelField = NSTextField(labelWithString: label)
-        if let automationID { labelField.setAccessibilityIdentifier("\(automationID)-label") }
-        labelField.font = detail == nil ? Typography.rowDetail : Typography.compactTitle
-        labelField.textColor = .labelColor
-        labelField.lineBreakMode = .byTruncatingTail
-        labelField.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-        labelField.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        let detailField = NSTextField(labelWithString: detail ?? "")
-        if let automationID { detailField.setAccessibilityIdentifier("\(automationID)-detail") }
-        detailField.font = Typography.metadata
-        detailField.textColor = .secondaryLabelColor
-        detailField.lineBreakMode = .byTruncatingTail
-        detailField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        detailField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        detailField.isHidden = detail == nil
-        container.labelField = labelField
-        container.detailField = detailField
-
-        let badge = NSTextField(labelWithString: shortcut)
-        badge.font = Typography.monoBadge
-        badge.textColor = .secondaryLabelColor
-        badge.setContentHuggingPriority(.required, for: .horizontal)
-        badge.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        let statusSlot = NSView()
-        statusSlot.translatesAutoresizingMaskIntoConstraints = false
-        statusSlot.setContentHuggingPriority(.required, for: .horizontal)
-        statusSlot.setContentCompressionResistancePriority(.required, for: .horizontal)
-        NSLayoutConstraint.activate([
-            statusSlot.widthAnchor.constraint(equalToConstant: 10), statusSlot.heightAnchor.constraint(greaterThanOrEqualToConstant: 10),
-        ])
-
-        // Status indicator (spinner/dot/spacer) always placed before badge so shortcut hints align.
-        if let agentStatus {
-            if agentStatus == .spinning {
-                let spinner = NSProgressIndicator()
-                if let automationID { spinner.setAccessibilityIdentifier("\(automationID)-status-spinning") }
-                spinner.style = .spinning
-                spinner.controlSize = .mini
-                spinner.translatesAutoresizingMaskIntoConstraints = false
-                NSLayoutConstraint.activate([
-                    spinner.widthAnchor.constraint(equalToConstant: 10), spinner.heightAnchor.constraint(equalToConstant: 10),
-                ])
-                spinner.setContentHuggingPriority(.required, for: .horizontal)
-                spinner.setContentCompressionResistancePriority(.required, for: .horizontal)
-                spinner.startAnimation(nil)
-                statusSlot.addSubview(spinner)
-                NSLayoutConstraint.activate([
-                    spinner.centerXAnchor.constraint(equalTo: statusSlot.centerXAnchor),
-                    spinner.centerYAnchor.constraint(equalTo: statusSlot.centerYAnchor),
-                ])
-            } else {
-                let (statusIconName, statusColor) = Self.agentStatusSymbolAndColor(agentStatus)
-                let statusDot = NSImageView()
-                if let automationID { statusDot.setAccessibilityIdentifier("\(automationID)-status-\(agentStatus.rawValue)") }
-                statusDot.image = NSImage(systemSymbolName: statusIconName, accessibilityDescription: agentStatus.rawValue)
-                statusDot.contentTintColor = statusColor
-                statusDot.translatesAutoresizingMaskIntoConstraints = false
-                NSLayoutConstraint.activate([
-                    statusDot.widthAnchor.constraint(equalToConstant: 10), statusDot.heightAnchor.constraint(equalToConstant: 10),
-                ])
-                statusDot.setContentHuggingPriority(.required, for: .horizontal)
-                statusDot.setContentCompressionResistancePriority(.required, for: .horizontal)
-                statusSlot.addSubview(statusDot)
-                NSLayoutConstraint.activate([
-                    statusDot.centerXAnchor.constraint(equalTo: statusSlot.centerXAnchor),
-                    statusDot.centerYAnchor.constraint(equalTo: statusSlot.centerYAnchor),
-                ])
-            }
-        } else if let processStatus {
-            let statusIconName: String
-            let statusColor: NSColor
-            switch processStatus {
-            case .running:
-                statusIconName = "circle.fill"
-                statusColor = .systemGreen
-            case .exited:
-                statusIconName = "circle"
-                statusColor = .systemRed
-            case .idle:
-                statusIconName = "circle"
-                statusColor = .tertiaryLabelColor
-            }
-            let statusDot = NSImageView()
-            statusDot.image = NSImage(systemSymbolName: statusIconName, accessibilityDescription: processStatus.rawValue)
-            statusDot.contentTintColor = statusColor
-            statusDot.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([statusDot.widthAnchor.constraint(equalToConstant: 8), statusDot.heightAnchor.constraint(equalToConstant: 8)])
-            statusDot.setContentHuggingPriority(.required, for: .horizontal)
-            statusDot.setContentCompressionResistancePriority(.required, for: .horizontal)
-            statusSlot.addSubview(statusDot)
-            NSLayoutConstraint.activate([
-                statusDot.centerXAnchor.constraint(equalTo: statusSlot.centerXAnchor),
-                statusDot.centerYAnchor.constraint(equalTo: statusSlot.centerYAnchor),
-            ])
-        }
-
-        let contentRow = NSStackView()
-        contentRow.orientation = .horizontal
-        contentRow.alignment = .centerY
-        contentRow.spacing = 8
-        contentRow.translatesAutoresizingMaskIntoConstraints = false
-
-        if let action { attachAsyncClickAction(to: contentRow, label: label, shortcut: shortcut, action: action) }
-
-        contentRow.addArrangedSubview(statusSlot)
-        contentRow.addArrangedSubview(badge)
-        contentRow.addArrangedSubview(iconView)
-        contentRow.addArrangedSubview(labelField)
-        contentRow.addArrangedSubview(detailField)
-        contentRow.addArrangedSubview(NSView())
-        row.addArrangedSubview(contentRow)
-        contentRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        contentRow.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        if let trailingAccessory {
-            trailingAccessory.setContentHuggingPriority(.required, for: .horizontal)
-            trailingAccessory.setContentCompressionResistancePriority(.required, for: .horizontal)
-            row.addArrangedSubview(trailingAccessory)
-        }
-
-        container.addSubview(row)
-        NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: container.leadingAnchor), row.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            row.topAnchor.constraint(equalTo: container.topAnchor), row.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-        ])
-        return container
-    }
-
-    private func logWindowRowClickProfile(_ message: String) {
-        guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
-        fputs("spaces: window_row_click \(message)\n", stderr)
     }
 
     /// Editors offered in settings: the built-in Editor first (always available, needs nothing

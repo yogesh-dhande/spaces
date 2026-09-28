@@ -84,7 +84,27 @@ import workspacecore
         /// surfaces (the alerts pane, its badge, the command palette) filter on this flag instead.
         let isFromHiddenWorkspace: Bool
         let items: [AlertsAttentionEntry]
+        /// The device this group's alerts were derived from, carried directly rather than resolved by
+        /// parsing `workspaceID` at render time: the automation group's synthetic workspace id
+        /// ("automations:<deviceID>") never walks back to a real workspace, so a lookup through it could
+        /// never find the owning device, and its rows never dimmed when that device went offline.
+        /// Defaults to "" for call sites (mostly tests) that build a group directly rather than through
+        /// `buildOverviewAlertsGroups`.
+        let deviceID: String
         var latestDate: Date? { items.compactMap(\.eventDate).max() }
+
+        init(
+            projectName: String, workspaceID: String, workspaceName: String, workspaceBranch: String?, isFromHiddenWorkspace: Bool,
+            items: [AlertsAttentionEntry], deviceID: String = ""
+        ) {
+            self.projectName = projectName
+            self.workspaceID = workspaceID
+            self.workspaceName = workspaceName
+            self.workspaceBranch = workspaceBranch
+            self.isFromHiddenWorkspace = isFromHiddenWorkspace
+            self.items = items
+            self.deviceID = deviceID
+        }
     }
 
     // ISO8601DateFormatter construction is expensive and this is shared by the `nonisolated`
@@ -174,7 +194,8 @@ import workspacecore
             groups.append(
                 AlertsGroup(
                     projectName: workspace.projectName, workspaceID: workspace.id, workspaceName: workspace.displayName,
-                    workspaceBranch: workspace.branch, isFromHiddenWorkspace: !overview.isWorkspaceVisible(workspace), items: items))
+                    workspaceBranch: workspace.branch, isFromHiddenWorkspace: !overview.isWorkspaceVisible(workspace), items: items,
+                    deviceID: deviceID))
         }
         // Failed/timed-out automation runs form their own synthetic group ("Automations / <device>") whose
         // cards deep-link to the Runs tab instead of focusing a live workspace target that may be detached.
@@ -183,13 +204,16 @@ import workspacecore
             let items = automationEntries.map { entry in
                 AlertsAttentionEntry(
                     attentionID: entry.attentionID, icon: entry.status == "timed_out" ? "clock.badge.exclamationmark.fill" : "xmark.octagon.fill",
-                    iconTint: .warning, label: entry.text, detail: nil, shortcut: "", countsTowardBadge: true, eventDate: entry.eventDate,
-                    automationRunTarget: AutomationRunAlertTarget(deviceID: entry.deviceID, runID: entry.runID))
+                    // The automation's name is the row's name segment and the run's outcome is its title
+                    // segment, matching every other alert row's name/title split (`alertsCombinedSegments`).
+                    iconTint: .warning, label: entry.automationName, detail: entry.outcome, shortcut: "", countsTowardBadge: true,
+                    eventDate: entry.eventDate, automationRunTarget: AutomationRunAlertTarget(deviceID: entry.deviceID, runID: entry.runID))
             }
             groups.append(
                 AlertsGroup(
                     projectName: "Automations", workspaceID: "automations:\(deviceID)",
-                    workspaceName: deviceName.isEmpty ? "This device" : deviceName, workspaceBranch: nil, isFromHiddenWorkspace: false, items: items))
+                    workspaceName: deviceName.isEmpty ? "This device" : deviceName, workspaceBranch: nil, isFromHiddenWorkspace: false, items: items,
+                    deviceID: deviceID))
         }
         groups.sort {
             switch ($0.latestDate, $1.latestDate) {
@@ -242,23 +266,42 @@ import workspacecore
     /// front of the user — see `consumeFocusedSessionBellAlerts`.
     private var focusedBellWatch: FocusedBellWatch?
     var alertsShortcutSpec: HotkeySpec?
-    /// Maps sequential window shortcut numbers (1-10, shown as 1-0) to focus targets for the current Alerts view.
+    /// Maps sequential window shortcut numbers (1-10, shown as 1-0) to the focus target for the current
+    /// Alerts table's row, for every row whose click focuses a runtime target.
     private var alertsFocusRequestMap: [Int: WindowFocusRequest] = [:]
+    /// Maps a numbered row to the automation-run deep link its click performs
+    /// (`AutomationsController.showRunsForAlert`), so a failed/timed-out automation row's shortcut does
+    /// the same thing clicking it does. Disjoint from `alertsFocusRequestMap`: an automation alert has no
+    /// live workspace target to focus, only a Runs-tab deep link.
+    private var alertsAutomationShortcutMap: [Int: AutomationRunAlertTarget] = [:]
     /// The alerts pane as it stands on screen: the signature it was rendered from and its row views keyed
     /// by attention id. Non-nil exactly while those views are the detail pane's content, so a refresh can
     /// be answered without rebuilding them (see `showAlertsDetail`).
     private var renderedAlerts: RenderedAlertsDetail?
+    /// Keeps every row's Age cell current between overview refreshes; see `armAlertsAgeRefreshTimer`.
+    private var alertsAgeRefreshTimer: Timer?
 
     func alertsFocusRequest(for index: Int) -> WindowFocusRequest? { alertsFocusRequestMap[index] }
+    func alertsAutomationRunTarget(for index: Int) -> AutomationRunAlertTarget? { alertsAutomationShortcutMap[index] }
 
     private struct RenderedAlertsDetail {
         let signature: AlertsRenderSignature
         let rowsByAttentionID: [String: ClickableRowView]
+        /// The Age cell for each row, held separately from `rowsByAttentionID`'s `ClickableRowView`
+        /// because age is the one text value that changes on a pure time-based beat rather than as part
+        /// of a `label`/`detail` content refresh.
+        let ageFieldsByAttentionID: [String: NSTextField]
     }
 
     /// Forgets what the pane was rendered from, so the next `showAlertsDetail` builds it again. Called
-    /// from `presentDetailPane` whenever other content takes over the detail container.
-    func invalidateRenderedAlertsDetail() { renderedAlerts = nil }
+    /// from `presentDetailPane` whenever other content takes over the detail container; also the one
+    /// place that stops the age-refresh beat, since the pane no longer being shown implies its timer
+    /// should not be either (see `armAlertsAgeRefreshTimer`).
+    func invalidateRenderedAlertsDetail() {
+        renderedAlerts = nil
+        alertsAgeRefreshTimer?.invalidate()
+        alertsAgeRefreshTimer = nil
+    }
 
     // MARK: - Alerts content
 
@@ -276,7 +319,7 @@ import workspacecore
             guard !items.isEmpty else { return nil }
             return AlertsGroup(
                 projectName: group.projectName, workspaceID: group.workspaceID, workspaceName: group.workspaceName,
-                workspaceBranch: group.workspaceBranch, isFromHiddenWorkspace: group.isFromHiddenWorkspace, items: items)
+                workspaceBranch: group.workspaceBranch, isFromHiddenWorkspace: group.isFromHiddenWorkspace, items: items, deviceID: group.deviceID)
         }
     }
 
@@ -284,65 +327,113 @@ import workspacecore
 
     // MARK: - Render plan and signature
 
-    /// The alerts pane's content resolved for drawing: the visible groups, the owning device's offline
-    /// state, and the sequential window shortcut each row carries. Built once per refresh so the pane's
+    /// One paired device's display facts the Alerts table needs: the name shown in its Device column
+    /// (the sidebar's own "Local"/stored-name rule, `DeviceModelStore.DeviceSection.displayName`) and
+    /// whether its rows dim as unreachable. Keyed by device id and passed into `alertsTableRows` so that
+    /// pure function never has to reach into `DeviceModelStore` itself.
+    struct AlertsDeviceDisplay: Sendable, Equatable {
+        let name: String
+        let isOffline: Bool
+    }
+
+    /// The alerts pane's content resolved for drawing: one flat, newest-first row per alert across every
+    /// device, plus the sequential window shortcut each row carries. Built once per refresh so the pane's
     /// signature and the pane itself are derived from the same resolution and cannot drift apart.
-    private struct AlertsRenderPlan {
+    struct AlertsRenderPlan {
         struct Row {
             let entry: AlertsAttentionEntry
-            let shortcut: String
+            let projectName: String
+            /// True for a failed/timed-out automation-run alert, whose Project / Workspace cell reads
+            /// just "Automations" rather than "project / workspace": the alert deep-links to the Runs
+            /// tab, not the workspace the automation targets, so naming that workspace here would imply
+            /// a focus target the row does not have.
+            let isAutomationsRow: Bool
+            let workspaceName: String
+            /// nil when the Device column is hidden (`showsDeviceColumn` false).
+            let deviceText: String?
+            let isOffline: Bool
+            let ageText: String
             /// The row's window shortcut number, or nil past the tenth row: those get no badge and no
             /// entry in the focus-request map.
             let shortcutIndex: Int?
         }
 
-        struct Group {
-            let projectName: String
-            let workspaceName: String
-            let offlineDeviceName: String?
-            let rows: [Row]
-        }
+        let showsDeviceColumn: Bool
+        let rows: [Row]
+    }
 
-        let groups: [Group]
+    /// Flattens every visible group's alerts into one table: every device's rows merged and sorted
+    /// newest first by `eventDate`, undated entries last. `Array.sorted` is a stable sort (guaranteed
+    /// since Swift 5), so entries with equal or missing dates keep the order `groups` already handed in,
+    /// since each group's own items are already newest-first, and the groups themselves are already
+    /// newest-group-first (`buildOverviewAlertsGroups`, `mergedSidebarData`), rather than shuffling on
+    /// every rebuild.
+    ///
+    /// Pure and internal (not private) so table ordering, shortcut numbering, and offline/device
+    /// derivation are testable without building any view. `buildAlertsRenderPlan()` supplies
+    /// `deviceDisplay` and `showsDeviceColumn` from live host state (`DeviceModelStore.deviceSections`,
+    /// `AppKitController.sidebarShowsDeviceHeaders` via `SidebarController.showsDeviceHeaders`).
+    nonisolated static func alertsTableRows(groups: [AlertsGroup], deviceDisplay: [String: AlertsDeviceDisplay], showsDeviceColumn: Bool, now: Date)
+        -> [AlertsRenderPlan.Row]
+    {
+        let entries = groups.flatMap { group in group.items.map { (group: group, entry: $0) } }
+        let ordered = entries.sorted { lhs, rhs in
+            switch (lhs.entry.eventDate, rhs.entry.eventDate) {
+            case (let a?, let b?): return a > b
+            case (nil, _): return false
+            case (_, nil): return true
+            }
+        }
+        var shortcutCounter = 1
+        return ordered.map { pair in
+            let shortcutIndex = shortcutCounter <= 10 ? shortcutCounter : nil
+            shortcutCounter += 1
+            let display = deviceDisplay[pair.group.deviceID]
+            return AlertsRenderPlan.Row(
+                entry: pair.entry, projectName: pair.group.projectName, isAutomationsRow: pair.entry.automationRunTarget != nil,
+                workspaceName: pair.group.workspaceName, deviceText: showsDeviceColumn ? (display?.name ?? "") : nil,
+                isOffline: display?.isOffline ?? false,
+                ageText: pair.entry.eventDate.map { AlertsAgeFormatting.abbreviatedAge(of: $0, relativeTo: now) } ?? "", shortcutIndex: shortcutIndex)
+        }
     }
 
     /// Everything `showAlertsDetail` renders, split by how a change to it has to be answered.
     ///
-    /// `groups` is what decides which views the pane builds: the group headers, the entry identities and
-    /// their order, and each row's icon, tint, status indicator, shortcut badge, focus target, offline
-    /// dimming, and whether it carries a detail line at all (that one decides the label's font and the
-    /// detail field's visibility, so gaining or losing a detail line is a change of shape, not of text).
-    /// `text` is the two strings each row displays.
-    ///
-    /// They are compared separately because a bell alert renders its session's live title as its detail
-    /// text, which moves as often as the terminal's title does.
+    /// `rows` is what decides which views the pane builds: row identity and order, each row's icon,
+    /// tint, status indicator, shortcut number, focus target, project/workspace, device text, offline
+    /// dimming, and whether its combined Alert column shows a title segment at all (`hasTitle` decides
+    /// whether the title field and its separator exist, so gaining or losing one is a change of shape,
+    /// not of text). `text` is the three strings each row can display without changing shape: the label
+    /// and detail (a bell alert renders its session's live title as its detail, which moves as often as
+    /// the terminal's title does) and the age (moves purely from wall-clock time passing, on the
+    /// age-refresh beat).
     struct AlertsRenderSignature: Equatable {
         struct Row: Equatable {
             let attentionID: String
             let icon: String
             let iconTint: AppKitController.AlertsIconTint
-            let shortcut: String
+            let shortcutIndex: Int?
             let processStatus: RunningProcessState?
             let agentStatus: AgentWindowStatus?
             let focusRequestKey: String?
-            let hasDetail: Bool
-        }
-
-        struct Group: Equatable {
+            let hasTitle: Bool
             let projectName: String
+            let isAutomationsRow: Bool
             let workspaceName: String
-            let offlineDeviceName: String?
-            let rows: [Row]
+            let deviceText: String?
+            let isOffline: Bool
         }
 
         struct RowText: Equatable {
             let attentionID: String
             let label: String
             let detail: String
+            let age: String
         }
 
-        let groups: [Group]
-        /// Flattened in render order, so an equal `groups` guarantees this lines up index for index with
+        let showsDeviceColumn: Bool
+        let rows: [Row]
+        /// Flattened in render order, so an equal `rows` guarantees this lines up index for index with
         /// the previously rendered text.
         let text: [RowText]
     }
@@ -359,48 +450,35 @@ import workspacecore
 
     nonisolated static func alertsRenderVerdict(rendered: AlertsRenderSignature?, refreshed: AlertsRenderSignature) -> AlertsRenderVerdict {
         guard let rendered else { return .structural }
-        guard rendered.groups == refreshed.groups else { return .structural }
+        guard rendered.showsDeviceColumn == refreshed.showsDeviceColumn, rendered.rows == refreshed.rows else { return .structural }
         return rendered.text == refreshed.text ? .unchanged : .textOnly
     }
 
     private func buildAlertsRenderPlan() -> AlertsRenderPlan {
-        // Sequential window shortcut counter across all groups and items.
-        var shortcutCounter = 1
-        let groups = buildAlertsGroups().map { group -> AlertsRenderPlan.Group in
-            // An unreachable device keeps its alerts listed and attributed to the workspace that raised
-            // them, marked stale by the same dimming its sidebar rows carry: they report what the device
-            // last said, and nothing can be done about them until it answers again.
-            let offlineDeviceName = unreachableDeviceName(workspaceID: group.workspaceID)
-            let rows = group.items.map { entry -> AlertsRenderPlan.Row in
-                let shortcutIndex = shortcutCounter <= 10 ? shortcutCounter : nil
-                shortcutCounter += 1
-                return AlertsRenderPlan.Row(
-                    entry: entry, shortcut: shortcutIndex.map { host.windowShortcutBadgeText(index: $0) } ?? "", shortcutIndex: shortcutIndex)
-            }
-            return AlertsRenderPlan.Group(
-                projectName: group.projectName, workspaceName: group.workspaceName, offlineDeviceName: offlineDeviceName, rows: rows)
-        }
-        return AlertsRenderPlan(groups: groups)
+        let showsDeviceColumn = host.sidebar.showsDeviceHeaders
+        let deviceDisplay = Dictionary(
+            uniqueKeysWithValues: host.deviceModel.deviceSections.map {
+                ($0.deviceID, AlertsDeviceDisplay(name: $0.displayName, isOffline: $0.loadState.isOffline))
+            })
+        let rows = Self.alertsTableRows(groups: buildAlertsGroups(), deviceDisplay: deviceDisplay, showsDeviceColumn: showsDeviceColumn, now: Date())
+        return AlertsRenderPlan(showsDeviceColumn: showsDeviceColumn, rows: rows)
     }
 
     private static func alertsRenderSignature(plan: AlertsRenderPlan) -> AlertsRenderSignature {
         var text: [AlertsRenderSignature.RowText] = []
-        var groups: [AlertsRenderSignature.Group] = []
-        for group in plan.groups {
-            var rows: [AlertsRenderSignature.Row] = []
-            for row in group.rows {
-                text.append(AlertsRenderSignature.RowText(attentionID: row.entry.attentionID, label: row.entry.label, detail: row.entry.detail ?? ""))
-                rows.append(
-                    AlertsRenderSignature.Row(
-                        attentionID: row.entry.attentionID, icon: row.entry.icon, iconTint: row.entry.iconTint, shortcut: row.shortcut,
-                        processStatus: row.entry.processStatus, agentStatus: row.entry.agentStatus,
-                        focusRequestKey: row.entry.focusRequest?.signatureKey, hasDetail: row.entry.detail != nil))
-            }
-            groups.append(
-                AlertsRenderSignature.Group(
-                    projectName: group.projectName, workspaceName: group.workspaceName, offlineDeviceName: group.offlineDeviceName, rows: rows))
+        var rows: [AlertsRenderSignature.Row] = []
+        for row in plan.rows {
+            let entry = row.entry
+            text.append(
+                AlertsRenderSignature.RowText(attentionID: entry.attentionID, label: entry.label, detail: entry.detail ?? "", age: row.ageText))
+            rows.append(
+                AlertsRenderSignature.Row(
+                    attentionID: entry.attentionID, icon: entry.icon, iconTint: entry.iconTint, shortcutIndex: row.shortcutIndex,
+                    processStatus: entry.processStatus, agentStatus: entry.agentStatus, focusRequestKey: entry.focusRequest?.signatureKey,
+                    hasTitle: Self.alertsRowHasTitle(entry: entry), projectName: row.projectName, isAutomationsRow: row.isAutomationsRow,
+                    workspaceName: row.workspaceName, deviceText: row.deviceText, isOffline: row.isOffline))
         }
-        return AlertsRenderSignature(groups: groups, text: text)
+        return AlertsRenderSignature(showsDeviceColumn: plan.showsDeviceColumn, rows: rows, text: text)
     }
 
     /// Attention-item dismissals are per-client desktop state, so they live in the client
@@ -632,20 +710,24 @@ import workspacecore
             switch Self.alertsRenderVerdict(rendered: rendered.signature, refreshed: signature) {
             case .unchanged: return
             case .textOnly:
-                // Only the rows whose strings moved are touched; an equal `groups` means the two text
-                // lists line up index for index. `alertsFocusRequestMap` is rebuilt by the render below,
-                // so skipping the render keeps the map the previous one left, which is still correct: an
-                // equal `groups` means the same entries in the same order with the same focus targets.
+                // Only the rows whose strings moved are touched; an equal `rows` means the two text lists
+                // line up index for index. `alertsFocusRequestMap`/`alertsAutomationShortcutMap` are
+                // rebuilt by the render below, so skipping the render keeps the maps the previous one
+                // left, which is still correct: an equal `rows` means the same entries in the same order
+                // with the same focus targets.
                 for (previous, current) in zip(rendered.signature.text, signature.text) where previous != current {
                     rendered.rowsByAttentionID[current.attentionID]?.updateText(label: current.label, detail: current.detail)
+                    if previous.age != current.age { rendered.ageFieldsByAttentionID[current.attentionID]?.stringValue = current.age }
                 }
-                renderedAlerts = RenderedAlertsDetail(signature: signature, rowsByAttentionID: rendered.rowsByAttentionID)
+                renderedAlerts = RenderedAlertsDetail(
+                    signature: signature, rowsByAttentionID: rendered.rowsByAttentionID, ageFieldsByAttentionID: rendered.ageFieldsByAttentionID)
                 return
             case .structural: break
             }
         }
 
         alertsFocusRequestMap = [:]
+        alertsAutomationShortcutMap = [:]
         host.clearWorkspaceDetailFooter()
         for view in host.detailContainer.subviews { view.removeFromSuperview() }
         host.detailContainer.wantsLayer = true
@@ -653,14 +735,12 @@ import workspacecore
             view.layer?.backgroundColor = host.sidebar.sidebarPanelBackgroundColor().cgColor
         }
 
-        var rowsByAttentionID: [String: ClickableRowView] = [:]
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 14
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let accentColor = host.sidebar.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
         let headerTitle = NSTextField(labelWithString: "Alerts")
         headerTitle.font = Typography.pageTitle
         headerTitle.textColor = host.sidebar.sidebarPrimaryTextColor(isSelected: false)
@@ -674,7 +754,7 @@ import workspacecore
         stack.addArrangedSubview(headerRow)
         constrainFormFieldToFillWidth(headerRow, in: stack)
 
-        if plan.groups.isEmpty {
+        if plan.rows.isEmpty {
             let sep = NSView()
             sep.translatesAutoresizingMaskIntoConstraints = false
             sep.wantsLayer = true
@@ -706,98 +786,178 @@ import workspacecore
             emptyStack.addArrangedSubview(emptyDetail)
             stack.addArrangedSubview(emptyStack)
             constrainFormFieldToFillWidth(emptyStack, in: stack)
-        } else {
-            for group in plan.groups {
-                let offlineDeviceName = group.offlineDeviceName
 
-                let groupHeaderStack = NSStackView()
-                groupHeaderStack.orientation = .horizontal
-                groupHeaderStack.alignment = .centerY
-                groupHeaderStack.spacing = 4
-                groupHeaderStack.translatesAutoresizingMaskIntoConstraints = false
-
-                let projectLabel = NSTextField(labelWithString: group.projectName)
-                projectLabel.font = Typography.compactTitle
-                projectLabel.textColor = .secondaryLabelColor
-                projectLabel.setContentHuggingPriority(.required, for: .horizontal)
-
-                let slashLabel = NSTextField(labelWithString: "/")
-                slashLabel.font = Typography.rowDetail
-                slashLabel.textColor = .tertiaryLabelColor
-                slashLabel.setContentHuggingPriority(.required, for: .horizontal)
-
-                let workspaceLabel = NSTextField(labelWithString: group.workspaceName)
-                workspaceLabel.font = Typography.compactTitle
-                workspaceLabel.textColor = accentColor
-                workspaceLabel.lineBreakMode = .byTruncatingTail
-                workspaceLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-                groupHeaderStack.addArrangedSubview(projectLabel)
-                groupHeaderStack.addArrangedSubview(slashLabel)
-                groupHeaderStack.addArrangedSubview(workspaceLabel)
-                if let offlineDeviceName {
-                    groupHeaderStack.alphaValue = AppKitController.unreachableDeviceAlpha
-                    groupHeaderStack.toolTip = "\(offlineDeviceName) is offline"
-                }
-                stack.addArrangedSubview(groupHeaderStack)
-                constrainFormFieldToFillWidth(groupHeaderStack, in: stack)
-
-                let itemsStack = NSStackView()
-                itemsStack.orientation = .vertical
-                itemsStack.spacing = 4
-                itemsStack.translatesAutoresizingMaskIntoConstraints = false
-
-                for planRow in group.rows {
-                    let entry = planRow.entry
-                    if let shortcutIndex = planRow.shortcutIndex, let focusRequest = entry.focusRequest {
-                        alertsFocusRequestMap[shortcutIndex] = focusRequest
-                    }
-                    let cardAction: (() async -> Void)?
-                    if let focusRequest = entry.focusRequest {
-                        cardAction = { [weak self] in
-                            guard let self else { return }
-                            await self.host.windowFocus.performWindowFocus(focusRequest)
-                        }
-                    } else if let automationRunTarget = entry.automationRunTarget {
-                        cardAction = { [weak self] in
-                            self?.host.automations.showRunsForAlert(deviceID: automationRunTarget.deviceID, runID: automationRunTarget.runID)
-                        }
-                    } else {
-                        cardAction = nil
-                    }
-                    let card = alertsWindowCard(entry: entry, shortcut: planRow.shortcut, action: cardAction)
-                    if let offlineDeviceName {
-                        card.container.alphaValue = AppKitController.unreachableDeviceAlpha
-                        card.container.toolTip = "\(offlineDeviceName) is offline"
-                    }
-                    rowsByAttentionID[entry.attentionID] = card.row
-                    itemsStack.addArrangedSubview(card.container)
-                    constrainFormFieldToFillWidth(card.container, in: itemsStack)
-                }
-
-                stack.addArrangedSubview(itemsStack)
-                constrainFormFieldToFillWidth(itemsStack, in: stack)
-            }
+            showScrollableDetailStack(stack, in: host.detailContainer)
+            renderedAlerts = RenderedAlertsDetail(signature: signature, rowsByAttentionID: [:], ageFieldsByAttentionID: [:])
+            alertsAgeRefreshTimer?.invalidate()
+            alertsAgeRefreshTimer = nil
+            return
         }
 
+        var rowsByAttentionID: [String: ClickableRowView] = [:]
+        var ageFieldsByAttentionID: [String: NSTextField] = [:]
+        let sideInset: CGFloat = 4
+        let table = NSStackView()
+        table.orientation = .vertical
+        table.alignment = .leading
+        table.spacing = 0
+        table.edgeInsets = NSEdgeInsets(top: 6, left: sideInset, bottom: 6, right: sideInset)
+        table.translatesAutoresizingMaskIntoConstraints = false
+
+        let grid = TableGrid()
+        let header = makeAlertsHeaderLine(grid: grid, showsDeviceColumn: plan.showsDeviceColumn)
+        let divider = makeAlertsTableDivider()
+        var lines: [NSView] = [header, divider]
+        for (index, row) in plan.rows.enumerated() {
+            let entry = row.entry
+            if let shortcutIndex = row.shortcutIndex {
+                if let focusRequest = entry.focusRequest {
+                    alertsFocusRequestMap[shortcutIndex] = focusRequest
+                } else if let automationRunTarget = entry.automationRunTarget {
+                    alertsAutomationShortcutMap[shortcutIndex] = automationRunTarget
+                }
+            }
+            // Every other row gets a light zebra fill; hover still overrides it.
+            let built = makeAlertsRowLine(row, grid: grid, showsDeviceColumn: plan.showsDeviceColumn, isAlternate: index % 2 == 1)
+            rowsByAttentionID[entry.attentionID] = built.row
+            ageFieldsByAttentionID[entry.attentionID] = built.ageField
+            lines.append(built.row)
+        }
+        for line in lines { table.addArrangedSubview(line) }
+        table.setCustomSpacing(4, after: header)
+        table.setCustomSpacing(4, after: divider)
+
+        let card = alertsCardContainer(table)
+        // Leading alignment gives arranged lines their intrinsic width, so pin each to the table's full
+        // width (minus its edge insets) to keep the grid's trailing columns right-aligned.
+        for line in lines { line.widthAnchor.constraint(equalTo: table.widthAnchor, constant: -sideInset * 2).isActive = true }
+        // Every line now shares the table's view hierarchy, so the rows can be tied to the header's columns.
+        grid.activateColumnAlignment()
+        stack.addArrangedSubview(card)
+        constrainFormFieldToFillWidth(card, in: stack)
+
         showScrollableDetailStack(stack, in: host.detailContainer)
-        renderedAlerts = RenderedAlertsDetail(signature: signature, rowsByAttentionID: rowsByAttentionID)
+        renderedAlerts = RenderedAlertsDetail(
+            signature: signature, rowsByAttentionID: rowsByAttentionID, ageFieldsByAttentionID: ageFieldsByAttentionID)
+        armAlertsAgeRefreshTimer()
     }
 
-    /// The display name of the device that raised this workspace's alerts when that device is
-    /// unreachable, and nil while it is loaded — the alerts pane's only piece of device context, shown
-    /// because a stale alert is otherwise indistinguishable from a live one.
-    private func unreachableDeviceName(workspaceID: String) -> String? {
-        guard let deviceID = host.deviceID(forWorkspaceID: workspaceID), let section = host.deviceSection(id: deviceID), section.loadState.isOffline
-        else { return nil }
-        return section.displayName
+    /// Keeps every row's Age cell current while the pane is open, without a structural rebuild: age is
+    /// the only value on the pane that moves purely from wall-clock time passing, with no overview
+    /// refresh to trigger a repaint. Mirrors `AutomationsController.armRelativeTimeRefresh`'s
+    /// self-terminating 30 s beat (iOS uses the same 30 s cadence for its Alerts age labels). Ticking
+    /// calls `showAlertsDetail()` itself (a background refresh), so a tick where nothing (not even age)
+    /// changed correctly takes the `.unchanged` early return without disturbing this same `Timer`, which
+    /// keeps firing on its own; the timer is only ever torn down by `invalidateRenderedAlertsDetail()`
+    /// when the pane stops being shown, or here when it notices that has already happened.
+    private func armAlertsAgeRefreshTimer() {
+        alertsAgeRefreshTimer?.invalidate()
+        alertsAgeRefreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, host.showingAlerts else {
+                    self?.alertsAgeRefreshTimer?.invalidate()
+                    self?.alertsAgeRefreshTimer = nil
+                    return
+                }
+                showAlertsDetail()
+            }
+        }
     }
 
-    /// Builds an alerts card with focus and dismiss affordances. The card's row is returned alongside
-    /// its container so a later text-only refresh can write into it (see `showAlertsDetail`).
-    private func alertsWindowCard(entry: AlertsAttentionEntry, shortcut: String, action: (() async -> Void)? = nil) -> (
-        container: NSView, row: ClickableRowView
+    // MARK: - Table
+
+    /// Column widths for the Alerts pane's table, laid out on the shared `TableGrid`.
+    private enum AlertsTableLayout {
+        /// Wide enough for the widest shortcut badge text ("⌘0" plus a custom modifier glyph).
+        static let shortcut: CGFloat = 34
+        static let device: CGFloat = 96
+        static let age: CGFloat = 40
+        static let dismiss: CGFloat = 24
+        /// Tall enough for the Alert column's icon + 12 pt name + 11 pt title on one line.
+        static let rowHeight: CGFloat = 32
+    }
+
+    private func makeAlertsHeaderLine(grid: TableGrid, showsDeviceColumn: Bool) -> NSView {
+        func header(_ text: String, alignment: NSTextAlignment = .left) -> NSTextField {
+            let label = NSTextField(labelWithString: text)
+            label.font = Typography.metadataTitle
+            label.textColor = Theme.mutedSecondary
+            label.alignment = alignment
+            label.lineBreakMode = .byTruncatingTail
+            return label
+        }
+        var columns: [(view: NSView, width: TableGrid.ColumnWidth)] = [
+            (RowPrimitives.statusSlot(), .asIs), (NSView(), .fixed(AlertsTableLayout.shortcut)),
+            // The Alert column takes the table's leftover width: it is the only column with real content
+            // that benefits from more room (a longer project/workspace/name/title line), where every
+            // other column's content is short and fixed-shape.
+            (header("Alert"), .growable(preferred: 340, minimum: 220)),
+        ]
+        if showsDeviceColumn { columns.append((header("Device"), .capped(preferred: AlertsTableLayout.device, minimum: 72))) }
+        columns.append((header("Age", alignment: .right), .fixed(AlertsTableLayout.age)))
+        columns.append((NSView(), .fixed(AlertsTableLayout.dismiss)))
+        return grid.makeHeaderLine(columns)
+    }
+
+    private func makeAlertsTableDivider() -> NSView {
+        let divider = ColoredBackgroundView()
+        divider.fillColor = Theme.border
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        divider.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        return divider
+    }
+
+    /// Builds one alerts row on the shared grid: status, shortcut, the combined Alert column, device
+    /// (when shown), age, and the dismiss button. Returns the row's Age field alongside its container so
+    /// the age-refresh beat can rewrite it without a rebuild; the name/title fields are handed to
+    /// `ClickableRowView` itself (`labelField`/`detailField`) for the same reason.
+    private func makeAlertsRowLine(_ row: AlertsRenderPlan.Row, grid: TableGrid, showsDeviceColumn: Bool, isAlternate: Bool) -> (
+        row: ClickableRowView, ageField: NSTextField
     ) {
+        let entry = row.entry
+        let shortcutText = row.shortcutIndex.map { host.windowShortcutBadgeText(index: $0) } ?? ""
+        let automationID = entry.agentStatus == nil ? nil : "alerts-agent-\(AppKitController.automationIdentifierSlug(entry.label))"
+
+        let cardAction: (() async -> Void)?
+        if let focusRequest = entry.focusRequest {
+            cardAction = { [weak self] in
+                guard let self else { return }
+                await self.host.windowFocus.performWindowFocus(focusRequest)
+            }
+        } else if let automationRunTarget = entry.automationRunTarget {
+            cardAction = { [weak self] in
+                self?.host.automations.showRunsForAlert(deviceID: automationRunTarget.deviceID, runID: automationRunTarget.runID)
+            }
+        } else {
+            cardAction = nil
+        }
+
+        let container = ClickableRowView(isInteractive: cardAction != nil)
+        container.setAccessibilityElement(true)
+        container.setAccessibilityRole(.group)
+        container.setAccessibilityLabel(entry.label)
+        if let detail = entry.detail, !detail.isEmpty { container.setAccessibilityValue(detail) }
+        if let automationID { container.setAccessibilityIdentifier("\(automationID)-row") }
+        if isAlternate { container.zebraFill = Theme.surface2 }
+
+        let statusView = Self.alertsStatusIndicator(processStatus: entry.processStatus, agentStatus: entry.agentStatus, automationID: automationID)
+
+        let shortcutLabel = NSTextField(labelWithString: shortcutText)
+        shortcutLabel.font = Typography.monoBadge
+        shortcutLabel.textColor = .secondaryLabelColor
+
+        let (alertCell, labelField, detailField) = Self.alertsCombinedCell(row: row, automationID: automationID)
+        container.labelField = labelField
+        container.detailField = detailField
+
+        let deviceCell = showsDeviceColumn ? alertsDeviceCell(text: row.deviceText ?? "", isOffline: row.isOffline) : nil
+
+        let ageField = NSTextField(labelWithString: row.ageText)
+        ageField.font = Typography.metadata
+        ageField.textColor = .secondaryLabelColor
+        ageField.alignment = .right
+        ageField.lineBreakMode = .byClipping
+
         let dismissButton = NSButton()
         dismissButton.title = ""
         dismissButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")
@@ -811,22 +971,270 @@ import workspacecore
         dismissButton.identifier = NSUserInterfaceItemIdentifier(entry.attentionID)
         dismissButton.toolTip = "Dismiss from alerts"
 
-        let mainRow = host.windowRow(
-            icon: entry.icon, iconColor: AppKitController.alertsIconColor(entry.iconTint), label: entry.label, detail: entry.detail,
-            shortcut: shortcut, processStatus: entry.processStatus, agentStatus: entry.agentStatus,
-            automationID: entry.agentStatus == nil ? nil : "alerts-agent-\(AppKitController.automationIdentifierSlug(entry.label))",
-            trailingAccessory: dismissButton, action: action)
+        var columns: [NSView] = [statusView, shortcutLabel, alertCell]
+        if let deviceCell { columns.append(deviceCell) }
+        columns.append(ageField)
+        columns.append(dismissButton)
+        let line = grid.makeRowLine(columns)
 
-        let container = NSStackView()
-        container.orientation = .vertical
-        container.spacing = 4
-        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(line)
+        NSLayoutConstraint.activate([
+            line.leadingAnchor.constraint(equalTo: container.leadingAnchor), line.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            line.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            container.heightAnchor.constraint(equalToConstant: AlertsTableLayout.rowHeight),
+        ])
 
-        container.addArrangedSubview(mainRow)
-        constrainFormFieldToFillWidth(mainRow, in: container)
+        // The dismiss button is a column inside this same clickable line, not a separate sibling region,
+        // so its click needs an explicit veto or it would also fire the row action: the same exclusion
+        // `AutomationsTableRowView` gives its enable switch and next-run chip.
+        if let cardAction { attachAlertsRowClickAction(to: container, action: cardAction) }
 
-        return (container: container, row: mainRow)
+        if row.isOffline {
+            container.alphaValue = AppKitController.unreachableDeviceAlpha
+            container.toolTip = "\(row.deviceText?.isEmpty == false ? row.deviceText! : "This device") is offline"
+        }
+
+        return (row: container, ageField: ageField)
     }
+
+    /// Whether the combined Alert column shows a title segment: a bell's live title, a process's
+    /// command, an agent's detail, or an automation run's outcome. Omitted when there is none, or when
+    /// it would only repeat the name (`entry.detail == entry.label`).
+    nonisolated static func alertsRowHasTitle(entry: AlertsAttentionEntry) -> Bool {
+        guard let detail = entry.detail, !detail.isEmpty else { return false }
+        return detail != entry.label
+    }
+
+    /// One text run in the combined Alert column, in display order.
+    struct AlertsCombinedSegment: Equatable {
+        enum Kind: Equatable {
+            case project, workspace
+            /// The alert's name: a process/session/agent name for a workspace alert, or the automation's
+            /// name for an automation-run alert.
+            case name
+            case separator
+            /// The alert's live title: a bell's live terminal title, a process's command, an agent's
+            /// detail, or an automation run's outcome text. The first segment to truncate under
+            /// pressure (see `AlertsCombinedCompressionPriority`).
+            case title
+        }
+        let kind: Kind
+        let text: String
+    }
+
+    /// The combined Alert column's content, in order: `project / workspace / name / title` for a
+    /// workspace alert, or `name / title` for an automation-run alert (which has no live workspace to
+    /// name, since its click deep-links to the Runs tab instead). The title segment, and its leading
+    /// separator, is left out when there is none or when it would only repeat the name.
+    ///
+    /// Pulled out as its own pure function, decoupled from `NSTextField` construction, so which segments
+    /// appear and their order is a decision made once here rather than spread across view-building code;
+    /// whether the name segment stays here at all is still an open product question, and keeping the
+    /// decision in one function is what makes that a one-line change when it is settled.
+    nonisolated static func alertsCombinedSegments(row: AlertsRenderPlan.Row) -> [AlertsCombinedSegment] {
+        var segments: [AlertsCombinedSegment] = []
+        if !row.isAutomationsRow {
+            segments.append(AlertsCombinedSegment(kind: .project, text: row.projectName))
+            segments.append(AlertsCombinedSegment(kind: .separator, text: "/"))
+            segments.append(AlertsCombinedSegment(kind: .workspace, text: row.workspaceName))
+            segments.append(AlertsCombinedSegment(kind: .separator, text: "/"))
+        }
+        segments.append(AlertsCombinedSegment(kind: .name, text: row.entry.label))
+        if Self.alertsRowHasTitle(entry: row.entry) {
+            segments.append(AlertsCombinedSegment(kind: .separator, text: "/"))
+            segments.append(AlertsCombinedSegment(kind: .title, text: row.entry.detail ?? ""))
+        }
+        return segments
+    }
+
+    /// The combined Alert column's per-segment give-way order under horizontal pressure: title first
+    /// (it is already secondary detail), then workspace, then project, and name last, since name is the
+    /// row's identity and is typically short anyway. Every value stays below `.required` so the row's
+    /// width, pinned equal to the header column by `TableGrid`, can always be satisfied by shrinking a
+    /// segment instead of the grid clipping arbitrarily or breaking constraints. Separators keep
+    /// `.required`: a bare "/" has nothing useful to truncate to, and it is never why a row cannot fit,
+    /// since some segment ahead of it in this order always has room to give first.
+    private enum AlertsCombinedCompressionPriority {
+        static let title = NSLayoutConstraint.Priority(250)
+        static let workspace = NSLayoutConstraint.Priority(400)
+        static let project = NSLayoutConstraint.Priority(500)
+        static let name = NSLayoutConstraint.Priority(600)
+    }
+
+    /// Builds the Alert column's cell from `alertsCombinedSegments`. Every non-separator segment truncates
+    /// with a tail ellipsis under `AlertsCombinedCompressionPriority`'s order, so an overlong identity
+    /// loses width from its least identifying segment first rather than clipping an arbitrary one.
+    ///
+    /// Static and not private (it touches no instance state) so a layout test can build and measure the
+    /// cell directly, without constructing a host `AppKitController` just to reach it.
+    static func alertsCombinedCell(row: AlertsRenderPlan.Row, automationID: String?) -> (
+        view: NSView, labelField: NSTextField, detailField: NSTextField?
+    ) {
+        let entry = row.entry
+        let iconView = NSImageView()
+        iconView.image = NSImage(systemSymbolName: entry.icon, accessibilityDescription: nil)
+        iconView.contentTintColor = AppKitController.alertsIconColor(entry.iconTint)
+        iconView.setContentHuggingPriority(.required, for: .horizontal)
+        iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        var views: [NSView] = [iconView]
+        var labelField: NSTextField?
+        var detailField: NSTextField?
+        for segment in Self.alertsCombinedSegments(row: row) {
+            let field = NSTextField(labelWithString: segment.text)
+            switch segment.kind {
+            case .separator:
+                field.font = Typography.rowDetail
+                field.textColor = .secondaryLabelColor
+                field.setContentHuggingPriority(.required, for: .horizontal)
+                field.setContentCompressionResistancePriority(.required, for: .horizontal)
+            case .workspace:
+                field.font = Typography.rowDetail
+                field.textColor = .secondaryLabelColor
+                field.lineBreakMode = .byTruncatingTail
+                field.setContentHuggingPriority(.required, for: .horizontal)
+                field.setContentCompressionResistancePriority(AlertsCombinedCompressionPriority.workspace, for: .horizontal)
+            case .project:
+                field.font = Typography.rowDetail
+                field.textColor = .secondaryLabelColor
+                field.lineBreakMode = .byTruncatingTail
+                field.setContentHuggingPriority(.required, for: .horizontal)
+                field.setContentCompressionResistancePriority(AlertsCombinedCompressionPriority.project, for: .horizontal)
+            case .name:
+                field.font = Typography.compactTitle
+                field.textColor = .labelColor
+                field.lineBreakMode = .byTruncatingTail
+                field.setContentHuggingPriority(.required, for: .horizontal)
+                field.setContentCompressionResistancePriority(AlertsCombinedCompressionPriority.name, for: .horizontal)
+                if let automationID { field.setAccessibilityIdentifier("\(automationID)-label") }
+                labelField = field
+            case .title:
+                field.font = Typography.metadata
+                field.textColor = .secondaryLabelColor
+                field.lineBreakMode = .byTruncatingTail
+                field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+                field.setContentCompressionResistancePriority(AlertsCombinedCompressionPriority.title, for: .horizontal)
+                if let automationID { field.setAccessibilityIdentifier("\(automationID)-detail") }
+                detailField = field
+            }
+            views.append(field)
+        }
+
+        let cell = NSStackView(views: views)
+        cell.orientation = .horizontal
+        cell.alignment = .firstBaseline
+        cell.spacing = 4
+        // `alertsCombinedSegments` always emits exactly one `.name` segment, so this is never nil.
+        return (cell, labelField!, detailField)
+    }
+
+    /// The Device column: the device's display name, with "offline" trailing it in the same red the
+    /// sidebar's device headers use when that device is unreachable.
+    private func alertsDeviceCell(text: String, isOffline: Bool) -> NSView {
+        let nameLabel = NSTextField(labelWithString: text)
+        nameLabel.font = Typography.rowDetail
+        nameLabel.textColor = .secondaryLabelColor
+        nameLabel.lineBreakMode = .byTruncatingTail
+
+        let cell = NSStackView(views: [nameLabel])
+        cell.orientation = .horizontal
+        cell.alignment = .firstBaseline
+        cell.spacing = 4
+        guard isOffline else { return cell }
+
+        let offlineLabel = NSTextField(labelWithString: "offline")
+        offlineLabel.font = Typography.rowDetail
+        offlineLabel.textColor = host.sidebar.sidebarFailedIndicatorColor()
+        cell.addArrangedSubview(offlineLabel)
+        return cell
+    }
+
+    private func alertsCardContainer(_ content: NSView) -> NSView {
+        content.translatesAutoresizingMaskIntoConstraints = false
+        let card = ColoredBackgroundView()
+        card.cornerRadius = 10
+        card.fillColor = host.sidebar.sidebarCardBackgroundColor()
+        card.translatesAutoresizingMaskIntoConstraints = false
+        bindAppearanceReactiveLayer(card) { [unowned host] view in
+            view.layer?.borderWidth = 1
+            view.layer?.borderColor = host.sidebar.sidebarCardBorderColor(isSelected: false).cgColor
+        }
+        card.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: card.leadingAnchor), content.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            content.topAnchor.constraint(equalTo: card.topAnchor), content.bottomAnchor.constraint(equalTo: card.bottomAnchor),
+        ])
+        return card
+    }
+
+    /// The row's leading status indicator: an agent's spinner/dot, a process dot, or an empty slot that
+    /// keeps every row's shortcut badge aligned regardless of whether it carries a status. Reuses
+    /// `RowPrimitives.statusSlot` (the same 14 pt slot the Automations table's status column uses) rather
+    /// than the former `windowRow`'s own hand-built slot, so both hand-rolled tables' status columns
+    /// align on the same width.
+    private static func alertsStatusIndicator(processStatus: RunningProcessState?, agentStatus: AgentWindowStatus?, automationID: String?) -> NSView {
+        if let agentStatus {
+            guard agentStatus != .spinning else {
+                let spinner = NSProgressIndicator()
+                if let automationID { spinner.setAccessibilityIdentifier("\(automationID)-status-spinning") }
+                spinner.style = .spinning
+                spinner.controlSize = .mini
+                spinner.translatesAutoresizingMaskIntoConstraints = false
+                NSLayoutConstraint.activate([
+                    spinner.widthAnchor.constraint(equalToConstant: 10), spinner.heightAnchor.constraint(equalToConstant: 10),
+                ])
+                spinner.startAnimation(nil)
+                return RowPrimitives.statusSlot(spinner)
+            }
+            let (statusIconName, statusColor) = AppKitController.agentStatusSymbolAndColor(agentStatus)
+            let statusDot = NSImageView()
+            if let automationID { statusDot.setAccessibilityIdentifier("\(automationID)-status-\(agentStatus.rawValue)") }
+            statusDot.image = NSImage(systemSymbolName: statusIconName, accessibilityDescription: agentStatus.rawValue)
+            statusDot.contentTintColor = statusColor
+            statusDot.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                statusDot.widthAnchor.constraint(equalToConstant: 10), statusDot.heightAnchor.constraint(equalToConstant: 10),
+            ])
+            return RowPrimitives.statusSlot(statusDot)
+        }
+        if let processStatus {
+            let statusIconName: String
+            let statusColor: NSColor
+            switch processStatus {
+            case .running:
+                statusIconName = "circle.fill"
+                statusColor = .systemGreen
+            case .exited:
+                statusIconName = "circle"
+                statusColor = .systemRed
+            case .idle:
+                statusIconName = "circle"
+                statusColor = .tertiaryLabelColor
+            }
+            let statusDot = NSImageView()
+            statusDot.image = NSImage(systemSymbolName: statusIconName, accessibilityDescription: processStatus.rawValue)
+            statusDot.contentTintColor = statusColor
+            statusDot.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([statusDot.widthAnchor.constraint(equalToConstant: 8), statusDot.heightAnchor.constraint(equalToConstant: 8)])
+            return RowPrimitives.statusSlot(statusDot)
+        }
+        return RowPrimitives.statusSlot()
+    }
+
+    /// Attaches the row's click action to the whole table row. `attachAlertsRowGestureDelegate` refuses
+    /// recognition where the dismiss button already owns the click, since that button lives inside this
+    /// same clickable line rather than as a separate sibling region.
+    private func attachAlertsRowClickAction(to view: NSView, action: @escaping () async -> Void) {
+        let target = AppKitController.ClickTarget(action)
+        let recognizer = NSClickGestureRecognizer(target: target, action: #selector(AppKitController.ClickTarget.clicked(_:)))
+        recognizer.delegate = alertsRowGestureDelegate
+        view.addGestureRecognizer(recognizer)
+        objc_setAssociatedObject(view, &AppKitController.clickTargetAssocKey, target, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    /// One shared, stateless delegate reused by every row's click recognizer (see
+    /// `attachAlertsRowClickAction`).
+    private let alertsRowGestureDelegate = AlertsRowGestureDelegate()
 
     @objc private func dismissAlertsAttentionItemAction(_ sender: NSButton) {
         guard let attentionID = sender.identifier?.rawValue, !attentionID.isEmpty else { return }
@@ -836,6 +1244,23 @@ import workspacecore
     func handleAlertsShortcut(event: NSEvent) -> Bool {
         guard let alertsShortcutSpec, host.shortcuts.matches(event: event, spec: alertsShortcutSpec) else { return false }
         showAlertsDetail(presentation: .userNavigation)
+        return true
+    }
+}
+
+/// Refuses row-click recognition where the dismiss button already owns the click. The dismiss button is
+/// a column inside the same clickable row line (not a separate sibling region, unlike the sidebar's
+/// trailing accessories), so the row's own click gesture needs this veto or a dismiss click would also
+/// fire the row action. Mirrors `AutomationsTableRowView.gestureRecognizer(_:shouldAttemptToRecognizeWith:)`.
+@MainActor final class AlertsRowGestureDelegate: NSObject, NSGestureRecognizerDelegate {
+    func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
+        guard let view = gestureRecognizer.view else { return true }
+        let location = view.convert(event.locationInWindow, from: nil)
+        var hit = view.hitTest(location)
+        while let candidate = hit, candidate !== view {
+            if candidate is NSButton { return false }
+            hit = candidate.superview
+        }
         return true
     }
 }

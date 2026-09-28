@@ -181,7 +181,7 @@ struct AutomationsViewModelTests {
 
     // MARK: - Alert-entry derivation
 
-    @Test func alertEntriesCoverFailedAndTimedOutWithText() {
+    @Test func alertEntriesCoverFailedAndTimedOutWithNameAndOutcome() {
         let runs = [
             run(
                 id: "r-fail", automationID: "a", name: "Nightly audit", status: "failed", exitCode: 3, startedAt: "2026-01-01T09:00:00Z",
@@ -199,9 +199,12 @@ struct AutomationsViewModelTests {
         let entries = AutomationsViewModel.alertEntries(deviceID: "mac", deviceName: "This Mac", runs: runs)
         // Newest ended first: the timeout ended 10:30, the failure 09:05.
         #expect(entries.map(\.runID) == ["r-timeout", "r-fail"])
-        #expect(entries.first(where: { $0.runID == "r-fail" })?.text == "Nightly audit failed (exit 3) on This Mac")
-        #expect(entries.first(where: { $0.runID == "r-timeout" })?.text == "Backup timed out on This Mac")
-        #expect(entries.first(where: { $0.runID == "r-fail" })?.attentionID == "alert:mac:automationrun:r-fail:failed")
+        let failEntry = entries.first(where: { $0.runID == "r-fail" })
+        #expect(failEntry?.automationName == "Nightly audit")
+        #expect(failEntry?.outcome == "failed (exit 3)")
+        #expect(failEntry?.deviceName == "This Mac")
+        #expect(entries.first(where: { $0.runID == "r-timeout" })?.outcome == "timed out")
+        #expect(failEntry?.attentionID == "alert:mac:automationrun:r-fail:failed")
     }
 
     @Test func alertEntriesFallBackWhenNoExitCode() {
@@ -211,7 +214,8 @@ struct AutomationsViewModelTests {
                 createdAt: "2026-01-01T09:00:00Z")
         ]
         let entries = AutomationsViewModel.alertEntries(deviceID: "mac", deviceName: "This Mac", runs: runs)
-        #expect(entries.first?.text == "Automation failed on This Mac")
+        #expect(entries.first?.automationName == "Automation")
+        #expect(entries.first?.outcome == "failed")
     }
 
     // MARK: - Editor field building (kind round-trip + validation)

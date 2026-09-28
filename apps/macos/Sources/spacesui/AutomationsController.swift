@@ -167,9 +167,7 @@ import workspacecore
                     do {
                         let context = DeviceRequestContext(device: request.device, clientApp: clientApp)
                         return (request.deviceID, try SpacesDeviceClient.listAutomationRuns(context: context))
-                    } catch {
-                        return (request.deviceID, nil)
-                    }
+                    } catch { return (request.deviceID, nil) }
                 }
             }.value
             guard let self, retainedRunHistoryGeneration == generation else { return }
@@ -296,7 +294,7 @@ import workspacecore
         table.edgeInsets = NSEdgeInsets(top: 6, left: sideInset, bottom: 6, right: sideInset)
         table.translatesAutoresizingMaskIntoConstraints = false
 
-        let grid = AutomationTableGrid()
+        let grid = TableGrid()
         let header = makeAutomationHeaderLine(grid: grid, showDevice: showDevice)
         let divider = makeTableDivider()
         let lines: [NSView] = [header, divider] + rows.map { makeAutomationRow($0, grid: grid, showDevice: showDevice, now: now) }
@@ -314,7 +312,20 @@ import workspacecore
         constrainFormFieldToFillWidth(card, in: stack)
     }
 
-    private func makeAutomationHeaderLine(grid: AutomationTableGrid, showDevice: Bool) -> NSView {
+    /// Column widths for the Automations pane's table, laid out on the shared `TableGrid`.
+    private enum AutomationsTableLayout {
+        static let schedule: CGFloat = 224
+        /// Wide enough for the next-run chip, which carries the value plus its disclosure chevron.
+        static let nextRun: CGFloat = 132
+        static let device: CGFloat = 96
+        static let toggle: CGFloat = 36
+        static let nameMinimum: CGFloat = 110
+        static let nameMaximum: CGFloat = 320
+        /// Compact enough to scan a long list, tall enough for the enable switch and a 13 pt name.
+        static let rowHeight: CGFloat = 30
+    }
+
+    private func makeAutomationHeaderLine(grid: TableGrid, showDevice: Bool) -> NSView {
         func header(_ text: String, alignment: NSTextAlignment = .left) -> NSTextField {
             let label = NSTextField(labelWithString: text)
             label.font = Typography.metadataTitle
@@ -323,9 +334,18 @@ import workspacecore
             label.lineBreakMode = .byTruncatingTail
             return label
         }
-        return grid.makeHeaderLine(
-            status: RowPrimitives.statusSlot(), name: header("Name"), schedule: header("Schedule"), nextRun: header("Next run", alignment: .right),
-            device: showDevice ? header("Device") : nil, toggle: header("On"))
+        var columns: [(view: NSView, width: TableGrid.ColumnWidth)] = [
+            (RowPrimitives.statusSlot(), .asIs),
+            (header("Name"), .name(minimum: AutomationsTableLayout.nameMinimum, maximum: AutomationsTableLayout.nameMaximum)),
+            // Schedule holds its preferred width while space is tight, then absorbs the surplus after
+            // Name reaches its readable cap, keeping the trailing status and toggle columns from bunching
+            // at the table's right edge in a wide pane.
+            (header("Schedule"), .growable(preferred: AutomationsTableLayout.schedule, minimum: 120)),
+            (header("Next run", alignment: .right), .fixed(AutomationsTableLayout.nextRun)),
+        ]
+        if showDevice { columns.append((header("Device"), .capped(preferred: AutomationsTableLayout.device, minimum: 78))) }
+        columns.append((header("On"), .fixed(AutomationsTableLayout.toggle)))
+        return grid.makeHeaderLine(columns)
     }
 
     private func makeTableDivider() -> NSView {
@@ -336,7 +356,7 @@ import workspacecore
         return divider
     }
 
-    private func makeAutomationRow(_ row: AutomationTableRow, grid: AutomationTableGrid, showDevice: Bool, now: Date) -> NSView {
+    private func makeAutomationRow(_ row: AutomationTableRow, grid: TableGrid, showDevice: Bool, now: Date) -> NSView {
         let automation = row.automation
         let identifier = NSUserInterfaceItemIdentifier("\(row.deviceID)::\(automation.id)")
 
@@ -395,9 +415,10 @@ import workspacecore
         toggleColumn.spacing = 0
 
         let device = showDevice ? makeCellLabel(row.deviceName, font: Typography.rowDetail, color: Theme.muted) : nil
-        let line = grid.makeRowLine(
-            status: RowPrimitives.statusSlot(compactStatusDot(for: row)), name: name, schedule: scheduleColumn, nextRun: nextRunColumn,
-            device: device, toggle: toggleColumn)
+        var columns: [NSView] = [RowPrimitives.statusSlot(compactStatusDot(for: row)), name, scheduleColumn, nextRunColumn]
+        if let device { columns.append(device) }
+        columns.append(toggleColumn)
+        let line = grid.makeRowLine(columns)
 
         // Pinned edge to edge: the line carries the grid's own horizontal inset, the same one the header
         // applies, so both start their columns at the same origin.
@@ -405,7 +426,7 @@ import workspacecore
         NSLayoutConstraint.activate([
             line.leadingAnchor.constraint(equalTo: rowView.leadingAnchor), line.trailingAnchor.constraint(equalTo: rowView.trailingAnchor),
             line.centerYAnchor.constraint(equalTo: rowView.centerYAnchor),
-            rowView.heightAnchor.constraint(equalToConstant: AutomationTableGrid.rowHeight),
+            rowView.heightAnchor.constraint(equalToConstant: AutomationsTableLayout.rowHeight),
         ])
         return rowView
     }
@@ -779,9 +800,7 @@ import workspacecore
     }
 
     private func runNow(deviceID: String, automationID: String) {
-        performMutation(deviceID: deviceID) { context in
-            try SpacesDeviceClient.triggerAutomation(id: automationID, context: context)
-        }
+        performMutation(deviceID: deviceID) { context in try SpacesDeviceClient.triggerAutomation(id: automationID, context: context) }
     }
 
     /// Opens the next-run popover anchored to the row's chip. The automation is re-resolved from the current
@@ -855,9 +874,7 @@ import workspacecore
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        performMutation(deviceID: deviceID) { context in
-            try SpacesDeviceClient.deleteAutomation(id: automationID, context: context)
-        }
+        performMutation(deviceID: deviceID) { context in try SpacesDeviceClient.deleteAutomation(id: automationID, context: context) }
     }
 
     @objc private func enabledToggled(_ sender: NSSwitch) {
@@ -873,16 +890,12 @@ import workspacecore
 
     @objc private func cancelRunTapped(_ sender: NSButton) {
         guard let (deviceID, runID) = Self.splitIdentifier(sender.identifier?.rawValue) else { return }
-        performMutation(deviceID: deviceID) { context in
-            try SpacesDeviceClient.cancelAutomationRun(runID: runID, context: context)
-        }
+        performMutation(deviceID: deviceID) { context in try SpacesDeviceClient.cancelAutomationRun(runID: runID, context: context) }
     }
 
     @objc private func endAgentsTapped(_ sender: NSButton) {
         guard let (deviceID, runID) = Self.splitIdentifier(sender.identifier?.rawValue) else { return }
-        performMutation(deviceID: deviceID) { context in
-            try SpacesDeviceClient.endAutomationAgents(runID: runID, context: context)
-        }
+        performMutation(deviceID: deviceID) { context in try SpacesDeviceClient.endAutomationAgents(runID: runID, context: context) }
     }
 
     /// Runs a Device API automation mutation off the main actor, then reloads overviews so the pane
@@ -894,8 +907,7 @@ import workspacecore
     /// to clear the stale flip rather than leave the UI asserting a change that never landed. For an
     /// offline remote this renders whatever cached overview exists, which is acceptable.
     private func performMutation(
-        deviceID: String, serializationKey: String? = nil,
-        _ operation: @escaping @Sendable (DeviceRequestContext) throws -> Void
+        deviceID: String, serializationKey: String? = nil, _ operation: @escaping @Sendable (DeviceRequestContext) throws -> Void
     ) {
         guard let device = host.automationDeviceRecord(deviceID: deviceID) else {
             host.showDeviceNotLoadedError()

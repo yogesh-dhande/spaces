@@ -248,17 +248,6 @@ enum SpacesMobileAttention {
         return GhosttyRemoteSessionStateTimestamp.date(from: value)
     }
 
-    /// Abbreviated relative age for event rows: "now", "5m", "3h", "2d".
-    static func abbreviatedAge(of date: Date, relativeTo now: Date = Date()) -> String {
-        let seconds = now.timeIntervalSince(date)
-        guard seconds >= 60 else { return "now" }
-        let minutes = Int(seconds / 60)
-        guard minutes >= 60 else { return "\(minutes)m" }
-        let hours = minutes / 60
-        guard hours >= 24 else { return "\(hours)h" }
-        return "\(hours / 24)d"
-    }
-
     private static func terminalKind(for state: TerminalSessionState) -> SpacesMobileAttentionEvent.Kind? {
         switch state {
         case .exited: .exited

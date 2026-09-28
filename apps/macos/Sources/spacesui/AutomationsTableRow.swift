@@ -1,7 +1,8 @@
 import AppKit
 import spacesterminalcore
 
-/// The shared column grid the Automations pane's table lays its header and every row out on.
+/// The shared column grid a hand-rolled pane table (Automations, Alerts) lays its header and every row
+/// out on.
 ///
 /// The header owns the grid. It is built first and is the only line whose columns are sized by their own
 /// constraints; every row line then pins each of its columns to the width of the matching header column, so
@@ -12,17 +13,28 @@ import spacesterminalcore
 /// `distribution` is `.fill` on every line for the same reason. The default `.gravityAreas` lays views out
 /// in gravity areas without forcing them to tile the line's pinned width, which leaves the leftover width
 /// unattributed and the columns free to slide.
-@MainActor final class AutomationTableGrid {
-    static let schedule: CGFloat = 224
-    /// Wide enough for the next-run chip, which carries the value plus its disclosure chevron.
-    static let nextRun: CGFloat = 132
-    static let device: CGFloat = 96
-    static let toggle: CGFloat = 36
-    static let nameMinimum: CGFloat = 110
-    static let nameMaximum: CGFloat = 320
+///
+/// Column count and sizing are supplied per table by its caller (`AutomationsController`'s
+/// `AutomationsTableLayout`, `AlertsController`'s `AlertsTableLayout`); this type owns only the shared
+/// alignment mechanics and the width policies a hand-rolled row grid needs.
+@MainActor final class TableGrid {
+    enum ColumnWidth {
+        /// Never shrinks or grows past `width` (a status dot, a shortcut badge, a toggle).
+        case fixed(CGFloat)
+        /// Prefers `preferred`, shrinks toward `minimum` under pressure, never grows past `preferred`.
+        case capped(preferred: CGFloat, minimum: CGFloat)
+        /// Prefers `preferred`, shrinks toward `minimum` under pressure, and absorbs surplus width beyond
+        /// `preferred`: the column that takes up the table's leftover space.
+        case growable(preferred: CGFloat, minimum: CGFloat)
+        /// Claims the first share of available width up to `maximum`, floors at `minimum`, and truncates
+        /// rather than push the rest of the grid past either bound.
+        case name(minimum: CGFloat, maximum: CGFloat)
+        /// The view already carries its own fixed-width constraints (e.g. `RowPrimitives.statusSlot()`),
+        /// so the grid leaves its sizing alone and only ties its width to the matching header column.
+        case asIs
+    }
+
     static let spacing: CGFloat = 10
-    /// Compact enough to scan a long list, tall enough for the enable switch and a 13 pt name.
-    static let rowHeight: CGFloat = 30
     /// Horizontal breathing room between the table's card edge and its first and last columns.
     static let horizontalInset: CGFloat = 6
 
@@ -32,36 +44,18 @@ import spacesterminalcore
     /// views needs a common ancestor to install on, and a line has none until it joins the table stack.
     private var pendingAlignment: [NSLayoutConstraint] = []
 
-    /// Builds the header line and fixes the grid to it. `device` is nil when the table shows a single
-    /// device and the column is dropped from every line at once. Call once, before any row line.
-    func makeHeaderLine(status: NSView, name: NSView, schedule: NSView, nextRun: NSView, device: NSView?, toggle: NSView) -> NSStackView {
-        // Schedule holds its preferred width while space is tight, then absorbs the surplus after Name
-        // reaches its readable cap. This keeps the trailing status and toggle columns from bunching at
-        // the table's right edge in a wide pane.
-        growableWidth(schedule, preferred: Self.schedule, minimum: 120)
-        fixWidth(nextRun, Self.nextRun)
-        if let device { flexWidth(device, preferred: Self.device, minimum: 78) }
-        fixWidth(toggle, Self.toggle)
-
-        name.translatesAutoresizingMaskIntoConstraints = false
-        // Name gets the first claim on available width, up to a readable cap, and truncates rather than
-        // pushing the rest of the grid after that.
-        name.setContentHuggingPriority(NSLayoutConstraint.Priority(100), for: .horizontal)
-        name.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(100), for: .horizontal)
-        // Outranks the flexible columns' preferred widths (so they shrink first) while staying below
-        // required (so an impossibly narrow pane degrades without unsatisfiable-constraint breakage).
-        let minimumName = name.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.nameMinimum)
-        minimumName.priority = NSLayoutConstraint.Priority(900)
-        let maximumName = name.widthAnchor.constraint(lessThanOrEqualToConstant: Self.nameMaximum)
-        NSLayoutConstraint.activate([minimumName, maximumName])
-
-        headerColumns = Self.columnOrder(status: status, name: name, schedule: schedule, nextRun: nextRun, device: device, toggle: toggle)
+    /// Builds the header line and fixes the grid to it and its column widths. Call once, before any row
+    /// line, with every column the table has in this render (a caller drops an optional column, such as
+    /// Device with one paired device, from this list rather than passing a placeholder).
+    func makeHeaderLine(_ columns: [(view: NSView, width: ColumnWidth)]) -> NSStackView {
+        for (view, width) in columns { size(view, width) }
+        headerColumns = columns.map(\.view)
         return Self.makeLine(headerColumns)
     }
 
-    /// Builds one row line on the grid the header established.
-    func makeRowLine(status: NSView, name: NSView, schedule: NSView, nextRun: NSView, device: NSView?, toggle: NSView) -> NSStackView {
-        let columns = Self.columnOrder(status: status, name: name, schedule: schedule, nextRun: nextRun, device: device, toggle: toggle)
+    /// Builds one row line on the grid the header established. `columns` must match the header's column
+    /// count and order.
+    func makeRowLine(_ columns: [NSView]) -> NSStackView {
         precondition(columns.count == headerColumns.count, "row line must have the same columns as the header line")
         for (column, headerColumn) in zip(columns, headerColumns) {
             column.translatesAutoresizingMaskIntoConstraints = false
@@ -81,13 +75,6 @@ import spacesterminalcore
         pendingAlignment = []
     }
 
-    private static func columnOrder(status: NSView, name: NSView, schedule: NSView, nextRun: NSView, device: NSView?, toggle: NSView) -> [NSView] {
-        var columns: [NSView] = [status, name, schedule, nextRun]
-        if let device { columns.append(device) }
-        columns.append(toggle)
-        return columns
-    }
-
     private static func makeLine(_ columns: [NSView]) -> NSStackView {
         let line = NSStackView(views: columns)
         line.orientation = .horizontal
@@ -99,21 +86,21 @@ import spacesterminalcore
         return line
     }
 
+    private func size(_ view: NSView, _ width: ColumnWidth) {
+        switch width {
+        case .fixed(let width): fixWidth(view, width)
+        case .capped(let preferred, let minimum): sizeFlexibleColumn(view, preferred: preferred, minimum: minimum, capsAtPreferredWidth: true)
+        case .growable(let preferred, let minimum): sizeFlexibleColumn(view, preferred: preferred, minimum: minimum, capsAtPreferredWidth: false)
+        case .name(let minimum, let maximum): sizeNameColumn(view, minimum: minimum, maximum: maximum)
+        case .asIs: break
+        }
+    }
+
     private func fixWidth(_ view: NSView, _ width: CGFloat) {
         view.translatesAutoresizingMaskIntoConstraints = false
         view.setContentHuggingPriority(.required, for: .horizontal)
         view.setContentCompressionResistancePriority(.required, for: .horizontal)
         view.widthAnchor.constraint(equalToConstant: width).isActive = true
-    }
-
-    /// A column that prefers `preferred` but shrinks toward `minimum` when the line runs out of room.
-    private func flexWidth(_ view: NSView, preferred: CGFloat, minimum: CGFloat) {
-        sizeFlexibleColumn(view, preferred: preferred, minimum: minimum, capsAtPreferredWidth: true)
-    }
-
-    /// A column that prefers `preferred`, shrinks toward `minimum`, and absorbs wider-window surplus.
-    private func growableWidth(_ view: NSView, preferred: CGFloat, minimum: CGFloat) {
-        sizeFlexibleColumn(view, preferred: preferred, minimum: minimum, capsAtPreferredWidth: false)
     }
 
     private func sizeFlexibleColumn(_ view: NSView, preferred: CGFloat, minimum: CGFloat, capsAtPreferredWidth: Bool) {
@@ -128,6 +115,20 @@ import spacesterminalcore
         floor.priority = NSLayoutConstraint.Priority(850)
         NSLayoutConstraint.activate([preferredWidth, floor])
         if capsAtPreferredWidth { view.widthAnchor.constraint(lessThanOrEqualToConstant: preferred).isActive = true }
+    }
+
+    private func sizeNameColumn(_ view: NSView, minimum: CGFloat, maximum: CGFloat) {
+        view.translatesAutoresizingMaskIntoConstraints = false
+        // Name gets the first claim on available width, up to a readable cap, and truncates rather than
+        // pushing the rest of the grid after that.
+        view.setContentHuggingPriority(NSLayoutConstraint.Priority(100), for: .horizontal)
+        view.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(100), for: .horizontal)
+        // Outranks the flexible columns' preferred widths (so they shrink first) while staying below
+        // required (so an impossibly narrow pane degrades without unsatisfiable-constraint breakage).
+        let minimumWidth = view.widthAnchor.constraint(greaterThanOrEqualToConstant: minimum)
+        minimumWidth.priority = NSLayoutConstraint.Priority(900)
+        let maximumWidth = view.widthAnchor.constraint(lessThanOrEqualToConstant: maximum)
+        NSLayoutConstraint.activate([minimumWidth, maximumWidth])
     }
 }
 
