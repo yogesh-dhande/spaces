@@ -683,6 +683,10 @@ launch_spaces() {
   ensure_profile_spaces_owner "$SPACES_PID"
   start_desktop_awake_assertion
   wait_for_spaces_launch_ready
+  # A machine whose real-home agent hooks are stale gets the optional coding-agents setup step
+  # regardless of this lane's isolated HOME (see drive_coding_agents_setup_step_if_offered), and the
+  # step holds back the main window content that opens and hotkeys need. The splitter wait drives it.
+  wait_for_spaces_splitter_ready
   transition_pause "Spaces launch"
 }
 
@@ -1403,7 +1407,6 @@ run_remote_device_ui_parity() {
   [[ -n "$REMOTE_DEVICE_RESULT_JSON" && -f "$REMOTE_DEVICE_RESULT_JSON" ]] || fail "Remote device UI parity requires a remote Device API result JSON."
   begin_case "remote device UI parity"
   wait_for_spaces_frontmost_ready
-  wait_for_spaces_splitter_ready
   wait_for_ui_identifier "sidebar-project-title-$REMOTE_DEVICE_PROJECT_ID" "remote project row"
   wait_for_ui_identifier "sidebar-project-settings-$REMOTE_DEVICE_PROJECT_ID" "remote project settings action"
   wait_for_ui_identifier "sidebar-project-add-workspace-$REMOTE_DEVICE_PROJECT_ID" "remote add workspace action"
