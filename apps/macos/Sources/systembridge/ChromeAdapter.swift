@@ -21,7 +21,7 @@ public final class ChromeAdapter {
     /// relaunch Chrome just to close tabs that no longer exist.
     public func isRunning() -> Bool {
         #if canImport(AppKit)
-            return !NSRunningApplication.runningApplications(withBundleIdentifier: Self.chromeBundleID).isEmpty
+            return Self.runningChromeApp() != nil
         #else
             return false
         #endif
@@ -421,7 +421,7 @@ public final class ChromeAdapter {
     private func bringChromeForward(raisedWindowID: Int) {
         #if canImport(AppKit)
             guard !Self.isRunningUnderXCTest else { return }
-            guard let chrome = NSRunningApplication.runningApplications(withBundleIdentifier: Self.chromeBundleID).first else { return }
+            guard let chrome = Self.runningChromeApp() else { return }
             chrome.activate(options: [])
             Self.waitForChromeActivation(chrome)
             _ = try? runChromeScript(Self.raiseWindowScript(windowID: raisedWindowID))
@@ -429,6 +429,14 @@ public final class ChromeAdapter {
     }
 
     #if canImport(AppKit)
+        /// Looks Chrome up by bundle identifier in the live workspace app list rather than through
+        /// `NSRunningApplication.runningApplications(withBundleIdentifier:)`. That class lookup was
+        /// observed returning empty off the main thread while Chrome was running and the workspace
+        /// list still had it, which made window cycling skip Chrome's windows.
+        private static func runningChromeApp() -> NSRunningApplication? {
+            NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == chromeBundleID }
+        }
+
         /// How long `waitForChromeActivation` polls before giving up and proceeding anyway.
         private static let chromeActivationWaitDeadlineSeconds: TimeInterval = 0.5
 
