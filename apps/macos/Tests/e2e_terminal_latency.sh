@@ -6,6 +6,7 @@ APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
 source "$SCRIPT_DIR/terminal_harness_lock.sh"
 source "$REPO_ROOT/scripts/spaces-profile-helpers.sh"
+source "$SCRIPT_DIR/e2e_ui_automation.sh"
 
 BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="${SPACES_APP:-$BUILD_DIR/SpacesApp}"
@@ -150,6 +151,7 @@ env \
   DEBUG=1 \
   "$SPACES_APP" >"$APP_LOG" 2>&1 &
 APP_PID="$!"
+SPACES_PID="$APP_PID"
 spaces_profile_wait_for_owner_pid "$SPACES_CLI" "$APP_PID" 20
 
 ipc_probe_output="$WORK_ROOT/ipc-ready-$(uuidgen).json"
@@ -170,6 +172,8 @@ while (( SECONDS < ipc_probe_deadline )); do
 done
 [[ "$ipc_probe_ready" == "1" ]] || fail "Timed out waiting for SpacesApp terminal IPC observers."
 
+export SPACES_E2E_UI_AUTOMATION="$SCRIPT_DIR/e2e_ui_automation.sh"
+export SPACES_E2E_APP_PID="$APP_PID"
 python3 - "$SPACES_CLI" "$SPACES_E2E" "$RUNTIME_DIR" "$WORK_ROOT" "$PERF_JSONL" "$SUMMARY_JSON" "$SAMPLES" "${SELECTED_SCENARIOS[@]}" <<'PY'
 import json
 import math
@@ -233,6 +237,23 @@ def event(name: str, scenario: str, probe_id: str, at_ns: int | None = None, **a
 
 def run(command: list[str], timeout: float = 30) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, env=base_env, capture_output=True, text=True, timeout=timeout, check=True)
+
+
+def drive_coding_agents_setup_step_if_offered() -> None:
+    subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; SPACES_PID="$2"; drive_coding_agents_setup_step_if_offered',
+            "_",
+            os.environ["SPACES_E2E_UI_AUTOMATION"],
+            os.environ["SPACES_E2E_APP_PID"],
+        ],
+        check=False,
+        timeout=10,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def register_workspace_dir() -> str:
@@ -566,6 +587,10 @@ def request_terminal_window(session_id: str) -> None:
         if last_state.get("found") and renderer_is_ghostty(last_state):
             time.sleep(0.3)
             return
+        # A fresh profile launch can offer the coding-agents setup step in the main window, and
+        # no terminal window is summoned while it is up, so each poll drives it through its Skip
+        # action.
+        drive_coding_agents_setup_step_if_offered()
         time.sleep(0.02)
     raise TimeoutError(f"timed out waiting for terminal window; last={last_state}")
 

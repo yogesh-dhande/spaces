@@ -6,6 +6,7 @@ APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
 source "$SCRIPT_DIR/terminal_harness_lock.sh"
 source "$REPO_ROOT/scripts/spaces-profile-helpers.sh"
+source "$SCRIPT_DIR/e2e_ui_automation.sh"
 
 BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="$BUILD_DIR/SpacesApp"
@@ -21,6 +22,7 @@ export SPACES_DEVICE_API_PORT="${SPACES_DEVICE_API_PORT:-0}"
 APP_LOG="$WORK_ROOT/spaces-app.log"
 PROBE_SCRIPT="$WORK_ROOT/mouse-reporting-scroll.py"
 PROBE_OUTPUT="$WORK_ROOT/mouse-reporting-input.bin"
+DUMP_PATH="$WORK_ROOT/terminal-window.json"
 APP_PID=""
 session_id=""
 
@@ -78,6 +80,57 @@ wait_for_probe_output() {
     sleep 0.1
   done
   fail "Timed out waiting for the mouse-reporting process to capture terminal input."
+}
+
+dump_value() {
+  local field="$1"
+  python3 - "$DUMP_PATH" "$field" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    value = json.load(handle).get(sys.argv[2])
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif value is None:
+    print("")
+else:
+    print(value)
+PY
+}
+
+# The dump request is asynchronous IPC, so the file is removed before each request and only a
+# freshly written reply is read; a reply left over from an earlier poll or a previous run under the
+# same WORK_ROOT would otherwise pass readiness while the setup step still blocks the window.
+dump_terminal_state() {
+  local start
+  start="$(date +%s)"
+  rm -f "$DUMP_PATH"
+  while (( "$(date +%s)" - start < 10 )); do
+    env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
+      dump-terminal-session-window-state --session-id "$session_id" --output-path "$DUMP_PATH" >/dev/null
+    local attempt_start
+    attempt_start="$(date +%s)"
+    while (( "$(date +%s)" - attempt_start < 2 )); do
+      [[ -s "$DUMP_PATH" ]] && return 0
+      sleep 0.1
+    done
+    [[ -s "$DUMP_PATH" ]] && return 0
+  done
+  fail "Timed out waiting for terminal state dump"
+}
+
+wait_for_terminal_window_ready() {
+  local deadline=$((SECONDS + 30))
+  while (( SECONDS < deadline )); do
+    dump_terminal_state
+    if [[ "$(dump_value found)" == "true" ]] && [[ "$(dump_value showsTerminalSurface)" == "true" ]]; then
+      return 0
+    fi
+    drive_coding_agents_setup_step_if_offered
+    sleep 0.2
+  done
+  fail "Timed out waiting for terminal window readiness"
 }
 
 require_binary "$SPACES_APP"
@@ -149,6 +202,7 @@ PY
 
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
 APP_PID="$!"
+SPACES_PID="$APP_PID"
 sleep 3
 
 command_output="$(
@@ -161,6 +215,11 @@ session_id="$(extract_session_id "$command_output")"
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal show "$session_id" >/dev/null
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" focus-terminal-session-window --session-id "$session_id" >/dev/null
 wait_for_tail_contains "MOUSE_SCROLL_READY"
+
+# MOUSE_SCROLL_READY only proves the daemon-side probe is running, not that the terminal window is
+# key on screen; a fresh profile launch can offer the coding-agents setup step in front of it, which
+# leaves the window unfocused for the scroll/click events below unless it is skipped here.
+wait_for_terminal_window_ready
 
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
   scroll-application-window --executable-name SpacesApp --application-pid "$APP_PID" --normalized-x 0.75 --normalized-y 0.5 --delta-y 120 --repetitions 2 >/dev/null

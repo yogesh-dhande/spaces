@@ -6,6 +6,7 @@ APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
 source "$SCRIPT_DIR/terminal_harness_lock.sh"
 source "$REPO_ROOT/scripts/spaces-profile-helpers.sh"
+source "$SCRIPT_DIR/e2e_ui_automation.sh"
 
 BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="$BUILD_DIR/SpacesApp"
@@ -62,6 +63,8 @@ wait_for_spaces_frontmost_ready() {
         return 0
       fi
     fi
+    # A fresh profile launch can offer the coding-agents setup step; skip it or the terminal window never becomes key.
+    drive_coding_agents_setup_step_if_offered
     sleep 0.2
   done
   fail "Timed out waiting for terminal window to become key"
@@ -166,6 +169,7 @@ wait_for_terminal_window_ready() {
     if [[ "$(dump_value found)" == "true" ]] && [[ "$(dump_value showsTerminalSurface)" == "true" ]]; then
       return 0
     fi
+    drive_coding_agents_setup_step_if_offered
     sleep 0.2
   done
   fail "Timed out waiting for terminal window readiness"
@@ -206,6 +210,26 @@ wait_for_rendered_output_contains() {
       fail "Timed out waiting for rendered terminal output to contain: $needle"
     fi
     sleep 0.2
+  done
+}
+
+wait_for_surface_selection_contains() {
+  local needle="$1"
+  local timeout="${2:-5}"
+  local start
+  local selection=""
+  start="$(date +%s)"
+  while true; do
+    dump_terminal_state
+    selection="$(dump_value surfaceSelectionText)"
+    if printf '%s\n' "$selection" | grep -Fq "$needle"; then
+      return 0
+    fi
+    if (( "$(date +%s)" - start >= timeout )); then
+      printf '%s\n' "$selection" >&2
+      fail "Timed out waiting for terminal selection to contain: $needle"
+    fi
+    sleep 0.1
   done
 }
 
@@ -253,6 +277,7 @@ FIXTURE_WORKSPACE_ID="$(printf '%s' "$FIXTURE_WORKSPACE_JSON" | python3 -c 'impo
 
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
 APP_PID="$!"
+SPACES_PID="$APP_PID"
 sleep 3
 
 command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal create --workspace "$FIXTURE_WORKSPACE_ID" --command cat --title "$SESSION_TITLE")"
@@ -271,6 +296,9 @@ wait_for_rendered_output_contains "$paste_token"
 : | pbcopy
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
   terminal-window-shortcut --session-id "$session_id" --action select-all >/dev/null
+# select-all takes effect on the mirror surface asynchronously while the paste's output frames may still be
+# landing, so copy must wait until the surface reports the selection or it reads nothing.
+wait_for_surface_selection_contains "$paste_token"
 send_command_key_code 8
 wait_for_pbpaste_contains "$paste_token"
 

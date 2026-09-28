@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Accessibility automation shared by the macOS app E2E lanes: driving the running Spaces app
 # through System Events by the stable AXIdentifiers the app publishes, rather than by label or
-# position. Sourced by apps/macos/Tests/e2e_macos_app.sh and by the mac-reconnect scenario in
-# apps/macos/Tests/e2e_mobile_baseline.sh.
+# position. Sourced by the app lane, the mac-reconnect mobile-baseline scenario, and the terminal
+# lanes that drive a desktop window.
 #
 # The sourcing script owns the state these functions read:
 #   SPACES_PID                  pid of the Spaces app instance to drive
@@ -173,6 +173,19 @@ on run argv
   error "identifier not found: " & targetID
 end run
 APPLESCRIPT
+}
+# The launch hotkey becomes available before the optional setup flow has handed the window back to
+# the workspace UI, and an isolated-HOME lane's dev daemon still reads coding-agent hook status from
+# the real home directory (hook files are machine state, not per-profile), so a machine whose hooks
+# are stale offers this step regardless of the lane's own isolated HOME. Skip is preferred over
+# Continue because Continue installs hook configs into that real home; Skip leaves the machine
+# untouched. Falling back to Continue only covers a build where Skip is unavailable.
+drive_coding_agents_setup_step_if_offered() {
+  if ui_identifier_exists "setup-coding-agents-skip"; then
+    ui_click_identifier "setup-coding-agents-skip" || true
+  elif ui_identifier_exists "setup-coding-agents-continue"; then
+    ui_click_identifier "setup-coding-agents-continue" || true
+  fi
 }
 # Reads one element's accessibility description (the AppKit accessibility label) by identifier.
 # Used to assert what a status row says without scraping pixels or depending on row geometry.

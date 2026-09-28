@@ -700,20 +700,6 @@ wait_for_spaces_launch_ready() {
   fail "timed out waiting for Spaces launch readiness"
 }
 
-# The launch hotkey becomes available before the optional setup flow has handed the window back to
-# the workspace UI, and an isolated-HOME lane's dev daemon still reads coding-agent hook status from
-# the real home directory (hook files are machine state, not per-profile), so a machine whose hooks
-# are stale offers this step regardless of the lane's own isolated HOME. Skip is preferred over
-# Continue because Continue installs hook configs into that real home; Skip leaves the machine
-# untouched. Falling back to Continue only covers a build where Skip is unavailable.
-drive_coding_agents_setup_step_if_offered() {
-  if ui_identifier_exists "setup-coding-agents-skip"; then
-    ui_click_identifier "setup-coding-agents-skip" || true
-  elif ui_identifier_exists "setup-coding-agents-continue"; then
-    ui_click_identifier "setup-coding-agents-continue" || true
-  fi
-}
-
 # Code-pane-only lanes open the seeded workspace through the CLI, so wait for the same sidebar row a
 # user would see first, driving the optional coding-agent setup step out of the way if it appears.
 wait_for_code_pane_workspace_ready() {
