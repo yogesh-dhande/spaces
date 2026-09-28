@@ -87,15 +87,15 @@ import spacesterminalcore
 
     private static func payload() -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: "state", emittedAt: GhosttyRemoteSessionStateTimestamp.string(from: Date()),
-            sessionStateRevision: 1, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: "zsh",
-            workingDirectory: "/tmp", outputByteCount: 0)
+            sessionID: "session-1", reason: "state", emittedAt: GhosttyRemoteSessionStateTimestamp.string(from: Date()), sessionStateRevision: 1,
+            sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: "zsh", workingDirectory: "/tmp",
+            outputByteCount: 0)
     }
 
     private static func makeResolver(dialer: StreamingConnectionDialer) -> SpacesDeviceEndpointResolver {
         SpacesDeviceEndpointResolver(
             hosts: ["lan"], port: port, certificateFingerprint: fingerprint, activeHost: nil, onProvenHost: { _ in },
-            connect: { _, _, _, _ in dialer.connect() }, plainTCPProbe: { _, _, _ in false })
+            connect: { _, _, _, _ in dialer.connect() })
     }
 }
 

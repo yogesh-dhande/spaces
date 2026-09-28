@@ -2,32 +2,21 @@ import Dispatch
 import Foundation
 import spacesterminalcore
 
-#if canImport(Darwin)
-    import Darwin
-#endif
-#if canImport(Glibc)
-    import Glibc
-#endif
-
 public enum SpacesDeviceEndpointResolverError: LocalizedError, Equatable {
     /// The device carries no candidate address at all, so there is nothing to dial. A stored record
     /// always has at least one, so this is an unusable record rather than an unreachable device.
     case noCandidateHosts
     /// Every candidate was tried and none answered, and no candidate reported a pinned-identity
     /// failure. Retryable: the device is off, asleep, or on a network none of these addresses reach.
+    /// Also covers a candidate that accepted TCP and then stalled or dropped mid-handshake: the pinned
+    /// verify block never ran, so nothing said anything about the daemon's identity.
     case allCandidatesUnreachable(hosts: [String])
-    /// A candidate accepted TCP but never completed the pinned-TLS handshake, which means the daemon
-    /// there is not the one this client pinned at pairing time. Recognized by
-    /// `SpacesDeviceAPIAuthentication.isTransportAuthenticationFailure`, so it reaches the re-pair
-    /// recovery flow instead of reading as an ordinary outage.
-    case transportAuthenticationFailed(host: String)
 
     public var errorDescription: String? {
         switch self {
         case .noCandidateHosts: "No Device API address is stored for this device. Remove this device and pair it again."
         case .allCandidatesUnreachable(let hosts):
             "Could not reach the Device API at \(hosts.joined(separator: ", ")). Check that the device is awake and reachable on the network or Tailscale."
-        case .transportAuthenticationFailed(let host): "The secure Device API transport could not authenticate \(host)."
         }
     }
 }
@@ -69,9 +58,6 @@ public final class SpacesDeviceEndpointResolver: @unchecked Sendable {
     /// `SpacesPinnedTLSConnector.connect`.
     typealias ConnectSeam =
         @Sendable (_ host: String, _ port: Int, _ certificateFingerprint: String, _ timeout: TimeInterval) throws -> any SpacesPinnedTLSLineConnection
-    /// Answers whether a plain TCP connection to a candidate is accepted. Replaced in tests alongside
-    /// `ConnectSeam` to drive the stalled-handshake classification below.
-    typealias PlainTCPProbeSeam = @Sendable (_ host: String, _ port: Int, _ timeout: TimeInterval) -> Bool
 
     /// Caps a single candidate's connect attempt when more than one candidate is in play, so one
     /// unreachable address (typically the LAN address when away from that network) cannot consume the
@@ -84,16 +70,12 @@ public final class SpacesDeviceEndpointResolver: @unchecked Sendable {
     /// on every connect. Away from that network, where the LAN candidate is dead, trying it first costs
     /// this window alone (250 ms) instead of the whole per-candidate timeout.
     static let candidateStaggerDelay: TimeInterval = 0.25
-    /// Budget for the plain-TCP probe that tells a stalled pinned handshake apart from nothing
-    /// listening. Short: the port either accepts immediately or it is not the daemon's.
-    private static let plainTCPProbeTimeout: TimeInterval = 0.75
 
     public let port: Int
     public let certificateFingerprint: String
 
     private let onProvenHost: @Sendable (String) -> Void
     private let connectSeam: ConnectSeam
-    private let plainTCPProbeSeam: PlainTCPProbeSeam
     /// Tracks every in-flight candidate attempt so tests can wait for losers to finish unwinding.
     private let attemptGroup = DispatchGroup()
     private let lock = NSLock()
@@ -120,19 +102,18 @@ public final class SpacesDeviceEndpointResolver: @unchecked Sendable {
             hosts: hosts, port: port, certificateFingerprint: certificateFingerprint, activeHost: activeHost, onProvenHost: onProvenHost,
             connect: { host, port, fingerprint, timeout in
                 try SpacesPinnedTLSConnector.connect(host: host, port: port, certificateFingerprint: fingerprint, timeout: timeout)
-            }, plainTCPProbe: { host, port, timeout in PlainTCPProbe.portAccepts(host: host, port: port, timeout: timeout) })
+            })
     }
 
     init(
         hosts: [String], port: Int, certificateFingerprint: String, activeHost: String?, onProvenHost: @escaping @Sendable (String) -> Void,
-        connect: @escaping ConnectSeam, plainTCPProbe: @escaping PlainTCPProbeSeam
+        connect: @escaping ConnectSeam
     ) {
         self.hosts = Self.normalized(hosts)
         self.port = port
         self.certificateFingerprint = certificateFingerprint
         self.onProvenHost = onProvenHost
         connectSeam = connect
-        plainTCPProbeSeam = plainTCPProbe
         cachedHost = activeHost.flatMap { self.hosts.contains($0) ? $0 : nil }
     }
 
@@ -239,8 +220,7 @@ public final class SpacesDeviceEndpointResolver: @unchecked Sendable {
     /// re-provisioned or re-paired), which is rare, and "Device unreachable" is a tolerable label for it
     /// since Retry is harmless there and the pairing surfaces are where the real fix (re-pairing)
     /// happens, not this banner.
-    @discardableResult
-    public func noteStreamFailed(host: String) -> Bool {
+    @discardableResult public func noteStreamFailed(host: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         streamFailedHosts.insert(host)
@@ -286,10 +266,7 @@ public final class SpacesDeviceEndpointResolver: @unchecked Sendable {
                 let connection = try connectSeam(host, port, certificateFingerprint, timeout)
                 recordProven(host: host)
                 return Resolved(connection: connection, host: host)
-            } catch {
-                throw failureError(
-                    candidates: candidates, authenticationError: authenticationFailure(host: host, error: error, shouldProbe: { true }))
-            }
+            } catch { throw failureError(candidates: candidates, authenticationError: authenticationFailure(error: error)) }
         }
         return try race(candidates: candidates, timeout: min(timeout, Self.perCandidateTimeoutCap))
     }
@@ -321,9 +298,7 @@ public final class SpacesDeviceEndpointResolver: @unchecked Sendable {
                 do {
                     let connection = try connectSeam(host, port, certificateFingerprint, timeout)
                     state.finishSucceeded(host: host, connection: connection)
-                } catch {
-                    state.finishFailed(authenticationError: authenticationFailure(host: host, error: error, shouldProbe: { !state.isDecided() }))
-                }
+                } catch { state.finishFailed(authenticationError: authenticationFailure(error: error)) }
             }
         }
 
@@ -337,22 +312,18 @@ public final class SpacesDeviceEndpointResolver: @unchecked Sendable {
 
     /// Reduces one candidate's failed connect to the single bit the caller-facing error depends on: the
     /// pinned-identity failure to surface, or nil when the candidate simply did not answer.
-    /// `shouldProbe` gates the follow-up plain-TCP probe so a loser that fails after the race is already
-    /// decided does not spend a further probe budget on a classification nobody will read.
-    private func authenticationFailure(host: String, error: any Error, shouldProbe: () -> Bool) -> (any Error)? {
-        // The common shape of a pinned-identity failure: the connector's verify block rejects the
-        // certificate and the connect fails outright. Classified through the same authority
-        // `SpacesDeviceAPIAuthentication.recoveryMessage(for:)` uses to route a raw transport failure
-        // into the re-pair flow, so the two stay in agreement about what counts as one.
-        if SpacesDeviceAPIAuthentication.isTransportAuthenticationFailure(error) { return error }
-        // The other shape: an endpoint that accepts TCP and then stalls without ever completing or
-        // rejecting the handshake. A timed-out connect alone cannot tell that apart from "nothing is
-        // listening there", so it only classifies as an identity failure once the probe proves
-        // something answered.
-        if case SpacesPinnedTLSConnectionError.timeout = error, shouldProbe(), plainTCPProbeSeam(host, port, Self.plainTCPProbeTimeout) {
-            return SpacesDeviceEndpointResolverError.transportAuthenticationFailed(host: host)
-        }
-        return nil
+    ///
+    /// Identity comes from the connector's verify block alone (`SpacesPinnedTLSConnectionError.timeout`
+    /// and every other non-authentication failure fall through to nil), never from the shape of the
+    /// failure: a candidate that accepted TCP and then stalled or dropped mid-handshake never had a
+    /// certificate to judge, so it is an ordinary unreachable candidate, not a rejected pin. Mirrors
+    /// iOS's `SpacesDeviceEndpointResolver.attempt`, which takes the same verdict from
+    /// `SpacesPinnedTLSPinRejection` rather than from an `NWError` shape.
+    private func authenticationFailure(error: any Error) -> (any Error)? {
+        // Classified through the same authority `SpacesDeviceAPIAuthentication.recoveryMessage(for:)`
+        // uses to route a raw transport failure into the re-pair flow, so the two stay in agreement
+        // about what counts as one.
+        SpacesDeviceAPIAuthentication.isTransportAuthenticationFailure(error) ? error : nil
     }
 
     private func failureError(candidates: [String], authenticationError: (any Error)?) -> any Error {
@@ -444,45 +415,5 @@ public final class SpacesDeviceEndpointResolver: @unchecked Sendable {
             while winner == nil, pending > 0 { condition.wait() }
             return Outcome(winner: winner, authenticationError: authenticationError)
         }
-    }
-}
-
-/// Whether a plain TCP connection to an address is accepted, which is the only way to tell a pinned
-/// handshake that stalled (something is listening, but it is not the daemon this client pinned) apart
-/// from nothing listening at all. Deliberately POSIX rather than Network.framework: this runs on the
-/// Linux client too.
-private enum PlainTCPProbe {
-    static func portAccepts(host: String, port: Int, timeout: TimeInterval) -> Bool {
-        var hints = addrinfo()
-        hints.ai_family = AF_UNSPEC
-        #if canImport(Glibc)
-            hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
-        #else
-            hints.ai_socktype = SOCK_STREAM
-        #endif
-        var results: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(host, String(port), &hints, &results) == 0, results != nil else { return false }
-        defer { freeaddrinfo(results) }
-        var candidate = results
-        while let info = candidate {
-            candidate = info.pointee.ai_next
-            if accepts(address: info.pointee, timeout: timeout) { return true }
-        }
-        return false
-    }
-
-    private static func accepts(address: addrinfo, timeout: TimeInterval) -> Bool {
-        let descriptor = socket(address.ai_family, address.ai_socktype, address.ai_protocol)
-        guard descriptor >= 0 else { return false }
-        defer { close(descriptor) }
-        let flags = fcntl(descriptor, F_GETFL)
-        guard flags >= 0, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0 else { return false }
-        if connect(descriptor, address.ai_addr, address.ai_addrlen) == 0 { return true }
-        guard errno == EINPROGRESS else { return false }
-        var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLOUT), revents: 0)
-        guard poll(&pollDescriptor, 1, Int32(timeout * 1000)) > 0 else { return false }
-        var socketError: Int32 = 0
-        var length = socklen_t(MemoryLayout<Int32>.size)
-        return getsockopt(descriptor, SOL_SOCKET, SO_ERROR, &socketError, &length) == 0 && socketError == 0
     }
 }

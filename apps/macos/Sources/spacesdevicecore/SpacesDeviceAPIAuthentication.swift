@@ -49,13 +49,13 @@ public enum SpacesDeviceAPIAuthentication {
     /// call sites drifting out of sync over what counts as an authentication failure.
     public static func isTransportAuthenticationFailure(_ error: Error) -> Bool {
         // A pin mismatch means the daemon's TLS identity no longer matches the fingerprint recorded
-        // at pairing time (identity rotated or wrong endpoint) — recoverable only by re-pairing.
+        // at pairing time (identity rotated or wrong endpoint), recoverable only by re-pairing. Each
+        // of these comes from the pinned verify block's own verdict, never from the shape of a failed
+        // connect: a handshake that merely stalled or dropped is a `SpacesDeviceEndpointResolverError`,
+        // not one of these.
         if case TerminalServiceTLSError.certificatePinMismatch = error { return true }
         if case TerminalServiceTLSError.peerCertificateUnavailable = error { return true }
         if case TerminalServiceTLSError.missingCertificateFingerprint = error { return true }
-        // The endpoint resolver's verdict for a candidate that accepts TCP but never completes the
-        // pinned handshake: something is listening there, and it is not the daemon this client pinned.
-        if case SpacesDeviceEndpointResolverError.transportAuthenticationFailed = error { return true }
         // Deliberately no `NWError.tls` catch-all. That case covers every TLS-layer transport failure,
         // including a handshake aborted or reset under a suspended process, a captive portal cutting the
         // connection, and an interface still coming up on foreground resume. Treating those as a
