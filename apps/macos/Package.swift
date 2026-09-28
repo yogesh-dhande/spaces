@@ -303,7 +303,7 @@ let executableTargets: [Target] = [
             dependencies: ["workspacecore", "spacesdatabase", "systembridge", "spacesterminalcore", "spacestestsupport"]
         ),
         .testTarget(name: "spacesclientcoreTests", dependencies: ["spacesclientcore"]),
-        .testTarget(name: "spacesdeviceapiTests", dependencies: ["spacesdeviceapi", "spacesdevicecore", "spacesterminalcore"]),
+        .testTarget(name: "spacesdeviceapiTests", dependencies: ["spacesdeviceapi", "spacesdevicecore", "spacesterminalcore", "spacestestsupport"]),
         .testTarget(name: "spacesdevicecoreTests", dependencies: ["spacesdevicecore", "spacesterminalcore"]),
         .testTarget(name: "spacesuiTests", dependencies: ["spacesui", "spacesclientcore", "spacesdevicecore", "spacestestsupport"]),
         .testTarget(

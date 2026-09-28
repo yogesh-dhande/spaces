@@ -1,14 +1,17 @@
 import Foundation
 
-/// Liveness contract for a terminal session's state stream (the Device API `subscribe` relay), shared by
-/// the daemon that writes the stream and by every client that reads it.
+/// Liveness contract for a Device API push stream whose producer can go silent for real reasons: a
+/// terminal session's state stream (the `subscribe` relay) and the device-overview subscription (whose
+/// metadata-only pushes are calmed to `overviewMetadataCoalesceInterval`). Shared by the daemon that
+/// writes each stream and by every client that reads it.
 ///
-/// A terminal session stream carries frames only when the terminal paints. An idle terminal is therefore
-/// byte-identical to a stream whose transport has died in a way TCP cannot see: a middlebox that drops
-/// payload while keeping the peer socket open, a sleeping radio, an NAT rebind. The client keeps rendering
-/// the last frame it received, and because the request channel redials on its own, typing still appears to
-/// work while the screen is frozen. The stream needs a liveness signal of its own, so the daemon writes one
-/// and the client watches for it.
+/// Such a stream carries frames only when its producer has something to say. An idle producer is
+/// therefore byte-identical to a stream whose transport has died in a way TCP cannot see: a middlebox that
+/// drops payload while keeping the peer socket open, a sleeping radio, an NAT rebind. The client keeps
+/// reading the last state it received, and because the request channel redials on its own, typing (for a
+/// terminal) or a reachability badge (for the overview) still appears to work while the underlying stream
+/// is frozen. The stream needs a liveness signal of its own, so the daemon writes one and the client
+/// watches for it.
 public enum TerminalStreamLiveness {
     /// The daemon writes a keepalive when a terminal relay has written nothing for this long.
     ///
@@ -47,7 +50,5 @@ public enum TerminalStreamLiveness {
 
     /// How often a client checks its stream for silence, derived from the timeout so that shortening the
     /// timeout in a test also tightens the poll without a second knob to keep in sync.
-    public static func silenceCheckIntervalSeconds(forTimeout timeout: Double) -> Double {
-        max(timeout / 8, 0.02)
-    }
+    public static func silenceCheckIntervalSeconds(forTimeout timeout: Double) -> Double { max(timeout / 8, 0.02) }
 }

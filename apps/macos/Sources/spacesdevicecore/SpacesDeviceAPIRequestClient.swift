@@ -580,8 +580,12 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
 
 /// Reads the device-overview subscription stream: opens a pinned-TLS Device API
 /// connection, sends a `subscribeDeviceOverview` request, and delivers each
-/// newline-framed overview payload. Mirrors `SpacesDeviceAPIStateStreamClient`
-/// but decodes overview payloads instead of terminal state.
+/// newline-framed overview payload. Mirrors `SpacesDeviceAPIStateStreamClient`,
+/// decoding overview payloads instead of terminal state and carrying the same
+/// silence watchdog: the overview producer's metadata-only pushes are calmed
+/// (`SpacesDeviceAPIServer.overviewMetadataCoalesceInterval`), so this stream can go
+/// several seconds with nothing to relay under ordinary operation, and only a keepalive
+/// (or a real change) proves the transport is still carrying bytes.
 public final class SpacesDeviceAPIOverviewStreamClient: @unchecked Sendable {
     private let request: SpacesDeviceAPIRequest
     private let resolver: SpacesDeviceEndpointResolver
@@ -589,14 +593,25 @@ public final class SpacesDeviceAPIOverviewStreamClient: @unchecked Sendable {
     private let onDisconnect: @Sendable ((any Error)?) -> Void
     private let connectionLock = NSLock()
     private var connection: (any SpacesPinnedTLSLineConnection)?
+    /// How long this stream may receive no bytes at all before it reports itself stalled. Injected only so
+    /// tests can compress the wait; production always uses `TerminalStreamLiveness.silenceTimeoutSeconds`,
+    /// the same bound the terminal state stream uses against the same keepalive cadence.
+    private let silenceTimeout: TimeInterval
+    /// When the last bytes arrived from the daemon, keepalives included. Guarded by `connectionLock`.
+    private var lastReceiveInstant = ContinuousClock.now
+    /// Set by whichever termination path runs first, so the silence watchdog can neither report a stream
+    /// that has already ended nor keep polling after it. Guarded by `connectionLock`.
+    private var hasFinished = false
 
     public init(
         authToken: String?, clientApp: SpacesDeviceClientApp?, resolver: SpacesDeviceEndpointResolver,
+        silenceTimeout: TimeInterval = TerminalStreamLiveness.silenceTimeoutSeconds,
         onOverview: @escaping @Sendable (SpacesDeviceOverviewPayload) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) throws {
         guard UInt16(exactly: resolver.port) != nil, resolver.port > 0 else { throw SpacesDeviceAPIRequestClientError.invalidPort }
         self.request = SpacesDeviceAPIRequest(command: .subscribeDeviceOverview, authToken: authToken, clientApp: clientApp)
         self.resolver = resolver
+        self.silenceTimeout = silenceTimeout
         self.onOverview = onOverview
         self.onDisconnect = onDisconnect
     }
@@ -615,6 +630,8 @@ public final class SpacesDeviceAPIOverviewStreamClient: @unchecked Sendable {
         }
         connectionLock.lock()
         connection = createdConnection
+        lastReceiveInstant = ContinuousClock.now
+        hasFinished = false
         connectionLock.unlock()
         let onDisconnect = SpacesDeviceAPIStreamEndpoint.invalidating(onDisconnect, resolver: resolver, host: host)
         do { try createdConnection.sendLine(try SpacesDeviceAPICodec.encodeRequest(request), timeout: timeoutSeconds) } catch {
@@ -629,6 +646,7 @@ public final class SpacesDeviceAPIOverviewStreamClient: @unchecked Sendable {
                     // as a rejection rather than a connection failure because that is what it is: the
                     // daemon answered on a healthy connection, so this must not read as the address being
                     // unreachable — the message the user sees is the same either way.
+                    guard self?.markFinished() ?? true else { return }
                     if let response = try? SpacesDeviceAPICodec.decodeResponse(line) {
                         onDisconnect(SpacesDeviceAPIRequestClientError.requestRejected(message: response.message, code: response.errorCode))
                     } else {
@@ -637,9 +655,53 @@ public final class SpacesDeviceAPIOverviewStreamClient: @unchecked Sendable {
                     self?.stop()
                 }
             },
-            // These signature and overview producers broadcast on their own timers, so silence here is a
-            // real stall the transport itself surfaces; only the terminal stream needs a liveness watch.
-            onBytesReceived: {}, onClosed: { error in onDisconnect(error) })
+            // Keepalive lines never reach `onLine` (the transport drops empty lines), so liveness is
+            // tracked here: any byte off the wire, frame or keepalive, is proof the link is alive.
+            onBytesReceived: { [weak self] in self?.noteBytesReceived() },
+            onClosed: { [weak self] error in
+                guard self?.markFinished() ?? true else { return }
+                onDisconnect(error)
+            })
+        startSilenceWatch(onDisconnect: onDisconnect)
+    }
+
+    private func noteBytesReceived() {
+        connectionLock.lock()
+        lastReceiveInstant = ContinuousClock.now
+        connectionLock.unlock()
+    }
+
+    /// True for the caller that got to end this stream, false for every later one, so a stall, a decode
+    /// failure, and the receive loop's own close cannot each report a disconnect for the same stream.
+    private func markFinished() -> Bool {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
+        guard !hasFinished else { return false }
+        hasFinished = true
+        return true
+    }
+
+    /// Watches for the silence a dead-but-open transport produces; see `TerminalStreamLiveness`. Runs on
+    /// its own thread rather than a GCD timer for the same reason `SpacesDeviceAPIStateStreamClient`'s does:
+    /// a saturated cooperative pool can leave a timer-based watchdog unscheduled past its own timeout.
+    private func startSilenceWatch(onDisconnect: @escaping @Sendable ((any Error)?) -> Void) {
+        let checkInterval = TerminalStreamLiveness.silenceCheckIntervalSeconds(forTimeout: silenceTimeout)
+        SpacesBlockingIOThread.spawn(name: "spaces.device.overview-stream.liveness") { [weak self] in
+            while true {
+                Thread.sleep(forTimeInterval: checkInterval)
+                guard let self else { return }
+                connectionLock.lock()
+                let isRunning = !hasFinished && connection != nil
+                let isSilentPastTimeout = ContinuousClock.now - lastReceiveInstant >= .seconds(silenceTimeout)
+                connectionLock.unlock()
+                guard isRunning else { return }
+                guard isSilentPastTimeout else { continue }
+                guard markFinished() else { return }
+                onDisconnect(SpacesDeviceAPIRequestClientError.streamStalled)
+                stop()
+                return
+            }
+        }
     }
 
     public func stop() {

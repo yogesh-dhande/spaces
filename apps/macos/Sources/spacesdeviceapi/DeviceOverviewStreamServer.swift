@@ -93,6 +93,18 @@ final class DeviceOverviewStreamServer: @unchecked Sendable {
         }
     }
 
+    /// Broadcasts bytes the caller already built, instead of pulling a fresh line from `lineProvider`.
+    /// The device-overview producer uses this: its owner (`SpacesDeviceAPIServer`) decides *whether* to
+    /// broadcast by inspecting the built overview first (byte-identical skip, metadata-only coalescing),
+    /// so the bytes that informed that decision must be the exact bytes sent, not a second independent
+    /// build that could see a different database state.
+    func broadcast(data: Data) {
+        queue.async {
+            guard !self.clientSources.isEmpty else { return }
+            for fd in Array(self.clientSources.keys) where !Self.writeAll(data: data, to: fd) { self.closeClient(fd) }
+        }
+    }
+
     private func acceptReadyConnections(listenSocketFD: Int32) {
         while true {
             let clientFD = accept(listenSocketFD, nil, nil)

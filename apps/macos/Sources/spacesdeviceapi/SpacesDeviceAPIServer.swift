@@ -292,11 +292,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             let heartbeatTimer: DispatchSourceTimer?
             let connection: NWConnection
             let sendSequencer: StreamSendSequencer
-            /// Set only for a terminal `subscribe` relay: the timer that writes the empty-line keepalive
-            /// when this relay has gone `TerminalStreamLiveness.keepaliveIntervalSeconds` without writing.
-            /// Cancelled everywhere `heartbeatTimer` is.
+            /// Set for a terminal `subscribe` relay and the device-overview relay: the timer that writes the
+            /// empty-line keepalive when this relay has gone `TerminalStreamLiveness.keepaliveIntervalSeconds`
+            /// without writing. `nil` for the diff-signature and file-signature relays, whose producers
+            /// already broadcast on their own timer. Cancelled everywhere `heartbeatTimer` is.
             var keepaliveTimer: DispatchSourceTimer? = nil
-            /// Set only for a terminal `subscribe` relay, alongside `keepaliveTimer`.
+            /// Set alongside `keepaliveTimer`.
             var writeClock: StreamRelayWriteClock? = nil
             /// Set only for a `subscribeWorkspaceDiffSignature` relay; `closeStreamRelay` uses it to
             /// release that scope's poll-subscriber slot when this relay's connection closes.
@@ -588,10 +589,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             let subscriptionSocketPath: String
             let controlSocketPath: String
             let clientID: String?
-            /// True only for a terminal session's `subscribe` relay, which is the one relay whose producer
-            /// can stay silent indefinitely and therefore needs the empty-line keepalive. The signature and
-            /// device-overview relays below already broadcast on their own timers.
-            var isTerminalSession: Bool = false
+            /// True for a terminal session's `subscribe` relay and the device-overview relay, the two
+            /// relays whose producer can stay silent indefinitely and therefore need the empty-line
+            /// keepalive. The diff-signature and file-signature relays below already broadcast on their own
+            /// timers, so their producers can never go silent this way.
+            var needsEmptyLineKeepalive: Bool = false
             /// Set only for a `subscribeWorkspaceDiffSignature` relay; `relayLinuxSubscription` uses it to
             /// release that scope's poll-subscriber slot once the relay loop returns.
             var diffSignatureScope: WorkspaceDiffScope? = nil
@@ -1374,6 +1376,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private var overviewTerminalChangeObserver: NSObjectProtocol?
     private var overviewTerminalDistributedObserver: NSObjectProtocol?
     private var overviewBroadcastScheduled = false
+    /// The encoded line and metadata-cleared projection of the last overview actually sent to clients, and
+    /// when it was sent. All three are `nil` before the first broadcast (which then always sends, since
+    /// there is nothing to compare against) and are confined to `overviewStreamQueue`, same as every other
+    /// overview-broadcast field. See `overviewBroadcastDecision`.
+    private var lastOverviewBroadcastBytes: Data?
+    private var lastOverviewBroadcastProjection: SpacesDeviceOverviewPayload?
+    private var lastOverviewBroadcastAt: Date?
+    /// Non-nil exactly while a metadata-only change is waiting out `overviewMetadataCoalesceInterval`
+    /// before it broadcasts; cancelled and replaced the moment a state change broadcasts immediately
+    /// instead (see `evaluateOverviewBroadcast`).
+    private var pendingOverviewMetadataBroadcast: DispatchWorkItem?
 
     #if canImport(Network) && canImport(Security)
         private let networkShaper: NetworkShaper
@@ -1770,9 +1783,20 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         overviewStreamServer?.stop()
         overviewStreamServer = nil
+        // Confined to `overviewStreamQueue`, same as every other overview-broadcast field: a restart must
+        // not compare its first rebuild against state a torn-down server broadcast, which could wrongly
+        // skip or defer that first push.
+        overviewStreamQueue.async { [weak self] in
+            guard let self else { return }
+            self.pendingOverviewMetadataBroadcast?.cancel()
+            self.pendingOverviewMetadataBroadcast = nil
+            self.lastOverviewBroadcastBytes = nil
+            self.lastOverviewBroadcastProjection = nil
+            self.lastOverviewBroadcastAt = nil
+        }
     }
 
-    /// Coalesces database-change bursts into one overview rebuild + push.
+    /// Coalesces database-change bursts into one overview rebuild + broadcast decision every 250 ms.
     private func scheduleOverviewBroadcast() {
         overviewStreamQueue.async { [weak self] in
             guard let self, !self.overviewBroadcastScheduled else { return }
@@ -1780,9 +1804,50 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             self.overviewStreamQueue.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
                 guard let self else { return }
                 self.overviewBroadcastScheduled = false
-                self.overviewStreamServer?.broadcast()
+                self.evaluateOverviewBroadcast()
             }
         }
+    }
+
+    /// Builds the current overview once and decides what to do with it: skip a byte-identical repeat
+    /// (the 1 Hz title/cwd tick rebuilds the same overview far more often than anything in it actually
+    /// changes), send a real state change immediately, or coalesce a metadata-only change (a live title or
+    /// working directory moving) to at most one push per `overviewMetadataCoalesceInterval`. Always runs on
+    /// `overviewStreamQueue`, so the fields `overviewBroadcastDecision` compares are read/written without a
+    /// lock and a deferred re-evaluation below cannot race a state change that arrives first.
+    private func evaluateOverviewBroadcast() {
+        guard let payload = try? loadOverview(), let bytes = try? SpacesDeviceOverviewStreamCodec.encodeLine(payload) else { return }
+        let projection = Self.overviewStateProjection(payload)
+        let now = Date()
+        let decision = Self.overviewBroadcastDecision(
+            previousBytes: lastOverviewBroadcastBytes, newBytes: bytes, previousProjection: lastOverviewBroadcastProjection,
+            newProjection: projection, lastBroadcastAt: lastOverviewBroadcastAt, now: now,
+            metadataCoalesceInterval: Self.overviewMetadataCoalesceInterval)
+        switch decision {
+        case .skip: return
+        case .sendNow:
+            pendingOverviewMetadataBroadcast?.cancel()
+            pendingOverviewMetadataBroadcast = nil
+            commitOverviewBroadcast(bytes: bytes, projection: projection, at: now)
+        case .deferUntil(let deadline):
+            // Already scheduled: a second metadata-only change arriving before the pending trailing push
+            // fires does not push the deadline out further, it just gets picked up when the pending
+            // evaluation rebuilds the overview fresh.
+            guard pendingOverviewMetadataBroadcast == nil else { return }
+            let workItem = DispatchWorkItem { [weak self] in
+                self?.pendingOverviewMetadataBroadcast = nil
+                self?.evaluateOverviewBroadcast()
+            }
+            pendingOverviewMetadataBroadcast = workItem
+            overviewStreamQueue.asyncAfter(deadline: .now() + max(deadline.timeIntervalSince(now), 0), execute: workItem)
+        }
+    }
+
+    private func commitOverviewBroadcast(bytes: Data, projection: SpacesDeviceOverviewPayload, at now: Date) {
+        lastOverviewBroadcastBytes = bytes
+        lastOverviewBroadcastProjection = projection
+        lastOverviewBroadcastAt = now
+        overviewStreamServer?.broadcast(data: bytes)
     }
 
     /// Identifies one (workspace, ref, lastCommit) diff-signature subscription scope. `refName == nil,
@@ -2088,6 +2153,94 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             try? FileManager.default.removeItem(at: outputURL.deletingLastPathComponent())
         }
     }
+
+    /// How long a metadata-only overview change (a live title or working directory moving, with no other
+    /// row-shaped state changed) may sit un-broadcast before it goes out anyway. Title/cwd are secondary
+    /// text next to a stable name ([spec.md](../../../docs/spec.md)), so a few seconds of lag reading them
+    /// on another device is invisible, while a real state change (an agent finishing, a bell, a
+    /// session starting or ending) still goes out on the 250 ms coalescing window `scheduleOverviewBroadcast`
+    /// already used before this constant existed.
+    static let overviewMetadataCoalesceInterval: TimeInterval = 5
+
+    /// What `evaluateOverviewBroadcast` should do with a freshly built overview, given what was last sent.
+    enum OverviewBroadcastDecision: Equatable {
+        /// The encoded overview is byte-identical to the last broadcast: the 1 Hz metadata tick rebuilt the
+        /// same overview without anything in it moving.
+        case skip
+        case sendNow
+        /// A metadata-only change inside the coalescing window: re-evaluate at this wall-clock deadline
+        /// (`lastBroadcastAt + overviewMetadataCoalesceInterval`) rather than sending now.
+        case deferUntil(Date)
+    }
+
+    /// Pure decision for one overview broadcast tick. `previousBytes`/`previousProjection` are `nil` before
+    /// the first broadcast, which always sends (there is nothing yet to compare against or coalesce behind).
+    /// `previousProjection`/`newProjection` are `overviewStateProjection`'s output: the overview with its
+    /// purely-metadata fields (`liveTitle`, `workingDirectory`, `sessions[].updatedAt`) cleared, so two
+    /// projections compare equal exactly when nothing but that metadata differs between them.
+    static func overviewBroadcastDecision(
+        previousBytes: Data?, newBytes: Data, previousProjection: SpacesDeviceOverviewPayload?, newProjection: SpacesDeviceOverviewPayload,
+        lastBroadcastAt: Date?, now: Date, metadataCoalesceInterval: TimeInterval
+    ) -> OverviewBroadcastDecision {
+        if let previousBytes, previousBytes == newBytes { return .skip }
+        guard let previousProjection, previousProjection == newProjection else { return .sendNow }
+        guard let lastBroadcastAt else { return .sendNow }
+        let elapsedSinceLastBroadcast = now.timeIntervalSince(lastBroadcastAt)
+        guard elapsedSinceLastBroadcast < metadataCoalesceInterval else { return .sendNow }
+        return .deferUntil(lastBroadcastAt.addingTimeInterval(metadataCoalesceInterval))
+    }
+
+    /// Clears the fields that are secondary display text ([spec.md](../../../docs/spec.md)) rather than
+    /// state a client renders a row's status, count, or list membership from: a terminal or coding-agent
+    /// row's `liveTitle`, a terminal row's or session's `workingDirectory`, and a session's `updatedAt`
+    /// (which a title/cwd refresh moves too, since it stamps the same runtime-state write). Everything else
+    /// — run state, agent activity state, bells, session/row membership, `daemonStatus`, automations — is
+    /// left untouched, so two projections differing anywhere else is what `overviewBroadcastDecision` reads
+    /// as a real state change worth sending immediately.
+    static func overviewStateProjection(_ payload: SpacesDeviceOverviewPayload) -> SpacesDeviceOverviewPayload {
+        SpacesDeviceOverviewPayload(
+            projects: payload.projects, workspaces: payload.workspaces.map(overviewWorkspaceStateProjection),
+            sessions: payload.sessions.map(overviewSessionStateProjection), retainedTerminalSessionIDs: payload.retainedTerminalSessionIDs,
+            workspaceIDsWithTeardownInFlight: payload.workspaceIDsWithTeardownInFlight, daemonStatus: payload.daemonStatus,
+            automations: payload.automations, automationRuns: payload.automationRuns)
+    }
+
+    private static func overviewSessionStateProjection(_ session: SpacesDeviceTerminalSessionSummary) -> SpacesDeviceTerminalSessionSummary {
+        SpacesDeviceTerminalSessionSummary(
+            id: session.id, title: session.title, liveTitle: nil, workingDirectory: "", shell: session.shell, command: session.command,
+            state: session.state, backend: session.backend, lifetimePolicy: session.lifetimePolicy, servicePID: session.servicePID,
+            childPID: session.childPID, workspaceID: session.workspaceID, workspaceTitle: session.workspaceTitle, projectID: session.projectID,
+            projectName: session.projectName, createdAt: session.createdAt, updatedAt: "", isControlAvailable: session.isControlAvailable,
+            isSubscriptionAvailable: session.isSubscriptionAvailable, attachmentSnapshot: session.attachmentSnapshot, rowKind: session.rowKind,
+            rowSourceID: session.rowSourceID, hasFinalRender: session.hasFinalRender,
+            foregroundDetectedAgentKind: session.foregroundDetectedAgentKind, foregroundCommand: session.foregroundCommand, bellAt: session.bellAt,
+            bracketedPasteActive: session.bracketedPasteActive)
+    }
+
+    private static func overviewWorkspaceStateProjection(_ workspace: SpacesDeviceWorkspaceSummary) -> SpacesDeviceWorkspaceSummary {
+        SpacesDeviceWorkspaceSummary(
+            id: workspace.id, projectID: workspace.projectID, projectName: workspace.projectName, projectKind: workspace.projectKind,
+            branch: workspace.branch, baseBranch: workspace.baseBranch, dir: workspace.dir, isRunning: workspace.isRunning,
+            isHidden: workspace.isHidden, isDefault: workspace.isDefault, notes: workspace.notes,
+            hasTrackedRuntimeIndicators: workspace.hasTrackedRuntimeIndicators, assignedPorts: workspace.assignedPorts,
+            environment: workspace.environment, setupState: workspace.setupState, config: workspace.config, processRows: workspace.processRows,
+            codingAgentRows: workspace.codingAgentRows.map(overviewCodingAgentRowStateProjection),
+            terminalRows: workspace.terminalRows.map(overviewTerminalRowStateProjection))
+    }
+
+    private static func overviewCodingAgentRowStateProjection(_ row: SpacesDeviceWorkspaceCodingAgentRow) -> SpacesDeviceWorkspaceCodingAgentRow {
+        SpacesDeviceWorkspaceCodingAgentRow(
+            id: row.id, workspaceID: row.workspaceID, name: row.name, command: row.command, agentID: row.agentID, sessionID: row.sessionID,
+            runState: row.runState, activityState: row.activityState, updatedAt: row.updatedAt, brief: row.brief, briefUpdatedAt: row.briefUpdatedAt,
+            canStop: row.canStop, liveTitle: nil)
+    }
+
+    private static func overviewTerminalRowStateProjection(_ row: SpacesDeviceWorkspaceTerminalRow) -> SpacesDeviceWorkspaceTerminalRow {
+        SpacesDeviceWorkspaceTerminalRow(
+            id: row.id, workspaceID: row.workspaceID, title: row.title, workingDirectory: "", sessionID: row.sessionID, runState: row.runState,
+            canOpenTerminal: row.canOpenTerminal, canStop: row.canStop, liveTitle: nil)
+    }
+
     /// Pure decision for whether the per-file signature poll timer's `tick`th invocation (1-indexed, one per
     /// 2s fire) should broadcast a frame: whenever the computed signature changed, or unconditionally every
     /// 10th tick (~20s) as a keepalive. The keepalive is disconnect detection, not a convenience: the Linux
@@ -7164,13 +7317,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     #if os(Linux) && canImport(OpenSSL)
         private func prepareLinuxSubscribe(_ request: SpacesDeviceAPIRequest) throws -> LinuxSubscribeAction {
             if request.command.isDeviceOverviewSubscription {
-                // Relay the device-overview producer socket (no terminal session,
-                // no control heartbeat); the producer pushes the current overview
-                // on connect and a fresh one on every database change.
+                // Relay the device-overview producer socket (no terminal session, no control heartbeat);
+                // the producer pushes the current overview on connect and again whenever
+                // `evaluateOverviewBroadcast` decides to. `needsEmptyLineKeepalive` covers the gaps: this
+                // relay can otherwise go minutes with nothing to relay while an idle desktop's metadata tick
+                // is calmed to at most one push per `overviewMetadataCoalesceInterval`.
                 return .relay(
                     LinuxSubscription(
                         sessionID: "device-overview", installationID: request.clientApp?.installationID ?? "",
-                        subscriptionSocketPath: try TerminalServicePaths.deviceOverviewSocketPath(), controlSocketPath: "", clientID: nil))
+                        subscriptionSocketPath: try TerminalServicePaths.deviceOverviewSocketPath(), controlSocketPath: "", clientID: nil,
+                        needsEmptyLineKeepalive: true))
             }
             if let scopePayload = request.command.workspaceDiffSignatureScope {
                 // Same shape as the device-overview relay above, but the producer socket is per (workspace,
@@ -7249,7 +7405,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return .relay(
                 LinuxSubscription(
                     sessionID: sessionID, installationID: installationID, subscriptionSocketPath: paths.subscriptionSocketPath,
-                    controlSocketPath: paths.controlSocketPath, clientID: request.clientID, isTerminalSession: true))
+                    controlSocketPath: paths.controlSocketPath, clientID: request.clientID, needsEmptyLineKeepalive: true))
         }
 
         private func relayLinuxSubscription(_ subscription: LinuxSubscription, ssl: OpaquePointer) throws {
@@ -7286,15 +7442,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
             defer { heartbeatTimer?.cancel() }
 
-            // Terminal relays also write an empty-line keepalive whenever they have been silent for
-            // `TerminalStreamLiveness.keepaliveIntervalSeconds`, so a client can tell an idle terminal from
-            // a dead transport. A failing keepalive write is also how this thread learns its peer is gone:
-            // it is blocked in `read()` on a producer socket an idle terminal never writes to, so nothing
+            // A terminal relay and the overview relay also write an empty-line keepalive whenever they have
+            // been silent for `TerminalStreamLiveness.keepaliveIntervalSeconds`, so a client can tell an
+            // idle producer from a dead transport. A failing keepalive write is also how this thread learns
+            // its peer is gone: it is blocked in `read()` on a producer socket an idle producer never writes
+            // to (an idle terminal, or an overview calmed to its metadata coalescing interval), so nothing
             // else would ever wake it, and the relay thread plus its subscriber slot would leak until the
             // session ended. Shutting the producer socket down unwinds the read into the normal EOF exit.
             let keepaliveGate: LinuxStreamRelayWriteGate?
             let keepaliveTimer: DispatchSourceTimer?
-            if subscription.isTerminalSession {
+            if subscription.needsEmptyLineKeepalive {
                 let gate = LinuxStreamRelayWriteGate()
                 let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
                 let checkInterval = DispatchTimeInterval.milliseconds(Int(TerminalStreamLiveness.daemonCheckIntervalSeconds * 1000))
@@ -7341,7 +7498,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                             sessionID: subscription.sessionID, name: "stream_network_send_begin", count: count, attributes: attributes)
                     }
                     // Through the gate when one exists, so this write cannot overlap a keepalive write on
-                    // the same `SSL`; without a gate (the signature and overview relays) it is unchanged.
+                    // the same `SSL`; without a gate (the signature relays, which have no keepalive of their
+                    // own) it is unchanged.
                     if let keepaliveGate {
                         try keepaliveGate.write { try LinuxServer.writeTLSResponse(data, ssl: ssl) }
                     } else {
@@ -7511,11 +7669,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 heartbeatTimer = nil
             }
 
-            // Terminal state streams get an empty-line keepalive; the overview, diff-signature, and
-            // file-signature relays below do not, because their producers already broadcast on a timer.
-            // Unlike the heartbeat above this is not conditional on `clientID`: the Mac's remote-pane
-            // stream subscribes with `clientID: nil` (see `DeviceTerminalSessionStateModel`) and needs
-            // the liveness signal exactly as much as a client that does claim the session.
+            // Terminal state streams and the overview relay below get an empty-line keepalive; the
+            // diff-signature and file-signature relays do not, because their producers already broadcast on
+            // a timer of their own. Unlike the heartbeat above this is not conditional on `clientID`: the
+            // Mac's remote-pane stream subscribes with `clientID: nil` (see `DeviceTerminalSessionStateModel`)
+            // and needs the liveness signal exactly as much as a client that does claim the session.
             let writeClock = StreamRelayWriteClock(lastWriteUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds)
             let keepaliveTimer = DispatchSource.makeTimerSource(queue: relayQueue)
             let keepaliveCheckInterval = DispatchTimeInterval.milliseconds(Int(TerminalStreamLiveness.daemonCheckIntervalSeconds * 1000))
@@ -7526,7 +7684,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 // relay's send sequencer, all of which are confined to the Device API queue.
                 self.queue.async { [weak self, weak connection] in
                     guard let self, let connection else { return }
-                    self.sendTerminalStreamKeepaliveIfDue(to: connection)
+                    self.sendStreamKeepaliveIfDue(to: connection)
                 }
             }
 
@@ -7543,10 +7701,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 "device_api_subscribe", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
         }
 
-        /// Relays the device-overview producer socket to a subscribing connection,
-        /// reusing the same stream-relay machinery as terminal subscriptions (no
-        /// terminal heartbeat). The producer sends the current overview on connect
-        /// and a fresh one on every database change.
+        /// Relays the device-overview producer socket to a subscribing connection, reusing the same
+        /// stream-relay machinery as terminal subscriptions (no session control heartbeat, since there is
+        /// no session to heartbeat). The producer sends the current overview on connect and pushes again
+        /// whenever `evaluateOverviewBroadcast` decides to; between those the connection can go minutes with
+        /// nothing to relay (an idle desktop pushes only its calmed metadata tick), so it gets the same
+        /// empty-line keepalive as a terminal `subscribe` relay, reusing `sendStreamKeepaliveIfDue`.
         private func relayOverviewSubscription(connection: NWConnection, installationID: String) throws {
             let socketPath = try TerminalServicePaths.deviceOverviewSocketPath()
             let relaySocketFD = try connectUnixSocket(path: socketPath)
@@ -7558,10 +7718,25 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 self.relayStateData(from: relaySocketFD, to: connection)
             }
             relaySource.setCancelHandler { close(relaySocketFD) }
+
+            let writeClock = StreamRelayWriteClock(lastWriteUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds)
+            let keepaliveTimer = DispatchSource.makeTimerSource(queue: relayQueue)
+            let keepaliveCheckInterval = DispatchTimeInterval.milliseconds(Int(TerminalStreamLiveness.daemonCheckIntervalSeconds * 1000))
+            keepaliveTimer.schedule(deadline: .now() + keepaliveCheckInterval, repeating: keepaliveCheckInterval)
+            keepaliveTimer.setEventHandler { [weak self, weak connection] in
+                guard let self, let connection else { return }
+                self.queue.async { [weak self, weak connection] in
+                    guard let self, let connection else { return }
+                    self.sendStreamKeepaliveIfDue(to: connection)
+                }
+            }
+
             streamRelays[ObjectIdentifier(connection)] = StreamRelay(
                 sessionID: "device-overview", installationID: installationID, relaySocketFD: relaySocketFD, relayQueue: relayQueue,
-                relaySource: relaySource, heartbeatTimer: nil, connection: connection, sendSequencer: StreamSendSequencer(queueKey: queueKey))
+                relaySource: relaySource, heartbeatTimer: nil, connection: connection, sendSequencer: StreamSendSequencer(queueKey: queueKey),
+                keepaliveTimer: keepaliveTimer, writeClock: writeClock)
             relaySource.resume()
+            keepaliveTimer.resume()
         }
 
         /// Relays one (workspace, ref) scope's diff-signature producer socket to a subscribing connection,
@@ -7784,10 +7959,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
         }
 
-        /// Writes one empty-line keepalive to a terminal relay's connection if it has been silent for
+        /// Writes one empty-line keepalive to a relay's connection (a terminal `subscribe` relay or the
+        /// device-overview relay; both set `writeClock`) if it has been silent for
         /// `TerminalStreamLiveness.keepaliveIntervalSeconds`. It goes through the relay's send sequencer
         /// rather than straight to the connection so it can never interleave with a frame that is mid-send.
-        private func sendTerminalStreamKeepaliveIfDue(to connection: NWConnection) {
+        private func sendStreamKeepaliveIfDue(to connection: NWConnection) {
             let key = ObjectIdentifier(connection)
             guard let relay = streamRelays[key], let writeClock = relay.writeClock else { return }
             // A relay that has begun its final send is on its way out; another write would race the close.

@@ -1,5 +1,6 @@
 import XCTest
 import spacesterminalcore
+import spacestestsupport
 
 @testable import spacesdeviceapi
 @testable import spacesdevicecore
@@ -182,6 +183,73 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         let line = try SpacesDeviceOverviewStreamCodec.encodeLine(payload)
         XCTAssertEqual(line.last, 0x0A)
         XCTAssertEqual(try SpacesDeviceOverviewStreamCodec.decodeLine(line.dropLast()), payload)
+    }
+
+    /// The wire line is a compressed envelope (`{"deflated":...,"byteCount":...}`), not the overview JSON
+    /// itself: a realistic multi-workspace overview is repetitive JSON (the same field names and similar
+    /// values across every session/row), which DEFLATE shrinks well below the plain encoding.
+    func testDeviceOverviewStreamCodecCompressesARealisticMultiWorkspaceFixture() throws {
+        let payload = Self.multiWorkspaceOverviewFixture()
+        let plainJSON = try JSONEncoder().encode(payload)
+        let line = try SpacesDeviceOverviewStreamCodec.encodeLine(payload)
+        XCTAssertEqual(try SpacesDeviceOverviewStreamCodec.decodeLine(line.dropLast()), payload)
+        XCTAssertLessThan(line.count, plainJSON.count / 2, "compressed line \(line.count) bytes vs plain JSON \(plainJSON.count) bytes")
+    }
+
+    func testDeviceOverviewStreamCodecRejectsACorruptEnvelope() throws {
+        struct TestEnvelope: Encodable {
+            let deflated: Data
+            let byteCount: Int
+        }
+        // Bytes that are not a valid raw-DEFLATE stream at all: `inflate` must fail rather than return
+        // garbage or crash, the same contract `GhosttyRenderUpdateBodyCompression` already gives every
+        // other consumer of compressed wire bytes.
+        let corrupt = try JSONEncoder().encode(TestEnvelope(deflated: Data(count: 4), byteCount: 1024))
+        XCTAssertThrowsError(try SpacesDeviceOverviewStreamCodec.decodeLine(corrupt))
+    }
+
+    func testDeviceOverviewStreamCodecRejectsAnOversizedByteCountClaim() throws {
+        struct TestEnvelope: Encodable {
+            let deflated: Data
+            let byteCount: Int
+        }
+        // A `byteCount` past `GhosttyRenderUpdateBodyCompression.maximumInflatedByteCount` must be refused
+        // before any allocation sized by it, regardless of what the (here, tiny and otherwise valid-looking)
+        // compressed bytes claim to hold.
+        let oversized = try JSONEncoder().encode(TestEnvelope(deflated: Data([0x01, 0x02, 0x03]), byteCount: 1024 * 1024 * 1024))
+        XCTAssertThrowsError(try SpacesDeviceOverviewStreamCodec.decodeLine(oversized))
+    }
+
+    /// Several workspaces, each with a handful of sessions and process/coding-agent/terminal rows, standing
+    /// in for a real desktop's overview: the shape the compression test above measures against.
+    private static func multiWorkspaceOverviewFixture() -> SpacesDeviceOverviewPayload {
+        var workspaces: [SpacesDeviceWorkspaceSummary] = []
+        var sessions: [SpacesDeviceTerminalSessionSummary] = []
+        for workspaceIndex in 0..<8 {
+            let workspaceID = "workspace-\(workspaceIndex)"
+            var terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
+            for rowIndex in 0..<4 {
+                let sessionID = "session-\(workspaceIndex)-\(rowIndex)"
+                sessions.append(
+                    SpacesDeviceTerminalSessionSummary(
+                        id: sessionID, title: "shell-\(rowIndex)", liveTitle: "npm run dev -- --watch", workingDirectory: "/repo/apps/macos",
+                        shell: "/bin/zsh", command: nil, state: .running, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 100,
+                        childPID: 200, workspaceID: workspaceID, workspaceTitle: "feature-\(workspaceIndex)", projectID: "project-1",
+                        projectName: "spaces", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:01Z", isControlAvailable: true,
+                        isSubscriptionAvailable: true, attachmentSnapshot: TerminalSessionAttachmentSnapshot()))
+                terminalRows.append(
+                    SpacesDeviceWorkspaceTerminalRow(
+                        id: "terminal-window:\(sessionID)", workspaceID: workspaceID, title: "shell-\(rowIndex)",
+                        workingDirectory: "/repo/apps/macos", sessionID: sessionID, runState: .running, canOpenTerminal: true, canStop: true,
+                        liveTitle: "npm run dev -- --watch"))
+            }
+            workspaces.append(
+                SpacesDeviceWorkspaceSummary(
+                    id: workspaceID, projectID: "project-1", projectName: "spaces", branch: "feature-\(workspaceIndex)", baseBranch: "main",
+                    dir: "/repo/apps/macos", isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true,
+                    terminalRows: terminalRows))
+        }
+        return SpacesDeviceOverviewPayload(workspaces: workspaces, sessions: sessions)
     }
 
     /// A daemon that predates the automations feature (or, for `projects`, predates whatever shipped
