@@ -2797,7 +2797,7 @@ enum SpacesDaemonErrorClassification {
     private nonisolated func profileAgentRuntimeLabel(sessionID: String) -> String? {
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return nil }
         if let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths), launchConfiguration.kind == .agent {
-            return normalizedProfileArgument(launchConfiguration.title)
+            return WorkspaceOrchestrator.agentLaunchTitleLabel(launchKind: launchConfiguration.kind, launchTitle: launchConfiguration.title)
         }
         guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), let kind = runtimeState.foregroundDetectedAgentKind
         else { return nil }

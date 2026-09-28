@@ -91,8 +91,11 @@ enum SessionRestoreAnswer: Equatable {
         list.documentView = card
         // The list takes exactly the height of its rows until it reaches the cap, at which point the cap
         // wins and the rows scroll. Everything around the list keeps its own size either way.
+        //
+        // One below `.defaultHigh`, the row labels' compression resistance: tied with it, the solver may
+        // squash rows to zero height at the cap instead of scrolling them, which renders them blank.
         let listFitsItsRows = list.heightAnchor.constraint(equalTo: card.heightAnchor)
-        listFitsItsRows.priority = .defaultHigh
+        listFitsItsRows.priority = .defaultHigh - 1
 
         let stack = NSStackView(views: [icon, title, body, list, statusLabel, buttonRow])
         stack.orientation = .vertical

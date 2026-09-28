@@ -143,6 +143,15 @@ extension WorkspaceOrchestrator {
             launchShell: session.launchConfiguration.shell)
     }
 
+    /// The name a `.agent`-launched session's row carries: its launch title. The hook path and foreground
+    /// detection both mint that row, so both name it with this, or detection's next pass would rename a
+    /// row the hook path already named. Nil for any other launch kind, whose row takes the label detection
+    /// observes.
+    public static func agentLaunchTitleLabel(launchKind: TerminalSessionKind?, launchTitle: String?) -> String? {
+        guard launchKind == .agent else { return nil }
+        return normalizedNonEmpty(launchTitle)
+    }
+
     func adHocDetectedForegroundAgent(from runtimeState: TerminalSessionRuntimeState) -> AdHocDetectedForegroundAgent? {
         guard let kind = runtimeState.foregroundDetectedAgentKind else { return nil }
         let label = runtimeState.foregroundDisplayLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -165,7 +174,12 @@ extension WorkspaceOrchestrator {
         // a session whose row the previous pass just inserted; the row id is deterministic, so this upsert
         // must never treat that row — carrying the SAME detected label — as a name conflict with itself and
         // rename it "-2".
-        let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspace.id, preferredLabel: detectedAgent.label, excludingAgentWindowID: agentID)
+        // An `.agent`-launched session keeps its launch title; see `agentLaunchTitleLabel`.
+        let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID)
+        let preferredLabel =
+            WorkspaceOrchestrator.agentLaunchTitleLabel(launchKind: launchConfiguration?.kind, launchTitle: launchConfiguration?.title)
+            ?? detectedAgent.label
+        let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspace.id, preferredLabel: preferredLabel, excludingAgentWindowID: agentID)
         // Detection only ever creates or refreshes the label/command/runtime-target binding; it never owns
         // lifecycle state. A trailing re-run reaches this call for the same deterministic id the pass before
         // it inserted, and a hook signal can commit newer status/session-key state between this pass's

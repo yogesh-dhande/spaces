@@ -253,15 +253,21 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let sessionID = UUID().uuidString
+        // The launch title ("Claude Code", what `createWorkspaceAgentSession` names a spawned claude
+        // session) is deliberately distinct from the foreground process's own reported label ("claude"),
+        // so the assertion below cannot pass by coincidence: it proves detection took the launch title
+        // over what the process reports about itself.
         try writeLiveTerminalSession(
-            sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .agent, foregroundDetectedAgentKind: .claude,
-            foregroundExecutableName: "claude", foregroundArgv: ["claude"], foregroundDisplayLabel: "Claude Code", foregroundDisplayCommand: "claude")
+            sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .agent, launchTitle: "Claude Code",
+            foregroundDetectedAgentKind: .claude, foregroundExecutableName: "claude", foregroundArgv: ["claude"], foregroundDisplayLabel: "claude",
+            foregroundDisplayCommand: "claude")
 
         XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
 
         let agent = try XCTUnwrap(try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID))
         XCTAssertEqual(agent.id, "terminal-agent-\(sessionID)", "the row carries the same deterministic id a plain shell's detection row gets")
         XCTAssertEqual(agent.detectedAgentKind, "claude")
+        XCTAssertEqual(agent.label, "Claude Code", "detection names the row from the launch title, the same rule the hook path applies")
     }
 
     /// A hook `init` signal that lands on the `.agent`-launched session after detection has already minted
@@ -351,14 +357,14 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
     /// foreground currently reports a coding agent or, when only the shell fields are set, its own bare
     /// prompt.
     private func writeLiveTerminalSession(
-        sessionID: String, workspaceID: String, workspaceDir: String, kind: TerminalSessionKind,
+        sessionID: String, workspaceID: String, workspaceDir: String, kind: TerminalSessionKind, launchTitle: String = "agent",
         foregroundDetectedAgentKind: TerminalDetectedAgentKind? = nil, foregroundExecutableName: String? = nil, foregroundArgv: [String]? = nil,
         foregroundDisplayLabel: String? = nil, foregroundDisplayCommand: String? = nil
     ) throws {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(
-                sessionID: sessionID, backend: .ghosttyEmbedded, title: "agent", workingDirectory: workspaceDir, shell: "/bin/zsh", command: nil,
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: launchTitle, workingDirectory: workspaceDir, shell: "/bin/zsh", command: nil,
                 createdAt: "2026-06-06T00:00:00Z", workspaceID: workspaceID, kind: kind), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
