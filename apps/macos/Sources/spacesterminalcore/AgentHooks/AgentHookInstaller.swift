@@ -301,11 +301,22 @@ public enum AgentHookInstaller {
             }
         }
 
-        private static func loginShellPathDirectories(home: URL, environment: [String: String], fileManager: FileManager) -> [String] {
+        /// Each original PATH directory immediately followed by its canonical (symlink-resolved) form,
+        /// in PATH order. `ExecutableResolver` dedups this list and checks it in order, so an original
+        /// directory that still exists wins over its own canonical form (keeping the exact path a hook
+        /// config persists for the `spaces` CLI unchanged), the canonical form is only a fallback for
+        /// that same directory (such as fnm's per-shell multishell symlink, deleted by the shell between
+        /// printing its PATH and the resolver checking it), and PATH precedence across distinct
+        /// directories is preserved: a directory later on PATH is never checked before an earlier
+        /// directory's canonical fallback.
+        ///
+        /// Not `private`: tests bind this directly as a `shellPathDirectoryResolver` to drive a real
+        /// (fake) login shell end to end, rather than stubbing the resolver away.
+        static func loginShellPathDirectories(home: URL, environment: [String: String], fileManager: FileManager) -> [String] {
             guard let shellPath = userLoginShellPath(environment: environment, fileManager: fileManager),
-                let shellPATH = resolvedLoginShellPATH(shellPath: shellPath, home: home, environment: environment)
+                let probe = resolvedLoginShellProbe(shellPath: shellPath, home: home, environment: environment)
             else { return [] }
-            return pathDirectories(from: shellPATH)
+            return probe.directories
         }
 
         private static func userLoginShellPath(environment: [String: String], fileManager: FileManager) -> String? {
@@ -324,13 +335,58 @@ public enum AgentHookInstaller {
         /// both streams first, so the value is printed on its own line and read back by prefix.
         static let pathMarkerPrefix = "__SPACES_AGENT_HOOK_PATH__="
 
-        /// Runs the user's login shell and reads back the PATH it would give a Spaces terminal.
+        /// Marks the ordered-directories line: each PATH entry, then its canonical form when that
+        /// differs, colon-joined like PATH itself so the same `pathDirectories(from:)` parser reads both
+        /// lines. A directory that cannot be entered (already gone, no permission) contributes no
+        /// canonical form rather than failing the whole line.
+        static let orderedPathDirectoriesMarkerPrefix = "__SPACES_AGENT_HOOK_PATH_DIRECTORIES__="
+
+        /// Printed inside the login shell via `/bin/sh -c`, not run as the login shell's own `-c` text
+        /// directly: the login shell can be zsh, bash, or fish, and fish keeps PATH as a list it would
+        /// join with spaces rather than colons, breaking the `for d in $PATH` split below. A `/bin/sh`
+        /// child inherits the login shell's live PATH regardless of which shell printed it, so the parsing
+        /// stays POSIX and shell-agnostic while the canonicalization still runs before that PATH's
+        /// directories can change or disappear.
+        ///
+        /// A PATH directory on a hung network mount can stall `cd -P` until the probe's timeout discards
+        /// the whole answer, raw PATH included. Accepted: a hung mount on PATH already stalls the user's own
+        /// shells' command lookups and this resolver's existence checks, so it is not a state worth
+        /// complicating the probe to survive.
+        ///
+        /// No single quotes appear in this script: the whole thing is embedded inside a single-quoted
+        /// `/bin/sh -c '...'` argument (see `resolvedLoginShellProbe`), so an embedded `'` would terminate
+        /// that argument early.
+        private static let canonicalizingPathProbeScript = """
+            printf "\\n\(pathMarkerPrefix)%s\\n" "$PATH"
+            IFS=:
+            ordered=""
+            for d in $PATH; do
+              [ -z "$d" ] && continue
+              if [ -z "$ordered" ]; then ordered="$d"; else ordered="$ordered:$d"; fi
+              c=$(cd -P -- "$d" 2>/dev/null && pwd -P) || continue
+              if [ "$c" != "$d" ]; then ordered="$ordered:$c"; fi
+            done
+            printf "\\n\(orderedPathDirectoriesMarkerPrefix)%s\\n" "$ordered"
+            """
+
+        /// Runs the user's login shell and reads back the PATH it would give a Spaces terminal, plus an
+        /// ordered directory list built from that PATH, each entry immediately followed by its
+        /// symlink-resolved (canonical) form when one exists and differs, computed while the shell is
+        /// still alive.
+        ///
+        /// A per-shell PATH directory (fnm's multishell symlink is the case this was written for) can be
+        /// deleted by an exit hook in the user's rc files (users add one because fnm otherwise leaks one
+        /// such directory per shell) between the shell printing its PATH and the resolver checking those
+        /// directories after the shell has already exited. Canonicalizing here, before the shell exits,
+        /// gives the resolver the executable's real, persistent location to fall back to once the
+        /// per-shell directory is gone, right after that directory's own entry rather than after every
+        /// other PATH directory: a directory later on PATH holding an executable of the same name must not
+        /// be picked over the deleted entry's canonical target.
         ///
         /// The pipe is drained by a readability handler *while* the shell runs, so an rc chain that writes
         /// more than the 64KB pipe buffer cannot deadlock. Process termination does not imply the handler
         /// has consumed the last chunk, so the output is read through to EOF before it is parsed —
-        /// otherwise the marker line, which is printed last, can be lost and the shell PATH silently
-        /// ignored.
+        /// otherwise the marker lines, printed last, can be lost and the shell PATH silently ignored.
         ///
         /// The shell is interactive (`-i`) because version managers put their shim directories on PATH
         /// from `.zshrc`, which a login-only shell never sources. An interactive shell that inherits a
@@ -338,10 +394,12 @@ public enum AgentHookInstaller {
         /// job-control signals that stop the probe until it times out. Both callers can have a terminal on
         /// stdin (the `spaces` CLI always does), so stdin is redirected to /dev/null: nothing is ever
         /// written to the shell, only read back from it.
-        static func resolvedLoginShellPATH(shellPath: String, home: URL, environment: [String: String], timeoutSeconds: TimeInterval = 5) -> String? {
+        static func resolvedLoginShellProbe(shellPath: String, home: URL, environment: [String: String], timeoutSeconds: TimeInterval = 5) -> (
+            path: String, directories: [String]
+        )? {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: shellPath)
-            process.arguments = ["-l", "-i", "-c", "printf '\\n\(pathMarkerPrefix)%s\\n' \"$PATH\""]
+            process.arguments = ["-l", "-i", "-c", "/bin/sh -c '\(canonicalizingPathProbeScript)'"]
             var processEnvironment = environment
             processEnvironment["HOME"] = home.path
             if processEnvironment["PATH"]?.isEmpty ?? true { processEnvironment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin" }
@@ -381,9 +439,17 @@ public enum AgentHookInstaller {
             outputPipe.fileHandleForReading.readabilityHandler = nil
 
             guard process.terminationStatus == 0, let output = String(data: outputBuffer.snapshot(), encoding: .utf8) else { return nil }
-            return output.components(separatedBy: .newlines).last { $0.hasPrefix(pathMarkerPrefix) }.map {
-                String($0.dropFirst(pathMarkerPrefix.count))
+            let lines = output.components(separatedBy: .newlines)
+            guard let path = lines.last(where: { $0.hasPrefix(pathMarkerPrefix) }).map({ String($0.dropFirst(pathMarkerPrefix.count)) }) else {
+                return nil
             }
+            // Absent only if `/bin/sh` died between its two printfs; the raw PATH line alone is still a
+            // usable answer then, just without the interleaved canonical forms.
+            let directories =
+                lines.last(where: { $0.hasPrefix(orderedPathDirectoriesMarkerPrefix) }).map {
+                    pathDirectories(from: String($0.dropFirst(orderedPathDirectoriesMarkerPrefix.count)))
+                } ?? pathDirectories(from: path)
+            return (path: path, directories: directories)
         }
     #else
         private static func cachedLoginShellPathDirectories(home: URL, environment: [String: String], fileManager: FileManager) -> [String] { [] }
