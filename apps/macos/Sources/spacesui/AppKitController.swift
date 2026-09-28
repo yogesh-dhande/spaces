@@ -1123,16 +1123,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         let modeDetail = "mode=\(mode.rawValue) focus=\(focusIntent.rawValue)"
         // The invariant for a replacement's open, enforced here and nowhere else: it either claims the
-        // pane its restart is holding or releases it, exactly once, on every path out of this function.
-        // Every failure exit below funnels through this one `defer` rather than cleaning up for itself,
-        // because the ways an open can fail are open-ended (the session may not resolve yet, its device
-        // may refuse the install, its content may fail to build) and a path that forgot to release would
-        // strand the terminated predecessor on screen with nothing left able to close it: the daemon
-        // consumed the reservation when it launched the replacement, and overview pruning skips held
-        // panes. Only an open that actually claimed the pane settles the hold: an open that succeeded by
-        // installing a fresh pane (the predecessor's was closed by the user before the restart, so there
-        // was nothing to claim) leaves the hold untouched and still owing a release, which is why the
-        // test below is on the action taken rather than on the open having worked.
+        // pane Start is holding for it (`replacesSessionID`, only ever set for Start's exited-process
+        // relaunch; a workspace Restart's relaunch opens no pane at all and never reaches this hold path,
+        // #799) or releases it, exactly once, on every path out of this function. Every failure exit below
+        // funnels through this one `defer` rather than cleaning up for itself, because the ways an open
+        // can fail are open-ended (the session may not resolve yet, its device may refuse the install, its
+        // content may fail to build) and a path that forgot to release would strand the terminated
+        // predecessor on screen with nothing left able to close it: the daemon consumed the reservation
+        // when it launched the replacement, and overview pruning skips held panes. Only an open that
+        // actually claimed the pane settles the hold: an open that succeeded by installing a fresh pane
+        // (the predecessor's was closed by the user before Start ran, so there was nothing to claim)
+        // leaves the hold untouched and still owing a release, which is why the test below is on the
+        // action taken rather than on the open having worked.
         var openAction: TerminalPaneService.TerminalPaneOpenAction?
         defer {
             if let orphaned = TerminalPaneService.heldPredecessorSessionToRelease(
@@ -3514,9 +3516,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Hands each open pane whose runtime target just swapped sessions over to the replacement, before
     /// pruning would close it for naming a session the device no longer retains.
     ///
-    /// This is the client half of restart pane reuse. The daemon serving the restart is the Device API's,
-    /// which has no opener to any client, so the replacement's open — the message that normally names the
-    /// pane to take over — is never posted; the refreshed overview carries the same pairing. Runs on every
+    /// This is the client half of restart pane reuse (#799). A restart never posts a close or an open for
+    /// the session it replaces, on any orchestrator: the row keeps its id and only the session it names
+    /// changes, so the refreshed overview is the only thing that carries the pairing. Runs on every
     /// authoritative overview, from all three of its call sites, since a restart on one client has to move
     /// the pane on every other client watching that device.
     func retargetReplacedTerminalPanes(previousOverview: SpacesDeviceOverviewPayload?, overview: SpacesDeviceOverviewPayload, deviceID: String) {
@@ -5666,9 +5668,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         switch result {
         case .success(let response):
-            // Unlike Stop and Delete, nothing is closed here: a restart keeps the workspace's Chrome tabs and
-            // code panes, and its terminal panes follow what the daemon reports (a replaced session's pane is
-            // retargeted from this response's overview, an ended one closes).
+            // Unlike Stop and Delete, nothing is closed here: a restart relaunches configured processes
+            // only, so it keeps the workspace's Chrome tabs, code panes, ad hoc terminals, and coding-agent
+            // sessions exactly as they were. A configured process's pane is retargeted onto its replacement
+            // by this response's overview diff (`retargetReplacedTerminalPanes`), never by a close IPC (#799).
             applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: id)
         case .failure(let error): showError(error)
         }

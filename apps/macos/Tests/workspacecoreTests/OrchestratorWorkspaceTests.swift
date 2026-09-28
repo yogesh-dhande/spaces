@@ -259,6 +259,41 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.automationRun(id: run.id)?.status, .running, "a busy Restart must not cancel before lifecycle admission")
     }
 
+    /// A restart relaunches configured processes only (#799): it never routes through the automation
+    /// cancellation coordination a plain Stop uses, so an automation run already in progress in the
+    /// workspace keeps running across a successful restart, not only across a busy/blocked one.
+    func testSuccessfulRestartDoesNotCancelAnActiveAutomationRun() throws {
+        let root = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: root.path)
+        let workspace = WorkspaceRecord(
+            id: "workspace-restart-preserves-automation", projectID: project.id, dir: root.path, dirname: nil, branch: nil, isDefault: true,
+            isRunning: true, lastLaunchedAt: "2026-07-01T00:00:00Z")
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        let automation = Automation(
+            id: "automation-restart-preserves", name: "Nightly", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script,
+            script: "sleep 60", workspaceID: workspace.id, timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce,
+            nextFireTime: nil, createdAt: Date(), updatedAt: Date())
+        try store.upsertAutomation(automation)
+        let run = AutomationRun(
+            id: "run-restart-preserves", automationID: automation.id, kind: .script, status: .running, skipReason: nil, trigger: .manual,
+            exitCode: nil, terminalSessionID: nil, startedAt: Date(), endedAt: nil, createdAt: Date())
+        try store.insertAutomationRun(run)
+
+        let orchestrator = makeTestOrchestrator(store: store)
+        let automationService = AutomationService(store: store, orchestrator: orchestrator, binaryDirectory: "/usr/bin", logError: { _ in })
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation { workspaceID, orchestration in
+            try automationService.cancelRunsForWorkspaceStop(workspaceID: workspaceID, orchestration: orchestration)
+        }
+        defer { WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation(nil) }
+
+        try orchestrator.restartWorkspace(workspaceID: workspace.id)
+
+        XCTAssertEqual(
+            try store.automationRun(id: run.id)?.status, .running, "restart never asks the cancellation hook to cancel the workspace's runs")
+    }
+
     func testHandoffStopPreservesActiveAutomationRunBeforeCancellation() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()

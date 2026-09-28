@@ -352,16 +352,6 @@ public final class WorkspaceOrchestrator {
     let currentDate: () -> Date
     let notificationDeliverer: (String, String, String?) -> Void
     let builtInTerminalWindowOpener: BuiltInTerminalWindowOpener
-    /// Whether this orchestrator's window opener actually reaches a client.
-    ///
-    /// This gates every pane hold, because a hold is a promise that a replacement open is coming: the
-    /// client keeps the pane in the layout and overview pruning skips it, so a hold nobody can claim
-    /// leaves the terminated session's pane on screen for good. The two halves are wired independently
-    /// (the Device API injects a no-op opener but leaves the closer at its real IPC-posting default),
-    /// which is exactly how a hold could be sent by an orchestrator that will never post the open that
-    /// releases it. Reading both the hold and the replacement's open off this one flag is what keeps them
-    /// from diverging again.
-    let deliversTerminalWindowOpens: Bool
     let builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser
     let builtInTerminalWindowCloser: BuiltInTerminalWindowCloser
     let builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator
@@ -402,8 +392,8 @@ public final class WorkspaceOrchestrator {
     public init(
         store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil, git: GitClient = .init(),
         notificationDeliverer: ((String, String, String?) -> Void)? = nil, builtInTerminalWindowOpener: BuiltInTerminalWindowOpener? = nil,
-        deliversTerminalWindowOpens: Bool = true, builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser? = nil,
-        builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil, builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator? = nil,
+        builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser? = nil, builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil,
+        builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil,
         builtInTerminalForegroundProcessSampler: BuiltInTerminalForegroundProcessSampler? = nil,
         builtInTerminalLiveOwnerAttachmentProber: BuiltInTerminalLiveOwnerAttachmentProber? = nil,
@@ -422,12 +412,6 @@ public final class WorkspaceOrchestrator {
         self.daemonHandoffInProgress = daemonHandoffInProgress ?? Self.daemonHandoffInProgressOverrideStore.get() ?? { false }
         self.workspacesRootDirectoryURL = workspacesRootDirectory
         self.notificationDeliverer = notificationDeliverer ?? Self.notificationDelivererOverrideStore.get() ?? Self.deliverUserNotification
-        #if canImport(Darwin)
-            self.deliversTerminalWindowOpens = deliversTerminalWindowOpens
-        #else
-            // A headless daemon has no client to open a pane in, so it can never promise a replacement.
-            self.deliversTerminalWindowOpens = false
-        #endif
         #if canImport(Darwin)
             self.builtInTerminalWindowOpener =
                 builtInTerminalWindowOpener ?? { sessionID, mode, openIntent in
@@ -1180,51 +1164,119 @@ public final class WorkspaceOrchestrator {
     /// only ever want the launch-or-converge behavior, never a forced restart.
     public func launchWorkspace(workspaceID: String) throws { try upWorkspace(workspaceID: workspaceID, restartIfRunning: false) }
 
+    /// Takes the workspace lifecycle lock directly rather than through the automation cancellation
+    /// coordinator Stop uses: a restart touches configured processes only, so it never cancels a run (#799).
     public func restartWorkspace(workspaceID: String) throws {
         try assertWorkspaceHasLifecycle(workspaceID: workspaceID)
-        // Reject a quiescing daemon before recording any automation cancellation. The inner stop repeats
-        // this guard at its destructive-row boundary to cover a handoff that begins during teardown.
         guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
-        try coordinateAutomationCancellationDuringWorkspaceStop(workspaceID: workspaceID) { [self] in
-            try restartWorkspaceUnlocked(workspaceID: workspaceID)
-        }
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try restartWorkspaceUnlocked(workspaceID: workspaceID) }
     }
 
-    /// Stop-then-launch, holding each configured process's pane across the gap so its replacement lands
-    /// in the layout position the user arranged instead of at the end of the tab strip. Every reservation
-    /// is released before this returns, including when the launch throws part way through.
+    /// Runs the stop script, then relaunches the workspace's configured processes in place; coding agents,
+    /// ad hoc terminals, and automation runs are left alone (#799).
     ///
-    /// The workspace stays marked running from the stop through the launch (see `stopWorkspaceUnlocked`),
-    /// so no client ever sees a restart as a stop (#799). A restart whose launch fails ends stopped, which
-    /// only this function can do, since its stop left the flag set.
+    /// Each process keeps its row id and only the session it names changes (`restartProcessInTerminal`),
+    /// so every overview read mid-restart names the old or the new session, never neither, and no client
+    /// can prune the pane in between. A failed relaunch does not stop the others; one error names every
+    /// failure at the end, and the workspace stays running. A workspace that is not running takes Start's
+    /// cold-launch path instead.
     private func restartWorkspaceUnlocked(workspaceID: String, background: Bool = false) throws {
-        let reservations = try replacedTerminalSessionReservations(workspaceID: workspaceID)
-        // Releases only the holds the stop actually sent. Installed before the stop rather than after it,
-        // because a stop can fail part way through closing sessions (its stop script throws, or the
-        // handoff re-check at the row-mutation boundary rejects) with some holds already out; the
-        // reservations themselves record which ones those were, so a stop rejected at its opening guard
-        // has nothing to release and leaves its still-running panes alone.
-        defer { releaseUnclaimedReplacedTerminalSessions(reservations) }
-        _ = try stopWorkspaceUnlocked(workspaceID: workspaceID, reservations: reservations)
-        do {
-            try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background, reservations: reservations)
-        } catch {
-            // `try?` so a failed write here cannot replace the launch's error, which is what the caller reports.
-            if let workspace = try? resolveWorkspace(id: workspaceID).1 { try? markWorkspaceStopped(workspace) }
-            throw error
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        guard try workspace.isRunning || hasTrackedRuntimeIndicators(workspaceID: workspace.id) else {
+            try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background)
+            return
+        }
+        try triggerDeferredWorkspaceSetupIfNeeded(workspaceID: workspaceID)
+        try waitForWorkspaceSetupToComplete(workspaceID: workspaceID)
+        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
+        let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
+        let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
+        let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
+        let env = buildWorkspaceEnv(
+            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) }, runtimeManifest: runtimeManifest
+        )
+        _ = try runWorkspaceStopScriptIfConfigured(workspace: workspace, settings: settings, env: env)
+        // The terminator no-ops during a daemon handoff, so every mutation below is guarded like
+        // `stopWorkspaceUnlocked`'s: proceeding would drop or mislabel sessions the successor inherits.
+        guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
+
+        let configuredTemplates = settings?.processes ?? []
+        let trackedProcesses = try store.runningProcesses(workspaceID: workspace.id)
+        var processByTemplateID: [String: RunningProcessRecord] = [:]
+        for process in trackedProcesses {
+            if let template = matchingConfiguredTemplateForMissingCheck(for: process, settings: settings) {
+                processByTemplateID[template.id] = process
+            }
+        }
+
+        // Every session this pass ends is waited out together before anything launches: an exit (SIGHUP,
+        // then a TERM/KILL escalation) can take seconds, and a replacement launched sooner finds its port
+        // still held. Waiting together overlaps slow exits instead of serializing them.
+        var pendingExitSessionIDs = Set<String>()
+
+        // A row matching no configured template is a process removed from settings while it ran; it is
+        // stopped, not relaunched, and first, so one re-added under a fresh template id frees its port.
+        // Accepted: a handoff that begins between this guard and `stopRunningProcess`'s termination (a few
+        // instructions) still deletes the row of a session the successor inherits.
+        for process in trackedProcesses where matchingConfiguredTemplateForMissingCheck(for: process, settings: settings) == nil {
+            guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
+            try stopRunningProcess(process, workspaceID: workspace.id)
+            if let sessionID = builtInTerminalSessionID(for: process) {
+                // Process-kind sessions are not finalized by the foreground reconciler, so an agent that
+                // ran in this process would otherwise stay listed.
+                try deleteAgentRows(forBuiltInTerminalSession: sessionID, workspaceID: workspace.id)
+                pendingExitSessionIDs.insert(sessionID)
+            }
+        }
+
+        guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
+        // Each row keeps naming its ended session until its relaunch lands, and every overview built in
+        // between still reports that session on the row: it is hosted in spacesd, so its persisted runtime
+        // state names the daemon itself as its live service whether or not the exit has been recorded yet,
+        // and the session garbage collector keeps it while a row names it. So no overview in the gap loses
+        // the old-to-new pairing that clients retarget the pane from (`TerminalSessionReplacementDiff`).
+        for process in processByTemplateID.values where isManagedTerminalApp(process.terminalApp) {
+            terminateBuiltInTerminalSessionWithoutClosingPane(for: process)
+            if let sessionID = builtInTerminalSessionID(for: process) { pendingExitSessionIDs.insert(sessionID) }
+        }
+        waitForBuiltInTerminalSessionsToExit(pendingExitSessionIDs)
+
+        var failedTemplateKeys: [String] = []
+        for template in configuredTemplates {
+            if let existing = processByTemplateID[template.id] {
+                do {
+                    try restartProcessInTerminal(
+                        workspaceID: workspace.id, process: existing, templateOverride: template, background: background, reason: .restart)
+                } catch {
+                    // A handoff stops the restart outright: rows not yet reached are still correct, and
+                    // going on would touch sessions the successor daemon inherits.
+                    if case WorkspaceError.daemonHandoffInProgress = error { throw error }
+                    failedTemplateKeys.append(processKey(for: template))
+                }
+            } else {
+                do {
+                    _ = try launchConfiguredProcess(template: template, workspace: workspace, env: env, background: background, openIntent: nil)
+                } catch {
+                    if case WorkspaceError.daemonHandoffInProgress = error { throw error }
+                    failedTemplateKeys.append(processKey(for: template))
+                }
+            }
+        }
+
+        // Re-read rather than the snapshot above: stopping the last stale row can clear the running flag
+        // through `stopRunningProcess`'s reconcile, and a restart always ends running. Accepted: that only
+        // happens when the stale row was the workspace's sole runtime, and a client refreshing in the gap
+        // reads a stop.
+        try markWorkspaceRunningIfNeeded(workspaceID: workspace.id)
+        guard failedTemplateKeys.isEmpty else {
+            throw WorkspaceError.invalidArgument(message: "Failed to relaunch: \(failedTemplateKeys.joined(separator: ", "))")
         }
     }
 
     public func upWorkspace(workspaceID: String, restartIfRunning: Bool = false, background: Bool = false) throws {
         try assertWorkspaceHasLifecycle(workspaceID: workspaceID)
-        if restartIfRunning {
-            guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
-            try coordinateAutomationCancellationDuringWorkspaceStop(workspaceID: workspaceID) { [self] in
-                try upWorkspaceUnlocked(workspaceID: workspaceID, restartIfRunning: true, background: background)
-            }
-        } else {
-            try upWorkspaceLocked(workspaceID: workspaceID, restartIfRunning: false, background: background)
-        }
+        if restartIfRunning { guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress } }
+        try upWorkspaceLocked(workspaceID: workspaceID, restartIfRunning: restartIfRunning, background: background)
     }
 
     private func upWorkspaceLocked(workspaceID: String, restartIfRunning: Bool, background: Bool) throws {
@@ -1233,8 +1285,7 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    /// Runs with the workspace lifecycle gate already held. The restart callers claim that gate before
-    /// entering the automation-service queue, so a busy lifecycle request cannot cancel an active run.
+    /// Runs with the workspace lifecycle gate already held.
     private func upWorkspaceUnlocked(workspaceID: String, restartIfRunning: Bool, background: Bool) throws {
         let (_, workspace) = try resolveWorkspace(id: workspaceID)
         try validateWorkspaceFocusNames(workspaceID: workspace.id)
@@ -1270,12 +1321,7 @@ public final class WorkspaceOrchestrator {
         try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background)
     }
 
-    /// - Parameter reservations: The panes a restart is holding for these launches, so each configured
-    ///   process's replacement claims the pane its predecessor occupied. Nil for a cold launch, which
-    ///   replaces nothing.
-    private func launchWorkspaceUnlocked(workspaceID: String, background: Bool = false, reservations: ReplacedTerminalSessionReservations? = nil)
-        throws
-    {
+    private func launchWorkspaceUnlocked(workspaceID: String, background: Bool = false) throws {
         // Fail fast on an unknown workspace id before triggering deferred setup for it.
         _ = try resolveWorkspace(id: workspaceID)
         try triggerDeferredWorkspaceSetupIfNeeded(workspaceID: workspaceID)
@@ -1285,16 +1331,14 @@ public final class WorkspaceOrchestrator {
         let hasTrackedRuntime = try hasTrackedRuntimeIndicators(workspaceID: workspace.id)
         // This cold-launch path unconditionally relaunches every configured process, which would kill and
         // restart already-running ones and would be destructive if reached with runtime present. Every
-        // caller (`restartWorkspace`, and `upWorkspace`'s not-already-running branch) already guarantees no
-        // tracked runtime exists before calling in, so the tracked-runtime half of this guard should never
-        // fire; it stays as an invariant check rather than something a user can hit. Start
-        // (`launchWorkspace`) routes through `upWorkspace` instead, which launches only what is missing and
-        // leaves already-running processes and any ad hoc or agent runtime untouched instead of refusing.
-        //
-        // A restart's relaunch (`reservations != nil`) passes with `workspace.isRunning` still true, since
-        // its stop leaves the flag set (see `restartWorkspaceUnlocked`). A cold launch carries no
-        // reservations, so it is still refused while the workspace is running.
-        guard !hasTrackedRuntime, reservations != nil || !workspace.isRunning else {
+        // caller (`restartWorkspaceUnlocked`'s not-already-running branch, and `upWorkspace`'s
+        // not-already-running branch) already guarantees no tracked runtime exists before calling in, so
+        // this guard should never fire; it stays as an invariant check rather than something a user can
+        // hit. Start (`launchWorkspace`) routes through `upWorkspace` instead, which launches only what is
+        // missing and leaves already-running processes and any ad hoc or agent runtime untouched instead
+        // of refusing. A running workspace's restart never reaches here at all: it relaunches its
+        // configured processes in place, one at a time, through `restartProcessInTerminal`.
+        guard !(workspace.isRunning || hasTrackedRuntime) else {
             throw WorkspaceError.invalidArgument(message: "Workspace is already running. Use restart.")
         }
         let config = try loadWorkspaceSettings(project: project, workspace: workspace)
@@ -1325,9 +1369,7 @@ public final class WorkspaceOrchestrator {
         var newWindows: [WindowRecord] = []
 
         if let config {
-            newWindows.append(
-                contentsOf: try launchProcesses(
-                    workspace: workspace, templates: config.processes, env: env, background: background, reservations: reservations))
+            newWindows.append(contentsOf: try launchProcesses(workspace: workspace, templates: config.processes, env: env, background: background))
         }
 
         var index = 0
@@ -1366,13 +1408,7 @@ public final class WorkspaceOrchestrator {
         return resolvedOutcome
     }
 
-    /// - Parameter reservations: A restart's captured sessions, whose panes are closed as held for their
-    ///   replacements rather than torn down. The stop records each hold through the reservations as it
-    ///   sends it, so the restart releases exactly what went out. Nil for a plain stop, which is every
-    ///   caller but the restart.
-    func stopWorkspaceUnlocked(workspaceID: String, waitForTerminalExit: Bool = true, reservations: ReplacedTerminalSessionReservations? = nil) throws
-        -> WorkspaceStopOutcome
-    {
+    func stopWorkspaceUnlocked(workspaceID: String, waitForTerminalExit: Bool = true) throws -> WorkspaceStopOutcome {
         // Refuse a stop that races a daemon handoff before touching anything: the daemon's terminator
         // no-ops during handoff (sessions are quiesced and carried across the exec), so proceeding would
         // delete the workspace's rows while its terminals stay live. Rejecting here keeps both the
@@ -1388,24 +1424,16 @@ public final class WorkspaceOrchestrator {
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
         let processes = try store.runningProcesses(workspaceID: workspace.id)
         var closedBuiltInTerminalSessionIDs = Set<String>()
-        var skippedStopScriptBecauseWorkspaceDirectoryMissing = false
         // One close per session id per stop, whichever loop below reaches it first.
         //
         // The loops overlap by design: a configured process whose command runs a coding agent has both a
         // `running_processes` row and an `agent_sessions` row naming the same terminal, and a tracked
-        // window row can name it too. Closing such a session twice is not harmless once a restart is
-        // holding its pane: the first close carries `awaitReplacement` and the second would carry a plain
-        // teardown, and the client would honor the teardown and drop the pane the replacement is about to
-        // claim. Routing every loop through here makes the invariant structural and order-independent,
-        // rather than a guard each loop has to remember (the agent loop did not).
-        //
-        // The disposition is resolved per session rather than per loop, so it belongs to whichever loop
-        // owns the replacement pairing no matter which one gets there first: only the configured-process
-        // sessions a restart named are in `reservations`, and agent, tracked-window, and ad hoc sessions
-        // are never relaunched by a restart, so they always resolve to a plain teardown.
+        // window row can name it too. Routing every loop through here makes "close each live session
+        // exactly once" structural and order-independent, rather than a guard each loop has to remember
+        // (the agent loop did not).
         func closeBuiltInTerminalSessionOnce(_ sessionID: String) {
             guard !closedBuiltInTerminalSessionIDs.contains(sessionID) else { return }
-            terminateBuiltInTerminalSession(sessionID, closeDisposition: reservations?.closeDisposition(for: sessionID) ?? .teardown)
+            terminateBuiltInTerminalSession(sessionID)
             closedBuiltInTerminalSessionIDs.insert(sessionID)
         }
         for process in processes {
@@ -1419,15 +1447,8 @@ public final class WorkspaceOrchestrator {
         for agent in workspaceAgentWindows {
             if let sessionID = agent.terminalTrackingID, !sessionID.isEmpty { closeBuiltInTerminalSessionOnce(sessionID) }
         }
-        if let script = settings?.stopScript?.trimmingCharacters(in: .whitespacesAndNewlines), !script.isEmpty {
-            if directoryExists(at: workspace.dir) {
-                do { try runScript(applyEnvVars(script, env: env), cwd: workspace.dir) } catch {
-                    if isMissingDirectoryError(error) { skippedStopScriptBecauseWorkspaceDirectoryMissing = true } else { throw error }
-                }
-            } else {
-                skippedStopScriptBecauseWorkspaceDirectoryMissing = true
-            }
-        }
+        let skippedStopScriptBecauseWorkspaceDirectoryMissing = try runWorkspaceStopScriptIfConfigured(
+            workspace: workspace, settings: settings, env: env)
         // Browser tabs are client-owned (the app tracks each session's Chrome window) and
         // are never closed by the daemon on stop; only Spaces-managed terminal sessions are
         // terminated by session id here.
@@ -1452,11 +1473,7 @@ public final class WorkspaceOrchestrator {
         // was already terminated above): the child's subscribers are told it exited before its row is
         // deleted, and the stopped terminal's own watch state is torn down.
         for agent in workspaceAgentWindows { try finalizeAgentRow(agent, reason: .destroyed(terminateTerminalSession: false)) }
-        // A restart (the only caller carrying reservations) leaves the running flag set: every client reads
-        // running state from it, and a stopped flag in the gap before the relaunch reads as a real stop,
-        // closing the Mac's tracked Chrome tabs and code panes (#799). It also keeps the port reconciler
-        // from binding placeholders on ports the relaunch is about to take.
-        if reservations == nil { try markWorkspaceStopped(workspace) }
+        try markWorkspaceStopped(workspace)
         return WorkspaceStopOutcome(skippedStopScriptBecauseWorkspaceDirectoryMissing: skippedStopScriptBecauseWorkspaceDirectoryMissing)
     }
 
@@ -2612,6 +2629,22 @@ public final class WorkspaceOrchestrator {
     }
 
     private func runScript(_ script: String, cwd: String) throws { _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd) }
+
+    /// Runs the workspace's configured stop script, if it has one, before a stop or a restart tears down
+    /// or relaunches anything. Tolerates a workspace directory that is already gone (a worktree removed out
+    /// from under a still-tracked workspace) rather than failing the whole stop or restart on it; returns
+    /// whether the script was skipped for that reason, which callers surface on `WorkspaceStopOutcome`.
+    private func runWorkspaceStopScriptIfConfigured(workspace: WorkspaceRecord, settings: WorkspaceSettings?, env: [String: String]) throws -> Bool {
+        guard let script = settings?.stopScript?.trimmingCharacters(in: .whitespacesAndNewlines), !script.isEmpty else { return false }
+        guard directoryExists(at: workspace.dir) else { return true }
+        do {
+            try runScript(applyEnvVars(script, env: env), cwd: workspace.dir)
+            return false
+        } catch {
+            guard isMissingDirectoryError(error) else { throw error }
+            return true
+        }
+    }
 
     private func initializeWorkspaceRuntime(project: ProjectRecord, workspace: WorkspaceRecord, runSetupScript: Bool) throws {
         let appConfig = try store.appConfig()

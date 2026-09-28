@@ -660,7 +660,11 @@ extension OrchestratorTests {
         XCTAssertEqual(windows.map(\.id), ["process-api"])
     }
 
-    func testRestartWorkspaceProcessUsesConfiguredSpacesHostEvenWhenStoredProcessHostDiffers() throws {
+    /// A row tracked under some other terminal app (never a built-in Spaces pane at all) has nothing for a
+    /// restart to reuse, so it comes back onto Spaces the same pane-less way any process with no pane
+    /// does: migrated in the row, posting no open (#799). It is not a fresh pane the way Start's revival of
+    /// an exited process gets one, since Start and Restart differ in exactly this: Restart never opens.
+    func testRestartWorkspaceProcessMigratesOffALegacyHostWithoutOpeningAPane() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try makeTemporaryStore()
@@ -699,20 +703,22 @@ extension OrchestratorTests {
             try orchestrator.restartWorkspaceProcess(workspaceID: workspace.id, processID: "process-api")
         }
 
-        XCTAssertEqual(capture.modes, [.owner])
-        XCTAssertEqual(capture.sessionIDs.count, 1)
-        XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
+        XCTAssertTrue(capture.sessionIDs.isEmpty, "the restart posts no open, so the migrated process starts with no pane at all")
+        XCTAssertTrue(terminateCapture.sessionIDs.isEmpty, "the old session was never a built-in one, so there is nothing here to terminate")
         let restartedProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == "process-api" }))
-        XCTAssertEqual(restartedProcess.terminalApp, TerminalHost.spaces.appName)
-        XCTAssertEqual(restartedProcess.terminalTrackingID, capture.sessionIDs.first)
+        XCTAssertEqual(restartedProcess.terminalApp, TerminalHost.spaces.appName, "the row still migrates onto Spaces")
+        XCTAssertNotEqual(restartedProcess.terminalTrackingID, "session-old", "and names a fresh Spaces session")
         XCTAssertEqual(restartedProcess.status, RunningProcessState.running)
 
         let restartedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" }))
         XCTAssertEqual(restartedWindow.app, TerminalHost.spaces.appName)
-        XCTAssertEqual(restartedWindow.terminalTrackingID, capture.sessionIDs.first)
+        XCTAssertEqual(restartedWindow.terminalTrackingID, restartedProcess.terminalTrackingID)
     }
 
-    func testRestartWorkspaceProcessClosesPreviousSpacesSessionBeforeStartingReplacement() throws {
+    /// A single-process restart terminates the old built-in session but posts no close IPC for it and no
+    /// open IPC for its replacement (#799): the row keeps its id and only the session it names changes, so
+    /// every client retargets its own pane from the next overview diff instead of being told to.
+    func testRestartWorkspaceProcessTerminatesThePreviousSpacesSessionWithoutAnyPaneIPC() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try makeTemporaryStore()
@@ -764,14 +770,12 @@ extension OrchestratorTests {
             }
         }
 
-        XCTAssertEqual(closeCapture.sessionIDs, ["old-spaces-session"])
-        XCTAssertEqual(terminateCapture.sessionIDs, ["old-spaces-session"])
+        XCTAssertTrue(closeCapture.sessionIDs.isEmpty, "the restart posts no close IPC for the session it replaces")
+        XCTAssertEqual(terminateCapture.sessionIDs, ["old-spaces-session"], "the old session is still actually ended")
         XCTAssertFalse(FileManager.default.fileExists(atPath: killLog))
-        XCTAssertEqual(openCapture.modes, [.owner])
-        XCTAssertEqual(openCapture.sessionIDs.count, 1)
-        XCTAssertNotEqual(openCapture.sessionIDs.first, "old-spaces-session")
+        XCTAssertTrue(openCapture.sessionIDs.isEmpty, "the restart posts no open IPC for the replacement either")
         let restartedProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == "process-api" }))
-        XCTAssertEqual(restartedProcess.terminalTrackingID, openCapture.sessionIDs.first)
+        XCTAssertNotEqual(restartedProcess.terminalTrackingID, "old-spaces-session", "the row silently names a fresh session")
     }
 
     func testRecoverMissingConfiguredProcessMarksStoppedWorkspaceRunning() throws {
@@ -889,9 +893,8 @@ extension OrchestratorTests {
     }
 
     /// Starting a workspace is triggered programmatically (the CLI's `spaces workspace start`, the MCP
-    /// tool wrapping it, or a restart of one of its processes), so the panes its configured processes
-    /// open must not take the window the user is working in. Each launch still asks for an owner
-    /// attachment: only focus is withheld, not ownership.
+    /// tool wrapping it), so the panes its configured processes open must not take the window the user is
+    /// working in. Each launch still asks for an owner attachment: only focus is withheld, not ownership.
     func testConfiguredProcessLaunchesAskForNonFocusingPaneOpens() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
@@ -922,22 +925,17 @@ extension OrchestratorTests {
             workspaceID: workspace.id,
             processes: [ProcessTemplate(name: "api", command: "echo api"), ProcessTemplate(name: "web", command: "echo web")])
 
-        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try orchestrator.launchWorkspace(workspaceID: workspace.id)
-            let api = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == "api" }))
-            try orchestrator.restartWorkspaceProcess(workspaceID: workspace.id, processID: api.id)
-        }
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
 
-        XCTAssertEqual(capture.openIntents.map(\.focus), [.withoutFocus, .withoutFocus, .withoutFocus])
-        XCTAssertEqual(capture.modes, [.owner, .owner, .owner])
+        XCTAssertEqual(capture.openIntents.map(\.focus), [.withoutFocus, .withoutFocus])
+        XCTAssertEqual(capture.modes, [.owner, .owner])
     }
 
-    /// `spaces workspace restart` is a full stop and relaunch, so it reaches process launch through
-    /// `launchProcesses` rather than the per-process restart above. It carries the same intent: the
-    /// relaunched panes must not take the user's window either. The close side is asserted alongside,
-    /// because the stop closes every pane before the relaunch opens any, and that teardown is the other
-    /// half of what a restart does to the client.
-    func testProgrammaticWorkspaceRestartAsksForNonFocusingPaneOpens() throws {
+    /// A workspace restart relaunches each configured process in place through `restartProcessInTerminal`,
+    /// which never posts an open or a close for the session it swaps in: the process row keeps its id and
+    /// only the session it names changes, so every client retargets its own pane from the next overview
+    /// diff instead of being told to (#799). Only the cold launch that started the workspace opens a pane.
+    func testProgrammaticWorkspaceRestartNeverAsksAClientToOpenOrCloseAPane() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try makeTemporaryStore()
@@ -963,8 +961,8 @@ extension OrchestratorTests {
                 closes.sessionIDs.append(sessionID)
                 closes.dispositions.append(disposition)
             },
-            // The stop waits for each terminated session to actually end, so the fake terminator has to
-            // record the exit the real one would; otherwise the restart spends the whole wait timeout.
+            // The restart waits for each terminated session to actually end, so the fake terminator has to
+            // record the exit the real one would; otherwise it spends the whole wait timeout.
             builtInTerminalSessionTerminator: { sessionID in
                 guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
                 try? TerminalSessionPersistence.writeRuntimeState(
@@ -984,15 +982,85 @@ extension OrchestratorTests {
             try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: true)
         }
 
-        XCTAssertEqual(capture.openIntents.map(\.focus), [.withoutFocus, .withoutFocus], "the launch and the relaunch both open without focus")
-        XCTAssertEqual(capture.modes, [.owner, .owner])
-        XCTAssertEqual(capture.sessionIDs.count, 2)
-        let firstSessionID = try XCTUnwrap(capture.sessionIDs.first)
-        XCTAssertEqual(closes.sessionIDs, [firstSessionID], "the restart closes the first session's pane before opening the replacement")
-        XCTAssertEqual(closes.dispositions, [.awaitReplacement], "that pane is held for the replacement rather than torn down")
-        XCTAssertEqual(
-            capture.openIntents.map(\.replacesSessionID), [nil, firstSessionID],
-            "the cold launch replaces nothing and the relaunch names the session whose pane it takes over")
+        XCTAssertEqual(capture.openIntents.map(\.focus), [.withoutFocus], "only the cold launch opens a pane, without focus")
+        XCTAssertEqual(capture.sessionIDs.count, 1, "the restart's relaunch opens no pane of its own")
+        XCTAssertTrue(closes.sessionIDs.isEmpty, "the restart closes no pane for the session it replaces")
+        let processes = try store.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(processes.count, 1)
+        XCTAssertNotEqual(processes.first?.terminalTrackingID, capture.sessionIDs.first, "the row now names a fresh session the restart never opened")
+    }
+
+    /// A configured process added to settings after the workspace was already running has no tracked row
+    /// yet: `restartWorkspaceUnlocked` launches it fresh through `launchConfiguredProcess`, which must open
+    /// no pane for it either, exactly as the in-place relaunch of the already-tracked process does not
+    /// (#799).
+    func testWorkspaceRestartWithAnUntrackedConfiguredProcessOpensAndClosesNoPanes() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let opens = TerminalOpenCapture()
+        let closes = TerminalCloseCapture()
+        let orchestrator = makeTestOrchestrator(
+            store: store,
+            builtInTerminalWindowOpener: { sessionID, mode, openIntent in
+                opens.sessionIDs.append(sessionID)
+                opens.modes.append(mode)
+                opens.openIntents.append(openIntent)
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                try? paths.ensureDirectories()
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                try? seedTerminalSessionRow(sessionID: sessionID, paths: paths)
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 9876, state: .running,
+                        updatedAt: "2026-05-11T18:00:00Z"), paths: paths)
+                try? "process started\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+            },
+            builtInTerminalWindowCloser: { sessionID, disposition in
+                closes.sessionIDs.append(sessionID)
+                closes.dispositions.append(disposition)
+            },
+            builtInTerminalSessionTerminator: { sessionID in
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .exited,
+                        updatedAt: "2026-05-11T18:05:00Z"), paths: paths)
+            })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        // "api" keeps the same template id across both settings writes below, so the row the cold launch
+        // creates for it still resolves back to its template after "web" is added; a fresh id would read
+        // as a removed-and-replaced template and get the row stopped instead of relaunched in place.
+        let apiTemplate = ProcessTemplate(id: "api-template", name: "api", command: "echo api")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [apiTemplate])
+
+        var opensBeforeRestart = 0
+        var closesBeforeRestart = 0
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
+            // Adds "web" directly to settings, bypassing the reconciler that would otherwise launch it
+            // right away, so it is configured but has no tracked row when the restart below runs.
+            try store.setWorkspaceProcesses(
+                workspaceID: workspace.id, processes: [apiTemplate, ProcessTemplate(id: "web-template", name: "web", command: "echo web")])
+            opensBeforeRestart = opens.sessionIDs.count
+            closesBeforeRestart = closes.sessionIDs.count
+
+            try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: true)
+        }
+
+        XCTAssertEqual(opens.sessionIDs.count, opensBeforeRestart, "neither the in-place relaunch nor the newly-configured process opens a pane")
+        XCTAssertEqual(closes.sessionIDs.count, closesBeforeRestart, "the restart closes no pane")
+
+        let processes = try store.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(processes.count, 2)
+        for process in processes {
+            XCTAssertEqual(process.status, .running, "\(process.templateName) has a row naming a live session")
+            XCTAssertNotNil(process.terminalTrackingID)
+        }
     }
 
     /// A restart refused at the stop's daemon-handoff guard has closed nothing, so it must release
@@ -1047,13 +1115,144 @@ extension OrchestratorTests {
             try store.runningProcesses(workspaceID: workspace.id).map(\.status), [.running], "and leaves the process it would have restarted running")
     }
 
+    /// `restartWorkspace`'s entry check happens once, before the stop script runs; a handoff that begins
+    /// after that check (for instance while the stop script itself runs) must still be caught before any
+    /// process is touched. Mirrors `stopWorkspaceUnlocked`'s mutation-boundary veto: the terminator no-ops
+    /// during a handoff, so proceeding here would relaunch over a session the successor daemon is about to
+    /// inherit and mislabel it as exited.
+    func testRestartRefusedByHandoffGuardAfterStopScriptLeavesTheProcessRowUntouched() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let opens = TerminalOpenCapture()
+        let terminateCapture = TerminalTerminateCapture()
+        // The entry check (`restartWorkspace`, before the lifecycle lock) answers "no handoff"; every later
+        // check, starting with the one right after the stop script, answers "handoff in progress", modeling
+        // a handoff that begins mid-restart.
+        let handoffCheckCount = TerminalLaunchAttemptCapture()
+        let orchestrator = makeTestOrchestrator(
+            store: store,
+            builtInTerminalWindowOpener: { sessionID, _, _ in
+                opens.sessionIDs.append(sessionID)
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                try? paths.ensureDirectories()
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                try? seedTerminalSessionRow(sessionID: sessionID, paths: paths)
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 9876, state: .running,
+                        updatedAt: "2026-05-11T18:00:00Z"), paths: paths)
+            }, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) },
+            daemonHandoffInProgress: {
+                handoffCheckCount.count += 1
+                return handoffCheckCount.count > 1
+            })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "echo api")])
+
+        var originalSessionID = ""
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
+            originalSessionID = try XCTUnwrap(opens.sessionIDs.first)
+            XCTAssertThrowsError(try orchestrator.restartWorkspace(workspaceID: workspace.id)) { error in
+                guard case WorkspaceError.daemonHandoffInProgress = error else {
+                    XCTFail("expected the mid-restart handoff guard to refuse the restart, got \(error)")
+                    return
+                }
+            }
+        }
+
+        XCTAssertTrue(terminateCapture.sessionIDs.isEmpty, "the terminator is never reached once the handoff guard refuses")
+        let process = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first)
+        XCTAssertEqual(process.status, .running, "the process row is untouched by the refused restart")
+        XCTAssertEqual(process.terminalTrackingID, originalSessionID, "and still names its original session")
+    }
+
+    /// A handoff can also begin after `restartProcessInTerminal`'s own `.restart` guard already let the
+    /// relaunch proceed: the guard only checks on the way in, not across the launch call. If the launch
+    /// then fails, the terminator already no-op'd for the handoff, so the old session is still live for
+    /// the successor daemon; the failure catch must re-check the handoff and rethrow untouched instead of
+    /// writing `.exited` over that still-live row.
+    func testHandoffDuringAFailedRelaunchLeavesTheProcessRowUntouched() throws {
+        struct TerminalLaunchFailure: Error {}
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let handoffCheckCount = TerminalLaunchAttemptCapture()
+        let launchCount = TerminalLaunchAttemptCapture()
+        let orchestrator = makeTestOrchestrator(
+            store: store,
+            builtInTerminalWindowOpener: { sessionID, _, _ in
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                try? paths.ensureDirectories()
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                try? seedTerminalSessionRow(sessionID: sessionID, paths: paths)
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 9876, state: .running,
+                        updatedAt: "2026-05-11T18:00:00Z"), paths: paths)
+            }, builtInTerminalWindowCloser: { _, _ in },
+            builtInTerminalSessionTerminator: { sessionID in
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .exited,
+                        updatedAt: "2026-05-11T18:05:00Z"), paths: paths)
+            },
+            // The cold launch succeeds; the relaunch throws, exercising the failed-relaunch catch under test.
+            builtInTerminalSessionLauncher: { configuration in
+                launchCount.count += 1
+                if launchCount.count > 1 { throw TerminalLaunchFailure() }
+                let paths = try TerminalSessionPaths.forSession(id: configuration.sessionID)
+                try paths.ensureDirectories()
+                try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+                return TerminalServiceSessionSummary(
+                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: getpid(),
+                    childPID: 9876, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath)
+            },
+            // False for the restart's entry check, the post-stop-script check, and the per-process
+            // `.restart` guard inside `restartProcessInTerminal`; true from the failed launch's catch
+            // onward, modeling a handoff that begins only after that per-process guard already passed.
+            daemonHandoffInProgress: {
+                handoffCheckCount.count += 1
+                return handoffCheckCount.count > 3
+            })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "echo api")])
+
+        var originalSessionID = ""
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
+            originalSessionID = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first?.terminalTrackingID)
+            XCTAssertThrowsError(try orchestrator.restartWorkspace(workspaceID: workspace.id)) { error in
+                guard case WorkspaceError.daemonHandoffInProgress = error else {
+                    XCTFail("expected the post-failure handoff re-check to refuse the restart, got \(error)")
+                    return
+                }
+            }
+        }
+
+        let process = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first)
+        XCTAssertEqual(process.status, .running, "a handoff caught in the failure catch must not mark the row exited")
+        XCTAssertEqual(process.terminalTrackingID, originalSessionID, "the row still names its original, still-live session")
+    }
+
     /// A configured process whose command runs a coding agent has both a `running_processes` row and an
-    /// `agent_sessions` row naming the same terminal, so the stop's loops overlap on one session id. That
-    /// session must be closed exactly once, carrying the hold the restart needs: a second close would
-    /// arrive as a plain teardown and the client would honor it, dropping the pane the replacement is
-    /// about to claim. The agent row is still finalized either way, since the stop deletes it separately
-    /// from closing its terminal.
-    func testARestartClosesAProcessSessionThatAlsoHasAnAgentRowExactlyOnce() throws {
+    /// `agent_sessions` row naming the same terminal, so a stop's loops overlap on one session id. That
+    /// session must be closed exactly once: closing it twice would send the client two close messages for
+    /// one pane. The agent row is still finalized, separately from closing its terminal.
+    func testStopClosesAProcessSessionThatAlsoHasAnAgentRowExactlyOnce() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try makeTemporaryStore()
@@ -1098,15 +1297,199 @@ extension OrchestratorTests {
             let launchedSessionID = try XCTUnwrap(capture.sessionIDs.first)
             _ = try orchestrator.registerAgentWindow(
                 workspaceID: workspace.id, provider: .spaces, label: "claude", terminalTrackingID: launchedSessionID)
-            try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: true)
+            try orchestrator.stopWorkspace(workspaceID: workspace.id)
         }
 
         let launchedSessionID = try XCTUnwrap(capture.sessionIDs.first)
-        let closesForSession = zip(closes.sessionIDs, closes.dispositions).filter { $0.0 == launchedSessionID }.map(\.1)
-        XCTAssertEqual(closesForSession, [.awaitReplacement], "the shared session is closed once, as the hold the restart needs")
+        XCTAssertEqual(closes.sessionIDs.filter { $0 == launchedSessionID }.count, 1, "the shared session is closed exactly once")
         XCTAssertTrue(
             try store.agentWindows(workspaceID: workspace.id).isEmpty, "the agent row is still finalized even though its close was deduplicated")
-        XCTAssertEqual(capture.openIntents.map(\.replacesSessionID), [nil, launchedSessionID], "and the replacement still claims that pane")
+    }
+
+    /// A restart relaunches the configured process in place, but the agent row sharing its old session
+    /// must not linger naming a now-dead terminal: the agent ran inside that process, so it ends with it.
+    /// The foreground reconciler skips `.process`-kind sessions, so nothing else would ever finalize it.
+    func testRestartFinalizesAnAgentRowSharingTheRestartedProcessSession() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let capture = TerminalOpenCapture()
+        let closes = TerminalCloseCapture()
+        let orchestrator = makeTestOrchestrator(
+            store: store,
+            builtInTerminalWindowOpener: { sessionID, _, openIntent in
+                capture.sessionIDs.append(sessionID)
+                capture.openIntents.append(openIntent)
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                try? paths.ensureDirectories()
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                try? seedTerminalSessionRow(sessionID: sessionID, paths: paths)
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 9876, state: .running,
+                        updatedAt: "2026-05-11T18:00:00Z"), paths: paths)
+            },
+            builtInTerminalWindowCloser: { sessionID, disposition in
+                closes.sessionIDs.append(sessionID)
+                closes.dispositions.append(disposition)
+            },
+            builtInTerminalSessionTerminator: { sessionID in
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .exited,
+                        updatedAt: "2026-05-11T18:05:00Z"), paths: paths)
+            })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "agentproc", command: "claude")])
+
+        var originalSessionID = ""
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
+            // The configured process's terminal is running a coding agent, so it also carries an agent row
+            // pointing at the very same session that the restart below ends.
+            originalSessionID = try XCTUnwrap(capture.sessionIDs.first)
+            _ = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "claude", terminalTrackingID: originalSessionID)
+            try orchestrator.restartWorkspace(workspaceID: workspace.id)
+        }
+
+        XCTAssertTrue(
+            try store.agentWindows(workspaceID: workspace.id).isEmpty,
+            "the agent row is finalized once the process session it shared ends, instead of lingering on a dead session")
+        let process = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == "agentproc" }))
+        XCTAssertEqual(process.status, .running)
+        XCTAssertNotEqual(process.terminalTrackingID, originalSessionID, "the row now names the restart's fresh session")
+    }
+
+    /// A stale row (its configured template removed while it ran) is stopped rather than relaunched by a
+    /// restart, through `stopRunningProcess`. That call ends the session and drops its own row but never
+    /// touches `agent_sessions`, and process-kind sessions are not finalized by the foreground reconciler
+    /// either, so without a finalize of its own a removed process that ran a coding agent leaves a ghost
+    /// agent row naming a now-dead terminal.
+    func testRestartFinalizesAnAgentRowSharingAStaleProcessSession() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let capture = TerminalOpenCapture()
+        let orchestrator = makeTestOrchestrator(
+            store: store,
+            builtInTerminalWindowOpener: { sessionID, _, openIntent in
+                capture.sessionIDs.append(sessionID)
+                capture.openIntents.append(openIntent)
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                try? paths.ensureDirectories()
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                try? seedTerminalSessionRow(sessionID: sessionID, paths: paths)
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 9876, state: .running,
+                        updatedAt: "2026-05-11T18:00:00Z"), paths: paths)
+            },
+            builtInTerminalSessionTerminator: { sessionID in
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .exited,
+                        updatedAt: "2026-05-11T18:05:00Z"), paths: paths)
+            })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "agentproc", command: "claude")])
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
+            // The configured process's terminal is running a coding agent, so it also carries an agent row
+            // pointing at its session.
+            let staleSessionID = try XCTUnwrap(capture.sessionIDs.first)
+            _ = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "claude", terminalTrackingID: staleSessionID)
+            // Removes the configured process while it runs: its tracked row now matches no template, so
+            // the restart below stops it instead of relaunching it in place.
+            try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [])
+            try orchestrator.restartWorkspace(workspaceID: workspace.id)
+        }
+
+        XCTAssertTrue(
+            try store.agentWindows(workspaceID: workspace.id).isEmpty,
+            "the agent row is finalized once the stale process's session is stopped, instead of lingering on a dead session")
+        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty, "the stale row itself is dropped, not relaunched")
+    }
+
+    /// Terminating a session is asynchronous (SIGHUP, then a TERM/KILL escalation that can take seconds),
+    /// so a restart that launches the replacement immediately can race a slow-exiting process still
+    /// holding its port. The fake terminator here mirrors that: it returns at once, as the real terminator
+    /// does, but the session only stops being interactive later, off a background queue, so if the restart
+    /// launched its replacement without waiting, the launcher would be observed running before that flip.
+    func testRestartWaitsForTheOldSessionToStopBeingInteractiveBeforeLaunchingTheReplacement() throws {
+        final class ExitTiming: @unchecked Sendable {
+            var exitedAt: Date?
+            var launchInvokedAt: Date?
+        }
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let capture = TerminalOpenCapture()
+        let timing = ExitTiming()
+        let exitDelay: TimeInterval = 0.2
+        let orchestrator = makeTestOrchestrator(
+            store: store,
+            builtInTerminalWindowOpener: { sessionID, _, openIntent in
+                capture.sessionIDs.append(sessionID)
+                capture.openIntents.append(openIntent)
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                try? paths.ensureDirectories()
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                try? seedTerminalSessionRow(sessionID: sessionID, paths: paths)
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 9876, state: .running,
+                        updatedAt: "2026-05-11T18:00:00Z"), paths: paths)
+            },
+            builtInTerminalSessionTerminator: { sessionID in
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                // Both the bulk restart terminate and `restartProcessInTerminal`'s own per-process
+                // terminate call this for the same session; the second call must be a no-op once the
+                // delayed exit below has already landed, or it would push `exitedAt` out again and make
+                // this test fail even when the wait it exercises is implemented correctly.
+                if let existing = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !existing.state.isInteractive { return }
+                DispatchQueue.global().asyncAfter(deadline: .now() + exitDelay) {
+                    // Stamped before the write that ends the session, so a launch released by that write
+                    // can never be timestamped earlier than the exit it waited for.
+                    timing.exitedAt = Date()
+                    try? TerminalSessionPersistence.writeRuntimeState(
+                        .init(
+                            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .exited,
+                            updatedAt: "2026-05-11T18:05:00Z"), paths: paths)
+                }
+            },
+            builtInTerminalSessionLauncher: { configuration in
+                timing.launchInvokedAt = Date()
+                return try TerminalService.createSession(configuration)
+            })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "echo api")])
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
+            timing.launchInvokedAt = nil
+            try orchestrator.restartWorkspace(workspaceID: workspace.id)
+        }
+
+        let exitedAt = try XCTUnwrap(timing.exitedAt, "the fake terminator's delayed exit ran")
+        let launchInvokedAt = try XCTUnwrap(timing.launchInvokedAt, "the replacement was launched")
+        XCTAssertGreaterThanOrEqual(launchInvokedAt, exitedAt, "the replacement launch waits for the old session to stop being interactive first")
     }
 
     /// The orchestrator shape every client mutation is served on: the Device API injects a window opener
@@ -1129,7 +1512,7 @@ extension OrchestratorTests {
                     .init(
                         sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 9876, state: .running,
                         updatedAt: "2026-05-11T18:00:00Z"), paths: paths)
-            }, deliversTerminalWindowOpens: false,
+            },
             builtInTerminalWindowCloser: { sessionID, disposition in
                 closes.sessionIDs.append(sessionID)
                 closes.dispositions.append(disposition)
@@ -1238,10 +1621,10 @@ extension OrchestratorTests {
         XCTAssertEqual(closesForEndedSession, [.awaitReplacement, .teardown], "the hold is placed by the stop and released when the launch fails")
     }
 
-    /// Restarting a running target keeps its pane for the replacement on the same orchestrator, which is
-    /// the shape every client's Restart action runs on. The target's row survives the restart naming the
-    /// replacement, so the pairing reaches the client in the refreshed overview exactly as a start's does.
-    func testRestartingARunningProcessHoldsItsPaneForTheReplacement() throws {
+    /// Restarting one running target through the public single-process API relaunches it through the same
+    /// `restartProcessInTerminal(reason: .restart)` a whole-workspace restart uses, so it never asks a
+    /// client to open or close a pane either: the row keeps its id and only the session it names changes.
+    func testRestartingARunningProcessNeverAsksAClientToOpenOrCloseAPane() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try makeTemporaryStore()
@@ -1261,10 +1644,12 @@ extension OrchestratorTests {
             try orchestrator.restartWorkspaceProcess(workspaceID: workspace.id, processID: api.id)
         }
 
+        // The cold launch is the only thing that ever opens a pane, so its session is the previous one.
         let previousSessionID = try XCTUnwrap(opens.sessionIDs.first)
-        let closesForPreviousSession = zip(closes.sessionIDs, closes.dispositions).filter { $0.0 == previousSessionID }.map(\.1)
-        XCTAssertEqual(closesForPreviousSession, [.awaitReplacement], "the running session's pane is held rather than removed")
-        XCTAssertEqual(opens.openIntents.map(\.replacesSessionID), [nil, previousSessionID])
+        XCTAssertEqual(opens.sessionIDs.count, 1, "only the cold launch opens a pane; the restart opens none")
+        XCTAssertTrue(closes.sessionIDs.isEmpty, "the restart closes no pane for the session it replaces")
+        let restarted = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == "api" }))
+        XCTAssertNotEqual(restarted.terminalTrackingID, previousSessionID, "the row now names a fresh session the restart never opened")
     }
 
     /// Stopping a runtime target removes its pane, so its close stays a plain teardown however the
@@ -1293,55 +1678,23 @@ extension OrchestratorTests {
         XCTAssertFalse(closes.dispositions.contains(.awaitReplacement), "and never as a hold, since nothing is coming to claim it")
     }
 
-    /// A workspace restart keeps tearing its panes down on an orchestrator that cannot post the opens.
-    /// Its holds are placed by the stop, for every process at once and before it knows which templates it
-    /// will relaunch, and only the daemon's own release pass ends the ones no relaunch reached, so that
-    /// path still requires a client that will receive the replacements' opens.
-    func testAWorkspaceRestartThatCannotOpenPanesNeverAsksAClientToHoldOne() throws {
+    /// A configured process that fails to relaunch does not stop the others: the restart keeps going,
+    /// leaves the failed process's row naming its now-ended session and marked exited, and still throws
+    /// one error naming it once every process has been tried. The workspace stays running throughout, and
+    /// nothing here ever asks a client to open or close a pane, whether the relaunch succeeds or fails.
+    func testFailedRestartLeavesItsRowExitedRelaunchesTheOthersAndThrowsNamingIt() throws {
+        struct TerminalLaunchFailure: Error {}
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try makeTemporaryStore()
         let opens = TerminalOpenCapture()
         let closes = TerminalCloseCapture()
-        let orchestrator = makeDeviceAPIShapedOrchestrator(store: store, opens: opens, closes: closes)
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "echo api")])
-
-        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try orchestrator.launchWorkspace(workspaceID: workspace.id)
-            try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: true)
-        }
-
-        XCTAssertFalse(closes.dispositions.isEmpty, "the restart does close the previous session's pane")
-        XCTAssertFalse(closes.dispositions.contains(.awaitReplacement), "but never as a hold this orchestrator could not release")
-    }
-
-    /// The hold a restart places on a pane is bounded by the restart, not by a timer, and there are two
-    /// ways it ends when the relaunch goes wrong.
-    ///
-    /// A template whose launch was attempted has already had its open posted, so the client retargeted
-    /// the held pane onto the replacement session; that pane is then cleaned up under the *new* session
-    /// id by the launch's own failure close. A template the batch never reached has no open at all, and
-    /// its pane would be held forever, so the restart releases it under the old session id on its way
-    /// out. This exercises the second, which is the one only the daemon can know about: the client has no
-    /// way to learn that a replacement stopped being on its way.
-    func testFailedRestartReleasesTheHeldPaneOfATemplateItNeverReached() throws {
-        struct TerminalLaunchFailure: Error {}
-        let root = try makeTempDirectory()
-        let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try makeTemporaryStore()
-        let capture = TerminalOpenCapture()
-        let closes = TerminalCloseCapture()
         let launchCount = TerminalLaunchAttemptCapture()
         let orchestrator = makeTestOrchestrator(
             store: store,
             builtInTerminalWindowOpener: { sessionID, _, openIntent in
-                capture.sessionIDs.append(sessionID)
-                capture.openIntents.append(openIntent)
+                opens.sessionIDs.append(sessionID)
+                opens.openIntents.append(openIntent)
                 guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
                 try? paths.ensureDirectories()
                 FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
@@ -1362,11 +1715,11 @@ extension OrchestratorTests {
                         sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .exited,
                         updatedAt: "2026-05-11T18:05:00Z"), paths: paths)
             },
-            // Both cold launches succeed; the relaunch throws on the first template, so the batch never
-            // reaches the second and that one's pane is left held with no open ever posted for it.
+            // The two cold launches (api, then web) succeed; the restart's relaunch of "api" (the third
+            // launch attempt) fails, and the restart's relaunch of "web" (the fourth) still runs.
             builtInTerminalSessionLauncher: { configuration in
                 launchCount.count += 1
-                if launchCount.count > 2 { throw TerminalLaunchFailure() }
+                if launchCount.count == 3 { throw TerminalLaunchFailure() }
                 let paths = try TerminalSessionPaths.forSession(id: configuration.sessionID)
                 try paths.ensureDirectories()
                 try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
@@ -1386,18 +1739,36 @@ extension OrchestratorTests {
             workspaceID: workspace.id,
             processes: [ProcessTemplate(name: "api", command: "echo api"), ProcessTemplate(name: "web", command: "echo web")])
 
+        var apiSessionBeforeRestart: String?
+        var webSessionBeforeRestart: String?
+        var opensFromColdLaunch = 0
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             try orchestrator.launchWorkspace(workspaceID: workspace.id)
-            XCTAssertThrowsError(try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: true))
+            // The cold launch legitimately opens a pane for each configured process; only the restart that
+            // follows is under test below.
+            opensFromColdLaunch = opens.sessionIDs.count
+            let processes = try store.runningProcesses(workspaceID: workspace.id)
+            apiSessionBeforeRestart = processes.first(where: { $0.templateName == "api" })?.terminalTrackingID
+            webSessionBeforeRestart = processes.first(where: { $0.templateName == "web" })?.terminalTrackingID
+            XCTAssertThrowsError(try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: true)) { error in
+                let message = String(describing: error)
+                XCTAssertTrue(message.contains("api"), "the error names the process that failed to relaunch")
+            }
         }
 
-        // The cold launch opened api then web, so the second session is the one whose template the failed
-        // relaunch never reached.
-        XCTAssertEqual(capture.sessionIDs.count, 3, "two cold launches, then the one relaunch that was attempted")
-        let unreachedSessionID = try XCTUnwrap(capture.sessionIDs.dropFirst().first)
-        let unreachedCloses = zip(closes.sessionIDs, closes.dispositions).filter { $0.0 == unreachedSessionID }.map(\.1)
-        XCTAssertEqual(
-            unreachedCloses, [.awaitReplacement, .teardown], "the hold is placed by the stop and released when the relaunch never reaches it")
+        XCTAssertEqual(opens.sessionIDs.count, opensFromColdLaunch, "neither the successful nor the failed relaunch ever asks to open a pane")
+        XCTAssertTrue(closes.sessionIDs.isEmpty, "neither the successful nor the failed relaunch ever asks to close a pane")
+
+        let processesAfterRestart = try store.runningProcesses(workspaceID: workspace.id)
+        let api = try XCTUnwrap(processesAfterRestart.first(where: { $0.templateName == "api" }))
+        XCTAssertEqual(api.terminalTrackingID, apiSessionBeforeRestart, "the failed relaunch leaves its row naming its old, now-ended session")
+        XCTAssertEqual(api.status, .exited, "and marks that row exited rather than leaving it reading running with nothing behind it")
+
+        let web = try XCTUnwrap(processesAfterRestart.first(where: { $0.templateName == "web" }))
+        XCTAssertNotEqual(web.terminalTrackingID, webSessionBeforeRestart, "the other process still relaunches onto a fresh session")
+        XCTAssertEqual(web.status, .running)
+
+        XCTAssertTrue(try store.workspace(id: workspace.id)?.isRunning ?? false, "the workspace stays running despite the failed relaunch")
     }
 
     func testUpdateWorkspaceSettingsDoesNotRestartRecoveredNamedProcess() throws {
@@ -2323,7 +2694,10 @@ extension OrchestratorTests {
         XCTAssertEqual(restarted.status, .running, "the explicit per-process restart action still relaunches a removed process via the fallback")
     }
 
-    func testRestartWorkspaceStopsThenLaunches() throws {
+    /// A tracked `running_processes` row whose template is no longer in the workspace's configuration (the
+    /// workspace here configures none at all) is stopped and its row removed rather than relaunched: the
+    /// restart applies the current configuration, not whatever was tracked before it ran.
+    func testRestartWorkspaceStopsAndRemovesARowNoLongerConfigured() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
@@ -2337,17 +2711,150 @@ extension OrchestratorTests {
         try withMockCommands(["osascript": Self.orchestratorOsaScriptMock]) { try orchestrator.restartWorkspace(workspaceID: workspace.id) }
 
         let running = try orchestrator.runningProcesses(workspaceID: workspace.id)
-        XCTAssertTrue(running.isEmpty)
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
+        XCTAssertTrue(running.isEmpty, "the untracked-by-configuration row is removed rather than relaunched")
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true, "the restart still ends running")
+    }
+
+    /// A tracked row no longer configured, and a newly configured template with no row yet, land on the
+    /// same restart when a process is removed and a differently named one added in its place. The stale
+    /// row's stop must run before the replacement launches: it is what frees the port (or, for a built-in
+    /// terminal, releases the workspace-mutation boundary) the replacement is about to claim, so restoring
+    /// it after the launch instead would race the new process for the same slot.
+    func testRestartWorkspaceStopsStaleRowBeforeLaunchingANewlyConfiguredProcess() throws {
+        final class OrderedCallCapture: @unchecked Sendable { var events: [String] = [] }
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let order = OrderedCallCapture()
+        let orchestrator = makeTestOrchestrator(
+            store: store,
+            builtInTerminalWindowOpener: { sessionID, _, _ in
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                try? paths.ensureDirectories()
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                try? seedTerminalSessionRow(sessionID: sessionID, paths: paths)
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 9876, state: .running,
+                        updatedAt: "2026-05-11T18:00:00Z"), paths: paths)
+            }, builtInTerminalWindowCloser: { _, _ in },
+            builtInTerminalSessionTerminator: { sessionID in
+                order.events.append("terminate:\(sessionID)")
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .exited,
+                        updatedAt: "2026-05-11T18:05:00Z"), paths: paths)
+            },
+            builtInTerminalSessionLauncher: { configuration in
+                order.events.append("launch:\(configuration.sessionID)")
+                let paths = try TerminalSessionPaths.forSession(id: configuration.sessionID)
+                try paths.ensureDirectories()
+                try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+                return TerminalServiceSessionSummary(
+                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: getpid(),
+                    childPID: 9876, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath)
+            })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(id: "old-template", name: "old", command: "echo old")])
+
+        var staleSessionID = ""
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
+            staleSessionID = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first?.terminalTrackingID)
+            order.events.removeAll()
+            // Removes "old" outright and configures "new" in its place, bypassing the reconciler that
+            // would otherwise stop/launch them right away, so the restart below is what has to resolve
+            // both: "old"'s row is now stale, and "new" is configured with no row at all.
+            try store.setWorkspaceProcesses(
+                workspaceID: workspace.id, processes: [ProcessTemplate(id: "new-template", name: "new", command: "echo new")])
+
+            try orchestrator.restartWorkspace(workspaceID: workspace.id)
+        }
+
+        let terminateIndex = try XCTUnwrap(order.events.firstIndex(of: "terminate:\(staleSessionID)"))
+        let launchIndex = try XCTUnwrap(order.events.firstIndex { $0.hasPrefix("launch:") })
+        XCTAssertLessThan(terminateIndex, launchIndex, "the stale row is stopped before the newly configured process launches")
+
+        let running = try store.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(running.map(\.templateName), ["new"], "the stale row is gone and the newly configured process is tracked")
+        XCTAssertEqual(running.first?.status, .running)
+    }
+
+    /// `restartWorkspaceUnlocked`'s stale-row cleanup runs before the relaunch loop and deletes rows
+    /// outright, so it needs its own handoff guard: `stopRunningProcess` carries none of its own. A
+    /// handoff that begins right after the post-stop-script check (the guard immediately before this
+    /// cleanup) must be caught there, leaving the stale row exactly as it was rather than deleted out from
+    /// under a session the successor daemon is about to inherit.
+    func testHandoffDuringTheStaleRowCleanupLeavesTheStaleRowInPlace() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let handoffCheckCount = TerminalLaunchAttemptCapture()
+        let terminateCapture = TerminalTerminateCapture()
+        let orchestrator = makeTestOrchestrator(
+            store: store,
+            builtInTerminalWindowOpener: { sessionID, _, _ in
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+                try? paths.ensureDirectories()
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                try? seedTerminalSessionRow(sessionID: sessionID, paths: paths)
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 9876, state: .running,
+                        updatedAt: "2026-05-11T18:00:00Z"), paths: paths)
+            }, builtInTerminalWindowCloser: { _, _ in },
+            builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) },
+            // False for the restart's entry check and the post-stop-script check; true from the stale-row
+            // cleanup's own handoff guard onward, modeling a handoff that begins only after the stop
+            // script's check already passed.
+            daemonHandoffInProgress: {
+                handoffCheckCount.count += 1
+                return handoffCheckCount.count > 2
+            })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "echo api")])
+
+        var staleSessionID = ""
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
+            staleSessionID = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first?.terminalTrackingID)
+            // Removes "api" from settings entirely, bypassing the reconciler that would otherwise stop it
+            // right away, so the cold launch's row is stale by the time the restart below runs.
+            try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [])
+
+            XCTAssertThrowsError(try orchestrator.restartWorkspace(workspaceID: workspace.id)) { error in
+                guard case WorkspaceError.daemonHandoffInProgress = error else {
+                    XCTFail("expected the stale-row cleanup's handoff guard to refuse the restart, got \(error)")
+                    return
+                }
+            }
+        }
+
+        XCTAssertTrue(terminateCapture.sessionIDs.isEmpty, "the handoff guard fires before the stale row's session is ever terminated")
+        let process = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first)
+        XCTAssertEqual(process.status, .running, "the stale row is left exactly as it was")
+        XCTAssertEqual(process.terminalTrackingID, staleSessionID)
     }
 
     /// Every client (Mac, iOS, CLI, MCP) reads a workspace's running state off this flag, so a restart
     /// that transiently reports the workspace stopped would make every one of them react to a stop the
     /// user never asked for, closing tracked browser tabs and code panes along the way (#799).
-    /// This samples the flag at the two points a restart's stop-then-launch actually touches it: closing
-    /// each configured process's old session, and launching its replacement. Neither ever observes the
-    /// workspace stopped, even though `running_processes`/`windows` rows are briefly empty in between
-    /// (the stop's teardown has run, but the launch has not inserted the replacement's rows yet).
+    /// This samples the flag at the two points a restart actually touches it: terminating each configured
+    /// process's old session, and launching its replacement. Neither ever observes the workspace stopped,
+    /// even though the relaunched process's own row is momentarily between the old and new session in
+    /// between (its terminal has ended but the replacement has not landed yet).
     func testRestartWorkspaceNeverReportsStoppedWhileInFlight() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
@@ -2365,8 +2872,8 @@ extension OrchestratorTests {
                         sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 9876, state: .running,
                         updatedAt: "2026-05-11T18:00:00Z"), paths: paths)
             },
-            builtInTerminalWindowCloser: { _, _ in samples.sample() },
             builtInTerminalSessionTerminator: { sessionID in
+                samples.sample()
                 guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
                 try? TerminalSessionPersistence.writeRuntimeState(
                     .init(
@@ -2401,16 +2908,16 @@ extension OrchestratorTests {
             try orchestrator.restartWorkspace(workspaceID: workspace.id)
         }
 
-        XCTAssertFalse(samples.samples.isEmpty, "the restart's close and relaunch hooks both fired and were sampled")
+        XCTAssertFalse(samples.samples.isEmpty, "the restart's terminate and relaunch hooks both fired and were sampled")
         XCTAssertTrue(samples.samples.allSatisfy { $0 }, "no sample taken while the restart was in flight ever saw the workspace stopped")
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true, "the successful restart still ends running")
     }
 
-    /// A restart's stop phase deliberately leaves the workspace marked running for the whole restart
-    /// (issue #799), so a relaunch that fails is the only place left to fall back to the stopped state a
-    /// failed restart has always produced; otherwise the workspace would be stranded marked running with
-    /// nothing behind it. Same fixture shape as `testFailedRestartReleasesTheHeldPaneOfATemplateItNeverReached`.
-    func testFailedRestartLeavesTheWorkspaceStopped() throws {
+    /// A restart that fails to relaunch its one configured process still leaves the workspace marked
+    /// running (#799): there is no other process for the workspace to fall back on being stopped by, and a
+    /// user whose relaunch failed still has a workspace to look at and retry from, not one that vanished
+    /// out from under them. The failed process's own row is what carries the failure, marked exited.
+    func testFailedRestartLeavesTheWorkspaceRunning() throws {
         struct TerminalLaunchFailure: Error {}
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
@@ -2427,8 +2934,7 @@ extension OrchestratorTests {
                     .init(
                         sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 9876, state: .running,
                         updatedAt: "2026-05-11T18:00:00Z"), paths: paths)
-            },
-            builtInTerminalWindowCloser: { _, _ in },
+            }, builtInTerminalWindowCloser: { _, _ in },
             builtInTerminalSessionTerminator: { sessionID in
                 guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
                 try? TerminalSessionPersistence.writeRuntimeState(
@@ -2457,20 +2963,56 @@ extension OrchestratorTests {
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "echo api")])
 
+        var sessionBeforeRestart: String?
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             try orchestrator.launchWorkspace(workspaceID: workspace.id)
-            XCTAssertThrowsError(try orchestrator.restartWorkspace(workspaceID: workspace.id))
+            sessionBeforeRestart = try store.runningProcesses(workspaceID: workspace.id).first?.terminalTrackingID
+            XCTAssertThrowsError(try orchestrator.restartWorkspace(workspaceID: workspace.id)) { error in
+                XCTAssertTrue(String(describing: error).contains("api"), "the error names the process that failed to relaunch")
+            }
         }
 
-        XCTAssertEqual(
-            try store.workspace(id: workspace.id)?.isRunning, false, "a restart whose relaunch fails ends stopped, like a plain stop would")
-        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty, "the failed relaunch leaves no running-process row behind")
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true, "the restart still ends the workspace running")
+        let processes = try store.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(processes.count, 1, "the failed process's row is kept rather than dropped")
+        XCTAssertEqual(processes.first?.status, .exited, "and marked exited")
+        XCTAssertEqual(processes.first?.terminalTrackingID, sessionBeforeRestart, "still naming the old, now-ended session")
     }
 
-    /// Restart's semantics are unchanged by Start's convergence (issue #438): unlike Start, restart still
-    /// forces a full stop first, which tears down ad hoc terminals and coding-agent sessions too, then
-    /// relaunches configured processes fresh rather than leaving the already-running one alone.
-    func testRestartWorkspaceStillTearsDownAdHocTerminalAndCodingAgent() throws {
+    /// A restart runs the workspace's configured stop script before relaunching anything, the same as a
+    /// plain stop does, and then relaunches every configured process onto a fresh session while keeping
+    /// each row's id (#799).
+    func testRestartWorkspaceRunsStopScriptAndRelaunchesEveryProcessKeepingItsRowID() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let marker = root.appendingPathComponent("restart-stop-script-marker.txt")
+        try store.setWorkspaceProcesses(
+            workspaceID: workspace.id,
+            processes: [ProcessTemplate(name: "api", command: "echo api"), ProcessTemplate(name: "web", command: "echo web")])
+        try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: "echo ran > '\(marker.path)'")
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "row-api", workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: "Spaces", terminalTarget: nil,
+                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "row-web", workspaceID: workspace.id, templateName: "web", command: "echo web", terminalApp: "Spaces", terminalTarget: nil,
+                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        try withMockCommands(["osascript": Self.orchestratorOsaScriptMock]) { try orchestrator.restartWorkspace(workspaceID: workspace.id) }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "the restart ran the workspace's stop script")
+        let processes = try store.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(Set(processes.map(\.id)), ["row-api", "row-web"], "every configured process's row keeps its id across the relaunch")
+        XCTAssertTrue(
+            processes.allSatisfy { $0.status == .running && $0.terminalTrackingID != nil }, "and every one relaunches onto a fresh, running session")
+    }
+
+    /// A restart relaunches configured processes only (#799): a coding agent and an ad hoc terminal in the
+    /// same workspace are neither of those, so they keep running through the restart untouched, and the
+    /// configured process's own row is reused in place (same id, only the session it names changes) rather
+    /// than deleted and recreated.
+    func testRestartWorkspaceLeavesAdHocTerminalAndCodingAgentRunning() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "echo api")])
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
@@ -2491,10 +3033,12 @@ extension OrchestratorTests {
 
         let processes = try store.runningProcesses(workspaceID: workspace.id)
         XCTAssertEqual(processes.map(\.templateName), ["api"])
-        XCTAssertNotEqual(processes.first?.id, "old-api", "restart relaunches the configured process fresh instead of leaving it running")
+        XCTAssertEqual(processes.first?.id, "old-api", "the configured process's row is reused in place, not deleted and recreated")
+        XCTAssertEqual(processes.first?.status, .running)
         XCTAssertTrue(
-            try store.windows(workspaceID: workspace.id).allSatisfy { $0.id != "ad-hoc-window" }, "restart also tears down ad hoc terminals")
-        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty, "restart also ends coding-agent sessions")
+            try store.windows(workspaceID: workspace.id).contains(where: { $0.id == "ad-hoc-window" }), "restart leaves the ad hoc terminal running")
+        XCTAssertTrue(
+            try store.agentWindows(workspaceID: workspace.id).contains(where: { $0.id == "agent-codex" }), "restart leaves the coding agent running")
     }
 
     func testUpWorkspaceLaunchesWhenStopped() throws {
@@ -2691,7 +3235,10 @@ extension OrchestratorTests {
 
     // MARK: - upWorkspace restart-exited-processes path
 
-    func testUpWorkspaceWithRestartIfRunningStopsThenRestarts() throws {
+    /// `upWorkspace(restartIfRunning: true)` routes through the same in-place restart `restartWorkspace`
+    /// uses. With no configured processes at all, the tracked row here resolves to no template, so the
+    /// restart stops and drops it rather than relaunching it (#799).
+    func testUpWorkspaceWithRestartIfRunningDropsAnUntemplatedRow() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
 

@@ -94,19 +94,18 @@ export default function WorkspacesDocsPage() {
             closes its panes and its Chrome tabs, then runs the stop script.
           </li>
           <li>
-            • <strong>Restart</strong> is a full stop followed by a fresh start, and it also ends
-            the workspace&apos;s ad hoc terminals and agent sessions.
+            • <strong>Restart</strong> relaunches every configured process, running the stop
+            script first. Ad hoc terminals, agent sessions, and running automations are left alone.
           </li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Restarting a single process, from any client, keeps its pane in place: the replacement
-          session takes over the same tab and split the old one had. Restarting a whole workspace
-          keeps its Chrome tabs and the Editor open, and closes the panes of ad hoc terminals and
-          agents, since their sessions end. Its process panes stay in place when you restart from
-          the CLI or MCP on the Mac; today, restarting from the Mac app or the iPhone can close
-          them. Starting or restarting a workspace from the CLI or MCP never moves focus in the Mac
-          app. See{" "}
-          <DocLink href="/docs/restarts">What survives a restart</DocLink> for quitting and
+          Restarting, whether one process or a whole workspace and from any client, keeps each
+          process&apos;s pane in place: the new session takes over the same tab and split, on every
+          Mac and iPhone watching. A restart never opens a pane or moves focus, so a process without
+          a pane stays without one, and a process that fails to come back keeps its pane showing
+          where it stopped. Chrome tabs and the Editor stay open. Starting a workspace from the CLI
+          or MCP never moves focus in the Mac app.
+          See <DocLink href="/docs/restarts">What survives a restart</DocLink> for quitting and
           rebooting.
         </p>
       </Section>
