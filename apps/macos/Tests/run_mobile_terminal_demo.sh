@@ -10,6 +10,7 @@ source "$script_dir/e2e_fixture_repos.sh"
 source "$script_dir/pairing_link_endpoint.sh"
 source "$repo_root/scripts/spaces-profile-helpers.sh"
 source "$repo_root/scripts/ios-simulator-lifecycle.sh"
+source "$script_dir/e2e_ui_automation.sh"
 # Drop any binding this shell was started with, before anything resolves a profile or runs a demo child.
 # A `user` run must stay unbound so every repo-local binary resolves the worktree profile it belongs to; an
 # `isolated` run names its own ephemeral root afterwards through `demo_profile_env`, which is the one thing
@@ -746,7 +747,11 @@ wait_for_pid() {
 # demo's `spaces terminal show` racing that ~700ms window, and losing it meant no owner attachment
 # ever appeared for the session.
 wait_for_spaces_app_ready() {
-  local deadline=$((SECONDS + 30))
+  # SetupFlowController's local-agent probe can take up to 25 seconds before the optional setup step
+  # renders, so the launch bound adds that budget on top of the ordinary 30-second launch allowance.
+  local setup_status_timeout_seconds=25
+  local deadline=$((SECONDS + setup_status_timeout_seconds + 30))
+  local next_setup_probe=0
   while [[ $SECONDS -lt $deadline ]]; do
     if ! ps -p "$app_pid" >/dev/null 2>&1; then
       echo "SpacesApp exited before its first sidebar snapshot was applied." >&2
@@ -755,6 +760,16 @@ wait_for_spaces_app_ready() {
     fi
     if grep -q 'spaces: startup stage=sidebar_snapshot_applied' "$app_log" 2>/dev/null; then
       return
+    fi
+    # The optional "Connect your coding agents" setup step reads hook status from the real home
+    # even under this lane's isolated profile (hook files are machine state, not per-profile), so a
+    # machine with stale hooks offers the step regardless of isolation and holds back the first
+    # sidebar snapshot until it is dismissed. Drive it closed as soon as the log shows it was
+    # offered. The AX probe is slow, so it runs at most once per second rather than on every 0.2s
+    # poll.
+    if [[ $SECONDS -ge $next_setup_probe ]] && grep -q 'spaces: startup stage=setup_flow_started' "$app_log" 2>/dev/null; then
+      SPACES_PID="$app_pid" drive_coding_agents_setup_step_if_offered
+      next_setup_probe=$((SECONDS + 1))
     fi
     sleep 0.2
   done
