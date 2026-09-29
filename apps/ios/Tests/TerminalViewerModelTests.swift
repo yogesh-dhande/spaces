@@ -6125,7 +6125,8 @@
         /// routes to `recoverEndedStateAfterTerminalStopped`'s own state fetch; that fetch is the last
         /// thing that can ever prove the outage over, since no stream frame arrives for an ended session.
         func testInputRefusedForAnEndedSessionRecoveryClearsTheBanner() async throws {
-            let transport = EndedSessionRefusesInputRequestTransport()
+            let owner = OwnerAttachmentBox()
+            let transport = EndedSessionRefusesInputRequestTransport(owner: owner)
             let backend = StageTrackerTestBackend(transportFactory: { transport })
             let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
             let model = TerminalViewerModel(
@@ -6137,6 +6138,9 @@
             await backend.waitForSubscribeCount(1)
             await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            // See `OwnerAttachmentBox`'s doc comment: without this, the silent reconnect `fireDisconnect`
+            // arms would read back "no owner" and make `sendKey` below a silent no-op on a slow runner.
+            owner.setOwner(model.remoteClientForTesting)
             await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
             await waitUntil("the banner to appear", timeout: .seconds(2)) { model.isConnectionBannerVisible }
 
@@ -6659,7 +6663,9 @@
         /// Typing must never be held back by the banner: an input attempt still sends while the banner is
         /// on screen, and pulses the banner as visible acknowledgement of the attempt.
         func testInputStillSendsAndPulsesTheBannerWhileItIsVisible() async throws {
-            let backend = StageTrackerTestBackend()
+            let owner = OwnerAttachmentBox()
+            let transport = StalledStreamRequestTransport(owner: owner)
+            let backend = StageTrackerTestBackend(transportFactory: { transport })
             let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
@@ -6670,6 +6676,10 @@
             await backend.waitForSubscribeCount(1)
             await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            // The silent reconnect `fireDisconnect` arms below reads state through this same transport;
+            // without telling it who owns the session, its default empty answer would wipe the ownership
+            // just configured (see `OwnerAttachmentBox`'s doc comment).
+            owner.setOwner(model.remoteClientForTesting)
             await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
             await waitUntil("the banner to appear", timeout: .seconds(2)) { model.isConnectionBannerVisible }
             let pulseCountBeforeSend = model.connectionBannerPulseCount
@@ -6688,7 +6698,9 @@
         /// keystroke at all here. Pulsing at enqueue time, before the item joins the queue, fires it
         /// immediately regardless of what the queue is doing.
         func testASecondKeystrokePulsesImmediatelyEvenWhileAnEarlierSendIsStalled() async throws {
-            let backend = StageTrackerTestBackend(transportFactory: { StallFirstKeySendRequestTransport() })
+            let owner = OwnerAttachmentBox()
+            let transport = StallFirstKeySendRequestTransport(owner: owner)
+            let backend = StageTrackerTestBackend(transportFactory: { transport })
             let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
@@ -6699,6 +6711,9 @@
             await backend.waitForSubscribeCount(1)
             await waitForColdOpenToSettle(model)
             await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            // See `OwnerAttachmentBox`'s doc comment: without this, the silent reconnect `fireDisconnect`
+            // arms would read back "no owner" and make the sends below silent no-ops on a slow runner.
+            owner.setOwner(model.remoteClientForTesting)
             await backend.fireDisconnect(SpacesDeviceAPIClientError.streamStalled)
             await waitUntil("the banner to appear", timeout: .seconds(2)) { model.isConnectionBannerVisible }
             let pulseCountBeforeAnySend = model.connectionBannerPulseCount
@@ -8392,7 +8407,44 @@
             }
         }
 
+        /// Lets a canned `.state` transport answer a reconnect's bootstrap read with the owner a test
+        /// configured through `configureOwnerInteractiveForTesting`, instead of the default empty
+        /// snapshot. `TerminalViewerModel.init` builds the transport (via `backend.makeRequestTransport()`
+        /// inside `makeCommandChannel()`) before it mints `remoteClient`, so no owner is knowable at
+        /// construction time; a test sets one into this box once the model exists, and the box is read
+        /// fresh on every `.state` answer that same transport instance gives afterward.
+        ///
+        /// Without this, `fireDisconnect` arms a silent reconnect (`TerminalViewerModel.silentReconnectDelay`)
+        /// whose own bootstrap `.state` read is answered with an empty snapshot: `merged(with:)` replaces
+        /// the attachment snapshot outright on any non-nil update, so that answer wipes the ownership the
+        /// test just configured. A test that polls for the banner and then sends a key is racing that
+        /// reconnect against its own `sendKey`; on a slow runner the reconnect can land first, `isOwner`
+        /// goes false, and `sendKey`'s `guard isOwner else { return }` makes it a silent no-op.
+        private final class OwnerAttachmentBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var client: TerminalClient?
+
+            func setOwner(_ client: TerminalClient) {
+                lock.lock()
+                defer { lock.unlock() }
+                self.client = client
+            }
+
+            func snapshot() -> TerminalSessionAttachmentSnapshot {
+                lock.lock()
+                defer { lock.unlock() }
+                guard let client else { return TerminalSessionAttachmentSnapshot() }
+                let attachment = TerminalAttachment(
+                    sessionID: "terminal-session", clientID: client.id, mode: .owner, attachedAt: "2026-01-01T00:00:00Z")
+                return TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment])
+            }
+        }
+
         private struct StalledStreamRequestTransport: SpacesDeviceAPIRequestTransport {
+            private let owner: OwnerAttachmentBox
+
+            init(owner: OwnerAttachmentBox = OwnerAttachmentBox()) { self.owner = owner }
+
             func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
                 if let acknowledgement = TerminalViewerModelTests.attachAcknowledgement(for: request) { return acknowledgement }
                 // The reconnect reads state before it resubscribes, and a read that answers `ok` without
@@ -8400,8 +8452,7 @@
                 // would, leaving the stall as the only thing under test.
                 if case .state = request.command {
                     return TerminalViewerModelTests.terminalStateResponse(
-                        TerminalViewerModelTests.runningTerminalState(
-                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:31Z"))
+                        TerminalViewerModelTests.runningTerminalState(attachmentSnapshot: owner.snapshot(), emittedAt: "2026-06-04T14:23:31Z"))
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
@@ -9791,12 +9842,14 @@
         /// immediately: only the head-of-queue item is meant to be stuck.
         private actor StallFirstKeySendRequestTransport: SpacesDeviceAPIRequestTransport {
             private var hasStalledFirstKeySend = false
+            private let owner: OwnerAttachmentBox
+
+            init(owner: OwnerAttachmentBox = OwnerAttachmentBox()) { self.owner = owner }
 
             func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
                 if case .state = request.command {
                     return TerminalViewerModelTests.terminalStateResponse(
-                        TerminalViewerModelTests.runningTerminalState(
-                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:31Z"))
+                        TerminalViewerModelTests.runningTerminalState(attachmentSnapshot: owner.snapshot(), emittedAt: "2026-06-04T14:23:31Z"))
                 }
                 if case .terminalControl(let payload) = request.command, payload.action == .key, !hasStalledFirstKeySend {
                     hasStalledFirstKeySend = true
@@ -9992,6 +10045,9 @@
         /// an open viewer. Everything else answers `ok`.
         private actor EndedSessionRefusesInputRequestTransport: SpacesDeviceAPIRequestTransport {
             private var sessionEnded = false
+            private let owner: OwnerAttachmentBox
+
+            init(owner: OwnerAttachmentBox = OwnerAttachmentBox()) { self.owner = owner }
 
             func setSessionEnded(_ value: Bool) { sessionEnded = value }
 
@@ -10003,9 +10059,12 @@
                                 childPID: 200, state: .exited, reason: TerminalRemoteSessionStateReason.terminated.rawValue,
                                 emittedAt: "2026-06-04T14:24:00Z"))
                     }
+                    // Still-running answer, given before the test flips `sessionEnded`: this is what the
+                    // silent reconnect `fireDisconnect` triggers reads back before `setSessionEnded` runs, so
+                    // it has to report the owner the test configured (see `OwnerAttachmentBox`'s doc
+                    // comment) or the reconnect wipes ownership out from under the `sendKey` that follows.
                     return TerminalViewerModelTests.terminalStateResponse(
-                        TerminalViewerModelTests.runningTerminalState(
-                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:23:31Z"))
+                        TerminalViewerModelTests.runningTerminalState(attachmentSnapshot: owner.snapshot(), emittedAt: "2026-06-04T14:23:31Z"))
                 }
                 if sessionEnded, case .terminalControl(let payload) = request.command, payload.action == .key {
                     throw SpacesDeviceAPIClientError.requestFailed("terminal session is not running", code: .sessionNotRunning)
