@@ -86,13 +86,34 @@ struct RootTabView: View {
         }
         // The browser proxy serves the whole app, so its lifetime follows the app shell rather than the
         // Spaces tab: backgrounding closes its tunnels, and foregrounding restores them. Backgrounding
-        // also ends any run of failed refreshes, since a suspended app polls nothing and cannot claim the
-        // connection kept failing while it was away.
+        // also ends any run of failed refreshes, since a suspended app has no stream open and cannot claim
+        // the connection kept failing while it was away.
         .task {
             // A shell that mounts with the scene already backgrounded gets no `.background` change to arm
             // the endpoint gate from: see `noteInitialSceneIsBackgrounded`.
             model.noteInitialSceneIsBackgrounded(scenePhase == .background)
             model.browserProxyStart()
+            // A normal cold launch mounts already `.active` and gets no `.active` change of its own to
+            // start streams from below; a launch that restores into the background is left to the
+            // `.active` change whenever it actually comes to the foreground.
+            if scenePhase != .background {
+                model.startDeviceStreams()
+                // The initial load and its loading state: nothing else calls `refresh()` on a cold
+                // launch (device switch, pairing, and Demo Mode toggle already call it explicitly from
+                // Settings, and foreground resume goes through `resumeFromBackground()`), so without
+                // this, `overview` stays nil and `isLoading` stays false until the first stream frame
+                // lands, and a screen like `SpacesTabView` reads that as the empty state rather than
+                // loading for as long as the connect takes.
+                if model.settings.isPaired { await model.refresh() }
+            }
+        }.onDisappear {
+            // A StoreKit entitlement change can swap this shell out for the paywall while the scene
+            // stays `.active`, so no scene-phase change reaches `.background` to stop these (and end the
+            // failure-streak run alongside them) on its own. Idempotent alongside that branch:
+            // `stopDeviceStreams()` cancelling an already-disabled coordinator, clearing an already-nil
+            // relative-time task, and ending an already-ended streak are all no-ops, so disappearing and
+            // then actually backgrounding costs nothing extra.
+            model.stopDeviceStreams()
         }.onChange(of: scenePhase) { _, newPhase in
             DevicePerformanceLog.sceneChanged(phase: scenePhaseName(newPhase), openTerminal: model.activeTerminalSessionID != nil)
             switch newPhase {
@@ -103,21 +124,29 @@ struct RootTabView: View {
                 // paired device's cached active host means the next connect re-evaluates `hosts` from
                 // the top, preferring the LAN address again when it is reachable rather than staying on
                 // the slower tailnet path out of habit. That alone only resets the persisted store, so
-                // also reset the live client: it keeps its own in-memory resolver cache and open command
+                // also reset every live client: each one keeps its own in-memory resolver cache and open
                 // connection independent of the store until something makes it fail over on its own (see
-                // `SpacesDeviceEndpointResolver`), which the foreground reset inside
-                // `resumeFromBackground()` triggers. That reset deliberately
-                // leaves any open terminal viewer's own stream alone.
+                // `SpacesDeviceEndpointResolver`). The command path's live client is reset inside
+                // `resumeFromBackground()` below; every paired device's overview-stream resolver is reset
+                // right here, synchronously and before `startDeviceStreams()` reopens the streams
+                // (`resetDeviceStreamEndpointsForForeground()`), so a stream cannot reconnect straight to
+                // its previously proven winner ahead of this reset the way an unordered `Task` could.
+                // Both resets deliberately leave any open terminal viewer's own stream alone.
                 SpacesMobileDeviceStore.clearActiveHosts()
+                model.resetDeviceStreamEndpointsForForeground()
                 model.resumeTerminalWatch()
+                // Every paired device's overview stream is foreground-only; opened here rather than
+                // awaited alongside the read below, since a stream reconnecting is not itself something a
+                // screen needs to wait on the way `resumeFromBackground()`'s endpoint reset is.
+                model.startDeviceStreams()
                 // The endpoint reset and the one read of the device the shell does on this transition,
                 // in that order and in a single task: see `resumeFromBackground`. The read is here at the
-                // shell because several screens poll nothing at all (the Settings tab, an open terminal or
-                // browser detail) and a returning tab's own first poll can be a whole interval away.
+                // shell rather than left to the stream's own reconnect, since it also proves the foreground
+                // endpoint re-preference actually reached a live connection before other screens' redials
+                // are released (`waitForForegroundEndpointRefresh`).
                 Task { await model.resumeFromBackground() }
             case .background:
                 model.browserProxyStop()
-                model.noteConnectionMonitoringPaused()
                 // Closes the gate an open terminal's foreground redial waits behind, so the redial cannot
                 // run ahead of the endpoint reset the `.active` branch above performs.
                 model.noteBackgroundedForEndpointRefresh()
@@ -125,6 +154,10 @@ struct RootTabView: View {
                 // app would go on treating a session the user cannot see as the one they are looking at
                 // and swallow the bells it rings while away.
                 model.suspendTerminalWatch()
+                // Also ends the connection's failure-streak run (`stopDeviceStreams()` calls
+                // `noteConnectionMonitoringPaused()` itself): nothing above this reads the streak or its
+                // generation, so ending it here instead of first changes nothing about the other two calls.
+                model.stopDeviceStreams()
             case .inactive: break
             @unknown default: break
             }

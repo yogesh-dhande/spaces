@@ -81,4 +81,19 @@ final class SpacesDeviceAPIAuthenticationTests: XCTestCase {
             "This Mac no longer recognizes this device. Open Devices and pair this device again.")
         XCTAssertNil(SpacesDeviceAPIAuthentication.recoveryMessage(for: CodedError(code: .notFound)))
     }
+
+    /// The production error a rejected overview or session stream disconnects with
+    /// (`SpacesDeviceAPIRequestClientError.requestRejected`, constructed by `streamDecodeError`), not a
+    /// synthetic stand-in: its own `code` conformance is what lets this branch on the daemon's category
+    /// instead of falling to the message heuristics below, which the daemon's actual rejection text ("The
+    /// device auth token is invalid.") does not match (they expect "invalid device auth token").
+    func testRecoveryMessageBranchesOnCodeForTheProductionStreamRejectionError() {
+        XCTAssertEqual(
+            SpacesDeviceAPIAuthentication.recoveryMessage(
+                for: SpacesDeviceAPIRequestClientError.requestRejected(message: "The device auth token is invalid.", code: .unauthorized)),
+            "This Mac no longer recognizes this device. Open Devices and pair this device again.")
+        XCTAssertNil(
+            SpacesDeviceAPIAuthentication.recoveryMessage(
+                for: SpacesDeviceAPIRequestClientError.requestRejected(message: "Internal error.", code: .internalError)))
+    }
 }

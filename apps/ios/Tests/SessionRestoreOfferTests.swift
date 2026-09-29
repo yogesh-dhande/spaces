@@ -516,7 +516,7 @@
 
         /// A device that refuses the answer has replaced the record the user was looking at, and it says so
         /// before its own status does. The question must go with the refusal, or the sheet would sit on a
-        /// record its device has disowned until some poll happens to report a different one.
+        /// record its device has disowned until some later status happens to report a different one.
         @MainActor func testARefusedAnswerRetiresTheQuestionAndDoesNotRaiseTheSameRecordAgain() async throws {
             let generation = "capture-\(UUID().uuidString)"
             let staleStatus = makeStatus(sessions: [makeSummary(sessionID: "s1", generation: generation)])
@@ -560,10 +560,10 @@
         }
 
         /// The shell asks for one read of the device every time the app comes back to the foreground, which
-        /// is what discovers a record made while it was away on a screen that polls nothing. The scene
+        /// is what discovers a record made while it was away and no stream was open. The scene
         /// transition itself belongs to `RootTabView`'s SwiftUI environment and no unit test can deliver it;
         /// what is testable here is the property that makes asking for it free, which is that the read joins
-        /// whatever fetch a tab's own poller already has in flight instead of issuing a second one.
+        /// whatever refresh is already in flight instead of issuing a second one.
         @MainActor func testARefreshIssuedWhileOneIsInFlightJoinsItInsteadOfFetchingAgain() async {
             let recorder = RequestRecorder()
             let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [], daemonStatus: makeStatus(sessions: []))
@@ -574,9 +574,9 @@
                     return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
                 })
 
-            let poll = Task { await model.refresh() }
+            let firstRefresh = Task { await model.refresh() }
             let foreground = Task { await model.refresh() }
-            await poll.value
+            await firstRefresh.value
             await foreground.value
 
             let overviewFetches = await recorder.snapshot().filter { $0.commandName == "overview" }
@@ -602,8 +602,8 @@
                     return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
                 })
 
-            // A poll's fetch, held open on the transport: this is the fetch the reset aborts.
-            let poll = Task { await model.refresh() }
+            // A refresh's fetch, held open on the transport: this is the fetch the reset aborts.
+            let firstRefresh = Task { await model.refresh() }
             while await recorder.snapshot().isEmpty { await Task.yield() }
 
             let resume = Task { await model.resumeFromBackground() }
@@ -614,18 +614,18 @@
             // Let the held fetch finish, which is the point the resume's refresh decides whether that
             // fetch answered for it.
             await gate.open()
-            await poll.value
+            await firstRefresh.value
             await resume.value
 
             let overviewFetches = await recorder.snapshot().filter { $0.commandName == "overview" }
             XCTAssertEqual(overviewFetches.count, 2, "the resume reads the device itself rather than joining the fetch its reset aborted")
         }
 
-        /// A Restore is answered while a poll issued before it is still in flight, and that poll describes a
-        /// device without the relaunched agents. The read the answer asks for issues its own request rather
-        /// than being answered by that poll, which is what puts the relaunched sessions in the lists on a
-        /// screen whose next poll is far away or never.
-        @MainActor func testTheReadAfterARestoreFetchesAgainInsteadOfJoiningAPollFromBeforeTheAnswer() async throws {
+        /// A Restore is answered while a refresh issued before it is still in flight, and that refresh
+        /// describes a device without the relaunched agents. The read the answer asks for issues its own
+        /// request rather than being answered by that refresh, which is what puts the relaunched sessions
+        /// in the lists without waiting on the stream's next push.
+        @MainActor func testTheReadAfterARestoreFetchesAgainInsteadOfJoiningARefreshFromBeforeTheAnswer() async throws {
             let recorder = RequestRecorder()
             let gate = RequestGate()
             let generation = "capture-\(UUID().uuidString)"
@@ -649,20 +649,20 @@
             model.daemonStatus = status
             let offer = try XCTUnwrap(model.sessionRestoreOffer)
 
-            // A poll's fetch, held open on the transport: this is the overview that predates the answer.
-            let poll = Task { await model.refresh() }
+            // A refresh's fetch, held open on the transport: this is the overview that predates the answer.
+            let firstRefresh = Task { await model.refresh() }
             while await recorder.snapshot().isEmpty { await Task.yield() }
 
             let answering = Task { await model.answerSessionRestoreOffer(.restore, offer: offer) }
-            // Let the answer land and reach its read while the poll above is still held, so what this
+            // Let the answer land and reach its read while the refresh above is still held, so what this
             // asserts is the decision that read makes about an in-flight fetch.
             for _ in 0..<100 { await Task.yield() }
             await gate.open()
             _ = await answering.value
-            await poll.value
+            await firstRefresh.value
 
             let overviewFetches = await recorder.snapshot().filter { $0.commandName == "overview" }
-            XCTAssertEqual(overviewFetches.count, 2, "the answer reads the device itself rather than joining a poll that predates it")
+            XCTAssertEqual(overviewFetches.count, 2, "the answer reads the device itself rather than joining a refresh that predates it")
         }
 
         /// The wiring of the rule above: a question on screen outlives a status this app could not read and
@@ -768,7 +768,7 @@
                 "the device never read the answer, so nothing about this record is remembered")
 
             // The device goes on reporting the record it never got an answer to. It stays retired until the
-            // user pairs again, rather than raising the same sheet over the recovery surface every poll.
+            // user pairs again, rather than raising the same sheet over the recovery surface on every status.
             model.daemonStatus = status
 
             XCTAssertNil(model.sessionRestoreOffer)

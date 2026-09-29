@@ -33,6 +33,12 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
     /// Synthetic session ids minted for started `notStarted` rows, mapped to the recorded slug they
     /// replay. Resolved on every stream/state path so the synthesized session serves a real recording.
     private var syntheticSessionAlias: [String: String] = [:]
+    /// Open overview-stream subscribers, keyed by an id private to `openOverviewStream`/
+    /// `removeOverviewSubscriber`. `commitMutation` calls every one of them with the freshly mutated
+    /// overview, mirroring a real daemon pushing on its own database change; nothing here ever calls
+    /// `onDisconnect` (a demo stream only ends when its handle is cancelled), matching a healthy daemon
+    /// stream, which stays open indefinitely.
+    private var overviewStreamSubscribers: [UUID: @Sendable (SpacesDeviceOverviewPayload) -> Void] = [:]
 
     init(library: DemoRecordingLibrary) {
         self.library = library
@@ -73,6 +79,27 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
             lifecycle.finish(error: nil)
         }
     }
+
+    /// Yields the current in-memory overview immediately, then again after every `commitMutation`,
+    /// mirroring the daemon's own "first frame right after subscribe, then push on change" contract for
+    /// the real overview stream. Never disconnects on its own: `onDisconnect` is only reachable by
+    /// cancelling the returned handle, so the caller sees Demo Mode's overview stream stay live exactly
+    /// as long as it keeps it open.
+    nonisolated func openOverviewStream(
+        authToken: String?, clientApp: SpacesDeviceClientApp?, onOverview: @escaping @Sendable (SpacesDeviceOverviewPayload) -> Void,
+        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) async throws -> SpacesDeviceAPIStreamHandle {
+        let id = UUID()
+        await registerOverviewSubscriber(id: id, onOverview: onOverview)
+        return SpacesDeviceAPIStreamHandle { Task { await self.removeOverviewSubscriber(id: id) } }
+    }
+
+    private func registerOverviewSubscriber(id: UUID, onOverview: @escaping @Sendable (SpacesDeviceOverviewPayload) -> Void) {
+        overviewStreamSubscribers[id] = onOverview
+        onOverview(overview)
+    }
+
+    private func removeOverviewSubscriber(id: UUID) { overviewStreamSubscribers[id] = nil }
 
     // MARK: - Request handling
 
@@ -318,6 +345,7 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
         guard let workspace else { return }
         let updated = workspace.demoWith(processRows: processRows, codingAgentRows: codingAgentRows)
         overview = overview.demoReplacing(workspaceID: workspaceID, workspace: updated, sessions: sessions)
+        for subscriber in overviewStreamSubscribers.values { subscriber(overview) }
     }
 
     // MARK: - Response builders

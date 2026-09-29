@@ -12,7 +12,7 @@ struct AgentsTabView: View {
             // never launches one: the shared navigation's pending-launch route stays permanently empty.
             content.background(Theme.bg.ignoresSafeArea()).navigationTitle("Agents").tint(Theme.accent).terminalSessionNavigation(
                 model: model, selectedSession: $selectedSession, pendingTerminalLaunch: .constant(nil))
-        }.accessibilityIdentifier("tab.agents").overviewPolling(model: model, tab: .agents, route: selectedSession.map { .detail($0.id) })
+        }.accessibilityIdentifier("tab.agents")
     }
 
     @ViewBuilder private var content: some View {

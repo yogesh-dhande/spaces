@@ -1160,7 +1160,11 @@ private struct DeviceSyncState {
 
     /// Opens one subscription attempt. `attempt` is the coordinator's id for it and rides in both stream
     /// callbacks, so a stopped stream's disconnect is never mistaken for the state of the attempt that
-    /// replaced it (a user retry stops the old client and connects again in the same turn).
+    /// replaced it (a user retry stops the old client and connects again in the same turn). `onOverview`
+    /// checks the same id against `isCurrentAttempt` before applying its data: a receive-loop line can
+    /// already be mid-flight past a `stop()` call, so a payload from an attempt already superseded can
+    /// still arrive after the replacement's own payload landed; the daemon pushes only on change, so an
+    /// unguarded stale payload would sit there indefinitely instead of self-correcting on the next push.
     private func openRemoteOverviewSubscription(record: SpacesPairedDeviceRecord, attempt: Int, clientApp: SpacesDeviceClientApp) {
         let deviceID = record.id
         // Build the stream callbacks with a single weak capture so the detached
@@ -1171,32 +1175,43 @@ private struct DeviceSyncState {
             // polling `resolveOverview` path derives it.
             let daemonStatus = overview.overview.daemonStatus
             let compatibility = SpacesWireCompatibility.evaluate(daemonStatus: daemonStatus)
-            Task { @MainActor in
-                guard let self else { return }
-                // Captured as the first thing this hop does, not before the hop is scheduled:
-                // `paneReplacementEpoch` lives on the main-actor `PanelCoordinator`, and `onOverview` itself
-                // runs off-main (a stream callback), so there is no way to read it before hopping onto the
-                // main actor. Nothing else can run on the main actor between the hop starting and this line,
-                // since a task body executes without interruption up to its first `await`.
-                // Accepted residual: a push whose stream delivery lags a whole pull round trip (the daemon
-                // sent it before answering the pull, but it arrives here after the pull's newer overview
-                // applied and retargeted a pane) captures the post-retarget epoch and still prunes. No
-                // client-side capture point can order data across two connections; closing this fully
-                // needs a daemon-stamped overview revision, and the lag it requires is far outside normal
-                // delivery behavior.
-                let capturedEpoch = self.host.panelCoordinator.paneReplacementEpoch
-                // A push is always the newer answer for this device: retire whatever pull is mid-flight so
-                // its eventual failure cannot report this device offline on stale grounds, and record that
-                // this push is about to apply data newer than any pull success already in flight.
-                self.recordRemoteOverviewInstalledOutsidePull(deviceID: deviceID)
-                self.applyRemoteDeviceSection(
-                    deviceID: deviceID,
-                    result: .success(RemoteDeviceLoad(overview: overview, daemonStatus: daemonStatus, compatibility: compatibility)),
-                    epoch: capturedEpoch)
+            // The main queue, not a `Task`, because it is strictly FIFO and is the main actor's executor:
+            // separate `Task { @MainActor in ... }`s created from the stream's single receive thread are
+            // not guaranteed to run on the main actor in creation order on every runtime this app
+            // supports, and a reordered disconnect or overview would apply out of receive order. Both
+            // callbacks hop the same way so a disconnect can never overtake the overview before it.
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    guard self.remoteOverviewSubscriptions.isCurrentAttempt(deviceID: deviceID, attempt: attempt) else { return }
+                    self.remoteOverviewSubscriptions.noteOverviewDelivered(deviceID: deviceID, attempt: attempt)
+                    // Captured as the first thing this hop does, not before the hop is scheduled:
+                    // `paneReplacementEpoch` lives on the main-actor `PanelCoordinator`, and `onOverview` itself
+                    // runs off-main (a stream callback), so there is no way to read it before hopping onto the
+                    // main actor. Nothing else can run on the main actor between the hop starting and this line,
+                    // since the main queue runs one enqueued block to completion before the next.
+                    // Accepted residual: a push whose stream delivery lags a whole pull round trip (the daemon
+                    // sent it before answering the pull, but it arrives here after the pull's newer overview
+                    // applied and retargeted a pane) captures the post-retarget epoch and still prunes. No
+                    // client-side capture point can order data across two connections; closing this fully
+                    // needs a daemon-stamped overview revision, and the lag it requires is far outside normal
+                    // delivery behavior.
+                    let capturedEpoch = self.host.panelCoordinator.paneReplacementEpoch
+                    // A push is always the newer answer for this device: retire whatever pull is mid-flight so
+                    // its eventual failure cannot report this device offline on stale grounds, and record that
+                    // this push is about to apply data newer than any pull success already in flight.
+                    self.recordRemoteOverviewInstalledOutsidePull(deviceID: deviceID)
+                    self.applyRemoteDeviceSection(
+                        deviceID: deviceID,
+                        result: .success(RemoteDeviceLoad(overview: overview, daemonStatus: daemonStatus, compatibility: compatibility)),
+                        epoch: capturedEpoch)
+                }
             }
         }
         let onDisconnect: @Sendable ((any Error)?) -> Void = { [weak self] error in
-            Task { @MainActor in self?.handleRemoteOverviewDisconnected(deviceID: deviceID, attempt: attempt, error: error) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.handleRemoteOverviewDisconnected(deviceID: deviceID, attempt: attempt, error: error) }
+            }
         }
         DeviceLinkTrace.log(deviceID: deviceID, event: "subscribe_attempt")
         Task { @MainActor [weak self] in
@@ -1225,7 +1240,10 @@ private struct DeviceSyncState {
             // unrelated sidebar reload.
             switch self.remoteOverviewSubscriptions.applyConnectResult(deviceID: deviceID, attempt: attempt, client: client) {
             case .keep: DeviceLinkTrace.log(deviceID: deviceID, event: "subscribe_connected")
-            case .discard: client?.stop()
+            // The sidebar already treats every failed connect and every dropped stream as recoverable
+            // by its armed retry, so a superseded attempt's discard and the current attempt's own
+            // connect failure need the same handling here: just stop the client.
+            case .discard, .connectFailed: client?.stop()
             case .discardDisconnected(let error):
                 client?.stop()
                 self.markRemoteOverviewSectionOffline(deviceID: deviceID, error: error)

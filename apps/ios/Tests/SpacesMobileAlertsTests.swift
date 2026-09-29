@@ -823,8 +823,8 @@
             XCTAssertTrue(SpacesMobileAttention.events(in: overview, focusedSessionID: "session-bell", watchWindowsBySessionID: [:]).isEmpty)
         }
 
-        /// Overview polling is paused while a terminal detail is open, so the bell rung while the user was
-        /// watching only arrives after they back out — by which time the session is no longer focused.
+        /// A bell for the focused session is excluded live; once the user backs out the session is no
+        /// longer focused, so the bell that rang while they were watching surfaces then.
         func testBellRungWhileWatchingIsSuppressedAfterBackingOut() {
             let clock = TestWallClock()
             let model = makeModel(clock: clock)
@@ -958,9 +958,9 @@
             XCTAssertEqual(model.attentionGroups.first?.events.map(\.kind), [.bell])
         }
 
-        /// The realistic sequence: overview polling is paused the whole time, so the bell only arrives on
-        /// the refresh after the user comes back and leaves the detail. The watch recorded on the way out
-        /// must not cover the stretch the app spent in the background.
+        /// The realistic sequence: no stream is open while backgrounded, so the bell only arrives on the
+        /// overview fetched after the user comes back and leaves the detail. The watch recorded on the way
+        /// out must not cover the stretch the app spent in the background.
         func testBellRungWhileBackgroundedStillAlertsAfterForegroundingAndBackingOut() {
             let clock = TestWallClock()
             let model = makeModel(clock: clock)
@@ -979,9 +979,9 @@
         }
 
         /// The whole visit, in order: the user watches the terminal and hears the bell, backgrounds the
-        /// app, comes back to the still-open detail, then leaves it — and only then does polling resume and
-        /// deliver that bell. Every watch of the session has to be remembered for it to stay suppressed;
-        /// keeping only the latest would raise an alert for a bell the user watched ring.
+        /// app, comes back to the still-open detail, then leaves it, and only then does the next overview
+        /// delivery report that bell. Every watch of the session has to be remembered for it to stay
+        /// suppressed; keeping only the latest would raise an alert for a bell the user watched ring.
         func testBellRungBeforeBackgroundingStaysSuppressedAfterForegroundingAndBackingOut() {
             let clock = TestWallClock()
             let model = makeModel(clock: clock)

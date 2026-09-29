@@ -100,9 +100,10 @@ enum SpacesMobileAttention {
     /// - Parameters:
     ///   - focusedSessionID: the session the user is watching right now, whose bell is happening in front
     ///     of them rather than being something to alert about.
-    ///   - watchWindowsBySessionID: the user's recent watches of each recently watched session. Overview
-    ///     polling is paused while a detail is open, so a bell rung during a watch is first seen after
-    ///     that watch ended — a bell inside any of them is one the user saw ring.
+    ///   - watchWindowsBySessionID: the user's recent watches of each recently watched session. A bell for
+    ///     the focused session is excluded live by `focusedSessionID` above; once that session stops being
+    ///     focused, these remembered windows keep excluding a bell that rang while it still was, since a
+    ///     bell inside any of them is one the user already saw ring in the terminal itself.
     ///   - includingHiddenWorkspaces: when true, a workspace's events are derived even while it (or its
     ///     project) is hidden, instead of being skipped. Defaults to false so the Alerts tab and its badge
     ///     stay unaffected; the only caller that opts in is `retainedDismissedEventIDs`, which needs a

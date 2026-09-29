@@ -691,11 +691,11 @@
             XCTAssertNil(model.errorMessage)
         }
 
-        /// A poll's overview fetch is already in flight when the trigger command lands. Without bumping
-        /// `mutationGeneration` before the post-command read, that read would join the older poll and
+        /// A refresh's overview fetch is already in flight when the trigger command lands. Without bumping
+        /// `mutationGeneration` before the post-command read, that read would join the older refresh and
         /// publish the pre-trigger state once it finally resolves. It must instead issue its own request,
-        /// and the poll's stale answer (released afterward) must not overwrite what that request publishes.
-        func testTriggerAutomationReadsPastAPollIssuedBeforeTheCommand() async {
+        /// and the refresh's stale answer (released afterward) must not overwrite what that request publishes.
+        func testTriggerAutomationReadsPastARefreshIssuedBeforeTheCommand() async {
             let recorder = SpacesMobileAutomationsRequestRecorder()
             let overviewGate = SpacesMobileAutomationsAsyncGate()
             let settings = SpacesMobileConnectionSettings()
@@ -719,23 +719,23 @@
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             model.activeDeviceID = "device-1"
 
-            // A poll's fetch, held open on the transport: this is the overview that predates the trigger.
-            let poll = Task { await model.refresh() }
+            // A refresh's fetch, held open on the transport: this is the overview that predates the trigger.
+            let firstRefresh = Task { await model.refresh() }
             while await recorder.snapshot().count(where: { $0.commandName == "overview" }) < 1 { await Task.yield() }
 
             let trigger = Task { await model.triggerAutomation(id: "automation-a") }
             for _ in 0..<100 { await Task.yield() }
             await overviewGate.open()
             await trigger.value
-            await poll.value
+            await firstRefresh.value
 
             let overviewFetches = await recorder.snapshot().count { $0.commandName == "overview" }
-            XCTAssertEqual(overviewFetches, 2, "the trigger's read issues its own overview request instead of only joining the poll before it")
+            XCTAssertEqual(overviewFetches, 2, "the trigger's read issues its own overview request instead of only joining the refresh before it")
             XCTAssertEqual(
-                model.automationRows.first?.lastRunStatus, "running", "the fresh overview lands, not the stale one the held poll answered with")
+                model.automationRows.first?.lastRunStatus, "running", "the fresh overview lands, not the stale one the held refresh answered with")
         }
 
-        func testSetAutomationNextRunReadsPastAPollIssuedBeforeTheCommand() async {
+        func testSetAutomationNextRunReadsPastARefreshIssuedBeforeTheCommand() async {
             let recorder = SpacesMobileAutomationsRequestRecorder()
             let overviewGate = SpacesMobileAutomationsAsyncGate()
             let settings = SpacesMobileConnectionSettings()
@@ -766,23 +766,23 @@
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             model.activeDeviceID = "device-1"
 
-            let poll = Task { await model.refresh() }
+            let firstRefresh = Task { await model.refresh() }
             while await recorder.snapshot().count(where: { $0.commandName == "overview" }) < 1 { await Task.yield() }
 
             let schedule = Task { await model.setAutomationNextRun(id: "automation-a", nextRunTime: freshNextRun) }
             for _ in 0..<100 { await Task.yield() }
             await overviewGate.open()
             _ = await schedule.value
-            await poll.value
+            await firstRefresh.value
 
             let overviewFetches = await recorder.snapshot().count { $0.commandName == "overview" }
-            XCTAssertEqual(overviewFetches, 2, "the schedule's read issues its own overview request instead of only joining the poll before it")
+            XCTAssertEqual(overviewFetches, 2, "the schedule's read issues its own overview request instead of only joining the refresh before it")
             XCTAssertEqual(
                 model.automationRows.first?.automation.nextFireTime, TerminalSessionTimestamp.fractionalString(from: freshNextRun),
-                "the fresh next-run time lands, not the stale one the held poll answered with")
+                "the fresh next-run time lands, not the stale one the held refresh answered with")
         }
 
-        func testCancelAutomationRunReadsPastAPollIssuedBeforeTheCommand() async {
+        func testCancelAutomationRunReadsPastARefreshIssuedBeforeTheCommand() async {
             let recorder = SpacesMobileAutomationsRequestRecorder()
             let overviewGate = SpacesMobileAutomationsAsyncGate()
             let settings = SpacesMobileConnectionSettings()
@@ -806,22 +806,22 @@
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             model.activeDeviceID = "device-1"
 
-            let poll = Task { await model.refresh() }
+            let firstRefresh = Task { await model.refresh() }
             while await recorder.snapshot().count(where: { $0.commandName == "overview" }) < 1 { await Task.yield() }
 
             let cancel = Task { await model.cancelAutomationRun(runID: "run-1") }
             for _ in 0..<100 { await Task.yield() }
             await overviewGate.open()
             await cancel.value
-            await poll.value
+            await firstRefresh.value
 
             let overviewFetches = await recorder.snapshot().count { $0.commandName == "overview" }
-            XCTAssertEqual(overviewFetches, 2, "the cancel's read issues its own overview request instead of only joining the poll before it")
+            XCTAssertEqual(overviewFetches, 2, "the cancel's read issues its own overview request instead of only joining the refresh before it")
             XCTAssertEqual(
-                model.automationRows.first?.lastRunStatus, "canceled", "the fresh overview lands, not the stale one the held poll answered with")
+                model.automationRows.first?.lastRunStatus, "canceled", "the fresh overview lands, not the stale one the held refresh answered with")
         }
 
-        func testEndAutomationAgentsReadsPastAPollIssuedBeforeTheCommand() async {
+        func testEndAutomationAgentsReadsPastARefreshIssuedBeforeTheCommand() async {
             let recorder = SpacesMobileAutomationsRequestRecorder()
             let overviewGate = SpacesMobileAutomationsAsyncGate()
             let settings = SpacesMobileConnectionSettings()
@@ -847,20 +847,20 @@
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             model.activeDeviceID = "device-1"
 
-            let poll = Task { await model.refresh() }
+            let firstRefresh = Task { await model.refresh() }
             while await recorder.snapshot().count(where: { $0.commandName == "overview" }) < 1 { await Task.yield() }
 
             let endAgents = Task { await model.endAutomationAgents(runID: "run-1") }
             for _ in 0..<100 { await Task.yield() }
             await overviewGate.open()
             await endAgents.value
-            await poll.value
+            await firstRefresh.value
 
             let overviewFetches = await recorder.snapshot().count { $0.commandName == "overview" }
-            XCTAssertEqual(overviewFetches, 2, "the end-agents read issues its own overview request instead of only joining the poll before it")
+            XCTAssertEqual(overviewFetches, 2, "the end-agents read issues its own overview request instead of only joining the refresh before it")
             XCTAssertEqual(
                 model.overview?.automationRuns.first?.attributedAgents.first?.live, false,
-                "the fresh overview lands, not the stale one the held poll answered with")
+                "the fresh overview lands, not the stale one the held refresh answered with")
         }
 
         /// A refresh whose fetched overview is byte-for-byte identical to what's already published must not
@@ -936,11 +936,11 @@
             XCTAssertEqual(counter.value(), 1)
         }
 
-        /// A tab whose poll was paused for a long stretch (hidden, backgrounded, or behind a closed detail
-        /// route) catches straight up on its very next refresh instead of creeping forward in fixed
-        /// 30-second steps: the reference sat untouched for the whole gap, so the elapsed check already
-        /// clears the 30-second bar by a wide margin on that first tick.
-        func testRelativeTimeReferenceCatchesUpImmediatelyAfterALongPollGap() async {
+        /// A device with no refresh or stream push for a long stretch (hidden, backgrounded, or behind a
+        /// closed detail route) catches straight up on its very next refresh instead of creeping forward
+        /// in fixed 30-second steps: the reference sat untouched for the whole gap, so the elapsed check
+        /// already clears the 30-second bar by a wide margin on that first tick.
+        func testRelativeTimeReferenceCatchesUpImmediatelyAfterALongGap() async {
             let clock = SpacesMobileTestWallClock()
             let settings = SpacesMobileConnectionSettings()
             let overview = makeOverview(automations: [makeAutomation(id: "automation-a", name: "Deploy")])
@@ -950,7 +950,7 @@
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, wallClock: { clock.now })
             await model.refresh()
 
-            clock.advance(300)  // five minutes with polling paused
+            clock.advance(300)  // five minutes with nothing refreshing
             await model.refresh()
 
             XCTAssertEqual(model.relativeTimeReference, clock.now)

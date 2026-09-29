@@ -38,7 +38,7 @@ import spacesdevicecore
     static let attempts = 5
 
     /// Interval between reconciliation refetches. `var` rather than a fixed constant so tests can
-    /// shrink the whole curve, matching `RemoteOverviewSubscriptionCoordinator.retryDelay` and
+    /// shrink the whole curve, matching `RemoteOverviewSubscriptionCoordinator.retryDelayPolicy` and
     /// `TerminalStateStreamReconnectBackoff.retryDelay`.
     var interval: Duration = .seconds(2)
 

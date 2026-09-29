@@ -85,6 +85,17 @@ actor SpacesDeviceEndpointResolver {
     /// Forgets the cached winner. The next `connect` call re-walks `hosts` from the top.
     func clearCachedWinner() { cachedHost = nil }
 
+    /// Adopts a host the overview stream's own resolver just proved reachable, so a command sent right
+    /// after a stream fails over (e.g. from the LAN address to Tailscale) starts from that same address
+    /// instead of re-racing from a stale cached or seeded winner. Only trusts a host that is a member of
+    /// this resolver's own `hosts`, the same re-validation `connect` already applies to a seeded winner:
+    /// the two resolvers are built from the same settings but are still separate instances, and a value
+    /// that is not one of this instance's candidates cannot be dialed by it.
+    func adoptProvenHost(_ host: String) {
+        guard hosts.contains(host) else { return }
+        cachedHost = host
+    }
+
     /// The host a new session stream should use. Unlike `connect(timeout:queue:)`, this never races:
     /// `SpacesDeviceNetworkBackend.openSessionStream` must stay non-blocking so a hung endpoint cannot
     /// stall the viewer's post-subscribe state refresh — the thing that surfaces an authentication
@@ -132,8 +143,7 @@ actor SpacesDeviceEndpointResolver {
     /// was re-provisioned or re-paired), which is rare, and "Device unreachable" is a tolerable label
     /// for it since Retry is harmless there and the pairing surfaces are where the real fix (re-pairing)
     /// happens, not this banner.
-    @discardableResult
-    func noteStreamFailed(host: String) -> Bool {
+    @discardableResult func noteStreamFailed(host: String) -> Bool {
         streamFailedHosts.insert(host)
         if cachedHost == host { cachedHost = nil }
         return !hosts.isEmpty && hosts.allSatisfy(streamFailedHosts.contains)
@@ -212,8 +222,7 @@ actor SpacesDeviceEndpointResolver {
         case .success(let winningHost, let connection):
             recordProven(host: winningHost)
             return connection
-        case .failure:
-            throw SpacesDeviceAPIClientError.requestFailed("Could not reach \(host).", code: nil)
+        case .failure: throw SpacesDeviceAPIClientError.requestFailed("Could not reach \(host).", code: nil)
         }
     }
 
@@ -225,10 +234,14 @@ actor SpacesDeviceEndpointResolver {
     /// proved reachable. Every successful connect, the racing multi-candidate walk and the
     /// single-candidate probe alike, goes through here so that cannot be missed at a call site. Mirrors
     /// the Mac resolver's `recordProven(host:)`.
+    ///
+    /// This actor runs off the main actor, so it persists through `reportProvenHost` rather than calling
+    /// `SpacesMobileDeviceStore.recordActiveHost` directly: that call is main-actor isolated and must not
+    /// run inline from this actor's own thread (see `reportProvenHost`'s doc comment).
     private func recordProven(host: String) {
         cachedHost = host
         streamFailedHosts.remove(host)
-        SpacesMobileDeviceStore.recordActiveHost(host, certificateFingerprint: certificateFingerprint)
+        SpacesMobileDeviceStore.reportProvenHost(host, certificateFingerprint: certificateFingerprint)
     }
 
     /// Outcome of racing every candidate: either the winning connection, or a failure across the whole

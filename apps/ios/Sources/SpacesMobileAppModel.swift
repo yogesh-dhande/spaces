@@ -481,22 +481,22 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
     /// The clock every relative-time label (automation next-fire, run started/duration, alert age) reads
-    /// at render time instead of calling `Date()` directly. Advances in 30-second jumps off the existing
-    /// poll cadence (`advanceRelativeTimeReferenceIfDue`, called from every `performRefresh`) — matching
-    /// the Mac's independent label-only beat (`AutomationsController.armRelativeTimeRefresh`) — rather
-    /// than on every 2-second overview tick, which is the churn #540 reports. `@Observable` notifies on
-    /// this property exactly like `overview`, so a view reading it re-renders on that cadence regardless
-    /// of whether the fetched overview payload itself changed: the equality gate in `publishOverview`
-    /// must not also freeze the labels that used to be repainted as a side effect of its every-tick
-    /// republish.
+    /// at render time instead of calling `Date()` directly. Advances in 30-second jumps
+    /// (`advanceRelativeTimeReferenceIfDue`), driven by its own clock task while a device's overview
+    /// stream is open (`startRelativeTimeReferenceClock`), and also by every `performRefresh`, matching
+    /// the Mac's independent label-only beat (`AutomationsController.armRelativeTimeRefresh`) rather than
+    /// on every overview push, which is the churn #540 reports. `@Observable` notifies on this property
+    /// exactly like `overview`, so a view reading it re-renders on that cadence regardless of whether the
+    /// fetched overview payload itself changed: the equality gate in `publishOverview` gates the overview
+    /// payload only, not these labels.
     var relativeTimeReference: Date
     /// Wire-protocol status of the active device, read on each successful refresh. `nil` until the
     /// first handshake. Drives the compatibility banner and blocks incompatible interaction.
     ///
     /// `didSet` re-derives the restore offer: the device reports its restorable record here, so every
-    /// path that lands a status (a poll, the standalone handshake, a device switch, the resets that
-    /// clear it) is a path that can raise or retire the offer, and deriving it from the setter means
-    /// none of them has to remember to.
+    /// path that lands a status (a stream push, an explicit refresh, the standalone handshake, a device
+    /// switch, the resets that clear it) is a path that can raise or retire the offer, and deriving it
+    /// from the setter means none of them has to remember to.
     var daemonStatus: TerminalServiceDaemonStatus? {
         didSet {
             daemonStatusDeviceID = activeDeviceID
@@ -518,7 +518,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var compatibility: SpacesWireCompatibility?
     var isLoading = false
     /// In flight for every mutation that rides the shared `commandChannel` — create, rename, hide/unhide,
-    /// launch/stop/restart, run — the same connection the overview poll uses. That connection does not
+    /// launch/stop/restart, run: the same connection an explicit `refresh()` uses. That connection does not
     /// serialize whole request/response round trips (issue #248), so two of these in flight at once can
     /// interleave and consume each other's responses; this flag is the app-wide gate that keeps them one
     /// at a time. `deleteWorkspace` does not set it: a delete runs on its own private channel created for
@@ -563,10 +563,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// device: one the device refused as stale, and one whose answer the device would not authenticate.
     ///
     /// Both arrive before any status saying the question is over: the app is holding the status the offer
-    /// was built from, and the next one can be a poll away (a tab that polls nothing is on screen) or
-    /// longer. Without this the same record would be derived again the moment the sheet closed, putting
-    /// the user back in a question that has already gone one of those two ways. Held in memory for the
-    /// run, keyed like the answered generations: a record that replaced a refused one carries a different
+    /// was built from, and the next one can be a stream push away, or an explicit refresh's away when
+    /// nothing is streaming. Without this the same record would be derived again the moment the sheet
+    /// closed, putting the user back in a question that has already gone one of those two ways. Held in
+    /// memory for the run, keyed like the answered generations: a record that replaced a refused one carries a different
     /// generation, so it is offered as soon as a status reports it, and pairing again clears this
     /// entirely, which is what brings back a record whose answer failed to authenticate.
     private var retiredSessionRestoreGenerations: [String: String] = [:]
@@ -579,7 +579,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// binding) so a link handled at the app shell can navigate whichever tab is on screen.
     var pendingTerminalDeepLinkSession: SpacesDeviceTerminalSessionSummary?
     /// `didSet` rather than a dedicated setter wrapping every assignment site: this is set from many
-    /// places (the poll's own failure path in `performRefresh`, mutation failures, deep-link misses,
+    /// places (an explicit refresh's own failure path in `performRefresh`, a stream failure, mutation failures, deep-link misses,
     /// authentication recovery), and `RootTabView`'s "Connection Error" alert appears on exactly one
     /// transition (nil to non-nil), regardless of which call site caused it. Reporting any other
     /// transition (non-nil to a different message, or to nil) would log alert-adjacent bookkeeping the
@@ -679,9 +679,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     @ObservationIgnored private var activeTerminalWatchStartedAt: Date?
     /// The session the user is actually looking at, which is what bell suppression keys on.
     var watchedTerminalSessionID: String? { activeTerminalWatchStartedAt == nil ? nil : activeTerminalSessionID }
-    /// The user's recent watches of each recently watched session's terminal detail, oldest first.
-    /// Overview polling is paused while a detail is open, so a bell rung during a watch is only seen
-    /// after it ends; these windows suppress it then. In-memory only, like `dismissedAlertIDs`.
+    /// The user's recent watches of each recently watched session's terminal detail, oldest first. A
+    /// bell for the focused session is excluded live (see `SpacesMobileAttention.events`); once a
+    /// session stops being focused, these windows keep excluding a bell that rang while it still was.
+    /// In-memory only, like `dismissedAlertIDs`.
     ///
     /// A list rather than one window per session because a single visit to a terminal produces several:
     /// backgrounding the app ends one and returning starts the next, and the bell rung before the app
@@ -710,6 +711,43 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// paths (e.g. `TerminalViewerModel`) reuse the same backend instead of building a parallel client
     /// from `settings`. Reflects the current device after a switch.
     var deviceClient: SpacesDeviceAPIClient { bridgeClient }
+    /// Every paired device's most recently delivered overview, keyed by device id. Held for every paired
+    /// device while streams are open, not only the selected one; this model reads the selected device's
+    /// entry into `overview`, through the same publish path a refresh uses (see `applyFetchedOverview`).
+    /// Populated by `handleDeviceStreamOverview` and drained of an entry for a device that stops being
+    /// paired (`reconcileDeviceStreams`). An entry for a device that remains paired survives a
+    /// backgrounding, so a returning foreground shows what was last known instead of flashing empty state
+    /// while streams reopen. Whether each stream currently has a live connection is tracked entirely by
+    /// `overviewStreamSubscriptions` (the coordinator); nothing here duplicates it.
+    @ObservationIgnored private var deviceOverviews: [String: SpacesDeviceOverviewPayload] = [:]
+    /// Test-only override: when a device id has an entry here, `overviewStreamClient(forDeviceID:)`
+    /// returns it instead of building a client from that device's paired-device record and the real
+    /// network backend, so a test can give a *non-selected* device a fake streaming backend. The active
+    /// device always uses `bridgeClient` regardless, which is already how a test drives its stream, so
+    /// production code (whose test-only init parameter defaults this empty) never consults it.
+    @ObservationIgnored private let overviewStreamClientsForTesting: [String: SpacesDeviceAPIClient]
+    /// The client built for a non-selected device's overview stream, keyed by device id and reused
+    /// across attempts: `SpacesDeviceAPIClient` wraps a resolver that only remembers a proven host and a
+    /// failed-host set across a *stable* instance, so rebuilding a fresh client on every reconnect (as
+    /// `overviewStreamClient(forDeviceID:)` used to) throws that memory away and can leave a device whose
+    /// preferred address is down redialing it forever instead of settling on its Tailscale address.
+    /// Matches the Mac sidebar's own per-device resolver reuse (`SpacesDeviceEndpointRegistry`), scoped
+    /// to this model instead of process-wide since iOS has one model, not many independent clients.
+    /// Keyed alongside the settings the cached client was built from, so a record whose hosts, port,
+    /// fingerprint, or token changed is detected on the next lookup and rebuilt rather than silently
+    /// reused stale; a device that leaves the desired set is dropped in `reconcileDeviceStreams()`,
+    /// alongside its cached overview.
+    @ObservationIgnored private var nonActiveDeviceStreamClients:
+        [String: (client: SpacesDeviceAPIClient, settings: SpacesMobileConnectionSettings)] = [:]
+    /// Owns retry pacing and connect/disconnect bookkeeping for every paired device's overview stream:
+    /// the coordinator type the Mac sidebar uses for its own remote devices
+    /// (`RemoteOverviewSubscriptionCoordinator` in `spacesdevicecore`). Implicitly-unwrapped because its
+    /// `retryDelayPolicy` closure captures `self`, so it can only be built once every other stored
+    /// property is initialized; every designated initializer below builds it as its last statement (see
+    /// `makeOverviewStreamCoordinator()`).
+    @ObservationIgnored private var overviewStreamSubscriptions: RemoteOverviewSubscriptionCoordinator<SpacesDeviceAPIStreamHandle>!
+    /// Drives `relativeTimeReference`'s 30-second beat while streams are open; see `startDeviceStreams()`.
+    @ObservationIgnored private var relativeTimeReferenceTask: Task<Void, Never>?
     /// The last screen each terminal session painted, kept here because `TerminalDetailView` owns its
     /// `TerminalViewerModel` as `@State` and the pop that closes a terminal destroys both (#674). A
     /// reopen paints from this before it asks the device anything; see `TerminalRetainedScreenStore`.
@@ -735,10 +773,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// issued before it cannot answer for a caller asking after it: joining one would return without ever
     /// having reached the device, which is the whole point of the read a foreground resume asks for.
     @ObservationIgnored private var connectionChannelGeneration = 0
-    /// Bumped every time a mutation's result is applied. A poll's overview is a snapshot of the moment its
+    /// Bumped every time a mutation's result is applied. An overview is a snapshot of the moment its
     /// fetch was issued, so one that started before a mutation and lands after it carries pre-mutation
     /// state: publishing it would put a deleted workspace, or a stopped process, back on screen as an
-    /// ordinary actionable row until the next poll two seconds later. A refresh captures this value when
+    /// ordinary actionable row until the stream's next push. A refresh captures this value when
     /// its fetch begins and discards its result if it moved — the same discard-don't-publish rule
     /// `overviewIdentity` applies to connection changes, for staleness in time rather than in connection.
     @ObservationIgnored private var mutationGeneration = 0
@@ -747,15 +785,19 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// change of connection restarts the run without every reset site having to clear it. `nil` once a
     /// refresh succeeds.
     @ObservationIgnored private var refreshFailureStreak: (identity: Int, startedAt: ContinuousClock.Instant)?
-    /// True while a run of failed overview fetches is open. `OverviewPollingModifier` reads it to keep
-    /// retrying at the list cadence behind a detail route, so the alert `refreshFailureAlertDelay` gates
-    /// is reported about five seconds into an outage rather than one slow poll later.
-    var isRefreshFailing: Bool { refreshFailureStreak != nil }
     /// Bumped every time the app stops watching this connection (see `noteConnectionMonitoringPaused`).
     /// A refresh attempt captures it at the start and records nothing about failure timing if it changed,
     /// because an attempt spanning a pause has no meaningful duration: the clock keeps advancing while
     /// the app is suspended or idle, so most of what it measured is time nothing was being watched.
     @ObservationIgnored private var connectionMonitoringGeneration = 0
+    /// Bumped every time `applyFetchedOverview` accepts a payload (a stream push or a refresh success)
+    /// and clears `refreshFailureStreak`. A failure whose compatibility handshake (`refreshCompatibility`)
+    /// is held open can still be resolving after that newer success already landed and cleared the
+    /// streak; `handleOverviewFailure` captures this at its own attempt's start (or, for a stream
+    /// failure, at the moment the failure is observed) and re-checks it before touching
+    /// `errorMessage`/`refreshFailureStreak`, so the old failure cannot report on top of the newer
+    /// success once the handshake finally completes.
+    @ObservationIgnored private var overviewDeliveryGeneration = 0
     /// On-device loopback reverse proxy WKWebView browser sessions load through. Owned for the app's
     /// lifetime (its installation identity is stable across device switches), started/stopped by
     /// `RootTabView`'s scene-phase observation.
@@ -784,13 +826,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Try Again deliberately bypasses this: the user asking again is new information.
     @ObservationIgnored private var autoStagedApplyAttempts: Set<DaemonStagedApplyAttempt> = []
     /// How long overview fetches must keep failing before the connection-error alert is raised (production
-    /// default 5s). Long enough to cover a blip and the poll's retry two seconds later, short enough that
-    /// a device that is actually unreachable is reported promptly. Injectable so tests can shrink it
-    /// instead of sleeping through the production wait.
+    /// default 5s). Long enough to cover a blip and the selected device's stream redialing two seconds
+    /// later, short enough that a device that is actually unreachable is reported promptly. Injectable so
+    /// tests can shrink it instead of sleeping through the production wait.
     @ObservationIgnored private let refreshFailureAlertDelay: Duration
     /// Wait between the overview refetches that reconcile an indeterminate workspace delete (production
-    /// default 2s, matching the ordinary poll cadence). Injectable so tests exercise the reconciliation
-    /// loop without sleeping through it.
+    /// default 2s, matching the selected device's stream retry cadence). Injectable so tests exercise the
+    /// reconciliation loop without sleeping through it.
     @ObservationIgnored private let workspaceDeletionReconciliationInterval: Duration
     /// Source of "now" for the refresh-failure streak's start time and elapsed-time check. The streak is
     /// pure bookkeeping against a clock — no real waiting happens between reading it twice — so tests
@@ -847,7 +889,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
             isDemoModeEnabled = true
             self.bridgeClient = bridgeClient
             commandChannel = bridgeClient.makeCommandChannel()
+            // Every stored property must be set before the `self` method calls below (definite
+            // initialization); `makeOverviewStreamCoordinator()`'s captured closure is the one call that
+            // legitimately needs `self` fully valid, so it alone stays last.
+            overviewStreamClientsForTesting = [:]
             loadDismissedAlertIDsForActiveDevice()
+            overviewStreamSubscriptions = makeOverviewStreamCoordinator()
             return
         }
 
@@ -858,15 +905,20 @@ private enum SpacesMobileMutationTimeoutRecovery {
         isDemoModeEnabled = false
         self.bridgeClient = bridgeClient
         commandChannel = bridgeClient.makeCommandChannel()
+        // See the Demo Mode branch above: every stored property must be set before the `self` method
+        // calls below.
+        overviewStreamClientsForTesting = [:]
         loadDismissedAlertIDsForActiveDevice()
         pruneDismissedAlertsForUnknownDevices()
+        overviewStreamSubscriptions = makeOverviewStreamCoordinator()
     }
 
     init(
         settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient, browserProxy: SpacesMobileBrowserProxy? = nil,
         daemonUpdatePollInterval: Duration = .seconds(3), daemonUpdateTimeout: Duration = .seconds(30),
         refreshFailureAlertDelay: Duration = .seconds(5), workspaceDeletionReconciliationInterval: Duration = .seconds(2),
-        now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }, wallClock: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }, wallClock: @escaping @Sendable () -> Date = { Date() },
+        overviewStreamClientsForTesting: [String: SpacesDeviceAPIClient] = [:]
     ) {
         self.settings = settings
         pairedDevices = []
@@ -886,6 +938,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // `thermal_state_change` subscription is pointless here and would leak a `NotificationCenter`
         // observer per test instance across the whole run, so this carries an inert token instead.
         thermalStateObserverToken = DevicePerformanceLog.inertObserverToken()
+        self.overviewStreamClientsForTesting = overviewStreamClientsForTesting
+        overviewStreamSubscriptions = makeOverviewStreamCoordinator()
     }
 
     /// The workspaces this client lists: neither archived, hidden, nor under a hidden project, matching
@@ -973,7 +1027,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     /// Points bell suppression at the terminal detail now on screen, or nil once none is. Leaving a
     /// detail (closing it, or switching straight to another session) closes the outgoing session's watch
-    /// window, so the bell it rang while the user was watching does not alert once polling resumes.
+    /// window, so the bell it rang while the user was watching does not alert when a later overview
+    /// delivery reports it.
     func setActiveTerminalSession(_ sessionID: String?) {
         guard sessionID != activeTerminalSessionID else { return }
         endActiveTerminalWatch()
@@ -1348,15 +1403,17 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Stops the loopback browser proxy and all live tunnels. Call when the app enters the background.
     func browserProxyStop() { Task { await browserProxy.stop() } }
 
-    /// Ends the current run of failed refreshes because the app stopped watching this connection — it
-    /// backgrounded, or the overview poll paused (a terminal or browser detail opened, another tab took
-    /// over, the device became unpaired). The alert gate reads wall-clock time between failures, and
-    /// nothing polls during a pause, so a failure recorded before it and one recorded after are far apart
+    /// Ends the current run of failed refreshes because nothing is watching this connection any more.
+    /// `stopDeviceStreams()` calls this itself, since foreground streams are the thing that watches a
+    /// connection; this stays callable on its own too for a pause that is not a stream stop (the
+    /// `.background` scene-phase change already goes through `stopDeviceStreams()`, so it does not call
+    /// this separately). The alert gate reads wall-clock time between failures, and nothing watches the
+    /// connection while paused, so a failure recorded before this and one recorded after are far apart
     /// with no evidence of anything in between. Without this, that pair reads as a long-running outage
-    /// and the first blip on the way back raises the alert — the very interruption the gate exists to
-    /// prevent. Attempts already in flight are covered too: they resume with a start time from before the
-    /// pause, so `performRefresh` drops their failure timing rather than letting it rebuild the run this
-    /// just ended.
+    /// and the first blip on the way back raises the alert: the very interruption the gate exists to
+    /// prevent. Attempts already in flight are covered too: they resume with a start time from before
+    /// the pause, so `performRefresh` drops their failure timing rather than letting it rebuild the run
+    /// this just ended.
     func noteConnectionMonitoringPaused() {
         refreshFailureStreak = nil
         connectionMonitoringGeneration += 1
@@ -1393,7 +1450,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// reconciliation fetch, a session-timeout recovery) can land during either wait (#450 review round
     /// 5) — applying this call's now-stale data at that point would mean overwriting a fresher fact with
     /// an older one.
-    private func updateBrowserRoutes(overview: SpacesDeviceOverviewPayload, identity: Int, mutationGeneration fetchGeneration: Int) async {
+    ///
+    /// `isStillCurrent` is the same additional check `applyFetchedOverview` runs on its own payload
+    /// (its delivery generation, or, for a stream frame, whether it is still that device's latest one):
+    /// every caller either has such a rule and passes it, or has none and passes `{ true }`, so this
+    /// method's own merge honors whichever staleness rule the caller's payload is actually subject to
+    /// instead of only the identity/mutation-generation check every caller shares.
+    private func updateBrowserRoutes(
+        overview: SpacesDeviceOverviewPayload, identity: Int, mutationGeneration fetchGeneration: Int, isStillCurrent: () -> Bool
+    ) async {
         guard let activeDeviceID else { return }
         // The raw-byte service tunnel has to reach the daemon over the path the command channel that just
         // fetched `overview` actually proved reachable, so ask the live client's resolver directly rather
@@ -1411,7 +1476,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // that mixture would register routes keyed to the old device carrying the new device's port and
         // fingerprint, resurrect routes for a device just removed, or overwrite a fresher route table
         // with this now-stale one.
-        guard isOverviewFetchCurrent(identity: identity, mutationGeneration: fetchGeneration) else { return }
+        guard isOverviewFetchCurrent(identity: identity, mutationGeneration: fetchGeneration), isStillCurrent() else { return }
         let resolvedHost = liveResolvedHost ?? activeDeviceRecord?.activeHost ?? settings.primaryHost
         browserRoutingTable.merge(
             deviceID: activeDeviceID, deviceName: activeDeviceName ?? settings.primaryHost, host: resolvedHost, port: settings.port,
@@ -1450,9 +1515,392 @@ private enum SpacesMobileMutationTimeoutRecovery {
         identity == overviewIdentity && mutationGeneration == fetchGeneration
     }
 
+    // MARK: - Device overview streams
+
+    /// Builds `overviewStreamSubscriptions` for a designated initializer's last statement, once every
+    /// other stored property already has a value: `retryDelayPolicy` below captures `self`, so building
+    /// the coordinator any earlier is a definite-initialization violation.
+    private func makeOverviewStreamCoordinator() -> RemoteOverviewSubscriptionCoordinator<SpacesDeviceAPIStreamHandle> {
+        let coordinator = RemoteOverviewSubscriptionCoordinator<SpacesDeviceAPIStreamHandle>(requestReconcile: { [weak self] in
+            self?.reconcileDeviceStreams()
+        })
+        coordinator.retryDelayPolicy = { [weak self] deviceID, failures in
+            // The device on screen redials at a fixed 2 s cadence so a brief outage recovers quickly; a
+            // device merely paired and held in the background uses the coordinator's default growing
+            // backoff, so every paired-but-unwatched device does not storm a remote that is genuinely down.
+            guard let self, deviceID == self.activeDeviceID else {
+                return RemoteConnectionBackoff.delay(
+                    consecutiveFailures: failures, floor: .seconds(5), cap: .seconds(60), jitterFraction: Double.random(in: 0..<0.25))
+            }
+            return .seconds(2)
+        }
+        return coordinator
+    }
+
+    /// Opens every paired device's overview stream and starts the age-clock beat. Called when the scene
+    /// becomes active. Idempotent: `reconcile` only opens a device with neither a live subscription nor a
+    /// connect already in flight, so a redundant call (e.g. a device switch right after foreground) opens
+    /// nothing twice.
+    func startDeviceStreams() {
+        overviewStreamSubscriptions.enable()
+        startRelativeTimeReferenceClock()
+        reconcileDeviceStreams()
+    }
+
+    /// Foreground re-preference for every paired device's overview stream: the streaming counterpart of
+    /// `resetActiveConnectionEndpoint()`'s command-path reset. Called from the same foreground site
+    /// (`RootTabView`'s `.active` branch), right after `SpacesMobileDeviceStore.clearActiveHosts()` and
+    /// before `startDeviceStreams()` reopens every stream, so each one's next connect walks `hosts` from
+    /// the top instead of going straight back to whatever address it proved reachable before
+    /// backgrounding (e.g. a Tailscale address that still answers away from home).
+    ///
+    /// Two halves, because a stream's resolver lives in two different places depending on whether its
+    /// device is selected:
+    /// - A non-selected device's stream runs through a client cached in `nonActiveDeviceStreamClients`,
+    ///   rebuilt only when its record changes (see that property's own doc comment). Dropping the whole
+    ///   cache here is what forces the rebuild: `overviewStreamClient(forDeviceID:)` then builds a fresh
+    ///   client the next time this device's stream opens, and a fresh client's resolver seeds its cached
+    ///   winner from `SpacesMobileDeviceStore.activeHost(certificateFingerprint:)`, which the caller's
+    ///   `clearActiveHosts()` already cleared, so the new resolver starts with none and its own
+    ///   `nextStreamHost()` walks from the top of `hosts`.
+    /// - The selected device's stream runs through `bridgeClient`, which the app keeps and reuses for the
+    ///   whole session rather than rebuilding on every foreground, so its `overviewStreamResolver` keeps
+    ///   whatever winner (and failed-host set) it learned in memory regardless of what the persisted
+    ///   store now says. `clearActiveHosts()` alone never reaches it; it has to be told directly.
+    ///
+    /// Synchronous and not `async`: `SpacesDeviceAPIClient.resetOverviewStreamEndpointResolution()` is a
+    /// plain, lock-based call, not actor-isolated, so this runs to completion before returning and the
+    /// caller can call `startDeviceStreams()` immediately afterward with no risk of the reset racing
+    /// behind the reconnect it is supposed to precede.
+    func resetDeviceStreamEndpointsForForeground() {
+        nonActiveDeviceStreamClients = [:]
+        bridgeClient.resetOverviewStreamEndpointResolution()
+    }
+
+    /// Closes every paired device's overview stream and stops the age-clock beat. Called when the scene
+    /// backgrounds (streams are foreground-only, and a backgrounded device's alerts are APNs, not this
+    /// stream) and from a StoreKit paywall swap while the scene stays active. Also ends the current
+    /// failure-streak run (`noteConnectionMonitoringPaused()`): foreground streams are the thing that
+    /// watches the connection, so closing them for either reason means nothing is watching it until they
+    /// reopen, and a streak spanning the gap would otherwise count that whole interval as one continuous
+    /// outage. Leaves `deviceOverviews` untouched, so a returning foreground shows each device's
+    /// last-known overview while its stream reopens instead of flashing empty state.
+    func stopDeviceStreams() {
+        stopRelativeTimeReferenceClock()
+        for handle in overviewStreamSubscriptions.disable() { handle.cancel() }
+        noteConnectionMonitoringPaused()
+    }
+
+    /// Awaits any retry the coordinator has armed for a paired device's stream. Test-only: the retry
+    /// timer runs on the real wall clock, not the model's injectable `now`, so a test proving the
+    /// selected device's fixed 2 s redial cadence drains this instead of sleeping past it or polling
+    /// under a ceiling. A no-op when nothing is armed.
+    func drainPendingDeviceStreamRetryForTesting() async { await overviewStreamSubscriptions.drainPendingRetryForTesting() }
+
+    /// Test-only: `overviewStreamClient(forDeviceID:)`'s result, directly callable so a test can prove
+    /// `nonActiveDeviceStreamClients` reuses the same client across two lookups without driving a real
+    /// connect/retry cycle to exercise it indirectly.
+    func overviewStreamClientForTesting(deviceID: String) -> SpacesDeviceAPIClient? { overviewStreamClient(forDeviceID: deviceID) }
+
+    /// Test-only: the browser proxy's routing table, so a test can prove which of two racing
+    /// `updateBrowserRoutes` merges (a stale one, or a fresher one) is the one actually reflected in it,
+    /// which `model.overview` alone does not show.
+    var browserRoutingTableForTesting: BrowserProxyRoutingTable { browserRoutingTable }
+
+    /// Test-only: `deviceOverviews[deviceID]`, so a test can prove a device's cached delivery was
+    /// dropped rather than merely not currently published through `overview`.
+    func deviceOverviewForTesting(deviceID: String) -> SpacesDeviceOverviewPayload? { deviceOverviews[deviceID] }
+
+    /// Reconciles the coordinator's tracked devices to the current paired set and opens whatever it asks
+    /// for. Called on every event that can change which devices should have a stream (foreground resume,
+    /// pairing, device removal, device switch, Demo Mode toggle, and by the coordinator itself once an
+    /// armed retry fires) as well as a no-op reconcile that mostly just confirms the invariant holds.
+    private func reconcileDeviceStreams() {
+        guard overviewStreamSubscriptions.isEnabled else { return }
+        let desiredIDs = Set(pairedDevices.compactMap { isDeviceCredentialedForStreaming($0) ? $0.id : nil })
+        let outcome = overviewStreamSubscriptions.reconcile(desiredIDs: desiredIDs)
+        for (_, handle) in outcome.removed { handle.cancel() }
+        // `outcome.removed` only reports a device the coordinator had a live client for; one still
+        // `.opening` or waiting out an armed retry is dropped from the coordinator's tracking just the
+        // same but hands back no client here. Prune every cached overview and cached client against
+        // `desiredIDs` directly instead of against `outcome.removed`, so re-pairing the same device id
+        // never republishes the overview left over from before it was removed, or reconnects through a
+        // client built for a record that no longer applies. Read from both caches' own keys, not just
+        // one: a device still `.opening` with no push yet has a cached client but no cached overview.
+        let staleDeviceIDs = Set(deviceOverviews.keys).union(nonActiveDeviceStreamClients.keys).subtracting(desiredIDs)
+        for deviceID in staleDeviceIDs {
+            deviceOverviews[deviceID] = nil
+            nonActiveDeviceStreamClients[deviceID] = nil
+        }
+        for (deviceID, attempt) in outcome.devicesToOpen { openDeviceStream(deviceID: deviceID, attempt: attempt) }
+    }
+
+    /// Whether `record` has what a stream needs to authenticate: a stored Keychain token and a
+    /// certificate fingerprint. The active device is asked through its own live `settings` (the source
+    /// of truth while it is selected, and possibly ahead of the Keychain-backed record right after a
+    /// pairing completes in this session); every other paired device is checked by rebuilding its
+    /// settings from its own record, the same construction `overviewStreamClient(forDeviceID:)` uses to
+    /// open its stream. Mirrors the Mac sidebar's own filter
+    /// (`AppKitController.pairedDeviceHasRequiredCredentials`): a device missing its token would
+    /// otherwise redial unauthorized every retry forever, since the coordinator's backoff only paces a
+    /// failing connect, it never stops retrying on its own.
+    private func isDeviceCredentialedForStreaming(_ record: SpacesMobilePairedDeviceRecord) -> Bool {
+        if record.id == activeDeviceID { return settings.isPaired }
+        return SpacesMobileDeviceStore.settings(from: record, installationID: settings.installationID).isPaired
+    }
+
+    /// If the selected device already has a stream-delivered overview cached from before this call (it
+    /// was already paired and streaming, just not selected, or streaming through an idle gap with nothing
+    /// new to push), republishes it immediately instead of waiting on that stream's next push, which may
+    /// be a long time away when nothing on the device is changing. A freshly paired or first-ever-launched
+    /// device has nothing cached yet and is left to its stream's connect-time push, which the daemon
+    /// sends immediately on every subscribe (see `relayOverviewSubscription` on the daemon side).
+    private func republishCachedStreamOverviewIfSelected() {
+        guard let deviceID = activeDeviceID, let overview = deviceOverviews[deviceID] else { return }
+        let identity = overviewIdentity
+        let mutationGenerationAtFetch = mutationGeneration
+        // Captured here, at the call, not inside the `Task` below: this republish is racing the stream a
+        // push can land on at any moment, and `applyFetchedOverview` must see this call's own generation,
+        // not whatever the generation happens to be once the task actually runs.
+        let deliveryGenerationAtFetch = overviewDeliveryGeneration
+        Task {
+            await applyFetchedOverview(
+                overview, identity: identity, mutationGenerationAtFetch: mutationGenerationAtFetch,
+                deliveryGenerationAtFetch: deliveryGenerationAtFetch, advancesDeliveryGeneration: false)
+        }
+    }
+
+    /// Reconciles device streams to the current paired set and, if the device this call leaves selected
+    /// already has a stream-delivered overview cached (it was already paired and streaming under its
+    /// previous role), republishes it immediately. If that device is instead sitting in an armed retry
+    /// (its last connect failed and it is waiting out a backoff), resets the retry first so the switch
+    /// redials it at once: a non-selected device's backoff can run up to 60 s, and without this reset the
+    /// user would see no Connection Error for up to a minute after switching to it. Called by every mutator
+    /// that can move `activeDeviceID` or change which devices should be streaming (pairing, device switch,
+    /// removal, Demo Mode toggle): `reconcile` alone only opens or closes streams for devices entering or
+    /// leaving the paired set, and says nothing about which paired device just became selected.
+    func reconcileDeviceStreamsAfterIdentityChange() {
+        if let deviceID = activeDeviceID, overviewStreamSubscriptions.armedRetryDelay(deviceID: deviceID) != nil {
+            overviewStreamSubscriptions.resetForUserRetry(deviceID: deviceID)?.cancel()
+        }
+        reconcileDeviceStreams()
+        republishCachedStreamOverviewIfSelected()
+    }
+
+    /// The client `deviceID`'s stream subscribes through. The active device's stream reuses `bridgeClient`
+    /// itself, whatever backend it wraps: the real network backend, the Demo backend (Demo Mode's one
+    /// paired device is always the active one, so its stream lands in the same in-memory store every
+    /// mutation commits to), or a test's fake backend, so a test that swaps in a streaming fake needs only
+    /// the one client the model already builds. Every other paired device is served by
+    /// `nonActiveDeviceStreamClients`, one client per device id reused across every open attempt for as
+    /// long as its record stays unchanged (see that property's doc comment): each stream owns its
+    /// endpoint resolution independently of `bridgeClient` (see `overviewStreamResolver` on the network
+    /// backend), so becoming or ceasing to be the active device never has to rebuild an already-open
+    /// stream's client, and a captured `bridgeClient` snapshot is never invalidated by a later rebuild:
+    /// the same accepted residual `rebuildLiveClientAfterHostsBackfill` already documents for the command
+    /// path applies here too, since an already-open stream keeps its resolver until its own next
+    /// reconnect.
+    private func overviewStreamClient(forDeviceID deviceID: String) -> SpacesDeviceAPIClient? {
+        if deviceID == activeDeviceID { return bridgeClient }
+        if let overridden = overviewStreamClientsForTesting[deviceID] { return overridden }
+        guard let record = pairedDevices.first(where: { $0.id == deviceID }) else { return nil }
+        let deviceSettings = SpacesMobileDeviceStore.settings(from: record, installationID: settings.installationID)
+        if let cached = nonActiveDeviceStreamClients[deviceID], cached.settings == deviceSettings { return cached.client }
+        let client = SpacesDeviceAPIClient(settings: deviceSettings, deviceName: UIDevice.current.name)
+        nonActiveDeviceStreamClients[deviceID] = (client: client, settings: deviceSettings)
+        return client
+    }
+
+    /// Opens `deviceID`'s overview stream for the coordinator's `attempt`. `attempt` rides in both stream
+    /// callbacks below so a disconnect belonging to an abandoned attempt is never mistaken for the state
+    /// of the attempt that replaced it (see `RemoteOverviewSubscriptionCoordinator`'s own doc comment).
+    private func openDeviceStream(deviceID: String, attempt: Int) {
+        guard let client = overviewStreamClient(forDeviceID: deviceID) else {
+            applyDeviceStreamConnectResult(deviceID: deviceID, attempt: attempt, handle: nil, connectError: nil)
+            return
+        }
+        Task { @MainActor [weak self] in
+            do {
+                let handle = try await client.openOverviewStream(
+                    // The main queue, not a `Task`, because it is strictly FIFO and is the main actor's
+                    // executor: separate `Task { @MainActor in ... }`s created from the stream's single
+                    // receive thread are not guaranteed to run on the main actor in creation order on
+                    // every runtime this app supports, and `handleDeviceStreamOverview`'s latest-frame
+                    // check depends on `deviceOverviews` being written in the order frames were received,
+                    // not the order their tasks happened to resume. Both callbacks hop the same way so a
+                    // disconnect can never overtake the frame before it.
+                    onOverview: { [weak self] overview in
+                        DispatchQueue.main.async {
+                            MainActor.assumeIsolated { self?.handleDeviceStreamOverview(deviceID: deviceID, attempt: attempt, overview: overview) }
+                        }
+                    },
+                    onDisconnect: { [weak self] error in
+                        DispatchQueue.main.async {
+                            MainActor.assumeIsolated { self?.handleDeviceStreamDisconnected(deviceID: deviceID, attempt: attempt, error: error) }
+                        }
+                    })
+                self?.applyDeviceStreamConnectResult(deviceID: deviceID, attempt: attempt, handle: handle, connectError: nil)
+            } catch { self?.applyDeviceStreamConnectResult(deviceID: deviceID, attempt: attempt, handle: nil, connectError: error) }
+        }
+    }
+
+    private func applyDeviceStreamConnectResult(deviceID: String, attempt: Int, handle: SpacesDeviceAPIStreamHandle?, connectError: Error?) {
+        switch overviewStreamSubscriptions.applyConnectResult(deviceID: deviceID, attempt: attempt, client: handle) {
+        case .keep:
+            // Accepted residual: a connected stream whose daemon cannot build its first overview stays
+            // open and silent until the next database or terminal change (`DeviceOverviewStreamServer`),
+            // so the selected device keeps its last overview until then or a pull-to-refresh. That
+            // needs the daemon's own overview read to fail at connect time, which a fetch here would hit
+            // just the same, so no follow-up fetch is scheduled; the Mac sidebar treats a loaded section
+            // the same way.
+            break
+        case .discard:
+            // This attempt simply stopped being wanted (unpaired, or superseded by a newer attempt),
+            // which says nothing about reachability, so it must not overwrite a state a newer attempt
+            // may own: an abandoned attempt's late connect failure must not report a Connection Error
+            // or trigger re-pair while the replacement attempt's own stream is live.
+            handle?.cancel()
+        case .connectFailed:
+            // The connect itself failed (an actual outage) for the attempt that is still current, so
+            // `handle` is always nil here; nothing to cancel.
+            if let connectError { handleDeviceStreamFailure(deviceID: deviceID, error: connectError) }
+        case .discardDisconnected(let error):
+            handle?.cancel()
+            handleDeviceStreamFailure(deviceID: deviceID, error: error)
+        }
+    }
+
+    private func handleDeviceStreamDisconnected(deviceID: String, attempt: Int, error: Error?) {
+        switch overviewStreamSubscriptions.applyDisconnect(deviceID: deviceID, attempt: attempt, error: error) {
+        case .ignore, .recordedWhileOpening: break
+        case .markOffline(let handle):
+            handle.cancel()
+            handleDeviceStreamFailure(deviceID: deviceID, error: error)
+        }
+    }
+
+    /// Routes one pushed overview from `deviceID`'s stream, at attempt `attempt`. Mirrors the Mac
+    /// sidebar's own overview-push handler (`SidebarController.openRemoteOverviewSubscription`). A
+    /// receive-loop line can already be mid-flight past a `cancel()` call, so a payload from an attempt
+    /// `reconcile` has since abandoned (a fresh connect replaced it, e.g. across a quick
+    /// background/foreground cycle) can still arrive after the replacement's own payload already landed.
+    /// The daemon pushes only on change, so an unguarded stale payload would sit there indefinitely
+    /// instead of self-correcting on the next push; checking `isCurrentAttempt` is what drops it.
+    private func handleDeviceStreamOverview(deviceID: String, attempt: Int, overview: SpacesDeviceOverviewPayload) {
+        // A queued payload can still arrive after `reconcile` already removed and cancelled this device's
+        // subscription (unpaired, or Demo Mode toggled off); resurrecting a connection record for a device
+        // no longer paired would leak state `reconcile` never has a reason to clean up again.
+        guard let record = pairedDevices.first(where: { $0.id == deviceID }) else { return }
+        guard overviewStreamSubscriptions.isCurrentAttempt(deviceID: deviceID, attempt: attempt) else { return }
+        overviewStreamSubscriptions.noteOverviewDelivered(deviceID: deviceID, attempt: attempt)
+        deviceOverviews[deviceID] = overview
+        guard deviceID == activeDeviceID else {
+            // Learned here rather than only inside `applyFetchedOverview` below (the active device's own
+            // path): every paired device's stream pushes its daemon's reachable addresses on every
+            // connection, and a non-selected device that gains Tailscale must not have to wait until it
+            // is selected to persist that address, the same way the Mac sidebar merges hosts for every
+            // device's subscription unconditionally (`SpacesDeviceClient.subscribeOverview`). This
+            // device's own stream keeps dialing whatever it already resolved until its own next
+            // reconnect, the same accepted residual `rebuildLiveClientAfterHostsBackfill` documents for
+            // the active device; dropping its cached client is what makes that next reconnect see the
+            // widened list instead of the one it was built from.
+            let hostsMerged = SpacesMobileDeviceStore.mergeAdvertisedHosts(
+                overview.daemonStatus.deviceAPIAddresses, certificateFingerprint: record.certificateFingerprint)
+            // `onProvenHost` -> `reportProvenHost` persists a newly proven host by hopping to the main
+            // queue from inside this same stream's connect, before the stream's first frame gets its own
+            // main-queue hop to `handleDeviceStreamOverview` (see `reportProvenHost`'s doc comment: the
+            // queue is FIFO), so the persisted `activeHost` read here already reflects this frame's own
+            // connect when it changed, never a stale value from before it. `record.activeHost` is the
+            // in-memory snapshot this call already holds, so a mismatch means only this comparison, not a
+            // real read, is what is stale.
+            let provenHostChanged = SpacesMobileDeviceStore.activeHost(certificateFingerprint: record.certificateFingerprint) != record.activeHost
+            if hostsMerged || provenHostChanged {
+                // `mergeAdvertisedHosts` and a proven-host update each only touch the persisted store;
+                // `pairedDevices` is a separate in-memory snapshot (the same gap `updateBrowserRoutes`
+                // reloads for the active device's own address label) that `ConnectionSettingsView` reads
+                // to show the address in use, so either change needs this reload to actually reach the
+                // screen. One reload covers both: a frame that merges new hosts and proves a new winner in
+                // the same connect (the common case for a first connect to a freshly widened candidate
+                // list) must not reload twice.
+                pairedDevices = SpacesMobileDeviceStore.load(fallbackSettings: settings).devices
+                // Only a widened host list invalidates the cached client: `overviewStreamClient(forDeviceID:)`
+                // would otherwise keep dialing the narrower list it was built from (the same accepted
+                // residual `rebuildLiveClientAfterHostsBackfill` documents for the active device). A proven
+                // host alone changes nothing the client needs rebuilt for (the stream that just proved it
+                // is already open and already on it), and `SpacesMobileConnectionSettings` excludes
+                // `activeHost` from its `Equatable` conformance, so reloading `pairedDevices` above never
+                // trips the cache's own settings-changed check either.
+                if hostsMerged { nonActiveDeviceStreamClients[deviceID] = nil }
+            }
+            return
+        }
+        let identity = overviewIdentity
+        let mutationGenerationAtFetch = mutationGeneration
+        // Each frame applies in its own task, suspended at `applyFetchedOverview`'s internal await; a
+        // quick burst can let an older frame's task resume after a newer one already published. Passing
+        // this rather than `deliveryGenerationAtFetch` (the refresh/republish guard): that counter only
+        // moves on an *accepted* delivery, so two frames arriving before either is applied would still
+        // read the same value and the guard would not catch a reorder between them. Comparing against
+        // `deviceOverviews[deviceID]` does, because that entry is overwritten synchronously, in arrival
+        // order, the instant each frame is received (above), before its task is even created.
+        Task {
+            await applyFetchedOverview(
+                overview, identity: identity, mutationGenerationAtFetch: mutationGenerationAtFetch,
+                isStillLatestFrame: { self.deviceOverviews[deviceID] == overview })
+        }
+    }
+
+    /// Routes a stream failure for `deviceID`. Only the selected device's failure surfaces anything: it
+    /// runs the shared failure handler so a stream failure raises the same delayed Connection Error alert
+    /// an explicit refresh failure did. A non-selected device's failure is left to the coordinator's own
+    /// retry bookkeeping.
+    private func handleDeviceStreamFailure(deviceID: String, error: Error?) {
+        guard deviceID == activeDeviceID else { return }
+        let identity = overviewIdentity
+        let mutationGenerationAtFetch = mutationGeneration
+        // Captured at the moment the failure is observed (a stream failure has no attempt start to
+        // capture it at instead), so a success that already landed and bumped this before the failure was
+        // even noticed is correctly seen as newer, not raced against.
+        let deliveryGenerationAtFailure = overviewDeliveryGeneration
+        let monitoringGeneration = connectionMonitoringGeneration
+        // A stream failure has no request in flight to time from, so the failure streak's clock starts at
+        // the instant the failure is observed here rather than at some inferred moment the daemon actually
+        // went quiet.
+        let attemptStartedAt = now()
+        // A clean stop reports no error, but the device still stopped streaming unexpectedly (an
+        // intentional stop on our side never reaches here: it goes through `reconcile`'s removed list or
+        // `disable()`, both of which cancel the handle directly instead of routing through this method), so
+        // failure handling still runs, with a generic error standing in for the missing one.
+        let effectiveError = error ?? SpacesDeviceAPIClientError.requestFailed("The device closed its overview stream.")
+        Task {
+            _ = await handleOverviewFailure(
+                identity: identity, mutationGenerationAtFetch: mutationGenerationAtFetch, deliveryGenerationAtAttempt: deliveryGenerationAtFailure,
+                attemptStartedAt: attemptStartedAt, monitoringGeneration: monitoringGeneration, error: effectiveError)
+        }
+    }
+
+    /// Starts the 30 s age-clock beat. Streams push on change, not on a timer, so relative-time labels
+    /// ("2m ago") need their own slow tick to stay live between changes; matches the Mac Alerts table's
+    /// own cadence.
+    private func startRelativeTimeReferenceClock() {
+        guard relativeTimeReferenceTask == nil else { return }
+        relativeTimeReferenceTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                guard let self, !Task.isCancelled else { return }
+                self.advanceRelativeTimeReferenceIfDue()
+            }
+        }
+    }
+
+    private func stopRelativeTimeReferenceClock() {
+        relativeTimeReferenceTask?.cancel()
+        relativeTimeReferenceTask = nil
+    }
+
     /// Fetches and publishes the active device's overview. Reentrant: a call joins the fetch already in
     /// flight only while the connection (`overviewIdentity`), its channel (`connectionChannelGeneration`),
-    /// and the mutation generation are all unchanged, so a deep link arriving mid-poll still resolves
+    /// and the mutation generation are all unchanged, so a deep link arriving mid-refresh still resolves
     /// instead of dropping silently. A fetch issued before any of those moved describes a device this app
     /// has since left, a connection that was closed out from under it, or a device state a mutation has
     /// already replaced, and its result is discarded or its request aborted, so a caller is never answered
@@ -1478,13 +1926,194 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     /// Advances `relativeTimeReference` to the current wall-clock instant once at least 30 seconds have
     /// elapsed since it last moved — the same cadence the Mac's `AutomationsController.armRelativeTimeRefresh`
-    /// uses for its own label-only beat. Piggybacks on the existing poll instead of a separate timer: every
-    /// `performRefresh` calls this once, so the label clock advances on a coarse cadence of its own without
-    /// adding new timer machinery.
+    /// uses for its own label-only beat. `startRelativeTimeReferenceClock`'s own task sleeps before its
+    /// first tick, so it cannot be what catches a reference gone stale by more than 30 seconds across a
+    /// background gap; `performRefresh`'s defer also calls this so the labels catch up in the same tick as
+    /// the refresh that brings everything else back, rather than waiting out the clock's first tick too.
     private func advanceRelativeTimeReferenceIfDue() {
         let current = wallClock()
         guard current.timeIntervalSince(relativeTimeReference) >= 30 else { return }
         relativeTimeReference = current
+    }
+
+    /// Applies one fetched overview through the exact path every consumer must share: compatibility from
+    /// its inline frozen-core status, the advertised-hosts merge, browser routes, and `publishOverview`'s
+    /// pruning and deferred-delete resolution. Used by `performRefresh` for an explicit fetch, by
+    /// `republishCachedStreamOverviewIfSelected` for a cached stream payload republished on selection, and
+    /// by `handleDeviceStreamOverview` for a pushed overview from the selected device's stream, so a
+    /// stream payload lands exactly where a refresh's payload would have.
+    ///
+    /// `deliveryGenerationAtFetch` is the staleness guard for the first two callers only: a stream push is
+    /// the ordered source of truth (the daemon pushes on every change, so anything a fetch could reveal is
+    /// also pushed), and always applies regardless of what else has landed since, which is why
+    /// `handleDeviceStreamOverview` passes `nil` (the default) rather than a captured generation. A fetch
+    /// or a cached republish has no such guarantee: it can still be in flight, or queued on the main actor,
+    /// when a newer push (or a newer fetch) already accepted and published, and without this guard it
+    /// would overwrite that newer state with its own older content even though identity and mutation
+    /// generation both still match. Checked at entry and again after the `await` below, since a push can
+    /// land while this call is suspended there.
+    ///
+    /// `isStillLatestFrame`, folded into `isStillCurrent` the same way, is the stream push's own ordering
+    /// guard: two of its frames apply in two separate tasks, each suspended at the `await` below, so a
+    /// quick burst can let an older frame's task resume after a newer frame's task already published, and
+    /// `deliveryGeneration` does not catch it (both frames arrive before either is applied, so both would
+    /// still read the same value). Only `handleDeviceStreamOverview` passes it.
+    ///
+    /// `advancesDeliveryGeneration` is false only for `republishCachedStreamOverviewIfSelected`: a cached
+    /// republish and an explicit `refresh()` can both be in flight after a device switch, and the cached
+    /// payload is never newer than whatever the daemon answers with, so it must never be the one that
+    /// moves the counter. If it did, publishing the cached (older) content while a concurrent refresh is
+    /// still in flight would advance `overviewDeliveryGeneration` out from under that refresh, so its own
+    /// `deliveryGenerationAtFetch` capture no longer matches by the time it finishes and its newer content
+    /// gets discarded as stale. The republish still discards itself the normal way when the generation
+    /// moved for some other reason (a stream push, or that same refresh landing first).
+    ///
+    /// Returns `nil` when the identity moved on mid-apply, or `isStillCurrent` no longer holds (the
+    /// payload is discarded, nothing to report); `true` when the overview was accepted and published;
+    /// `false` when it decoded but was blocked (the daemon needs an update) and `publishOverview(nil)` ran
+    /// instead. `performRefresh` folds this into its own `perfOutcome`; the other two callers ignore it; a
+    /// stream delivery and a cached republish are not timed requests with a baseline to report into.
+    @discardableResult private func applyFetchedOverview(
+        _ overview: SpacesDeviceOverviewPayload, identity: Int, mutationGenerationAtFetch: Int, deliveryGenerationAtFetch: Int? = nil,
+        isStillLatestFrame: (() -> Bool)? = nil, advancesDeliveryGeneration: Bool = true
+    ) async -> Bool? {
+        // Both conditions describe the same thing (this call's payload has been overtaken by something
+        // newer, short of a connection or mutation change, which `isOverviewFetchCurrent` already covers
+        // on its own) so callers, and `updateBrowserRoutes`, only need to ask this one question rather
+        // than juggling both parameters themselves.
+        let isStillCurrent: () -> Bool = {
+            if let deliveryGenerationAtFetch, deliveryGenerationAtFetch != self.overviewDeliveryGeneration { return false }
+            if let isStillLatestFrame, !isStillLatestFrame() { return false }
+            return true
+        }
+        guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtFetch), isStillCurrent() else { return nil }
+        applyCompatibility(overview.daemonStatus)
+        // The daemon reports the addresses it is currently reachable at on every connection. This is
+        // how a device paired before its Mac ever had Tailscale silently gains the tailnet fallback
+        // the moment the Mac gets one, with no rescan needed, unlike the QR-rescan path.
+        let hostsChanged = SpacesMobileDeviceStore.mergeAdvertisedHosts(
+            overview.daemonStatus.deviceAPIAddresses, certificateFingerprint: settings.certificateFingerprint)
+        // A decodable overview whose daemon nonetheless reports an incompatible protocol is blocked;
+        // show the restart/update block, not its stale workspace data.
+        let acceptedOverview = isActiveDeviceBlocked ? nil : overview
+        if let acceptedOverview {
+            await updateBrowserRoutes(
+                overview: acceptedOverview, identity: identity, mutationGeneration: mutationGenerationAtFetch, isStillCurrent: isStillCurrent)
+        }
+        // Re-checked after the await above, not just at entry: a mutation applying while the route
+        // update was suspended makes this attempt's payload pre-mutation state, and a stream push may
+        // have landed and published newer state while this call was suspended there too.
+        guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtFetch), isStillCurrent() else { return nil }
+        // Cleared before publishing, not after: the device answered, so any stale connection error is
+        // over, but publishing is also what settles a deferred delete, and that may raise an error of
+        // its own (`resolveDeferredWorkspaceDeletions`). Clearing afterwards would wipe it.
+        connectionNotice = nil
+        errorMessage = nil
+        refreshFailureStreak = nil
+        if advancesDeliveryGeneration { overviewDeliveryGeneration &+= 1 }
+        publishOverview(acceptedOverview)
+        // Rebuilds the live client only after the overview above is already published, deliberately:
+        // this can run mid-refresh, and racing the rebuild against the `overviewIdentity` guards earlier
+        // in this method could drop the very overview the caller is waiting for. Publishing first means
+        // there is nothing left for a rebuild to corrupt: the identity guard just above already
+        // confirmed no device switch happened in between.
+        if hostsChanged { rebuildLiveClientAfterHostsBackfill() }
+        return acceptedOverview != nil
+    }
+
+    /// The failure path shared by an explicit refresh's request failure and a stream disconnect or
+    /// connect failure for the selected device (`handleDeviceStreamFailure`): the compatibility handshake,
+    /// auth-failure recovery, daemon-update suppression, and the failure streak driving the 5 s delayed
+    /// "Connection Error" alert (suppressed while a terminal is open) all run from here, so a stream
+    /// failure looks exactly like a refresh failure did.
+    ///
+    /// Returns the outcome to fold into the caller's own `perfOutcome`, or `nil` when nothing should be
+    /// reported: a stale identity, the incompatible-daemon block, or an auth failure (none of those is a
+    /// completed measurement), or a daemon-update-suppressed attempt (a device offline on purpose is not a
+    /// failure worth counting into the baseline).
+    private func handleOverviewFailure(
+        identity: Int, mutationGenerationAtFetch: Int, deliveryGenerationAtAttempt: Int, attemptStartedAt: ContinuousClock.Instant,
+        monitoringGeneration: Int, error: Error
+    ) async -> (count: Int?, success: Bool, error: String?)? {
+        // A mutation or another attempt that landed while this one was failing has already published the
+        // device's real state and cleared any error; a stale failure must not overwrite that with an
+        // outage report.
+        guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtFetch) else { return nil }
+        // A newer success already accepted a payload and cleared the streak while this attempt's own
+        // compatibility handshake (below) was still in flight; that later success has already settled the
+        // question this attempt was trying to answer, so this attempt has nothing left to report.
+        guard deliveryGenerationAtAttempt == overviewDeliveryGeneration else { return nil }
+        // The overview did not decode (a wire-incompatible daemon) or the device is unreachable. The
+        // frozen-core handshake stays decodable across versions, so use it to tell those apart: an
+        // incompatible verdict shows the block; otherwise surface the original connection error.
+        await refreshCompatibility(
+            identity: identity,
+            isStillCurrent: {
+                isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtFetch)
+                    && deliveryGenerationAtAttempt == overviewDeliveryGeneration
+            })
+        // The user may have switched or removed the active device, or a mutation may have published
+        // fresher state, while the fallback handshake was in flight; a stale verdict must not
+        // overwrite either.
+        guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtFetch) else { return nil }
+        guard deliveryGenerationAtAttempt == overviewDeliveryGeneration else { return nil }
+        if isActiveDeviceBlocked {
+            overview = nil
+            connectionNotice = nil
+            errorMessage = nil
+            return nil
+        }
+        if let recoveryMessage = SpacesDeviceAPIAuthentication.recoveryMessage(for: error) {
+            handleAuthenticationFailure(message: recoveryMessage)
+            return nil
+        }
+        // A requested daemon update takes the device offline on purpose, and `requestDaemonUpdate()` is
+        // already watching across that outage. An authentication failure above still surfaces: that is
+        // not an outage and does not resolve itself when the daemon returns.
+        guard !isApplyingDaemonUpdate else { return nil }
+        // Measured in wall-clock time rather than failure count because the kinds of failure this folds
+        // together are not comparable in duration: a dead socket throws immediately, while an unreachable
+        // host burns a whole request timeout (twice, counting the compatibility handshake above) before it
+        // throws even once, and a stream disconnect can fire anywhere between the two. Counting attempts
+        // would report the fast case in a few seconds and the slow case only after a minute; timing the run
+        // reports both within one window. User-initiated work (mutations, deep links) does not come
+        // through here; it still reports on its first failure.
+        // This attempt started before the app last stopped watching, so its elapsed time is mostly time
+        // nothing was watching the connection. It cannot start or extend a run; that would resurrect,
+        // dated before the pause, exactly the run `noteConnectionMonitoringPaused` ended.
+        guard monitoringGeneration == connectionMonitoringGeneration else { return nil }
+        // While the selected device's overview stream is live, it is the authority on reachability: the
+        // daemon is provably still there, so a lone failed one-off refresh (pull-to-refresh, foreground
+        // resume, a terminal dismissal) neither starts nor extends the streak. A connection that is
+        // actually dead is caught by the stream itself, a disconnect or its silence watchdog
+        // (`streamStalled`), which reports a stream failure through this same function once the
+        // coordinator has already moved the device out of `.live`, and starts the run then. Without this,
+        // a streak a single failed fetch started could never be cleared by a healthy, quiet stream
+        // (keepalives are filtered below the model, so a live connection alone publishes nothing), and an
+        // unrelated failure minutes later would read as one continuous outage. Still a completed
+        // measurement for the perf log: the request itself failed normally, only the streak is bypassed.
+        if let activeDeviceID, overviewStreamSubscriptions.isLive(deviceID: activeDeviceID) {
+            return (count: nil, success: false, error: DevicePerformanceLog.sanitized(error.localizedDescription))
+        }
+        let streakStartedAt = refreshFailureStreak?.identity == identity ? refreshFailureStreak?.startedAt : nil
+        let startedAt = streakStartedAt ?? attemptStartedAt
+        refreshFailureStreak = (identity: identity, startedAt: startedAt)
+        let outcome: (count: Int?, success: Bool, error: String?) = (
+            count: nil, success: false, error: DevicePerformanceLog.sanitized(error.localizedDescription)
+        )
+        guard now() - startedAt >= refreshFailureAlertDelay else { return outcome }
+        // While a terminal is open, its own connection banner (Reconnecting, then Device unreachable)
+        // already reports this exact outage, so the modal alert would just repeat it while dimming the
+        // whole screen. The streak above keeps advancing regardless, so leaving the terminal while the
+        // device is still failing raises the alert on the very next failure rather than restarting the
+        // delay. A browser session detail has no banner of its own, so it is not covered here.
+        // The gate is the open terminal, not the banner: a terminal whose session already ended shows no
+        // banner, and an outage that starts while it is open goes unreported until the user leaves it.
+        // Accepted: the ended pane is what the user is looking at, nothing on it can change, and the next
+        // failure after leaving raises the alert with the streak intact.
+        guard activeTerminalSessionID == nil else { return outcome }
+        errorMessage = error.localizedDescription
+        return outcome
     }
 
     /// One overview fetch on behalf of connection `identity`. Publishes nothing when the identity
@@ -1501,24 +2130,29 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // Captured before the fetch is issued: this overview describes the daemon as of now, so a mutation
         // applied while it is in flight makes it stale and it must be dropped rather than published.
         let mutationGenerationAtFetch = mutationGeneration
+        // Captured at the same moment, and passed to both this attempt's success and failure paths: if a
+        // stream push (or another refresh) accepts a payload and bumps this before this attempt finishes,
+        // this attempt's own result is older than what is already published and must not overwrite it,
+        // whichever way this attempt itself turns out.
+        let deliveryGenerationAtStart = overviewDeliveryGeneration
         let perfBeganAtUptimeNanoseconds = DevicePerformanceLog.overviewRefreshBegin()
-        // Set at this attempt's one success or one reported-failure exit (`publishOverview` below, or the
-        // failure branch in the `catch` once the failure has updated `refreshFailureStreak`); left nil for
-        // every other exit (a stale-identity discard, cancellation, the blocked-device branch, an
-        // authentication failure, or a daemon-update-suppressed poll): none of those is a completed
-        // list-load measurement worth reporting into the baseline. The failure branch sets it regardless
-        // of whether the streak has crossed `refreshFailureAlertDelay`, so a failure that never reaches the
-        // user-facing alert still closes out the `overview_refresh_begin` this attempt opened.
+        // Set at this attempt's one success or one reported-failure exit (`applyFetchedOverview` below, or
+        // the `catch` once `handleOverviewFailure` has updated `refreshFailureStreak`); left nil for every
+        // other exit (a stale-identity discard, cancellation, the blocked-device branch, an authentication
+        // failure, or a daemon-update-suppressed poll): none of those is a completed list-load measurement
+        // worth reporting into the baseline. The failure branch sets it regardless of whether the streak
+        // has crossed `refreshFailureAlertDelay`, so a failure that never reaches the user-facing alert
+        // still closes out the `overview_refresh_begin` this attempt opened.
         var perfOutcome: (count: Int?, success: Bool, error: String?)?
         defer {
             isLoading = false
             refreshInFlight = nil
             // Runs on every refresh attempt regardless of outcome: it only reads the local wall clock, so
             // a fetch failure or a stale-identity discard still counts as "we checked in". That matters for
-            // a returning tab (hidden, backgrounded, or behind a closed detail route while polling was
-            // paused): its first refresh on resume already clears the 30-second bar by itself, since the
-            // reference sat untouched for the whole gap, so labels catch straight up with no separate
-            // "just resumed" case to write.
+            // a returning tab (hidden, backgrounded, or behind a closed detail route, each a state with no
+            // stream open and so no clock task running): its first refresh on resume already clears the
+            // 30-second bar by itself, since the reference sat untouched for the whole gap, so labels catch
+            // straight up with no separate "just resumed" case to write.
             advanceRelativeTimeReferenceIfDue()
             if let perfOutcome {
                 DevicePerformanceLog.overviewRefreshEnd(
@@ -1531,107 +2165,19 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // state costs a single round-trip. Only a refresh that fails entirely falls back to the
             // standalone frozen-core handshake below.
             let overview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
-            guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtFetch) else { return }
-            applyCompatibility(overview.daemonStatus)
-            // The daemon reports the addresses it is currently reachable at on every connection. This is
-            // how a device paired before its Mac ever had Tailscale silently gains the tailnet fallback
-            // the moment the Mac gets one — no rescan needed, unlike the pre-existing QR-rescan path.
-            let hostsChanged = SpacesMobileDeviceStore.mergeAdvertisedHosts(
-                overview.daemonStatus.deviceAPIAddresses, certificateFingerprint: settings.certificateFingerprint)
-            // A decodable overview whose daemon nonetheless reports an incompatible protocol is blocked;
-            // show the restart/update block, not its stale workspace data.
-            let acceptedOverview = isActiveDeviceBlocked ? nil : overview
-            if let acceptedOverview {
-                await updateBrowserRoutes(overview: acceptedOverview, identity: identity, mutationGeneration: mutationGenerationAtFetch)
-            }
-            // Re-checked after the await above, not just at fetch return: a mutation applying while the
-            // route update was suspended makes this poll's payload pre-mutation state.
-            guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtFetch) else { return }
-            // Cleared before publishing, not after: the device answered, so any stale connection error is
-            // over — but publishing is also what settles a deferred delete, and that may raise an error of
-            // its own (`resolveDeferredWorkspaceDeletions`). Clearing afterwards would wipe it.
-            connectionNotice = nil
-            errorMessage = nil
-            refreshFailureStreak = nil
-            publishOverview(acceptedOverview)
+            guard
+                let applied = await applyFetchedOverview(
+                    overview, identity: identity, mutationGenerationAtFetch: mutationGenerationAtFetch,
+                    deliveryGenerationAtFetch: deliveryGenerationAtStart)
+            else { return }
             // A refresh that decoded but published nothing (the daemon needs an update) is not a list load
             // the user saw, so it does not count as one.
             perfOutcome =
-                acceptedOverview.map { (count: $0.sessions.count, success: true, error: nil) } ?? (
-                    count: nil, success: false, error: "daemon_update_required"
-                )
-            // Rebuilds the live client only after the overview above is already published, deliberately:
-            // this runs mid-refresh, and racing the rebuild against the `overviewIdentity` guards earlier
-            // in this method could drop the very overview the user is waiting for. Publishing first means
-            // there is nothing left in this refresh for a rebuild to corrupt — the identity guard just
-            // above already confirmed no device switch happened in between.
-            if hostsChanged { rebuildLiveClientAfterHostsBackfill() }
+                applied ? (count: overview.sessions.count, success: true, error: nil) : (count: nil, success: false, error: "daemon_update_required")
         } catch is CancellationError { return } catch {
-            // A mutation that landed while this poll was failing has already published the device's real
-            // state and cleared any error; a stale failure must not overwrite that with an outage report.
-            guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtFetch) else { return }
-            // The overview did not decode (a wire-incompatible daemon) or the device is unreachable. The
-            // frozen-core handshake stays decodable across versions, so use it to tell those apart: an
-            // incompatible verdict shows the block; otherwise surface the original connection error.
-            await refreshCompatibility(identity: identity)
-            // The user may have switched or removed the active device — or a mutation may have published
-            // fresher state — while the fallback handshake was in flight; a stale verdict must not
-            // overwrite either.
-            guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtFetch) else { return }
-            if isActiveDeviceBlocked {
-                overview = nil
-                connectionNotice = nil
-                errorMessage = nil
-                return
-            }
-            if let recoveryMessage = SpacesDeviceAPIAuthentication.recoveryMessage(for: error) {
-                handleAuthenticationFailure(message: recoveryMessage)
-                return
-            }
-            // A requested daemon update takes the device offline on purpose, and `requestDaemonUpdate()`
-            // is already watching across that outage. Pausing the overview poll keeps most refreshes out
-            // of the window, but not one already awaiting its overview when the user taps Update, nor a
-            // pull-to-refresh during it — so the suppression has to live here, where the failure lands,
-            // rather than only at the call sites that start a refresh. An authentication failure above
-            // still surfaces: that is not an outage and does not resolve itself when the daemon returns.
-            guard !isApplyingDaemonUpdate else { return }
-            // A single failed round trip is routinely recoverable — a Wi-Fi blip, or a socket the OS
-            // dropped out from under the app while it was suspended — and the poll retries every two
-            // seconds, so raising the modal alert on the first one interrupts the user for something that
-            // heals itself before they can read it. The alert instead waits until failures have persisted
-            // for `refreshFailureAlertDelay`.
-            //
-            // Measured in wall-clock time rather than failure count because the two kinds of failure are
-            // not comparable in duration: a dead socket throws immediately, while an unreachable host
-            // burns the request's full eight-second timeout (twice, counting the compatibility handshake
-            // above) before it throws even once. Counting attempts would report the fast case in a few
-            // seconds and the slow case only after a minute; timing the run reports both within one
-            // window. User-initiated work (mutations, deep links) does not come through here — it still
-            // reports on its first failure.
-            // This attempt started before the app last stopped watching, so its elapsed time is mostly
-            // time nothing was polling. It cannot start or extend a run — that would resurrect, dated
-            // before the pause, exactly the run `noteConnectionMonitoringPaused` ended.
-            guard monitoringGeneration == connectionMonitoringGeneration else { return }
-            let streakStartedAt = refreshFailureStreak?.identity == identity ? refreshFailureStreak?.startedAt : nil
-            let startedAt = streakStartedAt ?? attemptStartedAt
-            refreshFailureStreak = (identity: identity, startedAt: startedAt)
-            // Set before the alert-delay guard, not after: this attempt failed regardless of whether the
-            // streak has run long enough to raise the user-facing alert, and the `defer` above needs a
-            // `perfOutcome` on every reported-failure exit or overview_refresh_begin never gets its
-            // matching overview_refresh_end for a refresh that fails below the delay.
-            perfOutcome = (count: nil, success: false, error: DevicePerformanceLog.sanitized(error.localizedDescription))
-            guard now() - startedAt >= refreshFailureAlertDelay else { return }
-            // While a terminal is open, its own connection banner (Reconnecting, then Device unreachable)
-            // already reports this exact outage, so the modal alert would just repeat it while dimming the
-            // whole screen. The streak above keeps advancing regardless, so leaving the terminal while the
-            // device is still failing raises the alert on the very next failed poll rather than restarting
-            // the delay. A browser session detail has no banner of its own, so it is not covered here.
-            // The gate is the open terminal, not the banner: a terminal whose session already ended shows
-            // no banner, and an outage that starts while it is open goes unreported until the user leaves
-            // it. Accepted: the ended pane is what the user is looking at, nothing on it can change, and
-            // the next poll after leaving raises the alert with the streak intact.
-            guard activeTerminalSessionID == nil else { return }
-            errorMessage = error.localizedDescription
+            perfOutcome = await handleOverviewFailure(
+                identity: identity, mutationGenerationAtFetch: mutationGenerationAtFetch, deliveryGenerationAtAttempt: deliveryGenerationAtStart,
+                attemptStartedAt: attemptStartedAt, monitoringGeneration: monitoringGeneration, error: error)
         }
     }
 
@@ -1686,15 +2232,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // The in-flight flag is released before this invocation's final refresh (see the timeout path
         // below), so a retry can legitimately start while this one is still finishing. Claim a
         // generation and only surrender the flag while still holding it, or a slow predecessor's exit
-        // would clear a live successor's state — re-enabling the button mid-update and resuming the
-        // overview poll straight into the handoff this flag exists to protect.
+        // would clear a live successor's state, re-enabling the button mid-update and letting ordinary
+        // overview traffic straight into the handoff this flag exists to protect.
         daemonUpdateGeneration += 1
         let generation = daemonUpdateGeneration
         isApplyingDaemonUpdate = true
         defer { if daemonUpdateGeneration == generation { isApplyingDaemonUpdate = false } }
 
         // This flow runs on its own command channel rather than the shared one. The shared channel
-        // carries the overview poll and every user mutation, and the transport does not serialize whole
+        // carries explicit overview refreshes and every user mutation, and the transport does not serialize whole
         // request/response round trips (issue #248): two callers can interleave on its single connection
         // and consume each other's responses. The mutation gate below covers the restart RPC, but the
         // polling phase deliberately runs with mutations enabled for up to `daemonUpdateTimeout`, so a
@@ -1772,9 +2318,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // fetch would take the ordinary failure path — clearing the status the screen renders from and
         // raising a connection error — which is the opposite of leaving the warning in place. It cannot
         // run under the expected-outage suppression either, because that keys off the same flag this
-        // path has to release to re-enable the button. Releasing the flag resumes the overview poll,
-        // which reconciles on its own cadence and reports a genuinely unreachable device the ordinary
-        // way, so nothing is left stale.
+        // path has to release to re-enable the button. Releasing the flag un-suppresses the selected
+        // device's stream failures (`handleOverviewFailure`), which then reports a genuinely unreachable
+        // device the ordinary way, so nothing is left stale.
         guard identity == overviewIdentity else { return .unresolved }
         connectionNotice = nil
         isApplyingDaemonUpdate = false
@@ -1916,9 +2462,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// two things the offer is made of: the daemon status that carries the record, and the overview that
     /// names its workspaces.
     ///
-    /// Assigns only on a change, because both setters fire on every poll while the steady state of this
-    /// property is nil: an unconditional write would invalidate every view observing the model twice a
-    /// second for a question nobody asked.
+    /// Assigns only on a change, because both setters fire on every overview delivery while the steady
+    /// state of this property is nil: an unconditional write would invalidate every view observing the
+    /// model on every push for a question nobody asked.
     private func updateSessionRestoreOffer() {
         // The answer in flight owns the sheet until the device has answered it, and the answer's own
         // completion re-derives this. See `isAnsweringSessionRestore`.
@@ -1960,8 +2506,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// What the active device is offering right now, or nil when it is offering nothing this app has not
     /// already answered.
     ///
-    /// The short circuit on an empty record comes before everything else: this runs on every poll, and
-    /// the steady state is that the device is offering nothing.
+    /// The short circuit on an empty record comes before everything else: this runs on every overview
+    /// delivery, and the steady state is that the device is offering nothing.
     ///
     /// A device with no paired record of its own is offered nothing, because its id is the key the
     /// answer is remembered under, and an offer this app could not remember answering would be raised
@@ -1998,20 +2544,21 @@ private enum SpacesMobileMutationTimeoutRecovery {
     func answerSessionRestoreOffer(_ answer: SessionRestoreAnswer, offer: SessionRestoreOffer) async -> String? {
         isAnsweringSessionRestore = true
         let identity = overviewIdentity
-        // Sent on a dedicated command channel rather than the shared one the overview poll also uses, for
-        // the reason `performDeleteWorkspace` uses one: a restore relaunches one agent per row under the
-        // daemon's long-running request timeout, far longer than the 8s the poll allows itself, and the
-        // transport does not serialize whole round trips on a connection (issue #248), so the poll timing
-        // out would close this request's connection out from under it while the device restores regardless.
-        // The poll itself is not shielded: the daemon serves the overview and the restore on the same
-        // serial lane, so a restore that outlasts the poll's timeout makes that poll fail and, past the alert
-        // delay, show a connection error while the agents are still being relaunched. Accepted: it takes
-        // dozens of agents to hold the lane that long, the message is factual about the request that
-        // failed, and the first poll after the answer clears it.
+        // Sent on a dedicated command channel rather than the shared one an explicit overview refresh
+        // also uses, for the reason `performDeleteWorkspace` uses one: a restore relaunches one agent per
+        // row under the daemon's long-running request timeout, far longer than the 8s a refresh allows
+        // itself, and the transport does not serialize whole round trips on a connection (issue #248), so
+        // a refresh timing out would close this request's connection out from under it while the device
+        // restores regardless. Traffic on the shared channel is not shielded from this either: the daemon
+        // serves the overview and the restore on the same serial lane, so a restore that outlasts a
+        // refresh's timeout times that refresh out and, past the alert delay, shows a connection error
+        // while the agents are still being relaunched. Accepted: it takes dozens of agents to hold the
+        // lane that long, the message is factual about the request that failed, and the selected
+        // device's next stream push or refresh clears it once the restore finishes.
         let answerChannel = bridgeClient.makeCommandChannel()
         let client = bridgeClient
-        // The version check rides that same channel, so the poll cannot close the connection out from
-        // under the check either, and the answer that follows reuses the connection the check just proved.
+        // The version check rides that same channel, so an explicit refresh cannot close the connection
+        // out from under the check either, and the answer that follows reuses the connection the check just proved.
         let probe: Result<TerminalServiceDaemonStatus, any Error>
         do { probe = .success(try await client.fetchDaemonStatus(commandChannel: answerChannel)) } catch { probe = .failure(error) }
         // The active device changed while the check was in flight, so there is no sheet left to report to
@@ -2079,8 +2626,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // The device replaced the record while the question was on screen. Retire the question with it
             // rather than leaving the sheet up on a record its own device has disowned, and ask for a fresh
             // status at once: the record that replaced it is one the user has not been asked about, and
-            // nothing else raises it until this app's next poll, which a screen that polls nothing (the
-            // Settings tab, an open terminal) leaves indefinitely far away.
+            // nothing else raises it until the device's stream next pushes an overview, which is soon
+            // while foregrounded but does not happen at all once backgrounded.
             retiredSessionRestoreGenerations[offer.deviceID] = offer.generation
             updateSessionRestoreOffer()
             // The refusal is the device reporting a record this app has never seen, which every overview
@@ -2096,7 +2643,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let failureReport = SessionRestoreAnswering.failureReport(restored.failures, offer: offer)
         // Only a Restore changes what this app shows: the relaunched agents are sessions the overview does
         // not carry yet, and the restore response answers with their ids alone. A Skip leaves every list
-        // exactly as it was, and bumps nothing, so a poll in flight across it still publishes.
+        // exactly as it was, and bumps nothing, so an overview fetch in flight across it still publishes.
         if answer == .restore {
             // The device has relaunched the agents, so every overview fetch issued before this answer
             // describes a device without them. Bumped like any other device-changing call so one of those
@@ -2141,20 +2688,25 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     /// Standalone frozen-core handshake, used only as a fallback when the overview cannot carry the
     /// inline status (an older daemon) or could not be fetched/decoded at all (incompatible/offline).
-    /// Takes the caller's connection `identity` and re-checks it after the await: this fallback only
-    /// runs once an overview fetch has already failed, so by the time it resolves the user may have
-    /// switched or removed the active device, and a stale handshake must not publish for the new one.
-    private func refreshCompatibility(identity: Int) async {
+    /// A probe result applies only while the failure that started it is still the latest word on the
+    /// device: this fallback only runs once an overview fetch has already failed, and with the selected
+    /// device retrying every 2 s, its own reconnect and a fresh overview can land while this handshake
+    /// is still in flight. Applying a stale verdict over that fresher state (clearing a status the
+    /// reconnect just recovered, or applying an incompatible verdict from before it) would go
+    /// uncorrected until the next push, since nothing else polls. `isStillCurrent` is the only caller's
+    /// (`handleOverviewFailure`) own currency check for the failure this handshake is answering, built
+    /// before the await and re-run after it so a mutated fresher state during the fetch is caught.
+    private func refreshCompatibility(identity: Int, isStillCurrent: () -> Bool) async {
         do {
             let status = try await bridgeClient.fetchDaemonStatus(commandChannel: commandChannel)
-            guard identity == overviewIdentity else { return }
+            guard isStillCurrent() else { return }
             applyCompatibility(status)
         } catch is CancellationError { return } catch {
-            guard identity == overviewIdentity else { return }
+            guard isStillCurrent() else { return }
             // A requested update takes the device offline on purpose. Clearing the status there would
             // drop the banner (it renders off `daemonStatus`) and unblock the device (blocking reads
             // `compatibility`), flashing stale workspace controls back mid-update; keep the last known
-            // facts until the poll learns otherwise.
+            // facts until the device's own status reporting says otherwise.
             guard !isApplyingDaemonUpdate else { return }
             // Could not read the handshake; leave compatibility unknown rather than blocking.
             daemonStatus = nil
@@ -2191,6 +2743,25 @@ private enum SpacesMobileMutationTimeoutRecovery {
         pendingPairingLink = nil
         loadDismissedAlertIDsForActiveDevice()
         pruneDismissedAlertsForUnknownDevices()
+        if let deviceID = activeDeviceID {
+            // This call rebuilds `bridgeClient` above unconditionally, so a re-pair of the device already
+            // selected (same id, new token) reuses that id with a subscription still tracked under the
+            // old client. `reconcileDeviceStreamsAfterIdentityChange`'s own reset only clears an armed
+            // retry; an `.opening` or `.live` subscription would stay current otherwise, and its late
+            // unauthorized failure could reopen re-pair recovery right after pairing just succeeded, or a
+            // late push on the old client could clear the auth notice that recovery raised. Resetting
+            // unconditionally, whatever the device's state, abandons that old attempt so the reconcile
+            // below opens a fresh one on the new client. A brand new device has no tracked state yet, so
+            // this is a no-op for it. The cached overview is dropped too: left in place, the reconcile's
+            // own republish would show whatever the old, now-invalid credentials last delivered, which a
+            // re-pair usually follows revoking or failing, so that payload can be arbitrarily stale (it
+            // would sit there until the new stream's first push, or indefinitely if the new connection
+            // never connects) and would merge its advertised addresses back into the persisted hosts.
+            overviewStreamSubscriptions.resetForUserRetry(deviceID: deviceID)?.cancel()
+            nonActiveDeviceStreamClients[deviceID] = nil
+            deviceOverviews[deviceID] = nil
+        }
+        reconcileDeviceStreamsAfterIdentityChange()
         Task { await previousCommandChannel.close() }
     }
 
@@ -2220,22 +2791,23 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     /// Foreground re-preference for the active connection: clears the live resolver's cached winner and
-    /// closes the shared command channel's current connection, so the very next overview poll or
-    /// mutation re-races every candidate address — preferring the LAN address again when this device is
-    /// back on it — instead of continuing on whatever address it settled on while away. Reuses
+    /// closes the shared command channel's current connection, so the very next explicit overview refresh
+    /// or mutation re-races every candidate address, preferring the LAN address again when this device
+    /// is back on it, instead of continuing on whatever address it settled on while away. Reuses
     /// `SpacesDeviceAPICommandChannel.close()` rather than a parallel teardown path.
     ///
     /// Deliberately touches only this app-wide command channel, never a `TerminalViewerModel`'s own
-    /// channel or its live session stream: a working terminal session must not be interrupted just to
-    /// re-prefer a lower-latency path. An open viewer keeps its stream, which re-races on its own the next
-    /// time it actually disconnects (see `SpacesDeviceNetworkBackend.openSessionStream`'s disconnect
-    /// handling).
+    /// channel or its live session stream, nor the selected device's overview stream (see
+    /// `resumeFromBackground`'s doc comment for that accepted residual): a working terminal session must
+    /// not be interrupted just to re-prefer a lower-latency path. An open viewer keeps its stream, which
+    /// re-races on its own the next time it actually disconnects (see
+    /// `SpacesDeviceNetworkBackend.openSessionStream`'s disconnect handling).
     ///
     /// Accepted race: a connect already suspended inside `connectIfNeeded` when this runs can install its
     /// connection and repopulate the resolver's cache afterwards, leaving the app on the address it had
-    /// rather than re-preferring the LAN one. The overview poll runs every couple of seconds, so the
-    /// window is real but the consequence is only staying on a path that already works, and the next
-    /// foreground clears it again. Not worth generation-stamping every connect to close.
+    /// rather than re-preferring the LAN one. The window is narrow (this reset itself, at foreground
+    /// resume) and the consequence is only staying on a path that already works, with the next foreground
+    /// clearing it again. Not worth generation-stamping every connect to close.
     func resetActiveConnectionEndpoint() { Task { await resetActiveConnectionEndpointAndWait() } }
 
     private func resetActiveConnectionEndpointAndWait() async {
@@ -2254,17 +2826,25 @@ private enum SpacesMobileMutationTimeoutRecovery {
     ///
     /// Sequenced rather than started side by side because the reset closes the shared command channel,
     /// and a close landing on the read already in flight aborts it: the app would come back to the
-    /// foreground having fetched nothing, with the next attempt a whole poll interval away on a tab that
-    /// polls, and indefinitely away on one that does not (the Settings tab, an open terminal). The reset
-    /// is also what makes the refresh below issue its own request rather than join one: the close bumps
+    /// foreground having fetched nothing, with no explicit next attempt queued and only the selected
+    /// device's stream eventually reporting anything, on its own schedule. The reset is also what
+    /// makes the refresh below issue its own request rather than join one: the close bumps
     /// `connectionChannelGeneration`, and a fetch from before it is never joined (see `refresh()`).
     ///
     /// The read is what the app misses without this: anything the device decided while the app was away,
     /// which is exactly when a device restarts and starts offering the coding agents its restart cut
-    /// short. Paired only, matching the poller's own gate (`OverviewPollingPolicy.shouldPoll`): an
-    /// unpaired app has nothing to read and would answer with a connection error. A tab poller firing on
-    /// the same transition costs no second fetch, since `refresh()` joins a fetch already in flight for
-    /// this connection.
+    /// short. Paired only: an unpaired app has nothing to read and would answer with a connection error.
+    ///
+    /// Narrower than the endpoint re-preference as a whole: this resets only the command path's resolver
+    /// (`bridgeClient`'s own `resolver`). There is no already-open stream to reset here: streams are
+    /// foreground-only (`stopDeviceStreams`/`startDeviceStreams`), so backgrounding already closed every
+    /// one and foreground reopens them fresh. Each stream's resolver instance still survives the
+    /// backgrounding (built once per paired device, outliving its stream's own connect/disconnect
+    /// cycles), so left alone a reopened stream would first try whatever address that resolver last
+    /// proved reachable rather than re-racing from the top. `RootTabView`'s `.active` branch resets every
+    /// paired device's overview-stream resolver directly, before calling `startDeviceStreams()`
+    /// (`resetDeviceStreamEndpointsForForeground()`), so that reopened streams do get the same
+    /// re-preference this reset gives the command path.
     func resumeFromBackground() async {
         let generation = foregroundEndpointRefreshGeneration
         latestForegroundResumeToken &+= 1
@@ -2375,6 +2955,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         connectionNotice = nil
         errorMessage = nil
         loadDismissedAlertIDsForActiveDevice()
+        reconcileDeviceStreamsAfterIdentityChange()
         Task { await previousCommandChannel.close() }
     }
 
@@ -2408,6 +2989,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         browserRoutingTable.removeDevice(deviceID: id)
         let table = browserRoutingTable
         Task { await browserProxy.updateRoutes(table) }
+        reconcileDeviceStreamsAfterIdentityChange()
         Task { await previousCommandChannel.close() }
     }
 
@@ -2454,6 +3036,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         overviewIdentity += 1
         DemoModeStore.save(true)
         loadDismissedAlertIDsForActiveDevice()
+        reconcileDeviceStreamsAfterIdentityChange()
         Task { await previousCommandChannel.close() }
     }
 
@@ -2473,6 +3056,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         DemoModeStore.save(false)
         loadDismissedAlertIDsForActiveDevice()
         pruneDismissedAlertsForUnknownDevices()
+        reconcileDeviceStreamsAfterIdentityChange()
         Task { await previousCommandChannel.close() }
     }
 
@@ -2504,16 +3088,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// stale overview, publishes `message` as the connection notice, and pushes Paired Devices.
     ///
     /// The credential deliberately survives. It is the same token the Keychain still holds, so clearing
-    /// it destroyed the only in-memory copy of something still on disk and, because the overview poll is
-    /// gated on `settings.isPaired`, left the app permanently "unpaired" for the rest of the process with
-    /// no retry that could ever prove otherwise. Keeping it means a failure that was really transport
-    /// trouble self-heals on the next poll, while a genuinely revoked device simply fails the next
+    /// it destroyed the only in-memory copy of something still on disk and left every future stream
+    /// reconnect (or explicit refresh) failing on the exact same auth error, with no way it could ever
+    /// prove the device reachable again. Keeping it means a failure that was really transport trouble
+    /// self-heals on the stream's next retry, while a genuinely revoked device simply fails the next
     /// request and lands back on this same screen. The connection itself is still reset, since the
     /// address and socket that just failed are not worth trusting and the next request should re-race
     /// every candidate. The client is not rebuilt: with the credential unchanged a rebuild would produce
     /// an identical client and throw away the resolver state the recovery is about to use.
     ///
-    /// Re-entrant by design: with the poll still running, a device that keeps rejecting this token calls
+    /// Re-entrant by design: with the stream still retrying, a device that keeps rejecting this token calls
     /// here every couple of seconds. `connectionNotice` is the episode marker, cleared by a successful
     /// refresh, so the recovery surface is raised once per episode rather than pulling the user back to
     /// Paired Devices every time they navigate away from it.
@@ -2561,9 +3145,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
             }
             selectDevice(id: deviceID)
         }
-        // The cached overview may predate the linked session: polling pauses while a terminal
-        // detail view is open — exactly where agent-notification links are tapped — and a device
-        // switch just cleared it. A lookup miss refreshes once before the link is declared dead.
+        // The cached overview may predate the linked session: the link can arrive before that
+        // device's stream has delivered the change that created the session, or while its stream is
+        // reconnecting, and switching to a device with no cached overview of its own leaves this
+        // empty too. A lookup miss refreshes once before the link is declared dead.
         if session(forSessionID: link.sessionID) == nil { await refresh() }
         guard let session = session(forSessionID: link.sessionID) else {
             errorMessage = "Couldn't find terminal session “\(link.sessionID)” on \(connectionSummary)."
@@ -2721,7 +3306,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// runs the delete on its own teardown queue and can keep going well past this request's timeout, so
     /// refetching the overview a few times gives a delete that is still finishing a chance to resolve to
     /// success instead of a spurious error. Five attempts at `workspaceDeletionReconciliationInterval`
-    /// give the daemon a settle window on the order of the poll cadence rather than an instant verdict.
+    /// give the daemon a settle window on the order of the selected device's stream retry cadence rather
+    /// than an instant verdict.
     static let workspaceDeletionReconciliationAttempts = 5
 
     /// Deletes the workspace, optionally deleting the branch it was created on locally and/or on the
@@ -2800,13 +3386,14 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 "\"\(workspace.displayName)\" wasn't deleted: the active device changed before its delete could be sent. Delete it again from that device."
             return
         }
-        // Sent on a dedicated command channel rather than the shared one the overview poll also uses.
-        // The daemon runs a delete's teardown (stop, worktree removal, record drop) on its own queue, so
-        // it can take many seconds — far longer than the 8s the poll allows itself. The transport does
-        // not serialize whole request/response round trips on a connection (issue #248): the poll and
-        // this request can interleave on one connection, and when the poll's own request times out,
-        // `SpacesDeviceNetworkRequestTransport.send` closes the shared connection out from under whatever
-        // else is using it, aborting this request client-side while the daemon keeps deleting regardless.
+        // Sent on a dedicated command channel rather than the shared one an explicit overview refresh
+        // also uses. The daemon runs a delete's teardown (stop, worktree removal, record drop) on its own
+        // queue, so it can take many seconds, far longer than the 8s a refresh allows itself. The
+        // transport does not serialize whole request/response round trips on a connection (issue #248):
+        // a refresh and this request can interleave on one connection, and when the refresh's own request
+        // times out, `SpacesDeviceNetworkRequestTransport.send` closes the shared connection out from
+        // under whatever else is using it, aborting this request client-side while the daemon keeps
+        // deleting regardless.
         // A private channel, created for this mutation and closed after it — mirroring
         // `requestDaemonUpdate` above — keeps the delete off the shared connection for its whole life,
         // including the reconciliation reads below.
@@ -2950,8 +3537,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     private func reconcileWorkspaceDeletionOutcome(workspaceID: String, identity: Int, commandChannel: SpacesDeviceAPICommandChannel) async
         -> WorkspaceDeletionReconciliation
     {
-        // These fetches are issued after the delete was sent, so each one is newer than any poll already in
-        // flight; publishing one retires those polls the same way applying a mutation's own overview does.
+        // These fetches are issued after the delete was sent, so each one is newer than any overview fetch
+        // already in flight; publishing one retires those fetches the same way applying a mutation's own
+        // overview does.
         mutationGeneration &+= 1
         var resolvedAtLeastOnce = false
         for attempt in 0..<Self.workspaceDeletionReconciliationAttempts {
@@ -2971,7 +3559,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // `updateBrowserRoutes` re-checks this same generation itself before it merges routes or
             // updates the proxy, so a fresher fact landing during either of its own awaits skips those
             // mutations too, not only the publish below.
-            await updateBrowserRoutes(overview: refreshedOverview, identity: identity, mutationGeneration: mutationGenerationAtFetch)
+            await updateBrowserRoutes(
+                overview: refreshedOverview, identity: identity, mutationGeneration: mutationGenerationAtFetch, isStillCurrent: { true })
             guard identity == overviewIdentity else { return .unknown }
             // A generation mismatch here means a fresher overview-derived fact landed while this
             // attempt's fetch or route update was suspended — not that this attempt's own read of the
@@ -3278,8 +3867,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // reconciliation, a timeout recovery) can bump `mutationGeneration` while this mutation's own
             // `updateBrowserRoutes` await is suspended and make its publish lose that race even though
             // the mutation itself fully succeeded. Reading `self.overview` here would then report a
-            // successful Run/Restart/Terminal as a failure — self-healing on the next poll, but only
-            // after the launch flow already showed the wrong answer (#450 review round 7).
+            // successful Run/Restart/Terminal as a failure, self-healing on the next overview delivery,
+            // but only after the launch flow already showed the wrong answer (#450).
             if let sessionID = response.sessionID { return response.overview?.sessions.first(where: { $0.id == sessionID }) }
             if let fallbackRowID { return refreshedSession(forRowID: fallbackRowID, in: response.overview) }
             return nil
@@ -3306,7 +3895,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // refresh discard a perfectly current overview.
         guard identity == overviewIdentity else { return }
         // Bumped for every applied mutation, including one that carried no overview: the daemon's state
-        // changed either way, so any poll already in flight is describing the world before it. Captured
+        // changed either way, so any refresh already in flight is describing the world before it. Captured
         // right after bumping, and re-checked once this call resumes from the await below: a delete's
         // private channel no longer excludes a shared-channel mutation from running at the same time
         // (#450), so two responses can now be applying concurrently, and there is no guarantee the one
@@ -3315,7 +3904,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         mutationGeneration &+= 1
         let mutationGenerationAtApply = mutationGeneration
         guard let overview = response.overview else { return }
-        await updateBrowserRoutes(overview: overview, identity: identity, mutationGeneration: mutationGenerationAtApply)
+        await updateBrowserRoutes(overview: overview, identity: identity, mutationGeneration: mutationGenerationAtApply, isStillCurrent: { true })
         // Skip rather than republish: a newer mutation's response already landed and published its
         // overview while this one was suspended above, so this one is describing a moment the app has
         // already moved past.
@@ -3324,15 +3913,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // snapshot order. Responses arriving on independent connections can invert — an older lifecycle
         // response bumping the generation after a newer delete response started applying discards the
         // delete's overview — because nothing in the wire carries a daemon-side revision to totally
-        // order snapshots by. A misordered pair leaves stale rows for at most one poll interval and the
-        // next overview corrects it; a daemon revision (a wire change) is what fixing it would take.
+        // order snapshots by. The mutation's own daemon-side change is also pushed on the stream, and that
+        // push corrects the misordered pair's stale rows; a daemon revision (a wire change) is what fixing
+        // the ordering itself would take.
         guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtApply) else { return }
         // Cleared before publishing, for the same reason as in `performRefresh`.
         connectionNotice = nil
         errorMessage = nil
         publishOverview(overview)
         // A mutation's refreshed overview is proof the device answered, so it ends any run of failed
-        // refreshes exactly as a successful poll does. Otherwise a run interrupted by a successful
+        // refreshes exactly as a successful refresh does. Otherwise a run interrupted by a successful
         // mutation keeps its original start time, and the next isolated failure alerts on the strength
         // of an outage that demonstrably ended.
         refreshFailureStreak = nil
@@ -3343,9 +3933,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// once per refresh. Clearing the overview (a device switch, a block) deliberately does not prune:
     /// there is nothing to prune against, and pruning against nothing would discard every dismissal.
     /// Settles deletes whose outcome nothing could confirm when they finished (see the `.unknown` case in
-    /// `deleteWorkspace`). Every published overview is a chance to answer, whichever path produced it —
-    /// the ordinary poll, a later mutation, or a reconciliation — so the resolution lives here, at the one
-    /// place an overview becomes the app's state.
+    /// `deleteWorkspace`). Every published overview is a chance to answer, whichever path produced it: a
+    /// stream push, an explicit refresh, a later mutation, or a reconciliation. The resolution lives here,
+    /// at the one place an overview becomes the app's state.
     ///
     /// Absent means the delete landed: the marking is dropped silently, and the unknown-branch-outcome
     /// notice is owed if the user had asked for branches to go too. Listed with no teardown queued behind
@@ -3375,12 +3965,14 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     /// Republishes `overview` only when the freshly fetched payload actually differs from what's already
-    /// published. `.overviewPolling` fetches on a flat 2-second cadence for every list tab regardless of
-    /// how often the device's state actually changes (see `OverviewPollingModifier`), and an unconditional
-    /// `overview = payload` here re-triggers `@Observable`'s change notification on every one of those
-    /// ticks — even a no-op fetch — invalidating and re-rendering every view reading `overview` twice a
-    /// second (#540: the Automations tab's constant visible churn). `SpacesDeviceOverviewPayload` is
-    /// `Equatable`, so a matching fetch is skipped here at effectively no cost.
+    /// published. Several paths can deliver a payload describing state that has not actually changed: the
+    /// selected device's stream sends its current overview again on every reconnect, and a metadata-only
+    /// daemon change still pushes a full overview on its own coalesced cadence
+    /// (`overviewMetadataCoalesceInterval`); an unconditional `overview = payload` here would re-trigger
+    /// `@Observable`'s change notification on every one of those regardless, even a no-op delivery,
+    /// invalidating and re-rendering every view reading `overview` (#540: the Automations tab's constant
+    /// visible churn). `SpacesDeviceOverviewPayload` is `Equatable`, so a matching fetch is skipped here at
+    /// effectively no cost.
     ///
     /// The two calls below still run against every fetched `payload`, gate or no gate: both are idempotent
     /// against an unchanged payload (they derive their result solely from `payload`'s own content, so a
@@ -3437,7 +4029,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             return session
         }
         do {
-            // Fetched after the mutation was sent, so it supersedes any poll already in flight. Captured
+            // Fetched after the mutation was sent, so it supersedes any refresh already in flight. Captured
             // right after bumping, before the fetch — not after it returns, or a fresher fact landing
             // during the fetch itself would already be reflected in the "baseline" this compares against.
             mutationGeneration &+= 1
@@ -3446,7 +4038,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // The connection changed while reconciling: this overview is the previous backend's, so it must
             // not be published as the current connection's state.
             guard identity == overviewIdentity else { return nil }
-            await updateBrowserRoutes(overview: refreshedOverview, identity: identity, mutationGeneration: mutationGenerationAtFetch)
+            await updateBrowserRoutes(
+                overview: refreshedOverview, identity: identity, mutationGeneration: mutationGenerationAtFetch, isStillCurrent: { true })
             guard identity == overviewIdentity else { return nil }
             if mutationGeneration == mutationGenerationAtFetch {
                 errorMessage = nil

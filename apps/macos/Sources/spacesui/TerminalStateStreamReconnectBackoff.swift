@@ -1,4 +1,5 @@
 import Foundation
+import spacesdevicecore
 
 /// Pacing for one terminal session's state-subscription reconnects.
 ///

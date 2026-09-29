@@ -37,6 +37,19 @@ protocol SpacesDeviceAPIBackend: Sendable {
         onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
     ) async throws -> SpacesDeviceAPIStreamHandle
 
+    /// Opens a device-overview push stream: the daemon's `subscribeDeviceOverview` semantics (see
+    /// `spacesdevicecore.SpacesDeviceAPIOverviewStreamClient`), which push a fresh overview whenever the
+    /// daemon's database changes rather than answering only on request. `onOverview` delivers every
+    /// pushed overview and `onDisconnect` fires exactly once when the stream ends, carrying its error (or
+    /// `nil` on an intentional stop). Unlike `openSessionStream`'s callbacks, both arrive off the main
+    /// actor (the network backend's callbacks run on the shared stream client's own receive thread), so a
+    /// caller that touches `@MainActor` state hops itself; this mirrors the Mac sidebar's
+    /// `SpacesDeviceClient.subscribeOverview`, which the network backend below delegates to.
+    func openOverviewStream(
+        authToken: String?, clientApp: SpacesDeviceClientApp?, onOverview: @escaping @Sendable (SpacesDeviceOverviewPayload) -> Void,
+        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) async throws -> SpacesDeviceAPIStreamHandle
+
     /// The candidate address this backend's endpoint resolution most recently proved reachable, if it has
     /// one. Lets a caller (e.g. the browser proxy's route table) ask for the address the command channel
     /// actually validated rather than trusting a possibly-stale persisted record. Defaults to `nil` for a
@@ -63,4 +76,11 @@ extension SpacesDeviceAPIBackend {
     func sendPinnedPing(request: SpacesDeviceAPIRequest, host: String, timeout: Duration) async -> (any Error)? {
         SpacesDeviceAPIClientError.requestFailed("This backend has no pinned host to ping.")
     }
+    /// Default for a backend with no overview-stream concept: every test fake that exercises only the
+    /// terminal session stream or the request path. The two production backends (network, Demo) both
+    /// override this; a fake that hits it is one this feature does not touch.
+    func openOverviewStream(
+        authToken: String?, clientApp: SpacesDeviceClientApp?, onOverview: @escaping @Sendable (SpacesDeviceOverviewPayload) -> Void,
+        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) async throws -> SpacesDeviceAPIStreamHandle { throw SpacesDeviceAPIClientError.invalidEndpoint }
 }

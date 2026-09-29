@@ -35,17 +35,7 @@ struct AutomationsListView: View {
             AutomationDetailView(model: model, automationID: automationID, selectedSession: $selectedSession)
         }.navigationDestination(isPresented: $isShowingRecentRuns) {
             AutomationRunsView(model: model, title: "Recent Runs", selectedSession: $selectedSession)
-        }.overviewPolling(model: model, tab: .automations, route: pollingRoute).terminalSessionNavigation(
-            model: model, selectedSession: $selectedSession, pendingTerminalLaunch: $pendingTerminalLaunch)
-    }
-
-    /// An automation detail or the recent-runs list installs its own `overviewPolling` modifier (both
-    /// are live lists), so this root stops polling while either is pushed; a terminal session route has
-    /// no poller of its own, so the root keeps polling at the slow cadence for it.
-    private var pollingRoute: OverviewPollingRoute? {
-        if let selectedAutomationID { return .nestedList(selectedAutomationID) }
-        if isShowingRecentRuns { return .nestedList("recent-runs") }
-        return selectedSession.map { .detail($0.id) }
+        }.terminalSessionNavigation(model: model, selectedSession: $selectedSession, pendingTerminalLaunch: $pendingTerminalLaunch)
     }
 
     @ViewBuilder private var content: some View {
@@ -69,7 +59,7 @@ struct AutomationsListView: View {
         var detailParts = [
             SpacesMobileAutomations.triggerSummary(automation),
             // Reads the shared 30-second label clock rather than `Date()`, so this text stays put across
-            // the 2-second overview poll instead of jittering (#540) — see
+            // every overview push instead of jittering (#540); see
             // `SpacesMobileAppModel.relativeTimeReference`.
             SpacesMobileAutomations.nextFireDescription(automation, relativeTo: model.relativeTimeReference),
         ]
@@ -115,9 +105,7 @@ struct AutomationRunsView: View {
 
     private var rows: [SpacesMobileAutomationRunRow] { SpacesMobileAutomations.runRows(model.overview?.automationRuns ?? [], automationID: nil) }
 
-    var body: some View {
-        content.navigationTitle(title).tint(Theme.accent).overviewPolling(model: model, tab: .automations, route: selectedSession.map { .detail($0.id) })
-    }
+    var body: some View { content.navigationTitle(title).tint(Theme.accent) }
 
     @ViewBuilder private var content: some View {
         if rows.isEmpty {
