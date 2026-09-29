@@ -308,8 +308,12 @@ read_response="$(control_command --command readSelectionText)"
   fail "readSelectionText lost the selection after selline-003 scrolled into scrollback"
 }
 
-# Step 6: scroll the pane back up until selline-003 is visible again, then confirm the mirror
-# paints the daemon-projected selection while it is scrolled into scrollback.
+# Step 6: scroll the pane back up until selline-003 is visible again. A plain shell session always
+# routes a wheel gesture to this pane's own local replay of the transcript (only a full-screen or
+# mouse-tracking program routes to the session's own viewport instead, see
+# `RemoteGhosttySessionHost.scrollRoute`), and a replay frame's snapshot never carries a selection
+# (`GhosttyVtSessionBridge.snapshot`'s `selection` stays nil for a replay's own reconstruction of the
+# transcript), so the pane paints no selection even with selline-003 back on screen.
 selection_revealed=0
 for _ in $(seq 1 40); do
   env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
@@ -326,14 +330,55 @@ done
   printf '%s\n' "${scrolled_text:-}" >&2
   fail "Scrolling never revealed selline-003 in scrollback"
 }
-[[ "$(dump_value surfaceSelectionText)" == "selline-003" ]] || {
+# Confirm the pane is actually in the mode this step means to exercise, so the next two checks are
+# not passing vacuously (e.g. because a stale live frame happened to still show no selection).
+[[ "$(dump_value isShowingLocalScrollbackFrame)" == "true" ]] || {
   printf '%s\n' "$(cat "$DUMP_PATH")" >&2
-  fail "Mirror surface did not paint the shared selection while scrolled into scrollback"
+  fail "The pane must be showing its local replay once selline-003 is scrolled back into view"
+}
+[[ -z "$(dump_value surfaceSelectionText)" ]] || {
+  printf '%s\n' "$(cat "$DUMP_PATH")" >&2
+  fail "A replay frame must paint no selection even where selline-003 is visible"
+}
+read_response="$(control_command --command readSelectionText)"
+[[ "$(json_field "$read_response" ok)" == "true" ]] || {
+  printf '%s\n' "$read_response" >&2
+  fail "readSelectionText reported failure while scrolled into the local replay"
+}
+[[ "$(json_field "$read_response" selectionText)" == "selline-003" ]] || {
+  printf '%s\n' "$read_response" >&2
+  fail "the shared selection did not survive being scrolled into the local replay"
 }
 
-# Step 7: a plain click clears the shared selection because part of it is visible in this viewer.
+# Step 7: a plain click on the replay is a no-op for the shared selection. The mirror only forwards
+# a click as a clear when its own last-applied frame painted a selection to click away
+# (`GhosttyMirrorTerminalView.clearSharedSelectionIfNeeded`), which a replay frame never does;
+# `RemoteGhosttySessionHost.sendRemoteClearSelection` also refuses to send while a replay is shown.
+# The click must therefore reach neither the daemon nor this pane's own surface.
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
   click-application-window --executable-name SpacesApp --application-pid "$APP_PID" --normalized-x 0.5 --normalized-y 0.5 >/dev/null
+sleep 1
+read_response="$(control_command --command readSelectionText)"
+[[ "$(json_field "$read_response" ok)" == "true" ]] || {
+  printf '%s\n' "$read_response" >&2
+  fail "readSelectionText reported failure after clicking the replay"
+}
+[[ "$(json_field "$read_response" selectionText)" == "selline-003" ]] || {
+  printf '%s\n' "$read_response" >&2
+  fail "a click on the replay cleared the selection every other viewer is looking at"
+}
+
+# Step 8: clear the shared selection the way any client's explicit clear affordance does (iOS shows
+# the shared selection and can clear it with no viewport of its own to overlap it). The daemon's
+# session driver clears unconditionally (`GhosttyEmbeddedTerminalSessionDriver.clearSelection`), so
+# this reaches the selection regardless of what this pane happens to be scrolled to. The pane dump
+# has nothing further to prove here: it is still showing the replay, which paints no selection either
+# way, so only the shared selection itself (`readSelectionText`) can show the clear took effect.
+clear_response="$(control_command --command clearSelection)"
+[[ "$(json_field "$clear_response" ok)" == "true" ]] || {
+  printf '%s\n' "$clear_response" >&2
+  fail "clearSelection reported failure"
+}
 
 selection_cleared=0
 deadline=$((SECONDS + 30))
@@ -347,22 +392,7 @@ while (( SECONDS < deadline )); do
 done
 (( selection_cleared == 1 )) || {
   printf '%s\n' "$read_response" >&2
-  fail "readSelectionText never reported the selection cleared after the click"
-}
-
-dump_cleared=0
-deadline=$((SECONDS + 30))
-while (( SECONDS < deadline )); do
-  dump_terminal_state
-  if [[ -z "$(dump_value surfaceSelectionText)" ]]; then
-    dump_cleared=1
-    break
-  fi
-  sleep 0.2
-done
-(( dump_cleared == 1 )) || {
-  printf '%s\n' "$(cat "$DUMP_PATH")" >&2
-  fail "Pane dump still reported a painted selection after the click cleared it"
+  fail "readSelectionText never reported the selection cleared"
 }
 
 echo "Spaces macOS shared-selection scrollback E2E passed for session $session_id"

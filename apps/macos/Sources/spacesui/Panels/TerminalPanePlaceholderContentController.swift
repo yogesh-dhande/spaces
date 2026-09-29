@@ -87,11 +87,12 @@ import spacesterminalui
     func debugStateDump() -> TerminalSessionWindowDebugState {
         TerminalSessionWindowDebugState(
             renderedOutput: "\(titleLabel.stringValue)\n\(detailLabel.stringValue)", visibleSurfaceOutput: nil, surfaceSelectionText: nil,
-            showsTerminalSurface: false, showsTextRenderer: true, rendererSummary: "Renderer: preparing", summary: detailLabel.stringValue,
-            state: titleLabel.stringValue, windowTitle: rootView.window?.title ?? "", didCloseWindow: false, surfaceColumns: nil, surfaceRows: nil,
-            windowIsKey: rootView.window?.isKeyWindow == true, firstResponderTypeName: debugFirstResponderTypeName, searchVisible: false,
-            searchQuery: "", searchTotal: nil, searchSelected: nil, attachmentMode: TerminalAttachmentMode.owner.rawValue,
-            takeoverPending: requestsOwnershipWhenReady, takeoverButtonVisible: false, takeoverButtonEnabled: false, takeoverMessage: "")
+            isShowingLocalScrollbackFrame: false, showsTerminalSurface: false, showsTextRenderer: true, rendererSummary: "Renderer: preparing",
+            summary: detailLabel.stringValue, state: titleLabel.stringValue, windowTitle: rootView.window?.title ?? "", didCloseWindow: false,
+            surfaceColumns: nil, surfaceRows: nil, windowIsKey: rootView.window?.isKeyWindow == true,
+            firstResponderTypeName: debugFirstResponderTypeName, searchVisible: false, searchQuery: "", searchTotal: nil, searchSelected: nil,
+            attachmentMode: TerminalAttachmentMode.owner.rawValue, takeoverPending: requestsOwnershipWhenReady, takeoverButtonVisible: false,
+            takeoverButtonEnabled: false, takeoverMessage: "")
     }
 
     private func buildView(title: String) {

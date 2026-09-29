@@ -582,7 +582,8 @@
         func debugSetBindingActionHandler(_ handler: (@MainActor (String) -> Bool)?) { terminalView.debugBindingActionHandler = handler }
 
         /// Whether the pane is painting its own scrollback replay rather than the session's frames.
-        var debugIsShowingLocalScrollbackFrame: Bool { isShowingLocalScrollbackFrame }
+        /// Public to satisfy `TerminalGhosttyRendererHosting`, so the pane dump can report it too.
+        public var debugIsShowingLocalScrollbackFrame: Bool { isShowingLocalScrollbackFrame }
         /// Where `output.log` ended as of the newest state payload this host has applied, which is what a
         /// gesture compares its replay against before reading a continuation.
         var debugLatestTranscriptEndByteOffset: UInt64? { latestTranscriptEndByteOffset }

@@ -13,6 +13,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     /// streamed frames), gated the same as `visibleSurfaceOutput`. Nil when the terminal container is
     /// hidden, there is no surface, or there is no active selection.
     public let surfaceSelectionText: String?
+    /// Whether the pane is painting its own local replay of scrollback rather than the session's own
+    /// frames. While true, `surfaceSelectionText` is nil even if the shared selection's text is still
+    /// scrolled into view: painting it is a replay row's own local highlight, not the shared selection.
+    public let isShowingLocalScrollbackFrame: Bool
     public let showsTerminalSurface: Bool
     public let showsTextRenderer: Bool
     public let rendererSummary: String
@@ -40,14 +44,16 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     public var briefSummary: String?
 
     public init(
-        renderedOutput: String, visibleSurfaceOutput: String?, surfaceSelectionText: String?, showsTerminalSurface: Bool, showsTextRenderer: Bool,
-        rendererSummary: String, summary: String, state: String, windowTitle: String, didCloseWindow: Bool, surfaceColumns: Int?, surfaceRows: Int?,
-        windowIsKey: Bool, firstResponderTypeName: String?, searchVisible: Bool, searchQuery: String, searchTotal: Int?, searchSelected: Int?,
-        attachmentMode: String, takeoverPending: Bool, takeoverButtonVisible: Bool, takeoverButtonEnabled: Bool, takeoverMessage: String
+        renderedOutput: String, visibleSurfaceOutput: String?, surfaceSelectionText: String?, isShowingLocalScrollbackFrame: Bool,
+        showsTerminalSurface: Bool, showsTextRenderer: Bool, rendererSummary: String, summary: String, state: String, windowTitle: String,
+        didCloseWindow: Bool, surfaceColumns: Int?, surfaceRows: Int?, windowIsKey: Bool, firstResponderTypeName: String?, searchVisible: Bool,
+        searchQuery: String, searchTotal: Int?, searchSelected: Int?, attachmentMode: String, takeoverPending: Bool, takeoverButtonVisible: Bool,
+        takeoverButtonEnabled: Bool, takeoverMessage: String
     ) {
         self.renderedOutput = renderedOutput
         self.visibleSurfaceOutput = visibleSurfaceOutput
         self.surfaceSelectionText = surfaceSelectionText
+        self.isShowingLocalScrollbackFrame = isShowingLocalScrollbackFrame
         self.showsTerminalSurface = showsTerminalSurface
         self.showsTextRenderer = showsTextRenderer
         self.rendererSummary = rendererSummary
@@ -96,6 +102,7 @@ extension TerminalSessionPaneViewController {
         let searchState = debugTerminalSearchState
         return .init(
             renderedOutput: renderedOutput, visibleSurfaceOutput: visibleSurfaceOutput, surfaceSelectionText: surfaceSelectionText,
+            isShowingLocalScrollbackFrame: ghosttyRendererHost?.debugIsShowingLocalScrollbackFrame ?? false,
             showsTerminalSurface: !terminalContainer.isHidden, showsTextRenderer: !outputScrollView.isHidden,
             rendererSummary: rendererLabel.stringValue, summary: summaryLabel.stringValue, state: stateLabel.stringValue,
             windowTitle: window?.title ?? "", didCloseWindow: didCloseWindow, surfaceColumns: surfaceSnapshot?.columns,

@@ -2537,11 +2537,22 @@ def wait_for_output_log_text(text: str, timeout: float, process: subprocess.Pope
 def assert_status_shell_hides_live_content(label: str, payload: dict) -> None:
     if payload.get("showsTerminalSurface") is not False:
         raise RuntimeError(f"{label} unexpectedly mounted a live terminal surface:\n{json.dumps(payload, indent=2)}")
-    visible_text = payload.get("visibleText") or payload.get("renderedOutput") or ""
-    if "Current owner:" not in visible_text:
-        raise RuntimeError(f"{label} did not show the takeover status shell:\n{json.dumps(payload, indent=2)}")
-    if "__roundtrip_" in visible_text:
-        raise RuntimeError(f"{label} exposed live terminal content:\n{json.dumps(payload, indent=2)}")
+    # The Mac pane shows the State-B locked view-only overlay while another client owns the
+    # session: a title naming the owner and a Take Over button, never the shell's own content
+    # (`TerminalSessionPaneViewController+Layout.swift`'s `currentGhosttyTakeoverStatusText` and
+    # `updateInputOwnershipUI`). The overlay's title itself is not in the dump, but the diagnostics
+    # state line (`state`) carries the same owner name, and the takeover fields carry the same
+    # affordance the overlay's button offers.
+    if payload.get("takeoverButtonVisible") is not True or payload.get("takeoverButtonEnabled") is not True:
+        raise RuntimeError(f"{label} did not offer the Take Over affordance:\n{json.dumps(payload, indent=2)}")
+    if payload.get("takeoverMessage") != "Take over to view and type here.":
+        raise RuntimeError(f"{label} did not show the takeover status message:\n{json.dumps(payload, indent=2)}")
+    state_text = payload.get("state") or ""
+    if mobile_device_label not in state_text:
+        raise RuntimeError(f"{label} did not name {mobile_device_label} as the current owner in the state line:\n{json.dumps(payload, indent=2)}")
+    for field in ("renderedOutput", "visibleSurfaceOutput", "state", "takeoverMessage"):
+        if "__roundtrip_" in (payload.get(field) or ""):
+            raise RuntimeError(f"{label} exposed live terminal content in {field}:\n{json.dumps(payload, indent=2)}")
 
 def request_mac_retakeover(expected_previous_owner: str) -> str:
     show_result = subprocess.run(

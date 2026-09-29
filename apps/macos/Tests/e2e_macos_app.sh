@@ -5099,7 +5099,6 @@ placeholder_fragments = (
     "Terminal render unavailable.",
     "Final terminal render unavailable.",
     "The live terminal renderer did not become ready",
-    "Live terminal rendering is limited to the active owner.",
     "Waiting for terminal ownership",
 )
 

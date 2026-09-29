@@ -56,11 +56,19 @@
         /// selection painted from streamed frames (see `GhosttyMirrorTerminalView.debugSurfaceSelectionText`).
         /// Nil with no surface or no selection.
         func debugSurfaceSelectionText() -> String?
+        /// Whether the pane is painting its own local replay of scrollback rather than the session's
+        /// frames (`RemoteGhosttySessionHost`'s `isShowingLocalScrollbackFrame`). While true, the pane
+        /// paints no selection: the shared selection is anchored in the session's own screen, which a
+        /// replay frame is not looking at (see `debugSurfaceSelectionText`). A host with no local replay
+        /// concept is never showing one, so this defaults to `false` below.
+        var debugIsShowingLocalScrollbackFrame: Bool { get }
     }
 
     @MainActor public protocol TerminalGhosttySessionHosting: TerminalGhosttySessionInfoProviding, TerminalGhosttyRendererHosting {}
 
     extension TerminalGhosttyRendererHosting {
+        public var debugIsShowingLocalScrollbackFrame: Bool { false }
+
         @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
             sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: 0, pointerPosition: nil)
         }
