@@ -298,6 +298,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let renderedOutput: String?
         let visibleSurfaceOutput: String?
         let surfaceSelectionText: String?
+        let isShowingLocalScrollbackFrame: Bool?
         let summary: String?
         let state: String?
         let showsTerminalSurface: Bool?
@@ -962,10 +963,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             sessionID: sessionID, requestedMode: requestedMode, found: content != nil, windowTitle: debugState?.windowTitle,
             rendererSummary: debugState?.rendererSummary, renderedOutput: debugState?.renderedOutput,
             visibleSurfaceOutput: debugState?.visibleSurfaceOutput, surfaceSelectionText: debugState?.surfaceSelectionText,
-            summary: debugState?.summary, state: debugState?.state, showsTerminalSurface: debugState?.showsTerminalSurface,
-            showsTextRenderer: debugState?.showsTextRenderer, didClose: debugState?.didCloseWindow,
-            windowNumber: content?.contentView.window?.windowNumber, surfaceColumns: debugState?.surfaceColumns, surfaceRows: debugState?.surfaceRows,
-            windowIsKey: debugState?.windowIsKey, firstResponderTypeName: debugState?.firstResponderTypeName,
+            isShowingLocalScrollbackFrame: debugState?.isShowingLocalScrollbackFrame, summary: debugState?.summary, state: debugState?.state,
+            showsTerminalSurface: debugState?.showsTerminalSurface, showsTextRenderer: debugState?.showsTextRenderer,
+            didClose: debugState?.didCloseWindow, windowNumber: content?.contentView.window?.windowNumber, surfaceColumns: debugState?.surfaceColumns,
+            surfaceRows: debugState?.surfaceRows, windowIsKey: debugState?.windowIsKey, firstResponderTypeName: debugState?.firstResponderTypeName,
             searchVisible: debugState?.searchVisible, searchQuery: debugState?.searchQuery, searchTotal: debugState?.searchTotal,
             searchSelected: debugState?.searchSelected, attachmentMode: debugState?.attachmentMode, takeoverPending: debugState?.takeoverPending,
             takeoverButtonVisible: debugState?.takeoverButtonVisible, takeoverButtonEnabled: debugState?.takeoverButtonEnabled,
