@@ -24,11 +24,7 @@ struct AutomationDetailView: View {
             overviewRuns: model.overview?.automationRuns ?? [], historyRuns: fetchedRuns ?? [], automationID: automationID)
     }
 
-    var body: some View {
-        content.navigationTitle(automation?.name ?? "Automation").tint(Theme.accent).overviewPolling(
-            model: model, tab: .automations, route: selectedSession.map { .detail($0.id) }
-        ).task { await loadRuns() }
-    }
+    var body: some View { content.navigationTitle(automation?.name ?? "Automation").tint(Theme.accent).task { await loadRuns() } }
 
     /// Fetches this automation's run history through the daemon's retained-runs endpoint, supplying the
     /// older tail the overview window doesn't carry.
@@ -81,8 +77,8 @@ struct AutomationDetailView: View {
     /// sheet. Present for every automation, including one that never fires on its own, since the sheet is
     /// also where Run Now lives and where a manual automation gets a one-shot scheduled run.
     private func nextRunRow(_ automation: TerminalServiceAutomationSummary) -> some View {
-        // Reads the shared 30-second label clock rather than `Date()`, so this text stays put across the
-        // 2-second overview poll instead of jittering (#540) — see
+        // Reads the shared 30-second label clock rather than `Date()`, so this text stays put across
+        // every overview push instead of jittering (#540); see
         // `SpacesMobileAppModel.relativeTimeReference`.
         let chipValue = SpacesMobileAutomations.nextRunChipValue(automation, relativeTo: model.relativeTimeReference)
         return HStack(spacing: 10) {

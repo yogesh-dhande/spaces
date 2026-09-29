@@ -4,6 +4,14 @@
     import spacesterminalcore
     @testable import SpacesMobile
 
+    /// Collects every overview `DemoDeviceBackend.openOverviewStream`'s `onOverview` callback delivers.
+    /// The callback is `@Sendable` and fires off the main actor, so recording through a plain array
+    /// captured by the closure would race the test reading it back.
+    private actor DemoOverviewStreamCollector {
+        private(set) var recorded: [SpacesDeviceOverviewPayload] = []
+        func record(_ overview: SpacesDeviceOverviewPayload) { recorded.append(overview) }
+    }
+
     @MainActor final class DemoDeviceBackendTests: XCTestCase {
         private func loadLibrary(now: Date = Date()) throws -> DemoRecordingLibrary { try DemoRecordingLibrary.load(bundle: .main, now: now) }
 
@@ -222,6 +230,41 @@
             XCTAssertNotNil(runningAgent.brief)
             XCTAssertEqual(stopped.brief, runningAgent.brief)
             XCTAssertEqual(stopped.briefUpdatedAt, runningAgent.briefUpdatedAt)
+        }
+
+        // MARK: - Overview stream
+
+        /// Mirrors the real daemon's `subscribeDeviceOverview` contract (push on subscribe, push again on
+        /// change) that `SpacesMobileAppModel`'s per-device streams depend on: a subscriber must see the
+        /// current overview the moment it opens, with no mutation required to prime it.
+        func testOverviewStreamYieldsImmediatelyAndAgainAfterAMutation() async throws {
+            let library = try loadLibrary()
+            let backend = DemoDeviceBackend(library: library)
+            let running = try XCTUnwrap(
+                library.overview.workspaces.lazy.flatMap { workspace in
+                    workspace.processRows.filter { $0.runState == .running && $0.processID != nil }
+                }.first, "Expected a running process to stop.")
+            let collector = DemoOverviewStreamCollector()
+
+            let handle = try await backend.openOverviewStream(
+                authToken: nil, clientApp: nil, onOverview: { overview in Task { await collector.record(overview) } }, onDisconnect: { _ in })
+            for _ in 0..<50 { await Task.yield() }
+            let afterOpen = await collector.recorded
+            XCTAssertEqual(afterOpen.count, 1, "the daemon's contract pushes the current overview the moment a subscriber opens")
+
+            let response = await backend.serve(
+                SpacesDeviceAPIRequest(
+                    command: .stopWorkspaceProcess(.init(workspaceID: running.workspaceID, processID: running.processID, processKey: running.name))))
+            XCTAssertTrue(response.ok)
+            for _ in 0..<50 { await Task.yield() }
+
+            let afterMutation = await collector.recorded
+            XCTAssertEqual(afterMutation.count, 2, "a mutation pushes again to every open subscriber")
+            let mutatedRow = try XCTUnwrap(
+                afterMutation.last?.workspaces.first { $0.id == running.workspaceID }?.processRows.first { $0.id == running.id })
+            XCTAssertEqual(mutatedRow.runState, .exited)
+
+            handle.cancel()
         }
 
         // MARK: - Synthesizing sessions for not-started rows

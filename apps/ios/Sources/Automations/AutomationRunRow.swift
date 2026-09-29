@@ -60,7 +60,7 @@ struct AutomationRunRowsList: View {
         let run = row.run
         var detailParts = [SpacesMobileAutomations.runTriggerLabel(run)]
         // Both read the shared 30-second label clock rather than `Date()`, so this text stays put across
-        // the 2-second overview poll instead of jittering (#540) — see
+        // every overview push instead of jittering (#540); see
         // `SpacesMobileAppModel.relativeTimeReference`. `startedDescription` clamps internally against a
         // reference that trails a just-started run; `durationDescription`'s own `max(0, ...)` already
         // covers the same case for the live-running duration it renders.

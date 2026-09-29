@@ -93,10 +93,32 @@ struct SpacesMobileDeviceStoreState: Equatable, Sendable {
     var settings: SpacesMobileConnectionSettings
 }
 
-enum SpacesMobileDeviceStore {
-    private static let devicesKey = "spaces.mobile.paired-devices"
+/// Every read-modify-write of the persisted paired-device list (and its paired Keychain writes, where a
+/// function's own Keychain call sits inside its load-then-save window and so must stay atomic with it)
+/// runs on the main actor. Every paired device's overview stream runs on its own resolver and reports
+/// its winning host off the main thread, concurrently with every other device's resolver and with the
+/// UI mutating the same list (pairing, renaming, removing); a network change fails every device over at
+/// once, so many writers can converge on the same list at once. Main-actor isolation serializes them:
+/// two overlapping writers that both loaded before either saved would otherwise each save back their own
+/// copy, so the later save erases the earlier writer's change, or, if a write for an already-removed
+/// device loaded before the removal's own save, its save could land after and resurrect the record the
+/// removal just deleted.
+///
+/// A lock would look equivalent but deadlocks: `UserDefaults.set` synchronously runs SwiftUI's
+/// `@AppStorage` observer on the calling thread, and that observer takes SwiftUI's global update lock.
+/// A lock held across that write, taken from a background stream thread, can then be waited on by a
+/// main-thread SwiftUI update that is itself holding the update lock, e.g. a scene-phase handler calling
+/// `clearActiveHosts()`, a lock-order inversion that hangs the app's main thread forever. Main-actor
+/// isolation has no such hazard: every writer, on-main or hopped in via `reportProvenHost`, already runs
+/// serialized on the actor SwiftUI's own update lock is entered from, so there is nothing left to wait on.
+///
+/// Off-main reporters (`SpacesDeviceEndpointResolver.recordProven(host:)`, the network backend's
+/// `onProvenHost` callback) must not call `recordActiveHost` directly; they call `reportProvenHost`,
+/// which hops to the main queue.
+@MainActor enum SpacesMobileDeviceStore {
+    nonisolated private static let devicesKey = "spaces.mobile.paired-devices"
     private static let activeDeviceKey = "spaces.mobile.active-device-id"
-    private static let keychainService = "dev.usespaces.spacesmobile.device"
+    nonisolated private static let keychainService = "dev.usespaces.spacesmobile.device"
 
     #if DEBUG
         static func applyDebugSeed(environment: [String: String] = ProcessInfo.processInfo.environment) {
@@ -257,7 +279,23 @@ enum SpacesMobileDeviceStore {
     /// Reads a paired device's Device API auth token from the Keychain, keyed by the same device ID
     /// the browser routing table carries. The browser proxy dialer authenticates its raw-byte service
     /// tunnel with this token, so it needs to look the secret up out of band from the settings flow.
-    static func authToken(deviceID: String) -> String? { secret(deviceID: deviceID, kind: .authToken) }
+    /// `nonisolated`: `BrowserProxyTunnel`'s dialer reads this off the main actor, and a Keychain read is
+    /// safe to call concurrently.
+    nonisolated static func authToken(deviceID: String) -> String? { secret(deviceID: deviceID, kind: .authToken) }
+
+    #if DEBUG
+        /// Test-only: stores `token` as `deviceID`'s Keychain auth token directly. A unit test that
+        /// builds its own `SpacesMobilePairedDeviceRecord` with a literal id (rather than the one
+        /// `upsert` would derive from a certificate fingerprint and port) needs this to make that
+        /// record read as credentialed to `settings(from:installationID:)`, the same as a real pairing
+        /// would.
+        static func saveAuthTokenForTesting(_ token: String, deviceID: String) { saveSecret(token, deviceID: deviceID, kind: .authToken) }
+
+        /// Test-only: removes `deviceID`'s Keychain auth token, the counterpart to
+        /// `saveAuthTokenForTesting` a test's teardown uses so one test's seeded token can never leak
+        /// into another test that reuses the same literal id.
+        static func deleteAuthTokenForTesting(deviceID: String) { deleteSecret(deviceID: deviceID, kind: .authToken) }
+    #endif
 
     /// Reads the persisted warm-start candidate `recordActiveHost` last wrote for the device matching
     /// `certificateFingerprint`, if any. `SpacesDeviceEndpointResolver` reads this at construction to
@@ -265,7 +303,11 @@ enum SpacesMobileDeviceStore {
     /// same warm-start fact, so a freshly built resolver (e.g. after a hosts backfill rebuilds the live
     /// client) starts already knowing what the last one learned instead of re-racing every candidate
     /// once more. Matches fingerprints the same trimmed+lowercased way `recordActiveHost` does.
-    static func activeHost(certificateFingerprint: String) -> String? {
+    /// `nonisolated`: read at resolver construction, which is not guaranteed to run on the main actor
+    /// (`SpacesDeviceEndpointResolver.init` and `SpacesDeviceNetworkBackend.init` are plain, non-isolated
+    /// initializers), so this must stay callable without a hop. A single `UserDefaults` read is safe to
+    /// call concurrently.
+    nonisolated static func activeHost(certificateFingerprint: String) -> String? {
         let fingerprint = certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return loadDevices().first(where: { $0.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == fingerprint })?
             .activeHost
@@ -280,7 +322,9 @@ enum SpacesMobileDeviceStore {
     /// Ignores `host` values that are not already one of the matched record's `hosts` rather than
     /// inventing a candidate — `activeHost` is only ever a member of `hosts`. Every connection reports
     /// its winner, so this no-ops when the value is unchanged rather than re-encoding the whole device
-    /// list into `UserDefaults` on each reconnect.
+    /// list into `UserDefaults` on each reconnect. Main-actor isolated: callers already on the main actor
+    /// (tests, the UI) may call it directly; an off-main reporter must go through `reportProvenHost`
+    /// instead, never here.
     static func recordActiveHost(_ host: String, certificateFingerprint: String) {
         let fingerprint = certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var devices = loadDevices()
@@ -291,6 +335,17 @@ enum SpacesMobileDeviceStore {
         else { return }
         devices[index].activeHost = host
         saveDevices(devices)
+    }
+
+    /// The entry point an off-main-actor reporter (`SpacesDeviceEndpointResolver.recordProven(host:)`,
+    /// running on its actor, and the network backend's `onProvenHost` callback, firing on the overview
+    /// stream's pinned-TLS connect thread) must use instead of calling `recordActiveHost` directly. Hops to the main queue with
+    /// `DispatchQueue.main.async` rather than `Task { @MainActor in }`: the queue is FIFO, so two reports
+    /// from the same resolver land in the order they were proven; a `Task` gives no such ordering
+    /// guarantee. `MainActor.assumeIsolated` is safe here because the closure only ever runs once the
+    /// dispatched block is actually executing on the main queue.
+    nonisolated static func reportProvenHost(_ host: String, certificateFingerprint: String) {
+        DispatchQueue.main.async { MainActor.assumeIsolated { recordActiveHost(host, certificateFingerprint: certificateFingerprint) } }
     }
 
     /// Bounds the candidate list `mergeAdvertisedHosts` produces. Without a cap, a device that roams
@@ -304,8 +359,10 @@ enum SpacesMobileDeviceStore {
 
     /// Backfills a paired device's `hosts` from the addresses its daemon reports it is reachable at
     /// (`TerminalServiceDaemonStatus.deviceAPIAddresses`). This is how a device paired before its Mac
-    /// ever had Tailscale silently gains the tailnet fallback the moment the Mac gets one — with no
-    /// rescan required, since the daemon advertises its own live addresses on every connection.
+    /// ever had Tailscale silently gains the tailnet fallback with no rescan required, since the daemon
+    /// advertises its own live addresses in every overview. It lands with the first overview after the
+    /// Mac gains the address, not the moment it does: the daemon pushes on database and terminal changes
+    /// only, so an address change alone waits for the next push, stream reconnect, or foreground (#835).
     ///
     /// No-ops when `hosts` is empty: an empty list means the daemon reported nothing (it predates this
     /// field, or this call raced a path that could not enumerate interfaces), never that the daemon has
@@ -391,7 +448,9 @@ enum SpacesMobileDeviceStore {
         saveDevices(devices)
     }
 
-    private static func loadDevices() -> [SpacesMobilePairedDeviceRecord] {
+    /// `nonisolated`: called from both main-actor mutators and the nonisolated reads above
+    /// (`activeHost(certificateFingerprint:)`). A single `UserDefaults` read is safe to call concurrently.
+    nonisolated private static func loadDevices() -> [SpacesMobilePairedDeviceRecord] {
         guard let data = UserDefaults.standard.data(forKey: devicesKey),
             let decoded = try? JSONDecoder().decode([SpacesMobilePairedDeviceRecord].self, from: data)
         else { return [] }
@@ -410,7 +469,11 @@ enum SpacesMobileDeviceStore {
             port: settings.port, certificateFingerprint: settings.certificateFingerprint, createdAt: now, updatedAt: now, lastSelectedAt: now)
     }
 
-    private static func settings(from device: SpacesMobilePairedDeviceRecord, installationID: String) -> SpacesMobileConnectionSettings {
+    /// Builds a live client's settings from a paired-device record, pulling its auth token out of the
+    /// Keychain. Exposed beyond the active-device path (`load`/`select`/`upsert` build it for
+    /// whichever device is becoming active) so the model can also build settings for a paired device it
+    /// is not currently on: one of the overview streams `SpacesMobileAppModel` opens per paired device.
+    static func settings(from device: SpacesMobilePairedDeviceRecord, installationID: String) -> SpacesMobileConnectionSettings {
         var settings = SpacesMobileConnectionSettings()
         // `hosts` always stays in the record's own order (daemon/pairing-link order, LAN first) — the
         // warm start lives in exactly one place, `SpacesDeviceEndpointResolver` seeding its cached
@@ -450,7 +513,9 @@ enum SpacesMobileDeviceStore {
         SecItemAdd(attributes as CFDictionary, nil)
     }
 
-    private static func secret(deviceID: String, kind: SecretKind) -> String? {
+    /// `nonisolated`: called from `authToken(deviceID:)`, which reads off the main actor. `SecItemCopyMatching`
+    /// is safe to call concurrently.
+    nonisolated private static func secret(deviceID: String, kind: SecretKind) -> String? {
         var query = keychainQuery(deviceID: deviceID, kind: kind)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -465,7 +530,9 @@ enum SpacesMobileDeviceStore {
         SecItemDelete(keychainQuery(deviceID: deviceID, kind: kind) as CFDictionary)
     }
 
-    private static func keychainQuery(deviceID: String, kind: SecretKind) -> [String: Any] {
+    /// `nonisolated`: a pure function of its arguments, called from both isolated Keychain writers and
+    /// the nonisolated `secret(deviceID:kind:)` read.
+    nonisolated private static func keychainQuery(deviceID: String, kind: SecretKind) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: keychainService,
             kSecAttrAccount as String: "\(deviceID).\(kind.rawValue)",

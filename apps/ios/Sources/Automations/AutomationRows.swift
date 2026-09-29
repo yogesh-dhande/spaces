@@ -24,8 +24,8 @@ struct SpacesMobileAutomationRunRow: Identifiable, Equatable, Sendable {
 /// A derived alert entry for a failed or timed-out automation run. Automation failures keep their own
 /// flat list, separate from coding-agent attention grouped by workspace, mirroring the
 /// Mac's synthetic "Automations" alerts group (`AutomationsViewModel.alertEntries` /
-/// `AppKitController.alertsGroups`). Unlike the Mac, which polls every paired device at once and so
-/// names the device in the entry text, the iOS app shows one active device at a time (see
+/// `AppKitController.alertsGroups`). Unlike the Mac, which streams every paired device's overview at once
+/// and so names the device in the entry text, the iOS app shows one active device at a time (see
 /// `SpacesMobileAppModel`), so there is no ambiguity to resolve and no device name to carry.
 struct SpacesMobileAutomationAlertEntry: Identifiable, Equatable, Sendable {
     let id: String
@@ -38,8 +38,9 @@ struct SpacesMobileAutomationAlertEntry: Identifiable, Equatable, Sendable {
 
 /// Pure merge/derivation logic for the iOS Automations feature, mirroring the Mac's
 /// `AutomationsViewModel`. The iOS app connects to one paired device at a time and refreshes that
-/// device's whole overview as a unit (see `SpacesMobileAppModel`), unlike the Mac sidebar, which polls
-/// every paired device simultaneously and merges their automations/runs into one cross-device table.
+/// device's whole overview as a unit (see `SpacesMobileAppModel`), unlike the Mac sidebar, which streams
+/// every paired device's overview simultaneously and merges their automations/runs into one cross-device
+/// table.
 /// There is therefore no cross-device merge to do here: switching the active device on iOS discards the
 /// previous overview and loads the new device's own automations from scratch.
 enum SpacesMobileAutomations {
@@ -75,8 +76,8 @@ enum SpacesMobileAutomations {
         }.map(SpacesMobileAutomationRunRow.init)
     }
 
-    /// Runs for the per-automation runs screen: the live overview window (refreshed by `.overviewPolling`
-    /// every 2 seconds while the screen is open) reconciled with the retained fetch history (a one-shot
+    /// Runs for the per-automation runs screen: the live overview window (kept current by the device's
+    /// overview stream while the screen is open) reconciled with the retained fetch history (a one-shot
     /// fetch of older runs the overview window doesn't carry). Overview wins for any run ID present in
     /// both — that keeps status, duration, and the Cancel/End Agents actions live for a run that completes
     /// or times out while the screen is open, instead of freezing at whatever the one-shot fetch saw.
@@ -132,8 +133,8 @@ enum SpacesMobileAutomations {
 
     /// "next in 5 min" for an enabled cron automation with a next fire time, else nil — a manual or
     /// disabled automation never fires on its own. `now` is meant to be
-    /// `SpacesMobileAppModel.relativeTimeReference` at every call site on the poll (a 30-second-cadence
-    /// clock, not `Date()` directly — see that property's doc comment for why).
+    /// `SpacesMobileAppModel.relativeTimeReference` at every call site (a 30-second-cadence clock, not
+    /// `Date()` directly; see that property's doc comment for why).
     ///
     /// A published `nextFireTime` is not guaranteed to stay future-dated relative to `now`: a refresh that
     /// failed retains the last-known overview while the reference keeps advancing, and even a fresh
@@ -201,7 +202,7 @@ enum SpacesMobileAutomations {
 
     /// "started 5 min ago" for a run that has started, else nil (a queued/skipped run never started).
     /// `now` is meant to be `SpacesMobileAppModel.relativeTimeReference`, which advances in 30-second jumps
-    /// off the poll cadence and can still trail a run that started only moments before the jump caught up.
+    /// and can still trail a run that started only moments before the jump caught up.
     /// Handed to the formatter unguarded, that reads in the future tense ("started in 5s") until the
     /// reference's next jump (#540); clamping `now` up to `started` avoids the wrong tense but then compares
     /// `started` against itself, which the formatter's numeric abbreviated style renders as "in 0 sec"
@@ -244,8 +245,8 @@ enum SpacesMobileAutomations {
 
     /// The terminal session a run row opens on tap, or nil when the row is not navigable (see
     /// `runIsNavigable`). The overview's own session wins when present, since it carries the daemon's
-    /// live, polled state; otherwise a summary is synthesized from the run itself — mirroring
-    /// `SpacesMobileAppModel.terminalSession(from:in:)` — so a retained historical run still opens its
+    /// live state; otherwise a summary is synthesized from the run itself, mirroring
+    /// `SpacesMobileAppModel.terminalSession(from:in:)`, so a retained historical run still opens its
     /// (by-then read-only) transcript after its session has aged out of the overview window.
     static func runSession(for run: TerminalServiceAutomationRunSummary, overview: SpacesDeviceOverviewPayload?)
         -> SpacesDeviceTerminalSessionSummary?

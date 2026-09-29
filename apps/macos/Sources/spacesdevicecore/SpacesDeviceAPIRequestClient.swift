@@ -23,8 +23,15 @@ public enum SpacesDeviceAPIRequestClientError: LocalizedError {
         case .connectionFailed(let message): message
         case .timeout(let message): message
         case .requestRejected(let message, _): message
-        case .streamStalled: "The terminal stream stopped responding."
+        case .streamStalled: "The device stopped responding."
         }
+    }
+}
+
+extension SpacesDeviceAPIRequestClientError: SpacesDeviceErrorCodeProviding {
+    public var spacesDeviceErrorCode: SpacesDeviceErrorCode? {
+        if case .requestRejected(_, let code) = self { return code }
+        return nil
     }
 }
 

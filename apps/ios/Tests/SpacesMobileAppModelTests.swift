@@ -943,12 +943,12 @@
             XCTAssertTrue(model.deletedWorkspaceNotice?.contains("branch") == true)
         }
 
-        /// An overview poll is a snapshot of the moment its fetch was issued. One that started before a
+        /// An overview is a snapshot of the moment its fetch was issued. One that started before a
         /// mutation and lands after it still carries the pre-mutation world, so publishing it would put the
-        /// deleted workspace back on screen as an ordinary actionable row until the next poll. It is
-        /// discarded instead — the same rule `overviewIdentity` applies to a connection change.
-        func testOverviewPollBegunBeforeAMutationIsDiscardedWhenItLandsAfterIt() async {
-            let pollGate = SpacesMobileAsyncGate()
+        /// deleted workspace back on screen as an ordinary actionable row until the stream's next push. It
+        /// is discarded instead, the same rule `overviewIdentity` applies to a connection change.
+        func testOverviewFetchBegunBeforeAMutationIsDiscardedWhenItLandsAfterIt() async {
+            let refreshGate = SpacesMobileAsyncGate()
             let settings = SpacesMobileConnectionSettings()
             let staleOverview = makeOverview()
             let postDeleteOverview = SpacesDeviceOverviewPayload(
@@ -956,8 +956,8 @@
                 sessions: staleOverview.sessions, daemonStatus: staleOverview.daemonStatus)
             let client = SpacesDeviceAPIClient(settings: settings) { request in
                 if request.commandName == "overview" {
-                    // The poll's fetch is parked until the delete below has been applied.
-                    await pollGate.wait()
+                    // The refresh's fetch is parked until the delete below has been applied.
+                    await refreshGate.wait()
                     return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(staleOverview))
                 }
                 return SpacesDeviceAPIResponse(
@@ -967,22 +967,22 @@
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             model.overview = staleOverview
 
-            let poll = Task { await model.refresh() }
+            let firstRefresh = Task { await model.refresh() }
             while !model.isLoading { await Task.yield() }
 
             await model.deleteWorkspace(staleOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
             XCTAssertEqual(model.overview, postDeleteOverview, "the delete publishes the post-delete overview")
 
-            await pollGate.open()
-            await poll.value
+            await refreshGate.open()
+            await firstRefresh.value
 
-            XCTAssertEqual(model.overview, postDeleteOverview, "the stale poll must not republish the deleted workspace")
+            XCTAssertEqual(model.overview, postDeleteOverview, "the stale refresh must not republish the deleted workspace")
             XCTAssertFalse(model.workspaceGroups.contains { $0.workspace.id == "workspace-feature" })
         }
 
-        /// The other half of the rule: a poll whose fetch begins after the mutation carries current state
+        /// The other half of the rule: a fetch that begins after the mutation carries current state
         /// and publishes normally.
-        func testOverviewPollBegunAfterAMutationPublishesNormally() async {
+        func testOverviewFetchBegunAfterAMutationPublishesNormally() async {
             let settings = SpacesMobileConnectionSettings()
             let baseOverview = makeOverview()
             let postDeleteOverview = SpacesDeviceOverviewPayload(
@@ -1003,7 +1003,7 @@
             await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
             await model.refresh()
 
-            XCTAssertEqual(model.overview, laterOverview, "a poll issued after the mutation is current and publishes")
+            XCTAssertEqual(model.overview, laterOverview, "a fetch issued after the mutation is current and publishes")
         }
 
         /// The point of reconciling rather than reporting failure: the row stays marked for deletion for
@@ -1220,7 +1220,7 @@
                 daemonStatus: overview.daemonStatus)
             let counter = SpacesMobilePollCounter()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
-                // Every request during the delete fails; the poll that follows it succeeds.
+                // Every request during the delete fails; the reconciliation fetch that follows it succeeds.
                 guard await counter.increment() > SpacesMobileAppModel.workspaceDeletionReconciliationAttempts + 1 else {
                     throw SpacesDeviceAPIClientError.connectionClosed
                 }
@@ -1948,9 +1948,9 @@
             XCTAssertNil(model.errorMessage)
         }
 
-        /// A deep link can name a session created after the overview was last fetched (polling pauses
-        /// while a terminal detail view is open — exactly where agent-notification links appear), so a
-        /// lookup miss against the cached overview must refresh once before the link is rejected.
+        /// A deep link can name a session created after the overview was last fetched (its device's stream
+        /// may not have delivered the change yet, or may still be reconnecting), so a lookup miss against
+        /// the cached overview must refresh once before the link is rejected.
         func testOpenTerminalDeepLinkRefreshesStaleOverviewBeforeRejecting() async {
             let freshOverview = makeOverview(sessions: [makeSession(id: "session-new")])
             let settings = SpacesMobileConnectionSettings()
@@ -1967,9 +1967,9 @@
             XCTAssertNil(model.errorMessage)
         }
 
-        /// A deep link typically arrives while the app is foregrounding — the same moment the overview
-        /// poller fires. Its refresh must join the in-flight fetch and resolve the session from the
-        /// result instead of silently returning with no overview and rejecting the link.
+        /// A deep link typically arrives while the app is foregrounding, the same moment the foreground
+        /// resume's own read fires. Its refresh must join the in-flight fetch and resolve the session from
+        /// the result instead of silently returning with no overview and rejecting the link.
         func testOpenTerminalDeepLinkResolvesWhileRefreshIsInFlight() async {
             let overview = makeOverview(sessions: [makeSession(id: "session-linked")])
             let gate = SpacesMobileAsyncGate()
@@ -1980,15 +1980,15 @@
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
 
-            let poll = Task { await model.refresh() }
+            let firstRefresh = Task { await model.refresh() }
             while !model.isLoading { await Task.yield() }
             let deepLink = Task { await model.openTerminalDeepLink(SpacesTerminalDeepLink(sessionID: "session-linked")) }
-            // Give the deep link ample turns to reach its refresh while the poll's fetch is still
+            // Give the deep link ample turns to reach its refresh while the first refresh's fetch is still
             // gated, so a refresh that drops concurrent callers is caught deterministically.
             for _ in 0..<100 { await Task.yield() }
             await gate.open()
             await deepLink.value
-            await poll.value
+            await firstRefresh.value
 
             XCTAssertEqual(model.pendingTerminalDeepLinkSession?.id, "session-linked")
             XCTAssertNil(model.errorMessage)
@@ -2307,9 +2307,9 @@
 
         // MARK: - Connection error tolerance
 
-        /// The overview poll runs every two seconds and a failed round trip that throws immediately —
-        /// most visibly when the app returns from the background onto a socket the OS dropped — routinely
-        /// heals on the next one, so it must not raise the modal connection alert.
+        /// The selected device's stream redials every two seconds, and a failed round trip that throws
+        /// immediately (most visibly when the app returns from the background onto a socket the OS
+        /// dropped) routinely heals on the next attempt, so it must not raise the modal connection alert.
         func testFailureThatThrowsImmediatelyDoesNotSurfaceConnectionError() async {
             let model = makeModel(refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"))
 
@@ -2373,7 +2373,7 @@
         }
 
         /// Leaving the terminal while the device is still unreachable raises the alert on the very next
-        /// failed poll: the streak kept running while suppressed, so it does not restart the delay.
+        /// failure: the streak kept running while suppressed, so it does not restart the delay.
         func testLeavingTheTerminalRaisesTheSuppressedAlertOnTheNextFailure() async {
             let clock = TestClock()
             let model = makeModel(
@@ -2439,10 +2439,10 @@
             XCTAssertNil(model.errorMessage, "the run restarts at the failure after the success, so nothing has persisted yet")
         }
 
-        /// Nothing polls while the app is backgrounded or the poll is paused behind a detail route, so
-        /// that time is not evidence of a failing connection. A failure recorded before the pause and one
-        /// recorded after must not read as one long outage, or the first blip on the way back raises the
-        /// alert this gate exists to prevent.
+        /// No stream is open and nothing refreshes while the app is backgrounded, so that time is not
+        /// evidence of a failing connection. A failure recorded before the pause and one recorded after
+        /// must not read as one long outage, or the first blip on the way back raises the alert this gate
+        /// exists to prevent.
         func testFailureRunEndsWhenConnectionMonitoringPauses() async {
             let clock = TestClock()
             let model = makeModel(
@@ -2452,6 +2452,24 @@
             await model.refresh()
             clock.advance(by: .milliseconds(60))
             model.noteConnectionMonitoringPaused()
+            await model.refresh()
+
+            XCTAssertNil(model.errorMessage)
+        }
+
+        /// `stopDeviceStreams()` closes the only thing watching the connection, so it must end the
+        /// failure-streak run itself, the same as an explicit `noteConnectionMonitoringPaused()`: a
+        /// StoreKit paywall swap while the scene stays active calls only `stopDeviceStreams()`, and a
+        /// streak that survived it would count the whole paywall interval as one continuous outage.
+        func testFailureRunEndsWhenDeviceStreamsStop() async {
+            let clock = TestClock()
+            let model = makeModel(
+                refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"), refreshFailureAlertDelay: .milliseconds(50),
+                clock: clock)
+
+            await model.refresh()
+            clock.advance(by: .milliseconds(60))
+            model.stopDeviceStreams()
             await model.refresh()
 
             XCTAssertNil(model.errorMessage)
@@ -2488,8 +2506,8 @@
         }
 
         /// A mutation's refreshed overview proves the device answered, so it ends the run exactly as a
-        /// successful poll does — otherwise the next isolated failure inherits a start time from an outage
-        /// that demonstrably ended.
+        /// successful refresh does; otherwise the next isolated failure inherits a start time from an
+        /// outage that demonstrably ended.
         func testMutationOverviewEndsTheFailureRun() async {
             let settings = SpacesMobileConnectionSettings()
             let overview = makeOverview()
@@ -2551,17 +2569,18 @@
         }
 
         /// Raising the re-pair surface must not unpair the app. The token in `settings` is a copy of one
-        /// the Keychain still holds, and the overview poll only runs while `settings.isPaired`, so
-        /// clearing it in memory ended every retry that could have proven the failure transient: the app
-        /// stayed on the pairing screen for the rest of the process even once the network recovered.
-        func testAuthenticationFailureKeepsThePairingSoAPollCanStillRun() {
+        /// the Keychain still holds, and every retry (the stream's own reconnects, an explicit refresh, a
+        /// foreground resume) requires the device to still read as paired, so clearing the token in memory
+        /// would have ended every one of them that could have proven the failure transient: the app stayed
+        /// on the pairing screen for the rest of the process even once the network recovered.
+        func testAuthenticationFailureKeepsThePairingSoRetriesCanStillRun() {
             let model = SpacesMobileAppModel(
                 settings: pairedSettings(), bridgeClient: pairedClient { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") })
 
             model.handleAuthenticationFailure(message: "Pair this device again.")
 
             XCTAssertEqual(model.settings.trimmedAuthToken, "paired-token", "the credential is still on disk; the in-memory copy must survive")
-            XCTAssertTrue(model.settings.isPaired, "the poll is gated on isPaired, so unpairing here stops every retry")
+            XCTAssertTrue(model.settings.isPaired, "retries are gated on isPaired, so unpairing here stops every retry")
             XCTAssertEqual(model.connectionNotice, "Pair this device again.", "the recovery notice is still the user-facing consequence")
             XCTAssertTrue(model.isShowingConnectionSettings)
         }
@@ -2590,7 +2609,7 @@
             XCTAssertEqual(model.overview?.workspaces.map(\.id), overview.workspaces.map(\.id))
         }
 
-        /// A genuinely revoked device rejects every poll, two seconds apart. The recovery surface is
+        /// A genuinely revoked device rejects every retry, two seconds apart. The recovery surface is
         /// raised once for that episode, not re-raised on every rejection: a user who has navigated away
         /// from Paired Devices must not be pulled back to it every two seconds.
         func testRepeatedAuthenticationFailuresRaiseTheRecoverySurfaceOnlyOnce() async {
@@ -2611,7 +2630,7 @@
         }
 
         /// A mutation is something the user just asked for, so its failure is reported immediately rather
-        /// than waiting for a run of failures the way a background poll does.
+        /// than waiting for a run of failures the way a stream retry or a background refresh does.
         func testMutationFailureSurfacesErrorImmediately() async {
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { request in
@@ -2748,11 +2767,11 @@
         }
 
         /// A blocked device that never answers again leaves the block in place and reports nothing: an
-        /// unreachable device is the overview poll's story, not evidence about an update, and the verdict
-        /// may only rest on what the device says about itself. Reconciling with a refresh here would do
-        /// the opposite — against a device that is still down it clears the status the screen renders
-        /// from and raises a connection error, and it cannot run under the expected-outage suppression
-        /// because that keys off the flag this path has to release.
+        /// unreachable device is ordinary connection reporting's story, not evidence about an update, and
+        /// the verdict may only rest on what the device says about itself. Reconciling with a refresh here
+        /// would do the opposite: against a device that is still down it clears the status the screen
+        /// renders from and raises a connection error, and it cannot run under the expected-outage
+        /// suppression because that keys off the flag this path has to release.
         func testAnAutomaticApplyReportsNothingWhenTheDeviceNeverAnswersAgain() async {
             let settings = SpacesMobileConnectionSettings()
             let recorder = SpacesMobileRequestRecorder()
@@ -2811,7 +2830,7 @@
                 // The daemon says nothing for the whole poll, so the run ends with no evidence either way.
                 case "daemonStatus": return SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.")
                 // The overview keeps answering: this is the device reporting itself still blocked and
-                // still waiting on the same staged build, which is what the app polls for anyway.
+                // still waiting on the same staged build, which is what the app refreshes for anyway.
                 default: return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
                 }
             }
@@ -2825,8 +2844,8 @@
             }
             XCTAssertNil(model.stagedApplyDidNotLandAlert, "a device that said nothing about itself reported no failed apply")
 
-            // The overview poll goes on reporting the device blocked with that build staged, exactly as it
-            // does in the app; that report has to be able to re-arm the apply.
+            // The overview goes on reporting the device blocked with that build staged, exactly as a
+            // stream push would in the app; that report has to be able to re-arm the apply.
             await waitUntil("the automatic apply to be requested again") {
                 await model.refresh()
                 return await recorder.snapshot().filter { $0.commandName == "requestDaemonRestart" }.count >= 2
@@ -2911,7 +2930,7 @@
             }
             XCTAssertEqual(hero.actionTitle, "Update Daemon", "the blocked screen carries the retry once the report is dismissed")
 
-            // The device goes on reporting the same staged build on every poll; none of that re-asks.
+            // The device goes on reporting the same staged build on every refresh; none of that re-asks.
             await model.refresh()
             await model.refresh()
             let restarts = await recorder.snapshot().filter { $0.commandName == "requestDaemonRestart" }.count
@@ -3061,7 +3080,7 @@
         /// A timed-out update releases the in-flight flag before its reconciling refresh, so a retry can
         /// start while the previous invocation is still finishing that refresh. The slow predecessor must
         /// not clear the flag out from under the retry: doing so would re-enable the Update Daemon button
-        /// and resume the overview poll in the middle of the retry's handoff.
+        /// and let ordinary overview refreshing resume in the middle of the retry's handoff.
         func testSlowPredecessorDoesNotClearARetrysInFlightState() async {
             let settings = SpacesMobileConnectionSettings()
             // Both waits are gates rather than sleeps, so each task parks exactly where the test needs it
@@ -3114,9 +3133,10 @@
         }
 
         /// A daemon update takes its device offline deliberately, so an overview refresh that fails
-        /// inside that window is expected rather than news. Pausing the poll cannot cover a refresh
-        /// already in flight when the user taps Update, or a pull-to-refresh during the update, so the
-        /// failure path itself stays quiet — but only for the duration of the update.
+        /// inside that window is expected rather than news. The suppression is a flag-check rather than
+        /// pausing anything, since pausing cannot cover a refresh already in flight when the user taps
+        /// Update, or a pull-to-refresh during the update, so the failure path itself stays quiet, but
+        /// only for the duration of the update.
         func testOverviewFailureDuringDaemonUpdateStaysQuietButNotAfterward() async {
             let settings = SpacesMobileConnectionSettings()
             let unreachable = SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.")

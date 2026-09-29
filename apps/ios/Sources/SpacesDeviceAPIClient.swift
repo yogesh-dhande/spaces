@@ -848,6 +848,15 @@ struct SpacesDeviceAPIClient: Sendable {
             request: request, initialEventTimeout: initialEventTimeout, onEvent: onEvent, onDisconnect: onDisconnect)
     }
 
+    /// Opens this device's overview push stream, the one subscription that keeps the model's overview
+    /// state current. See `SpacesDeviceAPIBackend.openOverviewStream` for the callback contract.
+    func openOverviewStream(
+        onOverview: @escaping @Sendable (SpacesDeviceOverviewPayload) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) async throws -> SpacesDeviceAPIStreamHandle {
+        try await backend.openOverviewStream(
+            authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, onOverview: onOverview, onDisconnect: onDisconnect)
+    }
+
     /// The address this client's backend most recently proved reachable, if it has resolved one yet.
     /// Distinct from `settings.primaryHost` or a paired-device record's persisted `activeHost`: those
     /// are snapshots that can go stale (settings captured at construction, a record written after the
@@ -855,6 +864,30 @@ struct SpacesDeviceAPIClient: Sendable {
     /// with no such concept (Demo Mode, the closure test backend) and for a network backend that has not
     /// resolved anything yet.
     func currentResolvedHost() async -> String? { await backend.currentResolvedHost() }
+
+    /// Test-only: identifies this client's overview-stream resolver, so a test can prove two client
+    /// values are the *same* client (built once and reused) rather than two independently constructed
+    /// ones that happen to compare equal on their settings. `nil` for a backend with no such resolver
+    /// (Demo Mode, a test's closure/fake backend), since only the real network backend has host-rotation
+    /// state worth proving is shared.
+    var overviewStreamResolverIdentityForTesting: ObjectIdentifier? {
+        (backend as? SpacesDeviceNetworkBackend).map { ObjectIdentifier($0.overviewStreamResolver) }
+    }
+
+    /// Test-only: the overview-stream resolver's cached winner, without driving a real connect. `nil`
+    /// for a backend with no such resolver, the same cases `overviewStreamResolverIdentityForTesting`
+    /// excludes.
+    var overviewStreamResolverCachedHostForTesting: String? { (backend as? SpacesDeviceNetworkBackend)?.overviewStreamResolver.currentCachedHost() }
+
+    /// Test-only: the host the overview stream's resolver would dial next (`nextStreamHost()`), without
+    /// driving a real connect.
+    var overviewStreamResolverNextHostForTesting: String? { (backend as? SpacesDeviceNetworkBackend)?.overviewStreamResolver.nextStreamHost() }
+
+    /// Test-only: records a stream failure on `host` against the overview-stream resolver directly, so a
+    /// test can put it in the same state a real failed stream dial would without driving a real connect.
+    func noteOverviewStreamFailedForTesting(host: String) {
+        _ = (backend as? SpacesDeviceNetworkBackend)?.overviewStreamResolver.noteStreamFailed(host: host)
+    }
 
     /// Clears this client's endpoint resolution so the next request or stream re-races every candidate
     /// address instead of continuing on whichever one most recently answered — the foreground
@@ -864,6 +897,19 @@ struct SpacesDeviceAPIClient: Sendable {
     /// `close()` so its current connection is dropped and the next send reconnects through the reset
     /// resolver, and must leave any open session stream alone — see `SpacesMobileAppModel.resetActiveConnectionEndpoint()`.
     func resetEndpointResolution() async { await backend.resetEndpointResolution() }
+
+    /// Clears this client's overview-stream resolver in place, synchronously: the streaming counterpart
+    /// of `resetEndpointResolution()`, for the selected device's stream (see
+    /// `SpacesMobileAppModel.resetDeviceStreamEndpointsForForeground()`). Uses
+    /// `resetForNetworkChange()`, not `clearCachedWinner()`: the resolver also remembers which
+    /// candidates a stream has recently failed on, and a foreground return is exactly the "the ground
+    /// this was learned on moved" case that API exists for (see its doc comment): a candidate that
+    /// failed while away (e.g. the LAN address, unreachable from the tailnet) must not stay skipped once
+    /// this device is back in range of it. Not `async` and not routed through `backend`'s protocol
+    /// method: `overviewStreamResolver` is a plain lock-based type, not actor-isolated, so a caller
+    /// sequencing this ahead of reopening streams needs no await to guarantee the order. A no-op for any
+    /// backend without such a resolver (Demo Mode, a test's closure/fake backend).
+    func resetOverviewStreamEndpointResolution() { (backend as? SpacesDeviceNetworkBackend)?.overviewStreamResolver.resetForNetworkChange() }
 
     /// Pings `host` specifically, bypassing the backend's normal multi-candidate address resolution.
     /// Backs the input-timeout ping-corroboration probe (see
@@ -1070,11 +1116,51 @@ struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
     /// Silence budget handed to every session stream this backend opens. Only tests pass anything other
     /// than the default, and they pass a shorter one so a stalled-stream assertion does not wait out the production timeout.
     let streamSilenceTimeout: TimeInterval
+    /// Resolver for this device's overview push stream, distinct from `resolver` above: the overview
+    /// stream runs through the Mac-shared `spacesdevicecore.SpacesDeviceAPIOverviewStreamClient`, which
+    /// dials over the blocking pinned-TLS connector (`SpacesPinnedTLSConnector`) rather than
+    /// `NWConnection`, so it needs that module's own `SpacesDeviceEndpointResolver` (module-qualified
+    /// below, since the iOS actor of the same name shadows it). Built once here and reused across reconnects
+    /// so a proven host survives them, the same warm-start contract `resolver` gives the request/session
+    /// stream path; `onProvenHost` persists a newly proven address the same way, so the two resolvers'
+    /// warm starts stay in sync regardless of which one last connected. It also hands the proven host
+    /// straight to `resolver` (`adoptProvenHost`), not just to the persisted record: a cold launch away
+    /// from the LAN seeds both resolvers from the same stale persisted address, and without this, only
+    /// the stream fails over to the reachable candidate while `resolver` (and so every command-channel
+    /// route built from `currentCachedHost()`, e.g. browser routing) keeps trusting the dead one until
+    /// its own next connect happens to race and win.
+    ///
+    /// A stream can outlive the `bridgeClient` that opened it (a device switch onto an already-streaming
+    /// device, or `rebuildLiveClientAfterHostsBackfill`), yet its `adoptProvenHost` never lands on an
+    /// obsolete `resolver` in practice: this resolver proves a host only inside a connect, a stream
+    /// connects once per attempt, and every attempt fetches its client fresh from
+    /// `SpacesMobileAppModel.overviewStreamClient(forDeviceID:)`, which is the current `bridgeClient` for
+    /// the selected device. A failover therefore always happens on a reconnect through the current
+    /// client. The one gap, a connect already in flight across the swap, is left to the new client's own
+    /// command channel, which proves its own winner on its first request (a device switch from Settings
+    /// or the device menu refreshes right away).
+    let overviewStreamResolver: spacesdevicecore.SpacesDeviceEndpointResolver
 
     init(settings: SpacesMobileConnectionSettings, streamSilenceTimeout: TimeInterval = TerminalStreamLiveness.silenceTimeoutSeconds) {
         self.settings = settings
         self.streamSilenceTimeout = streamSilenceTimeout
-        resolver = SpacesDeviceEndpointResolver(settings: settings)
+        let resolver = SpacesDeviceEndpointResolver(settings: settings)
+        self.resolver = resolver
+        overviewStreamResolver = spacesdevicecore.SpacesDeviceEndpointResolver(
+            hosts: settings.trimmedHosts, port: settings.port, certificateFingerprint: settings.certificateFingerprint,
+            activeHost: SpacesMobileDeviceStore.activeHost(certificateFingerprint: settings.certificateFingerprint),
+            onProvenHost: { host in
+                // Fires on the blocking pinned-TLS connect thread, off the main actor: goes through
+                // `reportProvenHost` rather than `recordActiveHost` directly for the same reason
+                // `SpacesDeviceEndpointResolver.recordProven(host:)` does (see its doc comment).
+                SpacesMobileDeviceStore.reportProvenHost(host, certificateFingerprint: settings.certificateFingerprint)
+                // Unordered against the stream's first overview on purpose: this fires inside the connect,
+                // a full network round trip before any frame can arrive, so the adoption lands first in
+                // practice. Losing that race would let the first frame's browser routes read the old host,
+                // and the cold-launch `refresh()` rebuilds them from its own command channel's proven
+                // winner, so an accepted residual rather than something to order explicitly.
+                Task { await resolver.adoptProvenHost(host) }
+            })
     }
 
     func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { SpacesDeviceNetworkRequestTransport(resolver: resolver) }
@@ -1152,6 +1238,23 @@ struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
             silenceTimeout: streamSilenceTimeout, onEvent: onEvent, onDisconnect: invalidatingOnDisconnect
         ).start(on: queue)
         return handle
+    }
+
+    /// Opens the device-overview push stream through the shared `spacesdevicecore` client, the same one
+    /// the Mac sidebar's `SpacesDeviceClient.subscribeOverview` uses. Unlike `openSessionStream`, whose
+    /// `NWConnection` dial and receive loop `StreamSubscription` starts non-blockingly, this client's
+    /// `start(timeoutSeconds:)` blocks the calling thread through the whole pinned-TLS handshake;
+    /// hopping to a detached task is what keeps that off the caller's actor (in practice the main actor)
+    /// instead of stalling it for the dial.
+    func openOverviewStream(
+        authToken: String?, clientApp: SpacesDeviceClientApp?, onOverview: @escaping @Sendable (SpacesDeviceOverviewPayload) -> Void,
+        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) async throws -> SpacesDeviceAPIStreamHandle {
+        let client = try spacesdevicecore.SpacesDeviceAPIOverviewStreamClient(
+            authToken: authToken, clientApp: clientApp, resolver: overviewStreamResolver, silenceTimeout: streamSilenceTimeout,
+            onOverview: onOverview, onDisconnect: onDisconnect)
+        try await Task.detached(priority: .userInitiated) { try client.start() }.value
+        return SpacesDeviceAPIStreamHandle { client.stop() }
     }
 
     /// The resolver's cached winner, if it has one — see `SpacesDeviceAPIClient.currentResolvedHost()`.
@@ -1232,6 +1335,15 @@ struct SpacesDeviceClosureBackend: SpacesDeviceAPIBackend {
             request: request, initialEventTimeout: initialEventTimeout, onEvent: onEvent, onDisconnect: onDisconnect)
     }
 
+    /// Overview streams, like session streams, keep using the real network path: a closure never
+    /// intercepts either.
+    func openOverviewStream(
+        authToken: String?, clientApp: SpacesDeviceClientApp?, onOverview: @escaping @Sendable (SpacesDeviceOverviewPayload) -> Void,
+        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) async throws -> SpacesDeviceAPIStreamHandle {
+        try await networkBackend.openOverviewStream(authToken: authToken, clientApp: clientApp, onOverview: onOverview, onDisconnect: onDisconnect)
+    }
+
     /// Routes the ping through the same `handler` closure every other request already goes through,
     /// rather than a bespoke fake: a test controls the ping-corroboration probe's outcome the same way
     /// it controls every other request: answer `.ping` from `handler` (probe "answered"), or throw
@@ -1282,8 +1394,9 @@ actor SpacesDeviceNetworkRequestTransport: SpacesDeviceAPIRequestTransport {
         // A cached socket cannot survive process suspension: iOS tears it down while the app is in the
         // background, and the next request on it fails with ENOTCONN before `connectIfNeeded` ever gets
         // to redial. Dropping the cache here — at the one place that owns it — means every channel built
-        // on this transport (the overview poll, an open terminal viewer, one-shot mutation channels)
-        // dials fresh on the way back to the foreground instead of surfacing a spurious connection error.
+        // on this transport (an explicit overview refresh, an open terminal viewer, one-shot mutation
+        // channels) dials fresh on the way back to the foreground instead of surfacing a spurious
+        // connection error.
         backgroundObserver.observe { [weak self] in
             guard let self else { return }
             Task { await self.close() }

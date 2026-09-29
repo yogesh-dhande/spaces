@@ -1314,9 +1314,10 @@
             XCTAssertEqual(takeoverCount, 0, "an ended foreground state must never take over")
         }
 
-        /// A terminal detail pauses overview polling, and its existing state stream can remain open after
-        /// the daemon revokes this device. The foreground heartbeat is therefore responsible for routing
-        /// that authentication failure into the normal re-pair recovery path.
+        /// A terminal detail's own state stream can remain open after the daemon revokes this device, since
+        /// it is a separate connection from the device overview stream. The foreground heartbeat is
+        /// therefore responsible for routing that authentication failure into the normal re-pair recovery
+        /// path.
         func testForegroundHeartbeatAuthenticationFailureRequestsRePairing() async throws {
             let recorder = DeviceAPIRequestRecorder()
             let authenticationRecorder = AuthenticationPromptRecorder()

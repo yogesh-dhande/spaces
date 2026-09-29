@@ -1,38 +1,46 @@
 import Foundation
 
-/// Per-device bookkeeping for the sidebar's live device-overview subscriptions.
+/// Per-device bookkeeping for a client's live device-overview subscriptions. Shared by the Mac sidebar
+/// (one instance covering every paired remote) and the iOS app model (one instance covering every
+/// paired device, including the selected one).
 ///
 /// Opening a subscription connects off the main actor and hands its client back asynchronously,
-/// while the stream's disconnect callback can already fire the moment the receive loop starts —
+/// while the stream's disconnect callback can already fire the moment the receive loop starts,
 /// that is, before the connect result lands. This type is the single place that decides, per
 /// device, what a disconnect means and whether an arriving connect result is still wanted.
 ///
 /// It also owns the retry schedule: every failed connect and every dropped stream arms that device's
-/// own bounded exponential backoff, and the device stays tracked while it waits so the caller's
+/// own retry delay (`retryDelayPolicy`), and the device stays tracked while it waits so the caller's
 /// unconditional reconciles cannot reopen it early. The two together make "every paired device has a
 /// live subscription" a continuously restored invariant that still leaves a genuinely-down remote
 /// alone between attempts.
 ///
-/// It performs no I/O: the caller opens connections, stops clients, and paints the sidebar; the
+/// It performs no I/O: the caller opens connections, stops clients, and paints the UI; the
 /// coordinator only tracks state and answers those questions, so the decisions are unit-testable
 /// by driving transitions directly.
-@MainActor final class RemoteOverviewSubscriptionCoordinator<Client: AnyObject> {
-    struct ReconcileOutcome {
+@MainActor public final class RemoteOverviewSubscriptionCoordinator<Client: AnyObject> {
+    public struct ReconcileOutcome {
         /// Live subscriptions whose device is no longer wanted. The caller stops each client; the
         /// coordinator has already dropped it, so the resulting disconnect reads as intentional.
-        var removed: [(deviceID: String, client: Client)] = []
+        public var removed: [(deviceID: String, client: Client)] = []
         /// Devices with no subscription and no connect in flight, each mapped to the attempt id its
         /// connect and its stream's disconnects must carry back. Marked as opening here, so a second
         /// reconcile before the connect returns does not start a duplicate connection.
-        var devicesToOpen: [String: Int] = [:]
+        public var devicesToOpen: [String: Int] = [:]
     }
 
     /// What the caller must do with a connect result that just landed.
-    enum ConnectOutcome {
+    public enum ConnectOutcome {
         /// Retain the client as the device's live subscription.
         case keep
-        /// Stop and drop the client: the device is no longer wanted, or the connect failed.
+        /// Stop and drop any client: the device is no longer wanted (removed, superseded by a newer
+        /// attempt, or subscriptions disabled). This says nothing about reachability, so the caller
+        /// must not report it as a failure: a superseded attempt's late connect failure must not
+        /// overwrite a replacement attempt's own state.
         case discard
+        /// Stop and drop any client: the current attempt's own connect failed (remote offline, or
+        /// still unreachable on a retry). A retry is armed.
+        case connectFailed
         /// Stop and drop the client and mark the device offline with `error`: the stream dropped
         /// before the connect result landed, so the client handed back is already dead. A retry is
         /// armed.
@@ -40,7 +48,7 @@ import Foundation
     }
 
     /// What the caller must do with a disconnect callback.
-    enum DisconnectOutcome {
+    public enum DisconnectOutcome {
         /// The subscription this disconnect belongs to was already given up on: removed on purpose,
         /// already retrying, or abandoned by a newer attempt on the same device.
         case ignore
@@ -56,7 +64,7 @@ import Foundation
         case live(attempt: Int, client: Client)
         /// Waiting out the backoff delay after a failed connect or a dropped stream. The device stays
         /// tracked while it waits so `reconcile` leaves it alone: reconciles arrive unconditionally
-        /// (the sidebar's reachability watchdog ticks on a timer), and reopening on every tick would
+        /// (e.g. the sidebar's reachability watchdog ticks on a timer), and reopening on every tick would
         /// reconnect-storm a remote that is genuinely down.
         case waitingToRetry(task: Task<Void, Never>, delay: Duration)
     }
@@ -68,34 +76,36 @@ import Foundation
     private let requestReconcile: @MainActor () -> Void
     private var states: [String: DeviceState] = [:]
     /// Source of the attempt ids that tie a connect result and a stream's disconnects to the attempt
-    /// that produced them. A device can have an abandoned attempt still winding down — a user retry
+    /// that produced them. A device can have an abandoned attempt still winding down (a user retry
     /// stops the live client and connects again immediately, and that stopped stream's disconnect
-    /// callback arrives afterwards — so identity, not device alone, decides what a callback means.
+    /// callback arrives afterwards), so identity, not device alone, decides what a callback means.
     private var lastAttemptID = 0
     /// Consecutive failed connects / dropped streams per device, the exponent behind its retry
     /// backoff. Reset when a connect succeeds and dropped when the device stops being tracked.
     private var consecutiveFailures: [String: Int] = [:]
-    private(set) var isEnabled = false
-    /// Floor of the per-device retry backoff: the delay before the first retry after a device's
-    /// subscription fails. Internal so behavior tests can shorten it instead of waiting out real
-    /// seconds.
-    var retryDelay: Duration = .seconds(5)
-    /// Ceiling of the per-device retry backoff, so a remote that stays down settles into a slow probe
-    /// instead of retrying every few seconds for as long as the app runs. Internal so behavior tests
-    /// can shorten it.
-    var maxRetryDelay: Duration = .seconds(60)
-    /// Fraction of the computed backoff added on top as jitter, so several devices that dropped
-    /// together (a network outage) don't retry in lockstep. Internal so behavior tests can pin it
-    /// instead of depending on a random draw.
-    var retryJitterFraction: @MainActor () -> Double = { Double.random(in: 0..<0.25) }
+    public private(set) var isEnabled = false
+    /// Computes the delay before the next retry attempt for `deviceID`, given its count of consecutive
+    /// failed connects/drops. Defaults to `RemoteConnectionBackoff`'s bounded exponential curve (5s
+    /// floor, 60s cap, up to 25% jitter), the behavior every device had before this hook existed.
+    ///
+    /// The one extension point this type offers for varying retry pacing: an owner that wants a
+    /// different cadence for some devices branches on `deviceID` inside its own closure rather than the
+    /// coordinator growing a second mode. iOS uses this to retry its *selected* device on a fixed 2s
+    /// delay while every other paired device keeps the growing backoff: a device the user is actively
+    /// looking at should recover promptly, while one merely paired and idle in the background should
+    /// not storm a remote that is genuinely down.
+    public var retryDelayPolicy: @MainActor (_ deviceID: String, _ consecutiveFailures: Int) -> Duration = { _, consecutiveFailures in
+        RemoteConnectionBackoff.delay(
+            consecutiveFailures: consecutiveFailures, floor: .seconds(5), cap: .seconds(60), jitterFraction: Double.random(in: 0..<0.25))
+    }
 
-    init(requestReconcile: @escaping @MainActor () -> Void) { self.requestReconcile = requestReconcile }
+    public init(requestReconcile: @escaping @MainActor () -> Void) { self.requestReconcile = requestReconcile }
 
-    func enable() { isEnabled = true }
+    public func enable() { isEnabled = true }
 
     /// Stops tracking every device and returns the live clients for the caller to stop. Disconnects
     /// and connect results arriving afterwards find no state and are discarded.
-    func disable() -> [Client] {
+    public func disable() -> [Client] {
         isEnabled = false
         var clients: [Client] = []
         for state in states.values {
@@ -111,10 +121,10 @@ import Foundation
     }
 
     /// Reconciles tracked devices to `desiredIDs`, reporting the subscriptions to tear down and the
-    /// devices to connect. A device waiting out its retry backoff is deliberately left alone — its
-    /// armed retry is what reopens it — so an unconditional reconcile converges on every device that
+    /// devices to connect. A device waiting out its retry backoff is deliberately left alone (its
+    /// armed retry is what reopens it), so an unconditional reconcile converges on every device that
     /// has no subscription and no pending attempt, without shortcutting the backoff.
-    func reconcile(desiredIDs: Set<String>) -> ReconcileOutcome {
+    public func reconcile(desiredIDs: Set<String>) -> ReconcileOutcome {
         var outcome = ReconcileOutcome()
         for (deviceID, state) in states where !desiredIDs.contains(deviceID) {
             states[deviceID] = nil
@@ -133,7 +143,7 @@ import Foundation
         return outcome
     }
 
-    func applyConnectResult(deviceID: String, attempt: Int, client: Client?) -> ConnectOutcome {
+    public func applyConnectResult(deviceID: String, attempt: Int, client: Client?) -> ConnectOutcome {
         guard case .opening(let openingAttempt, let pendingDisconnect) = states[deviceID], openingAttempt == attempt else {
             // The device stopped being wanted while the connect was in flight (unpaired, credentials
             // gone, or subscriptions stopped), or a user retry abandoned this attempt and started
@@ -144,7 +154,7 @@ import Foundation
             // The connect attempt failed (remote offline, or still unreachable on a retry). The armed
             // retry's reconcile opens the device again once its backoff elapses.
             armRetry(deviceID: deviceID)
-            return .discard
+            return .connectFailed
         }
         if let pendingDisconnect {
             // The stream this connect opened already dropped, so the client handed back is dead:
@@ -155,13 +165,12 @@ import Foundation
             return .discardDisconnected(error: pendingDisconnect.error)
         }
         states[deviceID] = .live(attempt: attempt, client: client)
-        // A connect that reached the remote clears the backoff, so the next outage retries promptly
-        // instead of inheriting the delay a previous outage had grown to.
-        consecutiveFailures[deviceID] = nil
+        // The backoff stays where it is: a connect only proves the transport opened, not that the
+        // subscription itself works (see `noteOverviewDelivered`'s doc comment).
         return .keep
     }
 
-    func applyDisconnect(deviceID: String, attempt: Int, error: (any Error)?) -> DisconnectOutcome {
+    public func applyDisconnect(deviceID: String, attempt: Int, error: (any Error)?) -> DisconnectOutcome {
         switch states[deviceID] {
         case .none: return .ignore
         case .opening(let openingAttempt, let recorded):
@@ -192,8 +201,7 @@ import Foundation
     private func armRetry(deviceID: String) {
         let failures = (consecutiveFailures[deviceID] ?? 0) + 1
         consecutiveFailures[deviceID] = failures
-        let delay = RemoteConnectionBackoff.delay(
-            consecutiveFailures: failures, floor: retryDelay, cap: maxRetryDelay, jitterFraction: retryJitterFraction())
+        let delay = retryDelayPolicy(deviceID, failures)
         let task = Task { @MainActor [weak self] in
             try? await Task.sleep(for: delay)
             guard let self, !Task.isCancelled else { return }
@@ -206,16 +214,16 @@ import Foundation
         states[deviceID] = .waitingToRetry(task: task, delay: delay)
     }
 
-    /// Drops everything tracked for `deviceID` — a live subscription, an in-flight connect's claim on
-    /// the device, an armed retry — and clears its backoff, so the caller's next reconcile reopens the
+    /// Drops everything tracked for `deviceID` (a live subscription, an in-flight connect's claim on
+    /// the device, an armed retry) and clears its backoff, so the caller's next reconcile reopens the
     /// device immediately and a fresh failure starts the backoff at its floor again. Returns the live
     /// client, if any, for the caller to stop.
     ///
     /// This is the user asking for this device again, which is a stronger signal than the schedule a run
-    /// of failures grew. Everything abandoned here still lands later — an in-flight connect, and the
-    /// disconnect the caller's `stop()` triggers on the returned client — carrying the attempt id of the
+    /// of failures grew. Everything abandoned here still lands later, an in-flight connect, and the
+    /// disconnect the caller's `stop()` triggers on the returned client, carrying the attempt id of the
     /// attempt being abandoned, so neither is mistaken for the state of the attempt that replaces it.
-    func resetForUserRetry(deviceID: String) -> Client? {
+    public func resetForUserRetry(deviceID: String) -> Client? {
         let state = states.removeValue(forKey: deviceID)
         consecutiveFailures[deviceID] = nil
         switch state {
@@ -229,15 +237,52 @@ import Foundation
     /// The delay of the retry currently armed for `deviceID`, or `nil` when the device is not waiting on
     /// one. Read by the connection trace to record when a device is next attempted, and by behavior
     /// tests to assert how the backoff grows and resets without waiting out the delays themselves.
-    func armedRetryDelay(deviceID: String) -> Duration? {
+    public func armedRetryDelay(deviceID: String) -> Duration? {
         guard case .waitingToRetry(_, let delay) = states[deviceID] else { return nil }
         return delay
+    }
+
+    /// Whether `attempt` is still the attempt this device is connecting or connected under, i.e.
+    /// `states[deviceID]` is `.opening(attempt)` or `.live(attempt)`. `false` for `.waitingToRetry`
+    /// (nothing is current while a device waits out its backoff) and for a device not tracked at all.
+    /// Callers use this to drop a data delivery that raced a `cancel()` against a replacement attempt:
+    /// unlike a connect result or a disconnect, a pushed overview carries no attempt of its own until the
+    /// caller threads one through, so this is what lets it be checked the same way.
+    public func isCurrentAttempt(deviceID: String, attempt: Int) -> Bool {
+        switch states[deviceID] {
+        case .opening(let openingAttempt, _): return openingAttempt == attempt
+        case .live(let liveAttempt, _): return liveAttempt == attempt
+        case .waitingToRetry, .none: return false
+        }
+    }
+
+    /// Whether `deviceID` has an open, connected subscription right now. A caller answering some other
+    /// question ("is anything watching this connection that would notice it drop on its own") reads this
+    /// rather than `isCurrentAttempt`, which needs an attempt id and answers a narrower one ("is this
+    /// specific attempt still the one that matters").
+    public func isLive(deviceID: String) -> Bool {
+        if case .live = states[deviceID] { return true }
+        return false
+    }
+
+    /// Clears `deviceID`'s backoff once its stream has actually delivered an overview for `attempt`,
+    /// still the current one. `applyConnectResult`'s `.keep` deliberately does not do this itself: the
+    /// daemon can accept the transport and reject the subscribe request (a revoked token, for one)
+    /// after the connect already returned, so a connect alone does not prove the subscription works,
+    /// only a delivered overview does. Without this, a repeatedly rejected device would have its
+    /// backoff reset on every connect and its rejection's own disconnect arm only the floor delay,
+    /// redialing a remote that will keep rejecting it at that same short interval forever instead of
+    /// backing off. Callers check `isCurrentAttempt` themselves before routing a delivery to their own
+    /// handler, so this repeats that same guard rather than trusting the caller already did.
+    public func noteOverviewDelivered(deviceID: String, attempt: Int) {
+        guard isCurrentAttempt(deviceID: deviceID, attempt: attempt) else { return }
+        consecutiveFailures[deviceID] = nil
     }
 
     /// Awaits every armed retry, including the reconciles they request, so a behavior test can assert
     /// on retry scheduling deterministically instead of polling under a wall-clock ceiling. A no-op
     /// when no retry is armed.
-    func drainPendingRetryForTesting() async {
+    public func drainPendingRetryForTesting() async {
         let tasks = states.values.compactMap { state -> Task<Void, Never>? in
             guard case .waitingToRetry(let task, _) = state else { return nil }
             return task

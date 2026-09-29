@@ -12,7 +12,7 @@
     /// `TerminalServiceTLSIdentityStore` (macOS/Linux-only: it shells out to `openssl`, which iOS has no
     /// `Process` to run) — so a handful of tests can drive the resolver to an actual cached-winner success
     /// without a real daemon, covering the multi-address failover invalidation paths that need one.
-    final class SpacesDeviceEndpointResolverTests: XCTestCase {
+    @MainActor final class SpacesDeviceEndpointResolverTests: XCTestCase {
         // Seeding-from-persisted-`activeHost` and `nextStreamHost()`/`noteStreamFailed(host:)` tests
         // below read and write `SpacesMobileDeviceStore`'s real `UserDefaults.standard` persistence —
         // reset it around every test the same way `SpacesMobileDeviceStoreTests` does, so a fingerprint
@@ -599,6 +599,37 @@
 
             let seeded = await resolver.currentCachedHost()
             XCTAssertNil(seeded)
+        }
+
+        /// The overview stream's own resolver proves a host the command-path resolver never dialed
+        /// itself (e.g. a cold launch away from the LAN, where the stream fails over to Tailscale before
+        /// any command is ever sent). `adoptProvenHost` is how that proof reaches this resolver's cache
+        /// without waiting for its own connect to race and rediscover the same address.
+        func testAdoptProvenHostSetsCachedHostWhenItIsAKnownCandidate() async {
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["10.0.0.5", "100.64.0.5"]
+            settings.certificateFingerprint = "SHA256:adopt-proven-host"
+            let resolver = SpacesDeviceEndpointResolver(settings: settings)
+
+            await resolver.adoptProvenHost("100.64.0.5")
+
+            let cached = await resolver.currentCachedHost()
+            XCTAssertEqual(cached, "100.64.0.5")
+        }
+
+        /// A host outside this resolver's own `hosts` cannot be dialed by it, so it must be ignored
+        /// rather than adopted, mirroring the same re-validation `connect` already applies to a seeded
+        /// cached winner.
+        func testAdoptProvenHostIgnoresAHostOutsideItsOwnHosts() async {
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["10.0.0.5"]
+            settings.certificateFingerprint = "SHA256:adopt-proven-host-rejects"
+            let resolver = SpacesDeviceEndpointResolver(settings: settings)
+
+            await resolver.adoptProvenHost("192.0.2.1")
+
+            let cached = await resolver.currentCachedHost()
+            XCTAssertNil(cached)
         }
 
         // MARK: - Stream-host rotation (item 2)

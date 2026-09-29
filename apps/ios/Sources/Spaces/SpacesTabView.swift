@@ -37,12 +37,11 @@ struct SpacesTabView: View {
             guard let session else { return }
             selectedSession = SelectedTerminalSessionRoute(session: session, openSource: "deep_link")
             model.pendingTerminalDeepLinkSession = nil
-        }.accessibilityIdentifier("tab.spaces").overviewPolling(
-            model: model, tab: .spaces, route: pollingRoute, refreshGeneration: terminalListRefreshGeneration
-        ).sheet(isPresented: workspaceCreateSheetBinding) { WorkspaceCreateSheet(model: model) }.sheet(isPresented: $isShowingVisibilitySheet) {
-            WorkspaceVisibilitySheet(model: model)
-        }.confirmationDialog(pendingStop?.title ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible, presenting: pendingStop) {
-            stop in
+        }.accessibilityIdentifier("tab.spaces").sheet(isPresented: workspaceCreateSheetBinding) { WorkspaceCreateSheet(model: model) }.sheet(
+            isPresented: $isShowingVisibilitySheet
+        ) { WorkspaceVisibilitySheet(model: model) }.confirmationDialog(
+            pendingStop?.title ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible, presenting: pendingStop
+        ) { stop in
             Button("Stop", role: .destructive) { Task { await performPendingStop(stop) } }
             Button("Cancel", role: .cancel) {}
         } message: { stop in
@@ -61,12 +60,6 @@ struct SpacesTabView: View {
         case .row(let row): await model.stop(row: row)
         case .workspace(let workspace): await model.stopWorkspace(workspace)
         }
-    }
-
-    /// Any detail route — a terminal, a pending terminal launch, or a browser session — that should
-    /// slow this tab's refresh poll while it is on screen. None of these install their own poller.
-    private var pollingRoute: OverviewPollingRoute? {
-        (selectedSession?.id ?? pendingTerminalLaunch?.id ?? selectedBrowserSession?.id).map(OverviewPollingRoute.detail)
     }
 
     private var workspaceCreateSheetBinding: Binding<Bool> {

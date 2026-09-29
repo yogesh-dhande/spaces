@@ -9,7 +9,7 @@
     ///
     /// These tests exercise the real `SpacesMobileDeviceStore` persistence, which lives in
     /// `UserDefaults.standard` and the Keychain, so each test clears and reseeds that state.
-    final class SpacesMobileDeviceStoreTests: XCTestCase {
+    @MainActor final class SpacesMobileDeviceStoreTests: XCTestCase {
         private let devicesKey = "spaces.mobile.paired-devices"
         private let activeDeviceKey = "spaces.mobile.active-device-id"
         private let connectionSettingsKey = "spaces.mobile.connection-settings"
@@ -423,6 +423,138 @@
             XCTAssertNil(second.devices.first?.activeHost)
         }
 
+        // MARK: - Concurrent device-list mutations
+
+        /// Releases `count` blocks on the global concurrent queue at (as near as the OS scheduler allows)
+        /// the same instant: each blocks on a shared gate until every one of them has been dispatched, so
+        /// their first real work (`loadDevices()`, for the writers this file races) starts from a
+        /// simultaneous field rather than trickling in one at a time the way
+        /// `DispatchQueue.concurrentPerform` can for a body this cheap, which was too narrow a window to
+        /// expose the race reliably at thousands of iterations.
+        private func runSimultaneously(count: Int, _ work: @escaping (Int) -> Void) {
+            let gate = DispatchSemaphore(value: 0)
+            let group = DispatchGroup()
+            for index in 0..<count {
+                group.enter()
+                DispatchQueue.global().async {
+                    gate.wait()
+                    work(index)
+                    group.leave()
+                }
+            }
+            for _ in 0..<count { gate.signal() }
+            group.wait()
+        }
+
+        /// Suspends until every block already enqueued on the main dispatch queue has run: `reportProvenHost`
+        /// hops each write there with `DispatchQueue.main.async`, and the main queue is FIFO.
+        private func drainMainQueue() async { await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } } }
+
+        /// Every paired device's overview stream reports its own winning host independently, off the
+        /// main thread and concurrently with every other device's stream, through `reportProvenHost`
+        /// (the nonisolated entry point that hops each report onto the main actor). Drives several
+        /// simultaneous bursts of background reporters, each one a genuine mutation for every device
+        /// (alternating which of its two hosts is targeted, so no burst is a no-op that would skip the
+        /// write entirely), drains the main queue once every burst has been dispatched, and checks that
+        /// every device ends on the last burst's host: main-actor serialization means each device's own
+        /// reports apply in the order they were dispatched, so nothing about racing the dispatch itself
+        /// can lose or reorder a device's final write.
+        func testConcurrentRecordActiveHostAcrossManyDevicesNeverLosesAWrite() async throws {
+            let deviceCount = 16
+            let fingerprints = (0..<deviceCount).map { "SHA256:concurrent-\($0)" }
+            for (index, fingerprint) in fingerprints.enumerated() {
+                _ = SpacesMobileDeviceStore.upsert(
+                    settings: makeSettings(hosts: ["10.0.0.\(index)", "100.64.0.\(index)"], fingerprint: fingerprint, token: "token-\(index)"),
+                    name: "Device \(index)")
+            }
+
+            let burstCount = 12
+            var lastTargetHosts: [String] = []
+            for burst in 0..<burstCount {
+                let targetHosts = fingerprints.indices.map { index in burst.isMultiple(of: 2) ? "100.64.0.\(index)" : "10.0.0.\(index)" }
+                lastTargetHosts = targetHosts
+                runSimultaneously(count: deviceCount) { index in
+                    SpacesMobileDeviceStore.reportProvenHost(targetHosts[index], certificateFingerprint: fingerprints[index])
+                }
+            }
+            // Every burst's reports are dispatched (enqueued on the main queue) before its
+            // `runSimultaneously` call returns, so a single drain after the last burst is enough to let
+            // every dispatched write, across every burst, actually run.
+            await drainMainQueue()
+
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            for (index, fingerprint) in fingerprints.enumerated() {
+                let device = reloaded.devices.first(where: { $0.certificateFingerprint == fingerprint })
+                XCTAssertEqual(
+                    device?.activeHost, lastTargetHosts[index],
+                    "device \(index)'s last dispatched write must land, not be lost to another device's queued write")
+            }
+        }
+
+        /// A device removed while a racing report for it is still in flight must never come back.
+        /// Main-actor serialization makes this true by construction rather than by locking: every
+        /// mutation, `remove` and a `reportProvenHost`-driven `recordActiveHost` alike, reads the
+        /// persisted list fresh at its own turn on the actor, never a snapshot taken before some other
+        /// writer's turn, so a report that runs after the removal simply finds nothing to match and a
+        /// report that runs before it is removed right along with everything else. Fires the removal
+        /// (itself hopped onto the main queue, the same way an off-main writer would) alongside a burst
+        /// of same-device reports released at the same instant, so the two race for a place in the main
+        /// queue the way a real stream failover and a real device removal would.
+        func testConcurrentRemovalIsNeverResurrectedByARacingRecordActiveHost() async throws {
+            let fingerprint = "SHA256:concurrent-remove"
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.9", "100.64.0.9"], fingerprint: fingerprint, token: "token-remove"), name: "Removable")
+            let id = try XCTUnwrap(state.devices.first?.id)
+            let racerCount = 24
+
+            runSimultaneously(count: racerCount + 1) { index in
+                if index == 0 {
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated {
+                            _ = SpacesMobileDeviceStore.remove(deviceID: id, fallbackSettings: SpacesMobileConnectionSettings())
+                        }
+                    }
+                } else {
+                    SpacesMobileDeviceStore.reportProvenHost("100.64.0.9", certificateFingerprint: fingerprint)
+                }
+            }
+            await drainMainQueue()
+
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertNil(reloaded.devices.first(where: { $0.id == id }), "a device removed mid-race must never be resurrected by a racing writer")
+        }
+
+        /// Regression for the deadlock this main-actor design closes: `UserDefaults.set` synchronously
+        /// runs `NSNotificationCenter`'s `didChangeNotification` on the calling thread, and in the real
+        /// app that is where SwiftUI's `@AppStorage` observer takes SwiftUI's global update lock. A
+        /// device-list write made from a background stream thread would enter that lock from a
+        /// non-main thread, which is the lock-order inversion that hung the app: a background write
+        /// holding a hypothetical device-list lock waits to enter the update lock while a main-thread
+        /// SwiftUI update, already holding the update lock, waits on that same device-list lock. Proves
+        /// the actual invariant that prevents it: every persisted device-list write happens on the main
+        /// thread, so it can never be the thread on the wrong side of that inversion. Uses `queue: nil`
+        /// so the observer runs synchronously on the posting thread rather than being hopped to main by
+        /// `NotificationCenter` itself, which would hide exactly the bug this guards against.
+        func testDeviceListWritesAlwaysHappenOnTheMainThread() async throws {
+            _ = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:main-thread-write", token: "token"), name: "Mac")
+
+            let observation = MainThreadWriteObservation()
+            let observer = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: nil) { _ in
+                observation.record(onMainThread: Thread.isMainThread)
+            }
+            defer { NotificationCenter.default.removeObserver(observer) }
+
+            runSimultaneously(count: 1) { _ in
+                SpacesMobileDeviceStore.reportProvenHost("100.64.0.5", certificateFingerprint: "SHA256:main-thread-write")
+            }
+            await drainMainQueue()
+
+            let (count, allOnMainThread) = observation.snapshot()
+            XCTAssertGreaterThan(count, 0, "sanity: the report must have actually produced a write")
+            XCTAssertTrue(allOnMainThread, "every persisted device-list write must happen on the main thread")
+        }
+
         // MARK: - Helpers
 
         private func makeSettings(hosts: [String], fingerprint: String, token: String, installationID: String = "INSTALL")
@@ -443,6 +575,29 @@
             }
             let defaults = UserDefaults.standard
             for key in [devicesKey, activeDeviceKey, connectionSettingsKey, demoModeKey] { defaults.removeObject(forKey: key) }
+        }
+    }
+
+    /// Accumulates `UserDefaults.didChangeNotification` observations for
+    /// `testDeviceListWritesAlwaysHappenOnTheMainThread`, above. `queue: nil` delivers the notification
+    /// synchronously on whichever thread made the write, including a background one, so this has to be
+    /// its own lock-protected box rather than a plain `var` the test method closes over.
+    private final class MainThreadWriteObservation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var observedCount = 0
+        private var allOnMainThread = true
+
+        func record(onMainThread: Bool) {
+            lock.lock()
+            defer { lock.unlock() }
+            observedCount += 1
+            allOnMainThread = allOnMainThread && onMainThread
+        }
+
+        func snapshot() -> (count: Int, allOnMainThread: Bool) {
+            lock.lock()
+            defer { lock.unlock() }
+            return (observedCount, allOnMainThread)
         }
     }
 #endif
