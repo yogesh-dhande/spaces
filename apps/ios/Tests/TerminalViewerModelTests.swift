@@ -11163,8 +11163,9 @@
                 settings: settings(), session: session(), recorder: recorder, transcript: transcript)
             defer { model.stop() }
             await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
-            // Let the empty read finish installing whatever it is going to install before reading the state.
-            try await Task.sleep(for: .milliseconds(200))
+            // The count above only proves the read went out; wait for its verdict to be applied before
+            // reading the state it left.
+            await model.awaitLocalScrollbackLoadForTesting()
             XCTAssertFalse(model.hasReadyLocalScrollbackForTesting, "a session that has written nothing yet has nothing to replay")
 
             await transcript.append(Self.numberedTranscript(lineCount: 400))
@@ -11251,7 +11252,10 @@
 
             _ = await model.applyLatestState(
                 try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, outputEndByteOffset: 1), isOutOfBand: false)
-            try await Task.sleep(for: .milliseconds(200))
+            // The refusal has to be applied before the gesture below fires: otherwise its delta parks on the
+            // prefetch's still-loading read and is dropped with it instead of starting the retry this test
+            // asserts on.
+            await model.awaitLocalScrollbackLoadForTesting()
             let readsBeforeTheGesture = await Self.transcriptRequests(in: recorder.snapshot()).count
             XCTAssertEqual(readsBeforeTheGesture, 1, "the frame that carried the output must not read again; the retry belongs to the next gesture")
 
@@ -11278,15 +11282,24 @@
             await waitUntilAsync("the first frame's prefetch to come back empty") {
                 await Self.transcriptRequests(in: recorder.snapshot()).count == 1
             }
+            // The count above only proves the prefetch's request went out; the verdict it carries (empty,
+            // so the state drops to `.idle`) has to be applied before the gesture below asks for its own
+            // read, or the delta it sends parks on the prefetch's load and is dropped with it instead.
+            await model.awaitLocalScrollbackLoadForTesting()
 
             model.noteScrollGestureBegan()
             model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
             await waitUntilAsync("the gesture to start a read of its own") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
-            // Let the empty read land before the rest of the flick arrives, so the deltas below are
-            // absorbed by the cancelled gesture rather than parked on a load still in flight.
-            try await Task.sleep(for: .milliseconds(200))
+            // Let the gesture's own read land before the rest of the flick arrives: its verdict is what sets
+            // `isScrollGestureCancelled`, and `sendScroll` checks that guard before it ever reaches
+            // `applyLocalScroll`, so the deltas below are absorbed synchronously rather than parked on a
+            // load still in flight.
+            await model.awaitLocalScrollbackLoadForTesting()
             for _ in 0..<5 { model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil) }
-            try await Task.sleep(for: .milliseconds(200))
+            // A delta that wrongly started a read would have made it the load task before the loop returned;
+            // awaiting it records that read's request before the count below, so the assertion catches it
+            // rather than racing it.
+            await model.awaitLocalScrollbackLoadForTesting()
             let readsAfterTheFlick = await Self.transcriptRequests(in: recorder.snapshot()).count
             XCTAssertEqual(readsAfterTheFlick, 2, "the rest of the flick is absorbed rather than starting a read per delta")
             let wheelDeltas = await recorder.countTerminalControlAction(.scroll)
@@ -11314,16 +11327,25 @@
             // The first painted frame's prefetch fails too. It belongs to no gesture, so it cancels none:
             // the flick below still gets its own read.
             await waitUntilAsync("the first frame's prefetch to be refused") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+            // The count above only proves the prefetch's request went out; the refusal it carries (the
+            // state drops to `.idle`) has to be applied before the gesture below asks for its own read, or
+            // the delta it sends parks on the prefetch's load and is dropped with it instead.
+            await model.awaitLocalScrollbackLoadForTesting()
 
             model.noteScrollGestureBegan()
             model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
             await waitUntilAsync("the gesture to start a read of its own") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
-            // Let the refusal land before the rest of the flick arrives, so the deltas below are absorbed by
-            // the cancelled gesture rather than parked on a load still in flight. The retry at the end is
-            // what proves they were: a read only starts from the retryable state the failure left.
-            try await Task.sleep(for: .milliseconds(200))
+            // Let the refusal land before the rest of the flick arrives: its verdict is what sets
+            // `isScrollGestureCancelled`, and `sendScroll` checks that guard before it ever reaches
+            // `applyLocalScroll`, so the deltas below are absorbed synchronously rather than parked on a
+            // load still in flight. The retry at the end is what proves they were: a read only starts from
+            // the retryable state the failure left.
+            await model.awaitLocalScrollbackLoadForTesting()
             for _ in 0..<5 { model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil) }
-            try await Task.sleep(for: .milliseconds(200))
+            // A delta that wrongly started a read would have made it the load task before the loop returned;
+            // awaiting it records that read's request before the count below, so the assertion catches it
+            // rather than racing it.
+            await model.awaitLocalScrollbackLoadForTesting()
             let readsAfterTheFlick = await Self.transcriptRequests(in: recorder.snapshot()).count
             XCTAssertEqual(readsAfterTheFlick, 2, "the rest of the flick is absorbed rather than starting a read per delta")
             let wheelDeltas = await recorder.countTerminalControlAction(.scroll)
