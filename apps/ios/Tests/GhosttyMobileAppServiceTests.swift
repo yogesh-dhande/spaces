@@ -1,6 +1,7 @@
 #if canImport(UIKit)
     import Foundation
     import GhosttyKit
+    import SwiftUI
     import UIKit
     import XCTest
     import spacesdevicecore
@@ -2190,6 +2191,285 @@
             window.isHidden = true
         }
 
+        /// A fresh `GhosttyRemoteTerminalHostView` can be told to accept input in the same SwiftUI update
+        /// that creates it, before it has ever entered a window: `TerminalDetailView` mounts the
+        /// representable only once `model.showsTerminalSurface` is true, and a cold open where ownership
+        /// arrives in the same update that first makes that true can flip `acceptsTerminalInput` on a view
+        /// `makeUIView` just returned, ahead of the window attach. `didMoveToWindow`'s later landing in a
+        /// window is a second edge that reconciles first responder against the same guard, which is what
+        /// recovers this case; this asserts the outcome (the keyboard/accessory bar eventually appears)
+        /// rather than which edge did it, so it stays valid however the reconciliation is triggered.
+        func testHostViewBecomesFirstResponderAfterAcceptingInputBeforeEnteringAWindow() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            XCTAssertNil(hostView.window, "sanity: the view has not been added to a window yet")
+
+            // Flips accepts-input false-to-true while detached, so the request this makes cannot land
+            // (`window` is still nil). Pump the run loop so that request's `Task.yield()` runs and gives
+            // up before the view ever reaches a window.
+            hostView.setAcceptsTerminalInput(true)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            XCTAssertFalse(hostView.isFirstResponder, "sanity: the view still has no window")
+
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            defer {
+                window.isHidden = true
+                hostView.removeFromSuperview()
+            }
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            let deadline = Date().addingTimeInterval(2)
+            while !hostView.isFirstResponder && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            XCTAssertTrue(
+                hostView.isFirstResponder,
+                "a view told to accept input before it had a window must still raise the keyboard once it actually lands in one")
+        }
+
+        /// A pane can lose and regain visibility without ever flipping `acceptsTerminalInput` back to
+        /// false: `setTerminalVisible(false)` resigns first responder (a genuinely hidden pane must not sit
+        /// there occupying the keyboard), and `setTerminalVisible(true)` must ask for it back on its own,
+        /// since `acceptsTerminalInput` never changes across the blip and so never offers its own
+        /// false-to-true edge to catch this. Regression shape for `shouldPresentLiveSurface` blipping false
+        /// then true while the viewer stays the interactive owner throughout (a retained screen handing
+        /// over to a live epoch, or an owner-epoch churn during a takeover).
+        func testHostViewRegainsFirstResponderAfterAVisibilityBlipWhileAcceptingInputTheWholeTime() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            defer { hostView.removeFromSuperview() }
+            viewController.view.addSubview(hostView)
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.setAcceptsTerminalInput(true)
+            let becameFirstResponderDeadline = Date().addingTimeInterval(2)
+            while !hostView.isFirstResponder && Date() < becameFirstResponderDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            XCTAssertTrue(hostView.isFirstResponder, "sanity: the initial accepts-input flip must raise the keyboard")
+
+            hostView.setTerminalVisible(false)
+            XCTAssertFalse(hostView.isFirstResponder, "hiding the terminal must resign the keyboard")
+
+            hostView.setTerminalVisible(true)
+            let regainedDeadline = Date().addingTimeInterval(2)
+            while !hostView.isFirstResponder && Date() < regainedDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            XCTAssertTrue(
+                hostView.isFirstResponder,
+                "a pane that becomes visible again while it was already input-accepting the whole time must raise the keyboard again")
+        }
+
+        /// `didMoveToWindow` reconciles first responder against the same guard every other edge uses
+        /// (`acceptsTerminalInput && isTerminalVisible && window != nil`), so landing in a window is not by
+        /// itself enough to claim the keyboard: a view that is not input-accepting, or one that is hidden,
+        /// must stay out of first responder even once it has a window, so a pane nobody asked to be
+        /// interactive never steals focus from whatever legitimately holds it.
+        func testHostViewDoesNotTakeFocusWhenLandingInAWindowWhileNotAcceptingInputOrHidden() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let notAcceptingHostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            defer { notAcceptingHostView.removeFromSuperview() }
+            viewController.view.addSubview(notAcceptingHostView)
+            notAcceptingHostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            XCTAssertFalse(
+                notAcceptingHostView.isFirstResponder, "a view nobody told to accept input must not take focus just by landing in a window")
+
+            let hiddenHostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            defer { hiddenHostView.removeFromSuperview() }
+            hiddenHostView.setTerminalVisible(false)
+            hiddenHostView.setAcceptsTerminalInput(true)
+            viewController.view.addSubview(hiddenHostView)
+            hiddenHostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            XCTAssertFalse(hiddenHostView.isFirstResponder, "a hidden view must not take focus just by landing in a window")
+        }
+
+        /// Presents `SheetDismissalFocusHarness`'s sheet (a focused `TextField`, the composer's shape)
+        /// over an already-first-responder terminal, dismisses it, and returns whether the terminal held
+        /// first responder again afterward.
+        private func runSheetDismissalFocusScenario() throws -> Bool {
+            let controller = SheetDismissalFocusTestController()
+            let hostingController = UIHostingController(rootView: SheetDismissalFocusHarness(controller: controller))
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            window.rootViewController = hostingController
+            window.isHidden = false
+            defer { window.isHidden = true }
+            hostingController.view.frame = window.bounds
+            hostingController.view.layoutIfNeeded()
+
+            var terminalHostView: GhosttyRemoteTerminalHostView?
+            let mountDeadline = Date().addingTimeInterval(2)
+            while terminalHostView == nil && Date() < mountDeadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                terminalHostView = descendants(of: hostingController.view, matching: GhosttyRemoteTerminalHostView.self).first
+            }
+            let hostView = try XCTUnwrap(terminalHostView, "the representable must mount a host view")
+
+            let firstResponderDeadline = Date().addingTimeInterval(2)
+            while !hostView.isFirstResponder && Date() < firstResponderDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            XCTAssertTrue(hostView.isFirstResponder, "sanity: the terminal must hold first responder before the sheet ever opens")
+
+            controller.isShowingSheet = true
+            let presentedDeadline = Date().addingTimeInterval(2)
+            while hostingController.presentedViewController == nil && Date() < presentedDeadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            }
+            XCTAssertNotNil(hostingController.presentedViewController, "sanity: the sheet must actually present")
+            // Give the sheet's own focused text field a chance to claim first responder.
+            RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+            XCTAssertFalse(hostView.isFirstResponder, "sanity: the sheet's focused field must take first responder from the terminal")
+
+            controller.isShowingSheet = false
+            let dismissedDeadline = Date().addingTimeInterval(2)
+            while hostingController.presentedViewController != nil && Date() < dismissedDeadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            }
+            XCTAssertNil(hostingController.presentedViewController, "sanity: the sheet must actually dismiss")
+
+            let settleDeadline = Date().addingTimeInterval(2)
+            while !hostView.isFirstResponder && Date() < settleDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            return hostView.isFirstResponder
+        }
+
+        /// The composer's message field focuses itself on appearance (`TerminalComposerSheet.focusMessageField()`),
+        /// taking first responder from the terminal. Neither UIKit nor SwiftUI hands first responder back
+        /// on dismissal by themselves; `TerminalDetailView` bumps `sheetDismissalTick` in the composer
+        /// sheet's `onDismiss`, which is what must bring it back.
+        func testComposerStyleSheetDismissalRestoresFirstResponder() throws {
+            let isFirstResponderAfterDismissal = try runSheetDismissalFocusScenario()
+            XCTAssertTrue(
+                isFirstResponderAfterDismissal,
+                "the terminal must reclaim first responder once a sheet that took it (like the composer's message field) is dismissed")
+        }
+
+        /// `reconcileFirstResponderIfNeeded()`'s guard against a presented view controller must block every
+        /// edge that can reach it, not only the internal ones: a dismissal signal that arrives while
+        /// something is still presented (two sheets queued back to back) must not pull focus into the
+        /// terminal behind whatever is still up.
+        func testHostViewDoesNotTakeFocusOnADismissalSignalWhileAnotherSheetIsStillPresented() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            defer { hostView.removeFromSuperview() }
+            viewController.view.addSubview(hostView)
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.setAcceptsTerminalInput(true)
+            let becameFirstResponderDeadline = Date().addingTimeInterval(2)
+            while !hostView.isFirstResponder && Date() < becameFirstResponderDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            XCTAssertTrue(hostView.isFirstResponder, "sanity: the terminal must hold first responder before anything is presented")
+            hostView.resignFirstResponder()
+
+            let presentedViewController = UIViewController()
+            let presentedExpectation = expectation(description: "a view controller presents over the terminal")
+            viewController.present(presentedViewController, animated: false) { presentedExpectation.fulfill() }
+            wait(for: [presentedExpectation], timeout: 2)
+
+            hostView.reconcileFirstResponderAfterSheetDismissal(dismissalTick: 1)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+            XCTAssertFalse(hostView.isFirstResponder, "a dismissal signal must not claim focus while something is still presented over the terminal")
+
+            let dismissedExpectation = expectation(description: "the presented view controller is dismissed")
+            presentedViewController.dismiss(animated: false) { dismissedExpectation.fulfill() }
+            wait(for: [dismissedExpectation], timeout: 2)
+        }
+
+        /// The presentation can come from the window's root controller even though the terminal's own
+        /// view lives inside a child controller nested under it, the way `TabView` and `NavigationStack`
+        /// sit between the terminal and the window's root in the app: the terminal's nearest ancestor
+        /// controller (the child) has nothing presented, only the root does. Regression shape for
+        /// `isCoveredByAWindowPresentation`, which walks from the window's root rather than from the
+        /// terminal's own ancestor controller.
+        func testHostViewDoesNotTakeFocusOnADismissalSignalWhileAnAncestorControllerPresentsAboveAChildController() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let rootViewController = UIViewController()
+            window.rootViewController = rootViewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let childViewController = UIViewController()
+            rootViewController.addChild(childViewController)
+            rootViewController.view.addSubview(childViewController.view)
+            childViewController.view.frame = rootViewController.view.bounds
+            childViewController.didMove(toParent: rootViewController)
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: childViewController.view.bounds)
+            defer { hostView.removeFromSuperview() }
+            childViewController.view.addSubview(hostView)
+            hostView.frame = childViewController.view.bounds
+            rootViewController.view.layoutIfNeeded()
+
+            hostView.setAcceptsTerminalInput(true)
+            let becameFirstResponderDeadline = Date().addingTimeInterval(2)
+            while !hostView.isFirstResponder && Date() < becameFirstResponderDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            XCTAssertTrue(hostView.isFirstResponder, "sanity: the terminal must hold first responder before anything is presented")
+            hostView.resignFirstResponder()
+
+            let presentedViewController = UIViewController()
+            let presentedExpectation = expectation(description: "a view controller presents from the window's root, above the child controller")
+            rootViewController.present(presentedViewController, animated: false) { presentedExpectation.fulfill() }
+            wait(for: [presentedExpectation], timeout: 2)
+
+            hostView.reconcileFirstResponderAfterSheetDismissal(dismissalTick: 1)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+            XCTAssertFalse(
+                hostView.isFirstResponder,
+                "a dismissal signal must not claim focus while the window's root has something presented, even above a child controller")
+
+            let dismissedExpectation = expectation(description: "the presented view controller is dismissed")
+            presentedViewController.dismiss(animated: false) { dismissedExpectation.fulfill() }
+            wait(for: [dismissedExpectation], timeout: 2)
+        }
+
+        /// A hidden or non-accepting host must ignore a dismissal signal exactly like it ignores every
+        /// other reconciliation edge (`testHostViewDoesNotTakeFocusWhenLandingInAWindowWhileNotAcceptingInputOrHidden`):
+        /// a sheet closing is not, by itself, a reason for a pane nobody entitled to take the keyboard.
+        func testHostViewDoesNotTakeFocusOnADismissalSignalWhileHiddenOrNotAcceptingInput() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let notAcceptingHostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            defer { notAcceptingHostView.removeFromSuperview() }
+            viewController.view.addSubview(notAcceptingHostView)
+            notAcceptingHostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+            notAcceptingHostView.reconcileFirstResponderAfterSheetDismissal(dismissalTick: 1)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+            XCTAssertFalse(notAcceptingHostView.isFirstResponder, "a dismissal signal must not focus a view nobody told to accept input")
+
+            let hiddenHostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            defer { hiddenHostView.removeFromSuperview() }
+            hiddenHostView.setTerminalVisible(false)
+            hiddenHostView.setAcceptsTerminalInput(true)
+            viewController.view.addSubview(hiddenHostView)
+            hiddenHostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+            hiddenHostView.reconcileFirstResponderAfterSheetDismissal(dismissalTick: 1)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+            XCTAssertFalse(hiddenHostView.isFirstResponder, "a dismissal signal must not focus a hidden view")
+        }
+
         func testRemoteTerminalHostViewCanRecreateSessionsAcrossMultipleMountCycles() throws {
             let window = UIWindow(frame: UIScreen.main.bounds)
             let viewController = UIViewController()
@@ -2869,6 +3149,36 @@
         if let typedView = view as? ViewType { matches.append(typedView) }
         for subview in view.subviews { matches.append(contentsOf: descendants(of: subview, matching: type)) }
         return matches
+    }
+
+    /// Mirrors `TerminalDetailView`'s `onDismiss` wiring: dismissing the sheet always bumps
+    /// `dismissalTick`, which is what asks the terminal to try reclaiming first responder.
+    @MainActor private final class SheetDismissalFocusTestController: ObservableObject {
+        @Published var isShowingSheet = false
+        @Published var dismissalTick = 0
+
+        func sheetDidDismiss() { dismissalTick += 1 }
+    }
+
+    private struct SheetDismissalFocusHarness: View {
+        @ObservedObject var controller: SheetDismissalFocusTestController
+
+        var body: some View {
+            GhosttyRemoteTerminalView(
+                fallbackText: "", isVisible: true, acceptsInput: true, isBusy: false, fontSize: .default,
+                sheetDismissalTick: controller.dismissalTick, onViewportSizeChanged: { _, _ in }, onSendText: { _, _ in }, onSendKey: { _ in }
+            ).sheet(isPresented: $controller.isShowingSheet, onDismiss: { controller.sheetDidDismiss() }) { SheetDismissalFocusTestFieldSheet() }
+        }
+    }
+
+    /// A focused `TextField`, the shape that actually takes first responder from the terminal: matches
+    /// `TerminalComposerSheet`'s message field, which focuses itself on appearance rather than the user
+    /// tapping into it.
+    private struct SheetDismissalFocusTestFieldSheet: View {
+        @State private var text = ""
+        @FocusState private var isFocused: Bool
+
+        var body: some View { TextField("Message", text: $text).focused($isFocused).onAppear { isFocused = true } }
     }
 
     extension GhosttyRemoteTerminalHostView {

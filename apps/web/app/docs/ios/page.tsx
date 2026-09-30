@@ -74,6 +74,7 @@ export default function IOSDocsPage() {
               <li>• Open a session to watch its output and type into it, the same shell every other client sees.</li>
               <li>• Compose a longer message and attach an image, then send it in one go.</li>
               <li>• A tap acts as a click when the program inside the session tracks the mouse.</li>
+              <li>• The keyboard comes up on its own when you open a session you own, and comes back once you close the composer or another sheet.</li>
               <li>• A connection banner with Retry shows when the app cannot reach the session&apos;s device.</li>
             </ul>
           </div>

@@ -32,5 +32,18 @@ import spacesterminalcore
             let height = ceil(font.lineHeight)
             return (width: max(width, 1), height: max(height, 1))
         }
+
+        /// The row pitch and top offset (points) a rendered row's position can be computed from: the same
+        /// cell height and Ghostty glyph padding `GhosttyRemoteTerminalHostView.tappedCellPointerPosition`
+        /// quantizes a touch against. The e2e render dump reads this so a UI test can tap the row a target
+        /// is actually drawn on, since it is a pure function of font size and screen scale and needs no
+        /// live view to compute.
+        @MainActor public static func renderedRowGeometry(fontSize: TerminalFontSize, scale: CGFloat = UIScreen.main.scale) -> (
+            rowPitchPoints: Double, topOffsetPoints: Double
+        ) {
+            let metrics = cellMetrics(fontSize: fontSize, scale: scale)
+            let topOffset = Double(GhosttyTerminalCellMetricsCache.paddingPerSidePx(scale: Double(scale))) / Double(scale)
+            return (rowPitchPoints: Double(metrics.height), topOffsetPoints: topOffset)
+        }
     }
 #endif

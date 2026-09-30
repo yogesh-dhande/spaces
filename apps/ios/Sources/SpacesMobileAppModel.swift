@@ -140,6 +140,13 @@ struct SpacesMobileE2ERenderDump: Codable, Equatable {
     let linkNotice: String?
     let visibleText: String
     let renderedText: String
+    /// The rendered grid's row height and the offset of its first row from the terminal host view's own
+    /// top, both in points (`GhosttyRemoteTerminalViewport.renderedRowGeometry`). A UI test uses these to
+    /// tap the row `renderedText` says a target is on, rather than proportioning a normalized offset over
+    /// the whole host element's frame: while the software keyboard is up, the rendered rows are a crop
+    /// that no longer spans that frame, so a proportional tap lands on the wrong row.
+    let renderRowPitchPoints: Double
+    let renderTopOffsetPoints: Double
     let renderStateKey: String
     let emittedAt: String
 }
