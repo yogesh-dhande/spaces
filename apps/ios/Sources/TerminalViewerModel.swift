@@ -2430,6 +2430,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         return model.transcriptEndByteOffset
     }
 
+    /// Waits for the local scrollback read in flight, if any, to finish applying its result. A test that
+    /// counts recorded transcript requests only learns a read went out; this is what says the model has
+    /// taken in the answer, so the next gesture sees the state that answer left.
+    func awaitLocalScrollbackLoadForTesting() async { await localScrollbackLoadTask?.value }
+
     /// - Parameter isGestureInitiated: Whether a scroll gesture in motion asked for this page, as opposed
     ///   to the prefetch a painted frame starts. It decides what a failed read does to that gesture; see
     ///   the failure path below.
