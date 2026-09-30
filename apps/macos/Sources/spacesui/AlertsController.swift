@@ -808,7 +808,7 @@ import workspacecore
         let header = makeAlertsHeaderLine(grid: grid, showsDeviceColumn: plan.showsDeviceColumn)
         let divider = makeAlertsTableDivider()
         var lines: [NSView] = [header, divider]
-        for (index, row) in plan.rows.enumerated() {
+        for row in plan.rows {
             let entry = row.entry
             if let shortcutIndex = row.shortcutIndex {
                 if let focusRequest = entry.focusRequest {
@@ -817,8 +817,7 @@ import workspacecore
                     alertsAutomationShortcutMap[shortcutIndex] = automationRunTarget
                 }
             }
-            // Every other row gets a light zebra fill; hover still overrides it.
-            let built = makeAlertsRowLine(row, grid: grid, showsDeviceColumn: plan.showsDeviceColumn, isAlternate: index % 2 == 1)
+            let built = makeAlertsRowLine(row, grid: grid, showsDeviceColumn: plan.showsDeviceColumn)
             rowsByAttentionID[entry.attentionID] = built.row
             ageFieldsByAttentionID[entry.attentionID] = built.ageField
             lines.append(built.row)
@@ -827,14 +826,13 @@ import workspacecore
         table.setCustomSpacing(4, after: header)
         table.setCustomSpacing(4, after: divider)
 
-        let card = alertsCardContainer(table)
         // Leading alignment gives arranged lines their intrinsic width, so pin each to the table's full
         // width (minus its edge insets) to keep the grid's trailing columns right-aligned.
         for line in lines { line.widthAnchor.constraint(equalTo: table.widthAnchor, constant: -sideInset * 2).isActive = true }
         // Every line now shares the table's view hierarchy, so the rows can be tied to the header's columns.
         grid.activateColumnAlignment()
-        stack.addArrangedSubview(card)
-        constrainFormFieldToFillWidth(card, in: stack)
+        stack.addArrangedSubview(table)
+        constrainFormFieldToFillWidth(table, in: stack)
 
         showScrollableDetailStack(stack, in: host.detailContainer)
         renderedAlerts = RenderedAlertsDetail(
@@ -911,7 +909,7 @@ import workspacecore
     /// (when shown), age, and the dismiss button. Returns the row's Age field alongside its container so
     /// the age-refresh beat can rewrite it without a rebuild; the name/title fields are handed to
     /// `ClickableRowView` itself (`labelField`/`detailField`) for the same reason.
-    private func makeAlertsRowLine(_ row: AlertsRenderPlan.Row, grid: TableGrid, showsDeviceColumn: Bool, isAlternate: Bool) -> (
+    private func makeAlertsRowLine(_ row: AlertsRenderPlan.Row, grid: TableGrid, showsDeviceColumn: Bool) -> (
         row: ClickableRowView, ageField: NSTextField
     ) {
         let entry = row.entry
@@ -938,7 +936,6 @@ import workspacecore
         container.setAccessibilityLabel(entry.label)
         if let detail = entry.detail, !detail.isEmpty { container.setAccessibilityValue(detail) }
         if let automationID { container.setAccessibilityIdentifier("\(automationID)-row") }
-        if isAlternate { container.zebraFill = Theme.surface2 }
 
         let statusView = Self.alertsStatusIndicator(processStatus: entry.processStatus, agentStatus: entry.agentStatus, automationID: automationID)
 
@@ -1147,24 +1144,6 @@ import workspacecore
         offlineLabel.textColor = host.sidebar.sidebarFailedIndicatorColor()
         cell.addArrangedSubview(offlineLabel)
         return cell
-    }
-
-    private func alertsCardContainer(_ content: NSView) -> NSView {
-        content.translatesAutoresizingMaskIntoConstraints = false
-        let card = ColoredBackgroundView()
-        card.cornerRadius = 10
-        card.fillColor = host.sidebar.sidebarCardBackgroundColor()
-        card.translatesAutoresizingMaskIntoConstraints = false
-        bindAppearanceReactiveLayer(card) { [unowned host] view in
-            view.layer?.borderWidth = 1
-            view.layer?.borderColor = host.sidebar.sidebarCardBorderColor(isSelected: false).cgColor
-        }
-        card.addSubview(content)
-        NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: card.leadingAnchor), content.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-            content.topAnchor.constraint(equalTo: card.topAnchor), content.bottomAnchor.constraint(equalTo: card.bottomAnchor),
-        ])
-        return card
     }
 
     /// The row's leading status indicator: an agent's spinner/dot, a process dot, or an empty slot that

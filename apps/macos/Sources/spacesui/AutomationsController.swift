@@ -302,14 +302,13 @@ import workspacecore
         table.setCustomSpacing(4, after: header)
         table.setCustomSpacing(4, after: divider)
 
-        let card = cardContainer(table)
         // Leading alignment gives arranged lines their intrinsic width, so pin each to the table's full
         // width (minus its edge insets) to keep the grid's trailing columns right-aligned.
         for line in lines { line.widthAnchor.constraint(equalTo: table.widthAnchor, constant: -sideInset * 2).isActive = true }
         // Every line now shares the table's view hierarchy, so the rows can be tied to the header's columns.
         grid.activateColumnAlignment()
-        stack.addArrangedSubview(card)
-        constrainFormFieldToFillWidth(card, in: stack)
+        stack.addArrangedSubview(table)
+        constrainFormFieldToFillWidth(table, in: stack)
     }
 
     /// Column widths for the Automations pane's table, laid out on the shared `TableGrid`.
