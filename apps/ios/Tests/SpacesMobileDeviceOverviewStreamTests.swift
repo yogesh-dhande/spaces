@@ -442,6 +442,300 @@
 
             XCTAssertTrue(model.isActiveDeviceBlocked, "an incompatible daemon reported inline on a pushed overview blocks like a refresh would")
             XCTAssertNil(model.overview, "blocked: no stale workspace data behind the update banner")
+            // `overview` above is the published fact `isActiveDeviceBlocked` already nulls out, but
+            // `deviceOverviews["device-1"]` (the raw stream cache `overview(forDeviceID:)` falls back to
+            // for the selected device, see that accessor's own doc comment) still holds the incompatible
+            // payload: nothing about a device switch or auth failure cleared it, since neither happened
+            // here. Agents/Alerts read through `overview(forDeviceID:)`, so it has to filter the blocked
+            // payload out of the fallback too, not just the published property.
+            XCTAssertNotNil(
+                model.deviceOverviewForTesting(deviceID: "device-1"), "precondition: the raw stream cache still holds the incompatible payload")
+            XCTAssertNil(
+                model.overview(forDeviceID: "device-1"), "a blocked device contributes no rows even through the selected device's own fallback")
+        }
+
+        /// A stream failure whose own frozen-core fallback (`handleOverviewFailure`'s `refreshCompatibility`)
+        /// is what discovers the daemon has moved to an incompatible wire version, rather than a decodable
+        /// overview reporting it inline: no fresh payload lands to replace the last *compatible* one still
+        /// sitting in `deviceOverviews`, so only checking the freshly updated `isActiveDeviceBlocked` (not
+        /// re-deriving compatibility from that stale cached payload's own `daemonStatus`) catches it.
+        func testAStreamFailureThatBlocksTheActiveDeviceThroughTheFallbackHandshakeDropsItsStaleCachedRowsToo() async {
+            let hub = SpacesMobileFakeStreamHub(initialOverview: overview())
+            var settings = SpacesMobileConnectionSettings()
+            settings.authToken = "token"
+            settings.certificateFingerprint = "fp-active"
+            let incompatibleStatus = TerminalServiceDaemonStatus(
+                version: "2.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+                protocolVersion: SpacesWireProtocol.version + 1)
+            let backend = SpacesMobileFakeStreamingBackend(
+                hub: hub, requestHandler: { _ in SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(incompatibleStatus)) })
+            let client = SpacesDeviceAPIClient(settings: settings, backend: backend)
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
+            model.pairedDevices = [deviceRecord(id: "device-1")]
+            model.startDeviceStreams()
+            await settle()
+            XCTAssertNotNil(model.overview(forDeviceID: "device-1"), "sanity: the compatible overview delivered on connect is visible")
+
+            await hub.disconnectAll(error: SpacesDeviceAPIClientError.requestFailed("stream decode failed"))
+            await settle()
+
+            XCTAssertTrue(model.isActiveDeviceBlocked, "the fallback handshake reports the daemon has moved to an incompatible version")
+            XCTAssertNotNil(
+                model.deviceOverviewForTesting(deviceID: "device-1"),
+                "precondition: the raw stream cache still holds the earlier compatible payload; a stream failure alone never clears it")
+            XCTAssertNil(
+                model.overview(forDeviceID: "device-1"),
+                "a block discovered only through the fallback handshake still drops the stale cached rows and badge count")
+            XCTAssertEqual(model.undismissedAlertCount, 0, "no badge count survives behind the block either")
+        }
+
+        /// The non-selected counterpart: `acceptNonSelectedDeviceOverview` (the stream-push and
+        /// mutation-response path shared by every other paired device) has no compatibility gate of its
+        /// own, unlike `applyFetchedOverview`'s `isActiveDeviceBlocked` check for the selected device. A
+        /// non-selected device's Agents/Alerts rows have to be filtered the same way, or a device the
+        /// compatibility gate would block if selected keeps contributing rows just because it never was.
+        func testOverviewForDeviceIDReturnsNilForANonSelectedBlockedDevice() {
+            let model = SpacesMobileAppModel(
+                settings: SpacesMobileConnectionSettings(),
+                bridgeClient: SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { _ in
+                    SpacesDeviceAPIResponse(ok: true, message: "ok")
+                })
+            model.activeDeviceID = "device-1"
+            model.pairedDevices = [deviceRecord(id: "device-1"), deviceRecord(id: "device-2")]
+            let incompatible = overview(
+                daemonStatus: TerminalServiceDaemonStatus(
+                    version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+                    protocolVersion: SpacesWireProtocol.version + 1))
+            model.setDeviceOverviewForTesting(incompatible, deviceID: "device-2")
+
+            XCTAssertNotNil(model.deviceOverviewForTesting(deviceID: "device-2"), "precondition: the raw cache holds the incompatible payload")
+            XCTAssertNil(model.overview(forDeviceID: "device-2"), "a blocked non-selected device contributes no rows")
+        }
+
+        // MARK: - Non-selected device: classifying a stream failure before marking it offline
+
+        /// `classifyNonSelectedDeviceStreamFailure` asks device-b's own client for its frozen-core status
+        /// (through the same `mutationConnection(forDeviceID:)` a row mutation would use) before deciding
+        /// anything, rather than marking it offline on the spot the way `handleDeviceStreamFailure` still
+        /// does for the selected device.
+        func testNonSelectedDeviceStreamFailureWithAnIncompatibleHandshakeBlocksWithoutMarkingItOffline() async {
+            let hubA = SpacesMobileFakeStreamHub(initialOverview: overview())
+            let hubB = SpacesMobileFakeStreamHub(initialOverview: overview())
+            var settingsA = SpacesMobileConnectionSettings()
+            settingsA.authToken = "token"
+            settingsA.certificateFingerprint = "fp-active"
+            let clientA = SpacesDeviceAPIClient(settings: settingsA, backend: SpacesMobileFakeStreamingBackend(hub: hubA))
+            let incompatibleStatus = TerminalServiceDaemonStatus(
+                version: "2.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+                protocolVersion: SpacesWireProtocol.version + 1)
+            let backendB = SpacesMobileFakeStreamingBackend(
+                hub: hubB, requestHandler: { _ in SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(incompatibleStatus)) })
+            let clientB = SpacesDeviceAPIClient(settings: settingsA, backend: backendB)
+            let model = SpacesMobileAppModel(settings: settingsA, bridgeClient: clientA, overviewStreamClientsForTesting: ["device-b": clientB])
+            model.activeDeviceID = "device-a"
+            model.pairedDevices = [deviceRecord(id: "device-a"), deviceRecord(id: "device-b")]
+            model.startDeviceStreams()
+            await settle()
+            XCTAssertNotNil(model.overview(forDeviceID: "device-b"), "sanity: device-b's rows are visible before its stream fails")
+
+            await hubB.disconnectAll(error: SpacesDeviceAPIClientError.requestFailed("stream decode failed"))
+            await settle()
+
+            XCTAssertNil(model.overview(forDeviceID: "device-b"), "the incompatible handshake blocks device-b's rows")
+            XCTAssertFalse(model.offlineDeviceIDs.contains("device-b"), "blocked, not offline: it gets no offline marking")
+        }
+
+        /// The counterpart: a device that is genuinely unreachable (its handshake fails the same way the
+        /// overview stream did) keeps today's offline treatment, dimmed rows and all.
+        func testNonSelectedDeviceStreamFailureWithAnUnreachableHandshakeMarksItOfflineAndKeepsItsDimmedRows() async {
+            let hubA = SpacesMobileFakeStreamHub(initialOverview: overview())
+            let hubB = SpacesMobileFakeStreamHub(initialOverview: overview())
+            var settingsA = SpacesMobileConnectionSettings()
+            settingsA.authToken = "token"
+            settingsA.certificateFingerprint = "fp-active"
+            let clientA = SpacesDeviceAPIClient(settings: settingsA, backend: SpacesMobileFakeStreamingBackend(hub: hubA))
+            let backendB = SpacesMobileFakeStreamingBackend(
+                hub: hubB, requestHandler: { _ in throw SpacesDeviceAPIClientError.requestFailed("still unreachable") })
+            let clientB = SpacesDeviceAPIClient(settings: settingsA, backend: backendB)
+            let model = SpacesMobileAppModel(settings: settingsA, bridgeClient: clientA, overviewStreamClientsForTesting: ["device-b": clientB])
+            model.activeDeviceID = "device-a"
+            model.pairedDevices = [deviceRecord(id: "device-a"), deviceRecord(id: "device-b")]
+            model.startDeviceStreams()
+            await settle()
+
+            await hubB.disconnectAll(error: SpacesDeviceAPIClientError.requestFailed("stream decode failed"))
+            await settle()
+
+            XCTAssertNotNil(model.overview(forDeviceID: "device-b"), "an unreachable device keeps its last cached rows, dimmed, not dropped")
+            XCTAssertTrue(model.offlineDeviceIDs.contains("device-b"), "today's offline behavior for anything short of an incompatible verdict")
+        }
+
+        /// The block clears the moment device-b's stream next delivers a compatible overview
+        /// (`acceptNonSelectedDeviceOverview`), the same as the selected device's own block clears on its
+        /// next successful delivery.
+        func testNonSelectedDeviceBlockClearsOnItsNextCompatibleOverview() async {
+            let hubA = SpacesMobileFakeStreamHub(initialOverview: overview())
+            let hubB = SpacesMobileFakeStreamHub(initialOverview: overview())
+            var settingsA = SpacesMobileConnectionSettings()
+            settingsA.authToken = "token"
+            settingsA.certificateFingerprint = "fp-active"
+            let clientA = SpacesDeviceAPIClient(settings: settingsA, backend: SpacesMobileFakeStreamingBackend(hub: hubA))
+            let incompatibleStatus = TerminalServiceDaemonStatus(
+                version: "2.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+                protocolVersion: SpacesWireProtocol.version + 1)
+            let backendB = SpacesMobileFakeStreamingBackend(
+                hub: hubB, requestHandler: { _ in SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(incompatibleStatus)) })
+            let clientB = SpacesDeviceAPIClient(settings: settingsA, backend: backendB)
+            let model = SpacesMobileAppModel(settings: settingsA, bridgeClient: clientA, overviewStreamClientsForTesting: ["device-b": clientB])
+            model.activeDeviceID = "device-a"
+            model.pairedDevices = [deviceRecord(id: "device-a"), deviceRecord(id: "device-b")]
+            model.startDeviceStreams()
+            await settle()
+
+            await hubB.disconnectAll(error: SpacesDeviceAPIClientError.requestFailed("stream decode failed"))
+            await settle()
+            XCTAssertNil(model.overview(forDeviceID: "device-b"), "precondition: blocked")
+
+            // The coordinator's own armed retry reopens device-b's stream; the hub still holds (and
+            // redelivers on open) the same compatible overview it started with.
+            await model.drainPendingDeviceStreamRetryForTesting()
+            await settle()
+
+            XCTAssertNotNil(model.overview(forDeviceID: "device-b"), "a delivered compatible overview clears the block and its rows return")
+            XCTAssertFalse(model.offlineDeviceIDs.contains("device-b"))
+        }
+
+        /// The probe's own token is the same `MutationConnectionToken`/`isCurrent(_:)` staleness check a
+        /// row mutation uses: a verdict that lands after the device's connection has moved on (here, an
+        /// unpair while the handshake is held open) must not resurrect a marking for a device that is no
+        /// longer part of the paired set.
+        func testALateNonSelectedProbeIsIgnoredAfterTheDeviceIsUnpaired() async {
+            let hubA = SpacesMobileFakeStreamHub(initialOverview: overview())
+            let hubB = SpacesMobileFakeStreamHub(initialOverview: overview())
+            var settingsA = SpacesMobileConnectionSettings()
+            settingsA.authToken = "token"
+            settingsA.certificateFingerprint = "fp-active"
+            let clientA = SpacesDeviceAPIClient(settings: settingsA, backend: SpacesMobileFakeStreamingBackend(hub: hubA))
+            let gate = SpacesMobileAsyncGate()
+            let incompatibleStatus = TerminalServiceDaemonStatus(
+                version: "2.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+                protocolVersion: SpacesWireProtocol.version + 1)
+            let backendB = SpacesMobileFakeStreamingBackend(
+                hub: hubB,
+                requestHandler: { _ in
+                    await gate.wait()
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(incompatibleStatus))
+                })
+            let clientB = SpacesDeviceAPIClient(settings: settingsA, backend: backendB)
+            let model = SpacesMobileAppModel(settings: settingsA, bridgeClient: clientA, overviewStreamClientsForTesting: ["device-b": clientB])
+            model.activeDeviceID = "device-a"
+            model.pairedDevices = [deviceRecord(id: "device-a"), deviceRecord(id: "device-b")]
+            model.startDeviceStreams()
+            await settle()
+
+            // The stream fails and the classifier's own handshake starts, held open on the gate.
+            await hubB.disconnectAll(error: SpacesDeviceAPIClientError.requestFailed("stream decode failed"))
+            await settle()
+            XCTAssertFalse(model.offlineDeviceIDs.contains("device-b"), "the probe has not answered yet: no marking either way")
+
+            // Unpaired while the handshake is still in flight.
+            model.removeDevice(id: "device-b")
+
+            // The stale handshake now answers incompatible.
+            await gate.open()
+            await settle()
+
+            XCTAssertFalse(
+                model.offlineDeviceIDs.contains("device-b"), "a probe that lands after the device was unpaired must not resurrect any marking for it")
+            XCTAssertNil(model.overview(forDeviceID: "device-b"), "unpaired: nothing left to show regardless")
+        }
+
+        /// A slow handshake can lose the race to the stream's own reconnect: the coordinator's backoff
+        /// redials on its own schedule regardless of how long the probe takes, and a fresh, compatible
+        /// delivery can land and clear device-b's state while the probe is still in flight. That fresher
+        /// delivery has already said the last word, so the probe's own (stale) incompatible verdict must
+        /// not reapply the block behind it; a quiet device afterward would never push again to correct it.
+        func testALateNonSelectedProbeWithAnIncompatibleAnswerIsIgnoredAfterAFresherCompatibleOverviewLands() async {
+            let hubA = SpacesMobileFakeStreamHub(initialOverview: overview())
+            let hubB = SpacesMobileFakeStreamHub(initialOverview: overview())
+            var settingsA = SpacesMobileConnectionSettings()
+            settingsA.authToken = "token"
+            settingsA.certificateFingerprint = "fp-active"
+            let clientA = SpacesDeviceAPIClient(settings: settingsA, backend: SpacesMobileFakeStreamingBackend(hub: hubA))
+            let gate = SpacesMobileAsyncGate()
+            let incompatibleStatus = TerminalServiceDaemonStatus(
+                version: "2.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+                protocolVersion: SpacesWireProtocol.version + 1)
+            let backendB = SpacesMobileFakeStreamingBackend(
+                hub: hubB,
+                requestHandler: { _ in
+                    await gate.wait()
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(incompatibleStatus))
+                })
+            let clientB = SpacesDeviceAPIClient(settings: settingsA, backend: backendB)
+            let model = SpacesMobileAppModel(settings: settingsA, bridgeClient: clientA, overviewStreamClientsForTesting: ["device-b": clientB])
+            model.activeDeviceID = "device-a"
+            model.pairedDevices = [deviceRecord(id: "device-a"), deviceRecord(id: "device-b")]
+            model.startDeviceStreams()
+            await settle()
+
+            // The stream fails and the classifier's own handshake starts, held open on the gate.
+            await hubB.disconnectAll(error: SpacesDeviceAPIClientError.requestFailed("stream decode failed"))
+            await settle()
+
+            // The coordinator's own armed retry reopens device-b's stream and redelivers its (still
+            // compatible) overview while the probe above is still blocked on the gate.
+            await model.drainPendingDeviceStreamRetryForTesting()
+            await settle()
+            XCTAssertNotNil(model.overview(forDeviceID: "device-b"), "precondition: the fresh delivery already landed")
+            XCTAssertFalse(model.offlineDeviceIDs.contains("device-b"))
+
+            // The stale probe now answers incompatible, after the fresher delivery.
+            await gate.open()
+            await settle()
+
+            XCTAssertNotNil(model.overview(forDeviceID: "device-b"), "a stale incompatible verdict must not reapply over a fresher delivery")
+            XCTAssertFalse(model.offlineDeviceIDs.contains("device-b"))
+        }
+
+        /// The same race, with the stale probe answering unreachable instead: it must not mark a device
+        /// offline when a fresher delivery already proved it live.
+        func testALateNonSelectedProbeWithAnUnreachableAnswerIsIgnoredAfterAFresherCompatibleOverviewLands() async {
+            let hubA = SpacesMobileFakeStreamHub(initialOverview: overview())
+            let hubB = SpacesMobileFakeStreamHub(initialOverview: overview())
+            var settingsA = SpacesMobileConnectionSettings()
+            settingsA.authToken = "token"
+            settingsA.certificateFingerprint = "fp-active"
+            let clientA = SpacesDeviceAPIClient(settings: settingsA, backend: SpacesMobileFakeStreamingBackend(hub: hubA))
+            let gate = SpacesMobileAsyncGate()
+            let backendB = SpacesMobileFakeStreamingBackend(
+                hub: hubB,
+                requestHandler: { _ in
+                    await gate.wait()
+                    throw SpacesDeviceAPIClientError.requestFailed("still unreachable")
+                })
+            let clientB = SpacesDeviceAPIClient(settings: settingsA, backend: backendB)
+            let model = SpacesMobileAppModel(settings: settingsA, bridgeClient: clientA, overviewStreamClientsForTesting: ["device-b": clientB])
+            model.activeDeviceID = "device-a"
+            model.pairedDevices = [deviceRecord(id: "device-a"), deviceRecord(id: "device-b")]
+            model.startDeviceStreams()
+            await settle()
+
+            await hubB.disconnectAll(error: SpacesDeviceAPIClientError.requestFailed("stream decode failed"))
+            await settle()
+
+            await model.drainPendingDeviceStreamRetryForTesting()
+            await settle()
+            XCTAssertNotNil(model.overview(forDeviceID: "device-b"), "precondition: the fresh delivery already landed")
+            XCTAssertFalse(model.offlineDeviceIDs.contains("device-b"))
+
+            await gate.open()
+            await settle()
+
+            XCTAssertNotNil(
+                model.overview(forDeviceID: "device-b"), "a stale unreachable verdict must not mark a device offline behind a fresher delivery")
+            XCTAssertFalse(model.offlineDeviceIDs.contains("device-b"))
         }
 
         func testStreamConnectFailureFallsBackToCompatibilityHandshakeAndBlocksOnAnOldProtocolVersion() async {
@@ -935,11 +1229,16 @@
             model.activeDeviceID = "device-a"
             var deviceB = deviceRecord(id: "device-b")
             model.pairedDevices = [deviceRecord(id: "device-a"), deviceB]
-            let beforeIdentity = model.overviewStreamClientForTesting(deviceID: "device-b")?.overviewStreamResolverIdentityForTesting
+            // Retained for the whole comparison below: a client dropped after only its `ObjectIdentifier`
+            // is read can be deallocated before the second client is built, and ARC is then free to reuse
+            // its address, which would make two genuinely different clients compare equal by accident.
+            let beforeClient = model.overviewStreamClientForTesting(deviceID: "device-b")
+            let beforeIdentity = beforeClient?.overviewStreamResolverIdentityForTesting
 
             deviceB.hosts = ["10.0.0.9"]
             model.pairedDevices = [deviceRecord(id: "device-a"), deviceB]
-            let afterIdentity = model.overviewStreamClientForTesting(deviceID: "device-b")?.overviewStreamResolverIdentityForTesting
+            let afterClient = model.overviewStreamClientForTesting(deviceID: "device-b")
+            let afterIdentity = afterClient?.overviewStreamResolverIdentityForTesting
 
             XCTAssertNotEqual(
                 beforeIdentity, afterIdentity, "a changed hosts list must rebuild the cached client, not keep dialing the old candidates")
@@ -947,14 +1246,15 @@
 
         // MARK: - Foreground endpoint re-preference
 
-        /// `resetDeviceStreamEndpointsForForeground()` must drop `nonActiveDeviceStreamClients` so a
-        /// non-selected device's next stream lookup rebuilds a fresh client, whose resolver in turn
-        /// re-seeds from the persisted `activeHost` `SpacesMobileDeviceStore.clearActiveHosts()` (called
-        /// first, the same order `RootTabView`'s `.active` branch uses) already cleared. Without either
-        /// half the cached client (and its warm-started resolver) survives foregrounding untouched, and
-        /// the next connect goes straight back to the previously proven host instead of racing `hosts`
-        /// from the top.
-        func testForegroundStreamResetRebuildsANonSelectedDevicesClientFromTheTopOfHosts() throws {
+        /// `resetDeviceStreamEndpointsForForeground()` must reset a non-selected device's cached client's
+        /// overview-stream resolver in place, not drop and rebuild the client: an open terminal viewer for
+        /// that device holds this same instance (`terminalContext(forDeviceID:)` reuses it), so a rebuild
+        /// would silently leave the viewer's own redial on an orphaned resolver the reset never touched.
+        /// `SpacesMobileDeviceStore.clearActiveHosts()` (called first, the same order `RootTabView`'s
+        /// `.active` branch uses) already cleared the persisted `activeHost` this resolver would otherwise
+        /// have re-seeded from, so the in-place reset carries no warm-started winner either, and the next
+        /// connect races `hosts` from the top instead of going straight back to the previously proven host.
+        func testForegroundStreamResetResetsANonSelectedDevicesClientInPlaceFromTheTopOfHosts() throws {
             let fingerprint = "fp-device-b-foreground"
             var storedSettings = SpacesMobileConnectionSettings()
             storedSettings.hosts = ["10.0.0.1", "100.64.0.5"]
@@ -993,15 +1293,64 @@
             model.resetDeviceStreamEndpointsForForeground()
 
             let secondClient = model.overviewStreamClientForTesting(deviceID: deviceB.id)
-            XCTAssertNotEqual(
+            XCTAssertEqual(
                 firstClient?.overviewStreamResolverIdentityForTesting, secondClient?.overviewStreamResolverIdentityForTesting,
-                "the foreground reset must drop the cached client so the next lookup rebuilds a fresh one")
+                "the foreground reset must keep the same cached client instance, resetting its resolver in place rather than discarding it")
             XCTAssertNil(
                 secondClient?.overviewStreamResolverCachedHostForTesting,
-                "the fresh resolver must carry no warm-started winner, since the persisted activeHost it would have seeded from was cleared first")
+                "the reset resolver must carry no warm-started winner, since the persisted activeHost it would otherwise re-seed from was cleared first"
+            )
             XCTAssertEqual(
                 secondClient?.overviewStreamResolverNextHostForTesting, "10.0.0.1",
                 "with no cached winner, the next connect must walk `hosts` from the top rather than falling back to the previously proven address")
+        }
+
+        /// `terminalContext(forDeviceID:)` is what a terminal viewer holds onto
+        /// (`DeviceTerminalContext.client`), so the foreground reset has to reach exactly the instance a
+        /// viewer already has, not a replacement it never sees. Proven the same way the stream-lookup test
+        /// above proves it: same resolver identity, no warm-started winner, and the next connect walks
+        /// `hosts` from the top.
+        func testForegroundStreamResetReachesANonSelectedDevicesTerminalContextClientInPlace() throws {
+            let fingerprint = "fp-device-b-terminalcontext"
+            var storedSettings = SpacesMobileConnectionSettings()
+            storedSettings.hosts = ["10.0.0.1", "100.64.0.5"]
+            storedSettings.port = 47_847
+            storedSettings.certificateFingerprint = fingerprint
+            storedSettings.authToken = "token-device-b-terminalcontext"
+            let persisted = SpacesMobileDeviceStore.upsert(settings: storedSettings, name: "device-b-terminalcontext")
+            let deviceB = try XCTUnwrap(persisted.devices.first(where: { $0.certificateFingerprint == fingerprint }))
+            defer {
+                _ = SpacesMobileDeviceStore.remove(deviceID: deviceB.id, fallbackSettings: SpacesMobileConnectionSettings())
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.paired-devices")
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.active-device-id")
+            }
+            SpacesMobileDeviceStore.recordActiveHost("100.64.0.5", certificateFingerprint: fingerprint)
+
+            var activeSettings = SpacesMobileConnectionSettings()
+            activeSettings.authToken = "token"
+            activeSettings.certificateFingerprint = "fp-active"
+            let client = SpacesDeviceAPIClient(
+                settings: activeSettings, backend: SpacesMobileFakeStreamingBackend(hub: SpacesMobileFakeStreamHub(initialOverview: overview())))
+            let model = SpacesMobileAppModel(settings: activeSettings, bridgeClient: client)
+            model.activeDeviceID = "device-a"
+            model.pairedDevices = [deviceRecord(id: "device-a"), deviceB]
+
+            let contextBefore = try XCTUnwrap(model.terminalContext(forDeviceID: deviceB.id))
+            XCTAssertEqual(
+                contextBefore.client.overviewStreamResolverCachedHostForTesting, "100.64.0.5",
+                "precondition: the viewer's client warm-started from the persisted proven host")
+
+            SpacesMobileDeviceStore.clearActiveHosts()
+            model.resetDeviceStreamEndpointsForForeground()
+
+            let contextAfter = try XCTUnwrap(model.terminalContext(forDeviceID: deviceB.id))
+            XCTAssertEqual(
+                contextBefore.client.overviewStreamResolverIdentityForTesting, contextAfter.client.overviewStreamResolverIdentityForTesting,
+                "an open viewer's client must be the exact instance the foreground reset touched, not a replacement built afterward")
+            XCTAssertNil(contextAfter.client.overviewStreamResolverCachedHostForTesting, "the in-place reset must forget the warm-started winner too")
+            XCTAssertEqual(
+                contextAfter.client.overviewStreamResolverNextHostForTesting, "10.0.0.1",
+                "with no cached winner, the viewer's own next connect walks `hosts` from the top")
         }
 
         /// The selected device streams through `bridgeClient`, which the model keeps and reuses for the

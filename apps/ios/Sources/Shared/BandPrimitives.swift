@@ -165,10 +165,11 @@ extension SpacesMobileWorkspaceRuntimeRow {
 struct DismissAlertMenuButton: View {
     let model: SpacesMobileAppModel
     let row: SpacesMobileWorkspaceRuntimeRow
+    let deviceID: String
 
     var body: some View {
         Button {
-            model.dismissAlerts(for: row)
+            model.dismissAlerts(for: row, deviceID: deviceID)
         } label: {
             Label("Dismiss Alert", systemImage: "bell.slash")
         }

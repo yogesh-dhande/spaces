@@ -158,6 +158,14 @@ struct SpacesDeviceAPIClient: Sendable {
     /// backend. Every request round trip and session stream funnels through it, so swapping the backend
     /// reroutes the entire client without touching call sites.
     private let backend: any SpacesDeviceAPIBackend
+    /// Stamped fresh by every `init`, so two client values built for identically-settinged devices still
+    /// compare unequal, and copies of the same value (assigning `bridgeClient` into a
+    /// `DeviceTerminalContext`, storing it in `nonActiveDeviceStreamClients`) still compare equal. Plain
+    /// reference identity (`===`) is not available here: `SpacesDeviceAPIClient` and its backends
+    /// (`SpacesDeviceNetworkBackend`, `SpacesDeviceClosureBackend`) are value types, so "the exact client
+    /// a caller was handed" has to be tracked explicitly rather than read off the object graph. See
+    /// `hasSameIdentity(as:)`.
+    private let identity = UUID()
 
     init(
         settings: SpacesMobileConnectionSettings, deviceName: String = SpacesDeviceAPIClient.fallbackDeviceName,
@@ -167,6 +175,15 @@ struct SpacesDeviceAPIClient: Sendable {
         self.deviceName = deviceName
         self.backend = backend ?? SpacesDeviceNetworkBackend(settings: settings)
     }
+
+    /// Whether `other` is a copy of this exact client value rather than a separately constructed one,
+    /// even when the two share identical settings. A terminal viewer captures a client once
+    /// (`DeviceTerminalContext.client`) and keeps it for the life of its route; if the device's role
+    /// later changes, the app model builds a *new* `SpacesDeviceAPIClient` for it (`selectDevice`,
+    /// `overviewStreamClient(forDeviceID:)`), so the viewer's captured value and the model's current one
+    /// can have equal settings while naming unrelated resolver state. This is what
+    /// `SpacesMobileAppModel.waitForForegroundEndpointRefresh(client:deviceID:)` uses to tell them apart.
+    func hasSameIdentity(as other: SpacesDeviceAPIClient) -> Bool { identity == other.identity }
 
     /// Test seam: injects canned request/response handling while session streams keep using the real
     /// network path (a closure never intercepted streams, matching the historical behavior). The mobile

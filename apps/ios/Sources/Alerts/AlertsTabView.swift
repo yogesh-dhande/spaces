@@ -1,7 +1,10 @@
 import SwiftUI
 import spacesdevicecore
 
-/// Alerts tab: attention events grouped by workspace, newest context first.
+/// Alerts tab: attention events and automation alerts across every paired device, merged into one flat,
+/// newest-first list. No workspace or device bands: each row carries its own project/workspace and
+/// (when more than one device is paired, or any paired device is offline) device text; see
+/// `SpacesMobileAppModel.alertItems`.
 struct AlertsTabView: View {
     @Bindable var model: SpacesMobileAppModel
     @State private var selectedSession: SelectedTerminalSessionRoute?
@@ -19,7 +22,7 @@ struct AlertsTabView: View {
     }
 
     @ViewBuilder private var content: some View {
-        if model.attentionGroups.isEmpty && model.automationAlerts.isEmpty {
+        if model.alertItems.isEmpty {
             ContentUnavailableView {
                 Label("No Alerts", systemImage: "bell")
             } description: {
@@ -28,39 +31,9 @@ struct AlertsTabView: View {
         } else {
             List {
                 swipeHint
-                ForEach(model.attentionGroups) { group in alertGroupSection(group) }
-                if !model.automationAlerts.isEmpty { automationAlertsSection(model.automationAlerts) }
+                ForEach(model.alertItems) { item in alertRow(item).bandListRow().swipeActions(edge: .trailing) { dismissButton(item) } }
             }.listStyle(.plain).scrollContentBackground(.hidden)
         }
-    }
-
-    /// Failed/timed-out automation runs get their own band rather than joining coding-agent attention
-    /// grouped by workspace.
-    @ViewBuilder private func automationAlertsSection(_ entries: [SpacesMobileAutomationAlertEntry]) -> some View {
-        HeaderBand {
-            Text("Automations").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
-            Spacer(minLength: 0)
-            Text("\(entries.count)").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
-        }.accessibilityIdentifier("alerts.band.automations").bandListHeaderRow()
-        ForEach(entries) { entry in
-            automationAlertRow(entry).bandListRow().swipeActions(edge: .trailing) {
-                Button(role: .destructive) {
-                    model.dismissAutomationAlert(entry)
-                } label: {
-                    Label("Dismiss", systemImage: "bell.slash")
-                }.accessibilityIdentifier("alert.dismiss.\(entry.id)")
-            }
-        }
-    }
-
-    /// Status-level only: automation terminal and replay navigation lives in the Runs screens, so unlike
-    /// `eventRow` this alert row is never a button.
-    private func automationAlertRow(_ entry: SpacesMobileAutomationAlertEntry) -> some View {
-        BandRow(
-            dotKind: .exited,
-            tile: TypeIconTile(systemName: "clock.arrow.circlepath", background: Theme.orange.opacity(0.16), foreground: Theme.orange),
-            title: entry.automationName, detail: entry.outcome, detailIsMonospaced: false
-        ) { EmptyView() }.accessibilityIdentifier("alert.automation.\(entry.id)")
     }
 
     /// Swiping is the only way to dismiss a single alert, and nothing on the row advertises it, so the
@@ -72,21 +45,31 @@ struct AlertsTabView: View {
         ).padding(.top, 2).padding(.bottom, 6).padding(.horizontal, 20).bandListRow().accessibilityIdentifier("alerts.swipeHint")
     }
 
-    @ViewBuilder private func alertGroupSection(_ group: SpacesMobileAttentionGroup) -> some View {
-        HeaderBand {
-            WorkspaceBandLabel(glyph: group.bandGlyph, displayName: group.workspaceDisplayName)
-            Spacer(minLength: 0)
-            Text(group.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
-                .lineLimit(1)
-        }.accessibilityIdentifier("alerts.band.\(group.workspaceID)").bandListHeaderRow()
-        ForEach(group.events) { event in
-            eventRow(event).bandListRow().swipeActions(edge: .trailing) {
-                Button(role: .destructive) {
-                    model.dismissAlert(event)
-                } label: {
-                    Label("Dismiss", systemImage: "bell.slash")
-                }.accessibilityIdentifier("alert.dismiss.\(event.id)")
+    @ViewBuilder private func alertRow(_ item: SpacesMobileAlertItem) -> some View {
+        switch item {
+        case .event(let event): eventRow(event)
+        case .automation(let entry): automationAlertRow(entry)
+        }
+    }
+
+    @ViewBuilder private func dismissButton(_ item: SpacesMobileAlertItem) -> some View {
+        Button(role: .destructive) {
+            switch item {
+            case .event(let event): model.dismissAlert(event)
+            case .automation(let entry): model.dismissAutomationAlert(entry)
             }
+        } label: {
+            Label("Dismiss", systemImage: "bell.slash")
+            // Same suffix the row itself carries (`alert.row.<event.id>` / `alert.automation.<entry.id>`),
+            // not `item.id` (`"event:<id>"`/`"automation:<id>"`): a UI test locates a row, then derives
+            // this identifier from it, so the two must agree on which string names the same alert.
+        }.accessibilityIdentifier("alert.dismiss.\(dismissIdentifierSuffix(item))")
+    }
+
+    private func dismissIdentifierSuffix(_ item: SpacesMobileAlertItem) -> String {
+        switch item {
+        case .event(let event): event.id
+        case .automation(let entry): entry.id
         }
     }
 
@@ -102,15 +85,31 @@ struct AlertsTabView: View {
             Text(AlertsAgeFormatting.abbreviatedAge(of: event.date, relativeTo: model.relativeTimeReference)).font(.system(size: 11)).foregroundStyle(
                 Theme.mutedSecondary
             ).monospacedDigit()
-        }
-        if let session = event.sessionID.flatMap({ model.session(forSessionID: $0) }) {
+        }.opacity(event.isDeviceOffline ? Theme.offlineRowOpacity : 1)
+        if let session = event.sessionID.flatMap({ model.session(forSessionID: $0, deviceID: event.deviceID) }) {
             Button {
-                selectedSession = SelectedTerminalSessionRoute(session: session)
+                selectedSession = SelectedTerminalSessionRoute(session: session, deviceID: event.deviceID)
             } label: {
                 row
             }.buttonStyle(.plain).disabled(model.isMutating).accessibilityIdentifier("alert.row.\(event.id)")
         } else {
             row.accessibilityIdentifier("alert.row.\(event.id)")
         }
+    }
+
+    /// Status-level only: automation terminal and replay navigation lives in the Runs screens, so unlike
+    /// `eventRow` this alert row is never a button.
+    private func automationAlertRow(_ entry: SpacesMobileAutomationAlertEntry) -> some View {
+        BandRow(
+            dotKind: .exited,
+            tile: TypeIconTile(systemName: "clock.arrow.circlepath", background: Theme.orange.opacity(0.16), foreground: Theme.orange),
+            title: entry.automationName, detail: entry.detail, detailIsMonospaced: false
+        ) {
+            if let date = entry.date {
+                Text(AlertsAgeFormatting.abbreviatedAge(of: date, relativeTo: model.relativeTimeReference)).font(.system(size: 11)).foregroundStyle(
+                    Theme.mutedSecondary
+                ).monospacedDigit()
+            }
+        }.opacity(entry.isDeviceOffline ? Theme.offlineRowOpacity : 1).accessibilityIdentifier("alert.automation.\(entry.id)")
     }
 }

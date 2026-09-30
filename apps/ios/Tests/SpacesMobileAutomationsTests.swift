@@ -472,12 +472,10 @@
                 makeRun(id: "run-timeout", automationID: "b", automationName: "Nightly", status: "timed_out", endedAt: "2026-01-01T01:00:00Z"),
             ]
 
-            let entries = SpacesMobileAutomationAlerts.entries(runs: runs)
+            let entries = SpacesMobileAutomationAlerts.entries(deviceID: "device-a", deviceText: nil, runs: runs)
 
             XCTAssertEqual(entries.map(\.runID), ["run-timeout", "run-failed"])
             XCTAssertEqual(entries.first?.automationName, "Nightly")
-            XCTAssertEqual(entries.first?.outcome, "Timed out")
-            XCTAssertEqual(entries.last?.outcome, "Failed (exit 3)")
         }
 
         func testAlertEntriesUseFractionalWireTimestampsForSameSecondRuns() {
@@ -486,7 +484,20 @@
                 makeRun(id: "newer", automationID: "a", automationName: "Deploy", status: "failed", endedAt: "2026-01-01T00:00:00.875Z"),
             ]
 
-            XCTAssertEqual(SpacesMobileAutomationAlerts.entries(runs: runs).map(\.runID), ["newer", "older"])
+            XCTAssertEqual(SpacesMobileAutomationAlerts.entries(deviceID: "device-a", deviceText: nil, runs: runs).map(\.runID), ["newer", "older"])
+        }
+
+        /// The Alerts row's detail line is `detail` ("Automation" or "Automation · device"), the
+        /// project/workspace stand-in every other Alerts row carries. It never includes the run's own
+        /// outcome text, by design; see `SpacesMobileAutomationAlertEntry.detail`'s doc comment.
+        func testAlertEntryDetailStandsInForProjectWorkspaceAndFoldsInDeviceText() {
+            let run = makeRun(id: "run-failed", automationID: "a", automationName: "Deploy", status: "failed", exitCode: 3)
+
+            let soloDeviceEntry = SpacesMobileAutomationAlerts.entries(deviceID: "device-a", deviceText: nil, runs: [run])
+            let namedDeviceEntry = SpacesMobileAutomationAlerts.entries(deviceID: "device-a", deviceText: "Other Mac", runs: [run])
+
+            XCTAssertEqual(soloDeviceEntry.first?.detail, "Automation")
+            XCTAssertEqual(namedDeviceEntry.first?.detail, "Automation · Other Mac")
         }
 
         // MARK: - Model integration
@@ -1032,10 +1043,25 @@
 
         // MARK: - Fixtures
 
+        /// Fixture device id `automationAlerts`/`clearAlerts`/`dismissAutomationAlert` need below: those
+        /// derivations now read through `pairedDevices`/`activeDeviceID` (the Alerts tab spans every
+        /// paired device), so a lightweight model under test needs one paired, selected device even though
+        /// these tests only ever set a single overview. Never a real device's id, so a stray write under
+        /// it in the real `UserDefaults.standard` dismissed-alerts bucket is inert; cleaned up below.
+        private static let testDeviceID = "device-a"
+
         private func makeModel() -> SpacesMobileAppModel {
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
-            return SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.pairedDevices = [
+                SpacesMobilePairedDeviceRecord(
+                    id: Self.testDeviceID, name: Self.testDeviceID, hosts: ["127.0.0.1"], port: 47_847, certificateFingerprint: "fp-device-a",
+                    createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil)
+            ]
+            model.activeDeviceID = Self.testDeviceID
+            addTeardownBlock { SpacesMobileDismissedAlertsStore.save([], deviceID: Self.testDeviceID) }
+            return model
         }
 
         private func makeOverview(

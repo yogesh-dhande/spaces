@@ -1,7 +1,9 @@
 import SwiftUI
 import spacesdevicecore
 
-/// Agents tab: every coding-agent row across workspaces, grouped by activity.
+/// Agents tab: every coding-agent row across every paired device's workspaces, grouped by activity. A
+/// device with no cached overview yet (not streamed since launch, or unpaired) contributes no rows; an
+/// offline device (streamed once, then dropped) keeps its last-known rows, dimmed.
 struct AgentsTabView: View {
     @Bindable var model: SpacesMobileAppModel
     @State private var selectedSession: SelectedTerminalSessionRoute?
@@ -42,19 +44,25 @@ struct AgentsTabView: View {
         // acknowledgment state is inert; passing `false` says so rather than reaching into the model for
         // an answer this row family never uses.
         let button = Button {
-            activateAgentRow(row)
+            activateAgentRow(entry)
         } label: {
             BandRow(dotKind: row.statusDotKind(exitAcknowledged: false), tile: .tile(for: .codingAgents), title: entry.row.name, detail: entry.detail)
             {
                 if row.brief != nil { RowBriefGlyph() }
                 if row.sessionID != nil { RowChevron() }
             }
-        }.buttonStyle(.plain).disabled(model.isMutating || row.sessionID == nil).accessibilityIdentifier("agents.row.\(entry.id)")
-        if model.hasUndismissedAlerts(for: row) { button.contextMenu { DismissAlertMenuButton(model: model, row: row) } } else { button }
+        }.buttonStyle(.plain).disabled(model.isMutating || row.sessionID == nil).opacity(entry.isDeviceOffline ? Theme.offlineRowOpacity : 1)
+            .accessibilityIdentifier("agents.row.\(entry.id)")
+        if model.hasUndismissedAlerts(for: row, deviceID: entry.deviceID) {
+            button.contextMenu { DismissAlertMenuButton(model: model, row: row, deviceID: entry.deviceID) }
+        } else {
+            button
+        }
     }
 
-    private func activateAgentRow(_ row: SpacesMobileWorkspaceRuntimeRow) {
-        guard let session = model.terminalSession(for: row) else { return }
-        selectedSession = SelectedTerminalSessionRoute(session: session)
+    private func activateAgentRow(_ entry: SpacesMobileAgentEntry) {
+        let row = entry.runtimeRow
+        guard let session = model.terminalSession(for: row, in: model.overview(forDeviceID: entry.deviceID)) else { return }
+        selectedSession = SelectedTerminalSessionRoute(session: session, deviceID: entry.deviceID)
     }
 }

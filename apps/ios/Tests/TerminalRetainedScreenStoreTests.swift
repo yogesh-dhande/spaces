@@ -36,9 +36,11 @@
                 "unlisted, ended, and owned-elsewhere sessions lose their screens; a session owned by one of this app's own viewers keeps it")
         }
 
-        /// The screens belong to the connection they were painted over: a session id from the previous
-        /// device means nothing on the next one.
-        func testAConnectionChangeDropsEveryRetainedScreen() {
+        /// A screen survives only as long as some overview still lists its session as retainable
+        /// (`pruneRetainedTerminalScreens` unions the published `overview` with every paired device's own
+        /// `overview(forDeviceID:)`). With no paired device and no published overview, nothing can vouch
+        /// for the session, so an auth failure that clears the selected device's own overview drops it.
+        func testARetainedScreenWithNoPairedDeviceBehindItDrops() {
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
@@ -47,6 +49,122 @@
             model.handleAuthenticationFailure(message: "Pair this device again.")
 
             XCTAssertTrue(model.retainedTerminalScreens.retainedSessionIDs.isEmpty)
+        }
+
+        /// A non-selected device's retained screen must survive a switch between two other devices:
+        /// `pruneRetainedTerminalScreens` unions every paired device's own `deviceOverviews` entry, not
+        /// just the newly selected device's, so switching from A to C and back never touches B's screen.
+        /// Unpairing B is what actually drops it, once `removeDevice` clears its `deviceOverviews` entry
+        /// (see that method's own doc comment on why it does this unconditionally, not only through the
+        /// stream-gated reconcile pass).
+        func testRetainedScreenForANonSelectedDeviceSurvivesADeviceSwitchButDropsOnUnpair() throws {
+            let fingerprintA = "fp-device-a-retainswitch"
+            let fingerprintB = "fp-device-b-retainswitch"
+            let fingerprintC = "fp-device-c-retainswitch"
+            var settingsA = SpacesMobileConnectionSettings()
+            settingsA.certificateFingerprint = fingerprintA
+            settingsA.authToken = "token-a-retainswitch"
+            var settingsB = SpacesMobileConnectionSettings()
+            settingsB.certificateFingerprint = fingerprintB
+            settingsB.authToken = "token-b-retainswitch"
+            var settingsC = SpacesMobileConnectionSettings()
+            settingsC.certificateFingerprint = fingerprintC
+            settingsC.authToken = "token-c-retainswitch"
+            let deviceA = try XCTUnwrap(
+                SpacesMobileDeviceStore.upsert(settings: settingsA, name: "device-a-retainswitch").devices.first(where: {
+                    $0.certificateFingerprint == fingerprintA
+                }))
+            let deviceB = try XCTUnwrap(
+                SpacesMobileDeviceStore.upsert(settings: settingsB, name: "device-b-retainswitch").devices.first(where: {
+                    $0.certificateFingerprint == fingerprintB
+                }))
+            let deviceC = try XCTUnwrap(
+                SpacesMobileDeviceStore.upsert(settings: settingsC, name: "device-c-retainswitch").devices.first(where: {
+                    $0.certificateFingerprint == fingerprintC
+                }))
+            defer {
+                for device in [deviceA, deviceB, deviceC] {
+                    _ = SpacesMobileDeviceStore.remove(deviceID: device.id, fallbackSettings: SpacesMobileConnectionSettings())
+                }
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.paired-devices")
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.active-device-id")
+            }
+
+            let client = SpacesDeviceAPIClient(settings: settingsA) { _ in
+                XCTFail("This test drives only device switches and an unpair, never a request.")
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = SpacesMobileAppModel(settings: settingsA, bridgeClient: client)
+            model.activeDeviceID = deviceA.id
+            model.pairedDevices = [deviceA, deviceB, deviceC]
+            model.setDeviceOverviewForTesting(makeOverview(sessions: [Self.sessionSummary(id: "session-b")]), deviceID: deviceB.id)
+            Self.retain(sessionID: "session-b", in: model.retainedTerminalScreens)
+
+            model.selectDevice(id: deviceC.id)
+            XCTAssertTrue(
+                model.retainedTerminalScreens.retainedSessionIDs.contains("session-b"),
+                "switching to another device must not drop a third device's retained screen")
+
+            model.selectDevice(id: deviceA.id)
+            XCTAssertTrue(
+                model.retainedTerminalScreens.retainedSessionIDs.contains("session-b"),
+                "switching back must still leave the third device's screen alone")
+
+            model.removeDevice(id: deviceB.id)
+            XCTAssertFalse(
+                model.retainedTerminalScreens.retainedSessionIDs.contains("session-b"), "unpairing the device that owned the screen must drop it")
+        }
+
+        /// The previously *selected* device's own retained screen must also survive switching away from
+        /// it. `selectDevice` calls `clearActiveDeviceFacts()` (which nils `overview` and prunes) before
+        /// moving `activeDeviceID` to the new device, so at prune time `overview` already reads nil while
+        /// `activeDeviceID` still names device A: reading every device through `overview(forDeviceID:)`
+        /// (rather than splitting between the nilled `overview` field and a `deviceID != activeDeviceID`-
+        /// guarded loop over `deviceOverviews`, which would skip A on both counts at that exact instant)
+        /// is what still finds A's own cached overview and keeps its screen.
+        func testASelectedDevicesOwnRetainedScreenSurvivesSwitchingAwayButDropsOnUnpair() throws {
+            let fingerprintA = "fp-device-a-selfretain"
+            let fingerprintB = "fp-device-b-selfretain"
+            var settingsA = SpacesMobileConnectionSettings()
+            settingsA.certificateFingerprint = fingerprintA
+            settingsA.authToken = "token-a-selfretain"
+            var settingsB = SpacesMobileConnectionSettings()
+            settingsB.certificateFingerprint = fingerprintB
+            settingsB.authToken = "token-b-selfretain"
+            let deviceA = try XCTUnwrap(
+                SpacesMobileDeviceStore.upsert(settings: settingsA, name: "device-a-selfretain").devices.first(where: {
+                    $0.certificateFingerprint == fingerprintA
+                }))
+            let deviceB = try XCTUnwrap(
+                SpacesMobileDeviceStore.upsert(settings: settingsB, name: "device-b-selfretain").devices.first(where: {
+                    $0.certificateFingerprint == fingerprintB
+                }))
+            defer {
+                for device in [deviceA, deviceB] {
+                    _ = SpacesMobileDeviceStore.remove(deviceID: device.id, fallbackSettings: SpacesMobileConnectionSettings())
+                }
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.paired-devices")
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.active-device-id")
+            }
+
+            let client = SpacesDeviceAPIClient(settings: settingsA) { _ in
+                XCTFail("This test drives only a device switch and an unpair, never a request.")
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = SpacesMobileAppModel(settings: settingsA, bridgeClient: client)
+            model.activeDeviceID = deviceA.id
+            model.pairedDevices = [deviceA, deviceB]
+            model.setDeviceOverviewForTesting(makeOverview(sessions: [Self.sessionSummary(id: "session-a")]), deviceID: deviceA.id)
+            Self.retain(sessionID: "session-a", in: model.retainedTerminalScreens)
+
+            model.selectDevice(id: deviceB.id)
+            XCTAssertTrue(
+                model.retainedTerminalScreens.retainedSessionIDs.contains("session-a"),
+                "switching away from device A must not drop its own retained screen")
+
+            model.removeDevice(id: deviceA.id)
+            XCTAssertFalse(
+                model.retainedTerminalScreens.retainedSessionIDs.contains("session-a"), "unpairing the device that owned the screen must drop it")
         }
 
         private static func retain(sessionID: String, in store: TerminalRetainedScreenStore) {

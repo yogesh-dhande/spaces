@@ -581,6 +581,21 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var isShowingWorkspaceCreateSheet = false
     var connectionNotice: String?
     var pendingPairingLink: SpacesDevicePairingLink?
+    /// The most recent time a non-selected paired device rejected this iPhone's credential
+    /// (`handleAuthenticationFailure(message:deviceID:)`'s non-selected branch), or nil before the first
+    /// one. `TerminalSessionNavigationModifier` (`TerminalFlow.swift`) watches this and closes any open
+    /// terminal route for the rejecting device, per the product decision that a device which stops
+    /// recognizing this iPhone should not go on showing a terminal for it, the same outcome an open
+    /// terminal already reaches on its own when the rejection surfaces through its own request
+    /// (`onAuthenticationRequired`). `token` is a counter rather than the event being a plain `Bool`
+    /// flip: two rejections in a row for the same device (a stream retry racing a manual retry) must
+    /// still both be observable as distinct occurrences, which a repeated identical value would not be.
+    struct DeviceAuthenticationRejection: Equatable {
+        let deviceID: String
+        let token: UInt64
+    }
+    private(set) var nonSelectedDeviceAuthenticationRejection: DeviceAuthenticationRejection?
+    @ObservationIgnored private var nextDeviceAuthenticationRejectionToken: UInt64 = 0
     /// A terminal session a `spaces://terminal/…` deep link asks to focus. The Spaces tab observes
     /// this, pushes the session's detail route, and clears it. Model-driven (rather than a tab-local
     /// binding) so a link handled at the app shell can navigate whichever tab is on screen.
@@ -670,12 +685,18 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// from a *different* client — no client can exclude another from its daemon's one queue either — just
     /// reachable here from this client's own queued successor instead of a stranger's.
     @ObservationIgnored private var pendingDeleteChains: [Int: Task<Void, Never>] = [:]
-    /// Attention events the user dismissed on the active device, one at a time or with Clear. Identities
-    /// are stable per source+kind+date, so a dismissed event stays dismissed until its source changes
-    /// state again. Persisted per device via `SpacesMobileDismissedAlertsStore` and pruned against that
-    /// device's overview on every refresh; reloaded from the newly active device's bucket whenever
-    /// `activeDeviceID` changes, so this always describes the device whose overview is being published.
-    var dismissedAlertIDs: Set<String> = []
+    /// Attention events and automation-run alerts the user dismissed, one at a time or with Clear, keyed
+    /// by deviceID to that device's bucket of unprefixed event/run identities (see
+    /// `SpacesMobileAttentionEvent.eventKey`). Kept for every paired device at once, not only the selected
+    /// one, since the Alerts tab lists every paired device's rows together and dismissing or clearing a
+    /// non-selected (including offline) device's rows has to take effect immediately.
+    ///
+    /// Each bucket is exactly what `SpacesMobileDismissedAlertsStore` persists on disk per device; loading
+    /// every paired device's bucket into memory here does not change that persisted shape. Reloaded
+    /// whenever the paired set can change (init, a device switch, pairing, removal, Demo Mode toggle: see
+    /// `loadDismissedAlertIDsForPairedDevices`), and each device's bucket is pruned against its own
+    /// freshly delivered overview independently (see `pruneDismissedAlertIDs`).
+    private var dismissedAlertIDsByDevice: [String: Set<String>] = [:]
     /// The session whose terminal detail is on screen, or nil when no terminal detail is open. Set by
     /// the terminal navigation flow as its selected session changes. Having the route open is not the
     /// same as watching it — see `watchedTerminalSessionID`.
@@ -689,7 +710,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// The user's recent watches of each recently watched session's terminal detail, oldest first. A
     /// bell for the focused session is excluded live (see `SpacesMobileAttention.events`); once a
     /// session stops being focused, these windows keep excluding a bell that rang while it still was.
-    /// In-memory only, like `dismissedAlertIDs`.
+    /// In-memory only, like `dismissedAlertIDsByDevice`.
     ///
     /// A list rather than one window per session because a single visit to a terminal produces several:
     /// backgrounding the app ends one and returning starts the next, and the bell rung before the app
@@ -726,7 +747,30 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// backgrounding, so a returning foreground shows what was last known instead of flashing empty state
     /// while streams reopen. Whether each stream currently has a live connection is tracked entirely by
     /// `overviewStreamSubscriptions` (the coordinator); nothing here duplicates it.
-    @ObservationIgnored private var deviceOverviews: [String: SpacesDeviceOverviewPayload] = [:]
+    ///
+    /// Not `@ObservationIgnored`: the Agents and Alerts tabs derive their rows from every paired device's
+    /// entry here, not only the selected one's `overview`, so a non-selected device's delivery has to be
+    /// observable too.
+    private var deviceOverviews: [String: SpacesDeviceOverviewPayload] = [:]
+    /// Paired devices whose overview stream has failed to connect or dropped since its last delivered
+    /// overview. Set for any paired device's stream failure (see `handleDeviceStreamFailure`), cleared the
+    /// moment that device's stream next delivers an overview (`handleDeviceStreamOverview`). Mirrors the
+    /// Mac sidebar's offline rule (`SidebarController.applyRemoteDeviceSection`'s `.failure` branch): no
+    /// grace period, and the device keeps its last-known agents/alerts, dimmed, until it recovers. Tracked
+    /// explicitly, not derived from `overviewStreamSubscriptions.isLive`, so a device that has never yet
+    /// connected (`.opening`) reads as not-offline instead of colliding with one that connected and dropped.
+    private(set) var offlineDeviceIDs: Set<String> = []
+    /// Non-selected paired devices a frozen-core probe (`classifyNonSelectedDeviceStreamFailure`) has
+    /// found running a wire version this app cannot decode. Kept apart from `offlineDeviceIDs`: a blocked
+    /// device is blocked, not offline, so `overview(forDeviceID:)` reads this set to drop its rows and
+    /// badge count entirely rather than leaving them listed dimmed. Cleared by
+    /// `invalidateNonSelectedDeviceConnection` (unpair, re-pair, and every role change route through it)
+    /// and by the device's own next delivered compatible overview (`acceptNonSelectedDeviceOverview`).
+    /// The active device has no entry here: its own block is `isActiveDeviceBlocked`, kept current by
+    /// `applyCompatibility` from both the inline overview path and the standalone handshake fallback.
+    /// Not `@ObservationIgnored`: `overview(forDeviceID:)` reads it, and that read has to be tracked so a
+    /// probe's verdict refreshes the Agents/Alerts rows and badge count it drives.
+    private var blockedNonSelectedDeviceIDs: Set<String> = []
     /// Test-only override: when a device id has an entry here, `overviewStreamClient(forDeviceID:)`
     /// returns it instead of building a client from that device's paired-device record and the real
     /// network backend, so a test can give a *non-selected* device a fake streaming backend. The active
@@ -746,6 +790,46 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// alongside its cached overview.
     @ObservationIgnored private var nonActiveDeviceStreamClients:
         [String: (client: SpacesDeviceAPIClient, settings: SpacesMobileConnectionSettings)] = [:]
+    /// A non-selected device's row-mutation identity, mirroring `overviewIdentity`'s role for the selected
+    /// device: bumped by `invalidateNonSelectedDeviceConnection` whenever that device's connection actually
+    /// changes (unpair, re-pair, Demo Mode toggle, reconcile removal), so a mutation response captured
+    /// against the old one is recognized as stale. Not bumped by every cache drop:
+    /// `rebuildNonSelectedDeviceConnectionForWidenedHosts` also drops the cached client and channel, for a
+    /// host list widening that names the same daemon, and leaves this alone on purpose so a mutation whose
+    /// own response is what revealed the wider list still reads as current. Missing key reads as 0, the
+    /// value every device starts at.
+    ///
+    /// Also bumped on every role change, in `selectDevice`/`removeDevice`/`enableDemoMode`/
+    /// `disableDemoMode`, for both the device losing selection and the device gaining it:
+    /// `isCurrent(_:)` only re-checks this identity once a device is non-selected again, so a device that
+    /// round-trips (non-selected, briefly selected, non-selected again) would otherwise let a mutation
+    /// token captured in the first non-selected stint read as current again in the second, once
+    /// `activeDeviceID` no longer names it either time.
+    @ObservationIgnored private var nonSelectedDeviceIdentities: [String: Int] = [:]
+    /// A non-selected device's delivery counter, mirroring `overviewDeliveryGeneration`'s role for the
+    /// selected device: bumped by `acceptNonSelectedDeviceOverview` on every accepted overview for that
+    /// device, whether delivered by its stream or by a row mutation's response. `classifyNonSelectedDeviceStreamFailure`
+    /// captures this before its handshake probe and re-checks it after, so a verdict answered after a
+    /// fresher overview already landed (the stream's own retry reconnected and delivered while the probe
+    /// was still in flight) is dropped rather than overwriting state that delivery already settled.
+    /// `isCurrent(_:)`'s identity check alone does not catch this: a role or pairing change bumps
+    /// `nonSelectedDeviceIdentities`, but an ordinary reconnect-and-deliver on the same, still-non-selected
+    /// connection does not, since nothing about the connection's identity changed, only what it last said.
+    /// Missing key reads as 0, the value every device starts at.
+    @ObservationIgnored private var nonSelectedDeviceDeliveryGenerations: [String: Int] = [:]
+    /// A non-selected device's row-mutation command channel, created on first use and reused for later
+    /// mutations against the same client; dropped and closed by `invalidateNonSelectedDeviceConnection`
+    /// (or, for a widened host list, `rebuildNonSelectedDeviceConnectionForWidenedHosts`) alongside that
+    /// device's cached stream client.
+    @ObservationIgnored private var nonSelectedDeviceCommandChannels: [String: SpacesDeviceAPICommandChannel] = [:]
+    /// The command-path reset `resetDeviceStreamEndpointsForForeground()` fires off for a non-selected
+    /// device, kept so `waitForForegroundEndpointRefresh(client:deviceID:)` can await the same reset it
+    /// started rather than racing it: that call is intentionally unawaited where it is fired (nothing
+    /// there needs it to have landed), but a terminal viewer's own foreground redial does need it landed
+    /// before it dials, or it can reach the stale pre-reset address. Cleared on the connection's own
+    /// teardown (`invalidateNonSelectedDeviceConnection`), since a discarded client's in-flight reset is
+    /// no longer any redial's concern.
+    @ObservationIgnored private var nonSelectedDeviceForegroundResetTasks: [String: Task<Void, Never>] = [:]
     /// Owns retry pacing and connect/disconnect bookkeeping for every paired device's overview stream:
     /// the coordinator type the Mac sidebar uses for its own remote devices
     /// (`RemoteOverviewSubscriptionCoordinator` in `spacesdevicecore`). Implicitly-unwrapped because its
@@ -765,11 +849,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// active connection changes (device switch or removal, new settings, auth reset) so an overview
     /// fetch begun against the previous connection can neither publish its stale payload nor satisfy
     /// a `refresh()` caller waiting on the new one.
-    ///
-    /// `didSet` drops every retained terminal screen: those screens belong to the connection being left
-    /// behind, and a session id from it means nothing on the device being switched to. Doing it here
-    /// rather than at each of the several call sites is what keeps a newly added one from forgetting.
-    @ObservationIgnored private var overviewIdentity = 0 { didSet { retainedTerminalScreens.removeAll() } }
+    @ObservationIgnored private var overviewIdentity = 0
     /// The in-flight overview fetch, tagged with the connection identity, the channel generation, and the
     /// mutation generation it was issued under. `refresh()` joins it only while all three still match, and
     /// re-fetches after it completes when any of them moved on.
@@ -900,7 +980,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // initialization); `makeOverviewStreamCoordinator()`'s captured closure is the one call that
             // legitimately needs `self` fully valid, so it alone stays last.
             overviewStreamClientsForTesting = [:]
-            loadDismissedAlertIDsForActiveDevice()
+            loadDismissedAlertIDsForPairedDevices()
             overviewStreamSubscriptions = makeOverviewStreamCoordinator()
             return
         }
@@ -915,7 +995,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // See the Demo Mode branch above: every stored property must be set before the `self` method
         // calls below.
         overviewStreamClientsForTesting = [:]
-        loadDismissedAlertIDsForActiveDevice()
+        loadDismissedAlertIDsForPairedDevices()
         pruneDismissedAlertsForUnknownDevices()
         overviewStreamSubscriptions = makeOverviewStreamCoordinator()
     }
@@ -1023,13 +1103,82 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }.sorted(by: groupSort)
     }
 
-    /// Attention-event groups for the Alerts tab, derived client-side from the overview payload
-    /// with the user's cleared events filtered out.
-    var attentionGroups: [SpacesMobileAttentionGroup] {
-        guard let overview else { return [] }
-        return SpacesMobileAttention.groups(
-            in: overview, dismissedEventIDs: dismissedAlertIDs, focusedSessionID: watchedTerminalSessionID,
-            watchWindowsBySessionID: terminalWatchWindowsBySessionID)
+    /// Every paired device with a currently cached overview, paired with its display name and offline
+    /// flag: the input the Agents and Alerts tabs' pure derivations need to span every paired device (see
+    /// `SpacesMobileDeviceOverviewContext`). A freshly paired device still connecting for the first time
+    /// has no cached overview yet, so it contributes nothing.
+    private var deviceOverviewContexts: [SpacesMobileDeviceOverviewContext] {
+        pairedDevices.compactMap { device in
+            guard let deviceOverview = overview(forDeviceID: device.id) else { return nil }
+            return SpacesMobileDeviceOverviewContext(
+                deviceID: device.id, deviceName: device.name, overview: deviceOverview, isOffline: offlineDeviceIDs.contains(device.id))
+        }
+    }
+
+    /// `deviceID`'s most recently delivered overview: `overview` itself for the selected device when it
+    /// has one (the published fact every other active-device derivation reads, kept current by every path
+    /// that can change it, and read ahead of the stream cache below so a fresher refresh or mutation
+    /// response is never shadowed by a stream push that has not caught up yet), falling back to
+    /// `deviceOverviews[deviceID]` when it does not; `deviceOverviews[deviceID]` alone for any other
+    /// paired device. The fallback matters because `overview` goes nil at several points that leave the
+    /// device otherwise fully paired and still streaming (a device switch away and back, an auth failure):
+    /// `deviceOverviews[activeDeviceID]` is that same device's own stream-delivered data the whole time
+    /// (`handleDeviceStreamOverview` writes it for the selected device too, not only for others), so
+    /// Agents/Alerts can keep showing its rows instead of the device's data vanishing and reappearing.
+    ///
+    /// Nil for a blocked device, matching the Mac sidebar's empty section for the same case and spec.md's
+    /// "a daemon too old for the app blocks only that device": a blocked device contributes no rows,
+    /// badge count, or session lookup, whether it is selected or not. Checked once here, the one place
+    /// every cross-device read goes through, rather than in each caller, so row lookups, session lookups,
+    /// and row actions all agree. A blocked device is blocked, not offline: this folds it out of
+    /// `deviceOverviewContexts` entirely rather than leaving it in with an offline marking.
+    ///
+    /// Blocked is decided two different ways depending on whether a fresh, decoded payload is in hand:
+    /// - The active device: `isActiveDeviceBlocked`, not a re-derivation from the raw payload's own
+    ///   `daemonStatus`. `isActiveDeviceBlocked` is kept current by `applyCompatibility` from *both* an
+    ///   overview's inline status and the standalone handshake fallback `handleOverviewFailure` runs when
+    ///   an overview cannot be fetched or decoded at all; the raw payload cached in `deviceOverviews`
+    ///   cannot be, since a decode failure delivers nothing to cache. Re-deriving from that stale payload's
+    ///   own (still-compatible) `daemonStatus` would miss exactly this case: a block discovered only
+    ///   through the fallback handshake, with the last *compatible* overview still sitting in the cache.
+    /// - Every other paired device: `blockedNonSelectedDeviceIDs`, set the same way by
+    ///   `classifyNonSelectedDeviceStreamFailure`'s own fallback handshake (there is no per-device
+    ///   `compatibility` state var to read for a device that is not selected), plus a plain read of the raw
+    ///   cached payload's own `daemonStatus` for the case that payload decoded fine but reported
+    ///   incompatible inline (no handshake needed to have discovered that one).
+    func overview(forDeviceID deviceID: String) -> SpacesDeviceOverviewPayload? {
+        if deviceID == activeDeviceID {
+            guard !isActiveDeviceBlocked else { return nil }
+            let raw = overview ?? deviceOverviews[deviceID]
+            guard let raw, SpacesWireCompatibility.evaluate(daemonStatus: raw.daemonStatus).isCompatible else { return nil }
+            return raw
+        }
+        guard !blockedNonSelectedDeviceIDs.contains(deviceID) else { return nil }
+        guard let raw = deviceOverviews[deviceID], SpacesWireCompatibility.evaluate(daemonStatus: raw.daemonStatus).isCompatible else { return nil }
+        return raw
+    }
+
+    /// Whether the "· device" segment should show on every Agents/Alerts row right now. A single global
+    /// decision, not computed per tab: see `SpacesMobileDeviceDisplay.showsDeviceSegment`.
+    private var showsDeviceSegment: Bool {
+        SpacesMobileDeviceDisplay.showsDeviceSegment(
+            pairedDeviceCount: pairedDevices.count, hasOfflineDevice: pairedDevices.contains { offlineDeviceIDs.contains($0.id) })
+    }
+
+    /// Attention events across every paired device with a cached overview, newest first, with the user's
+    /// cleared events filtered out. Flat, not grouped by workspace: the Alerts tab shows one cross-device
+    /// list (see `AlertsTabView`), and each event carries its own project/workspace/device text instead of
+    /// a band header naming it.
+    var attentionEvents: [SpacesMobileAttentionEvent] {
+        let showsDeviceSegment = showsDeviceSegment
+        return deviceOverviewContexts.flatMap { device -> [SpacesMobileAttentionEvent] in
+            let deviceText = showsDeviceSegment ? SpacesMobileDeviceDisplay.text(name: device.deviceName, isOffline: device.isOffline) : nil
+            let dismissed = dismissedAlertIDsByDevice[device.deviceID] ?? []
+            return SpacesMobileAttention.events(
+                deviceID: device.deviceID, deviceText: deviceText, in: device.overview, focusedSessionID: watchedTerminalSessionID,
+                watchWindowsBySessionID: terminalWatchWindowsBySessionID, isDeviceOffline: device.isOffline
+            ).filter { !dismissed.contains($0.eventKey) }
+        }.sorted { $0.date > $1.date }
     }
 
     /// Points bell suppression at the terminal detail now on screen, or nil once none is. Leaving a
@@ -1083,95 +1232,141 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    /// Failed/timed-out automation-run alert entries for the Alerts tab, with cleared entries filtered
-    /// out. Automation runs are workspace-less, so these are derived and rendered separately from
-    /// `attentionGroups` — see `SpacesMobileAutomationAlerts`.
+    /// Failed/timed-out automation-run alert entries across every paired device with a cached overview,
+    /// newest first, with cleared entries filtered out. Automation runs are workspace-less, so these join
+    /// `attentionEvents` in one flat Alerts list with "Automation" standing in for a project/workspace;
+    /// see `SpacesMobileAutomationAlerts`.
     var automationAlerts: [SpacesMobileAutomationAlertEntry] {
-        guard let overview else { return [] }
-        return SpacesMobileAutomationAlerts.entries(runs: overview.automationRuns).filter { !dismissedAlertIDs.contains($0.id) }
+        let showsDeviceSegment = showsDeviceSegment
+        return deviceOverviewContexts.flatMap { device -> [SpacesMobileAutomationAlertEntry] in
+            let deviceText = showsDeviceSegment ? SpacesMobileDeviceDisplay.text(name: device.deviceName, isOffline: device.isOffline) : nil
+            let dismissed = dismissedAlertIDsByDevice[device.deviceID] ?? []
+            return SpacesMobileAutomationAlerts.entries(
+                deviceID: device.deviceID, deviceText: deviceText, runs: device.overview.automationRuns, isDeviceOffline: device.isOffline
+            ).filter { !dismissed.contains($0.eventKey) }
+        }.sorted { lhs, rhs in
+            switch (lhs.date, rhs.date) {
+            case (let a?, let b?): return a > b
+            case (nil, _): return false
+            case (_, nil): return true
+            }
+        }
     }
 
-    /// Undismissed attention-event count, shown as the Alerts tab badge.
-    var undismissedAlertCount: Int { attentionGroups.reduce(0) { $0 + $1.events.count } + automationAlerts.count }
+    /// What the Alerts tab actually renders: `attentionEvents` and `automationAlerts` merged into one
+    /// cross-device, newest-first list (see `SpacesMobileAlertItems.merge`).
+    var alertItems: [SpacesMobileAlertItem] { SpacesMobileAlertItems.merge(events: attentionEvents, automationAlerts: automationAlerts) }
 
-    /// Marks every currently derived attention event dismissed.
+    /// Undismissed attention-event and automation-alert count, shown as the Alerts tab badge. Counts an
+    /// offline device's own undismissed alerts too, the same as any other paired device's, so the badge
+    /// always equals the number of rows the Alerts tab actually shows.
+    var undismissedAlertCount: Int { attentionEvents.count + automationAlerts.count }
+
+    /// Marks every currently derived attention event and automation alert dismissed, across every paired
+    /// device with a cached overview.
     func clearAlerts() {
-        guard let overview else { return }
-        dismissedAlertIDs.formUnion(
-            SpacesMobileAttention.events(
-                in: overview, focusedSessionID: watchedTerminalSessionID, watchWindowsBySessionID: terminalWatchWindowsBySessionID
-            ).map(\.id))
-        dismissedAlertIDs.formUnion(SpacesMobileAutomationAlerts.entries(runs: overview.automationRuns).map(\.id))
-        saveDismissedAlertIDs()
+        for device in deviceOverviewContexts {
+            var dismissed = dismissedAlertIDsByDevice[device.deviceID] ?? []
+            dismissed.formUnion(
+                SpacesMobileAttention.events(
+                    deviceID: device.deviceID, deviceText: nil, in: device.overview, focusedSessionID: watchedTerminalSessionID,
+                    watchWindowsBySessionID: terminalWatchWindowsBySessionID
+                ).map(\.eventKey))
+            dismissed.formUnion(
+                SpacesMobileAutomationAlerts.entries(deviceID: device.deviceID, deviceText: nil, runs: device.overview.automationRuns).map(\.eventKey)
+            )
+            dismissedAlertIDsByDevice[device.deviceID] = dismissed
+            saveDismissedAlertIDs(deviceID: device.deviceID)
+        }
     }
 
-    /// Dismisses one attention event, leaving the rest of its band in place.
+    /// Dismisses one attention event, on whichever device it came from.
     func dismissAlert(_ event: SpacesMobileAttentionEvent) {
-        dismissedAlertIDs.insert(event.id)
-        saveDismissedAlertIDs()
+        dismissedAlertIDsByDevice[event.deviceID, default: []].insert(event.eventKey)
+        saveDismissedAlertIDs(deviceID: event.deviceID)
     }
 
-    /// `row`'s own currently undismissed attention events — its exited/waiting/finished event (if any)
-    /// plus any bell on its session — derived via the same focus/watch-window bell suppression the Alerts
-    /// tab uses (`SpacesMobileAttention.events`), so a bell rung while its terminal viewer was open or
-    /// inside a watch window never offers "Dismiss Alert" for something the user already saw live. Hidden
-    /// workspaces stay included: that filter only serves the Alerts tab's band grouping, not row-level
-    /// dismissal. Backs both the row's "Dismiss Alert" menu item's visibility and what it dismisses.
-    func undismissedAlerts(for row: SpacesMobileWorkspaceRuntimeRow) -> [SpacesMobileAttentionEvent] {
-        guard let overview else { return [] }
+    /// `row`'s own currently undismissed attention events on `deviceID`: its exited/waiting/finished
+    /// event (if any) plus any bell on its session, derived via the same focus/watch-window bell
+    /// suppression the Alerts tab uses (`SpacesMobileAttention.events`), so a bell rung while its terminal
+    /// viewer was open or inside a watch window never offers "Dismiss Alert" for something the user
+    /// already saw live. Hidden workspaces stay included: that filter only serves the Alerts tab, not
+    /// row-level dismissal. Backs both the row's "Dismiss Alert" menu item's visibility and what it
+    /// dismisses.
+    ///
+    /// `deviceID` is explicit rather than always the selected device: the Spaces tab's own row menu only
+    /// ever shows the selected device's rows and passes `activeDeviceID`, but the Agents tab lists every
+    /// paired device's rows in one list and passes each row's own device.
+    func undismissedAlerts(for row: SpacesMobileWorkspaceRuntimeRow, deviceID: String) -> [SpacesMobileAttentionEvent] {
+        guard let overview = overview(forDeviceID: deviceID) else { return [] }
+        let dismissed = dismissedAlertIDsByDevice[deviceID] ?? []
+        // Same focus/watch-window inputs as `attentionEvents`, for every device: a watched session id is
+        // unique across devices, so passing them regardless of `deviceID` costs nothing and a terminal
+        // open on another device suppresses its own bell correctly instead of only the selected device's.
         return SpacesMobileAttention.events(
-            in: overview, focusedSessionID: watchedTerminalSessionID, watchWindowsBySessionID: terminalWatchWindowsBySessionID,
-            includingHiddenWorkspaces: true
-        ).filter { row.matches($0) && !dismissedAlertIDs.contains($0.id) }
+            deviceID: deviceID, deviceText: nil, in: overview, focusedSessionID: watchedTerminalSessionID,
+            watchWindowsBySessionID: terminalWatchWindowsBySessionID, includingHiddenWorkspaces: true
+        ).filter { row.matches($0) && !dismissed.contains($0.eventKey) }
     }
 
     /// Whether `row` has anything its long-press "Dismiss Alert" menu item could dismiss.
-    func hasUndismissedAlerts(for row: SpacesMobileWorkspaceRuntimeRow) -> Bool { !undismissedAlerts(for: row).isEmpty }
+    func hasUndismissedAlerts(for row: SpacesMobileWorkspaceRuntimeRow, deviceID: String) -> Bool {
+        !undismissedAlerts(for: row, deviceID: deviceID).isEmpty
+    }
 
     /// Dismisses every one of `row`'s currently undismissed attention events in one action — identical in
-    /// effect to dismissing each individually from the Alerts tab: same `dismissedAlertIDs`, same badge.
-    func dismissAlerts(for row: SpacesMobileWorkspaceRuntimeRow) {
-        let events = undismissedAlerts(for: row)
+    /// effect to dismissing each individually from the Alerts tab: same dismissal bucket, same badge.
+    func dismissAlerts(for row: SpacesMobileWorkspaceRuntimeRow, deviceID: String) {
+        let events = undismissedAlerts(for: row, deviceID: deviceID)
         guard !events.isEmpty else { return }
-        dismissedAlertIDs.formUnion(events.map(\.id))
-        saveDismissedAlertIDs()
+        dismissedAlertIDsByDevice[deviceID, default: []].formUnion(events.map(\.eventKey))
+        saveDismissedAlertIDs(deviceID: deviceID)
     }
 
-    /// Whether `row`'s own exited-process event, if it has one right now, is already dismissed — the
+    /// Whether `row`'s own exited-process event, if it has one right now, is already dismissed: the
     /// signal that turns its dot from failed red to the unstarted stroke (see
     /// `SpacesMobileWorkspaceRuntimeRow.statusDotKind(exitAcknowledged:)`). Only a `.process` row can have
-    /// one: every other row family's dot keeps tracking live state regardless of dismissal.
+    /// one: every other row family's dot keeps tracking live state regardless of dismissal. Scoped to the
+    /// selected device only, unlike `undismissedAlerts(for:deviceID:)`.
     func isExitAcknowledged(_ row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
-        guard case .process = row.source, let overview else { return false }
-        guard let event = SpacesMobileAttention.allEvents(in: overview).first(where: { row.matches($0) && $0.kind == .exited }) else { return false }
-        return dismissedAlertIDs.contains(event.id)
+        guard case .process = row.source, let activeDeviceID, let overview else { return false }
+        guard
+            let event = SpacesMobileAttention.allEvents(deviceID: activeDeviceID, in: overview).first(where: { row.matches($0) && $0.kind == .exited }
+            )
+        else { return false }
+        return (dismissedAlertIDsByDevice[activeDeviceID] ?? []).contains(event.eventKey)
     }
 
-    /// Dismisses one failed/timed-out automation run, leaving the rest of the Automations band in place.
+    /// Dismisses one failed/timed-out automation run, on whichever device it came from.
     func dismissAutomationAlert(_ entry: SpacesMobileAutomationAlertEntry) {
-        dismissedAlertIDs.insert(entry.id)
-        saveDismissedAlertIDs()
+        dismissedAlertIDsByDevice[entry.deviceID, default: []].insert(entry.eventKey)
+        saveDismissedAlertIDs(deviceID: entry.deviceID)
     }
 
-    /// Drops stored dismissals whose event this overview no longer produces, so the persisted set stays
-    /// bounded by what the device currently reports rather than growing for the life of the install.
-    private func pruneDismissedAlertIDs(against overview: SpacesDeviceOverviewPayload) {
-        // Automation-run alerts share the dismissal set but derive from `automationRuns`, not attention
-        // events, so retain their dismissals separately or a prune would resurface dismissed run alerts.
-        let retained = SpacesMobileAttention.retainedDismissedEventIDs(dismissedAlertIDs, in: overview).union(
-            dismissedAlertIDs.intersection(Set(SpacesMobileAutomationAlerts.entries(runs: overview.automationRuns).map(\.id))))
-        guard retained != dismissedAlertIDs else { return }
-        dismissedAlertIDs = retained
-        saveDismissedAlertIDs()
+    /// Drops `deviceID`'s stored dismissals whose event/run its overview no longer produces, so its
+    /// persisted bucket stays bounded by what the device currently reports rather than growing for the
+    /// life of the install.
+    private func pruneDismissedAlertIDs(deviceID: String, against overview: SpacesDeviceOverviewPayload) {
+        let bucket = dismissedAlertIDsByDevice[deviceID] ?? []
+        // Automation-run alerts share the dismissal bucket but derive from `automationRuns`, not
+        // attention events, so retain their dismissals separately or a prune would resurface dismissed run
+        // alerts.
+        let retained = SpacesMobileAttention.retainedDismissedEventIDs(bucket, deviceID: deviceID, in: overview).union(
+            bucket.intersection(
+                Set(SpacesMobileAutomationAlerts.entries(deviceID: deviceID, deviceText: nil, runs: overview.automationRuns).map(\.eventKey))))
+        guard retained != bucket else { return }
+        dismissedAlertIDsByDevice[deviceID] = retained
+        saveDismissedAlertIDs(deviceID: deviceID)
     }
 
-    /// Loads the persisted dismissal bucket for `activeDeviceID` into the in-memory set, discarding
-    /// whatever the previous active device's bucket held. Called at every chokepoint that changes the
-    /// active device — init, a device switch or removal, and Demo Mode enable/disable — so
-    /// `dismissedAlertIDs` always belongs to the device whose overview is about to be published, never a
-    /// leftover from the connection this model just switched away from.
-    private func loadDismissedAlertIDsForActiveDevice() {
-        dismissedAlertIDs = activeDeviceID.map { SpacesMobileDismissedAlertsStore.load(deviceID: $0) } ?? []
+    /// Loads every paired device's persisted dismissal bucket into memory, discarding whatever was there
+    /// before. Called at every chokepoint that can change the paired set (init, a device switch, pairing,
+    /// removal, Demo Mode enable/disable) so `dismissedAlertIDsByDevice` always matches the devices whose
+    /// overviews are about to be published, never a leftover from before the change. Each device's own
+    /// bucket is still what is loaded and saved individually, so this changes nothing about what is on disk.
+    private func loadDismissedAlertIDsForPairedDevices() {
+        dismissedAlertIDsByDevice = Dictionary(
+            uniqueKeysWithValues: pairedDevices.map { ($0.id, SpacesMobileDismissedAlertsStore.load(deviceID: $0.id)) })
         // Unconfirmed deletes belong to the connection they were issued against: another device's overview
         // cannot answer whether this one's workspace was deleted, and leaving an entry behind would let the
         // next published overview resolve it against the wrong device. Dropped with the marking, silently —
@@ -1180,12 +1375,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         workspaceIDsPendingDeletion.removeAll()
     }
 
-    /// Persists `dismissedAlertIDs` into the active device's bucket. A `nil` `activeDeviceID` (no device
-    /// selected yet) has nothing to attribute the dismissals to, so it's a no-op rather than a shared
-    /// bucket that would leak across whichever device pairs first.
-    private func saveDismissedAlertIDs() {
-        guard let activeDeviceID else { return }
-        SpacesMobileDismissedAlertsStore.save(dismissedAlertIDs, deviceID: activeDeviceID)
+    /// Persists `deviceID`'s in-memory bucket back into its own slot in the store.
+    private func saveDismissedAlertIDs(deviceID: String) {
+        SpacesMobileDismissedAlertsStore.save(dismissedAlertIDsByDevice[deviceID] ?? [], deviceID: deviceID)
     }
 
     /// Drops persisted dismissal buckets for devices no longer known: the paired devices plus the demo
@@ -1199,10 +1391,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
         SpacesMobileDismissedAlertsStore.retainDevices(Set(pairedDevices.map(\.id)).union([SpacesMobileDemoDevice.id]))
     }
 
-    /// Coding-agent rows across all workspaces grouped by activity for the Agents tab.
+    /// Coding-agent rows across every paired device with a cached overview, grouped by activity for the
+    /// Agents tab.
     var agentGroups: [SpacesMobileAgentGroup] {
-        guard let overview else { return [] }
-        return SpacesMobileAgentGrouping.groups(in: overview)
+        SpacesMobileAgentGrouping.groups(devices: deviceOverviewContexts, showsDeviceSegment: showsDeviceSegment)
     }
 
     /// Automation rows for the Automations tab, derived from the active device's overview.
@@ -1352,6 +1544,24 @@ private enum SpacesMobileMutationTimeoutRecovery {
     func session(forSessionID sessionID: String) -> SpacesDeviceTerminalSessionSummary? {
         if let session = overview?.sessions.first(where: { $0.id == sessionID }) { return session }
         return runtimeRow(forSessionID: sessionID).flatMap { terminalSession(for: $0) }
+    }
+
+    /// `session(forSessionID:)`, scoped to any paired device rather than only the selected one: resolves
+    /// a session opened from a non-selected device's Agents/Alerts row.
+    func session(forSessionID sessionID: String, deviceID: String) -> SpacesDeviceTerminalSessionSummary? {
+        guard deviceID != activeDeviceID else { return session(forSessionID: sessionID) }
+        let deviceOverview = overview(forDeviceID: deviceID)
+        if let session = deviceOverview?.sessions.first(where: { $0.id == sessionID }) { return session }
+        return runtimeRow(forSessionID: sessionID, deviceID: deviceID).flatMap { terminalSession(for: $0, in: deviceOverview) }
+    }
+
+    /// `runtimeRow(forSessionID:)`, scoped to any paired device. Not cached like the selected device's own
+    /// `runtimeRowIndex`: this path is cold (a background device's terminal chrome, not the selected
+    /// device's hot render loop), so a fresh scan each call is cheap enough to skip the cache's own
+    /// invalidation bookkeeping.
+    func runtimeRow(forSessionID sessionID: String, deviceID: String) -> SpacesMobileWorkspaceRuntimeRow? {
+        guard deviceID != activeDeviceID else { return runtimeRow(forSessionID: sessionID) }
+        return overview(forDeviceID: deviceID)?.workspaces.flatMap(workspaceRuntimeRows(for:)).first(where: { $0.sessionID == sessionID })
     }
 
     /// The active device cannot be used until its daemon is restarted/updated or this app updates.
@@ -1561,27 +1771,49 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// the top instead of going straight back to whatever address it proved reachable before
     /// backgrounding (e.g. a Tailscale address that still answers away from home).
     ///
-    /// Two halves, because a stream's resolver lives in two different places depending on whether its
-    /// device is selected:
-    /// - A non-selected device's stream runs through a client cached in `nonActiveDeviceStreamClients`,
-    ///   rebuilt only when its record changes (see that property's own doc comment). Dropping the whole
-    ///   cache here is what forces the rebuild: `overviewStreamClient(forDeviceID:)` then builds a fresh
-    ///   client the next time this device's stream opens, and a fresh client's resolver seeds its cached
-    ///   winner from `SpacesMobileDeviceStore.activeHost(certificateFingerprint:)`, which the caller's
-    ///   `clearActiveHosts()` already cleared, so the new resolver starts with none and its own
-    ///   `nextStreamHost()` walks from the top of `hosts`.
-    /// - The selected device's stream runs through `bridgeClient`, which the app keeps and reuses for the
-    ///   whole session rather than rebuilding on every foreground, so its `overviewStreamResolver` keeps
-    ///   whatever winner (and failed-host set) it learned in memory regardless of what the persisted
-    ///   store now says. `clearActiveHosts()` alone never reaches it; it has to be told directly.
+    /// Resets every non-selected device's cached client in place rather than discarding it the way
+    /// `invalidateNonSelectedDeviceConnection` does: a discard also bumps that device's mutation identity,
+    /// which is reserved for a real connection change (unpair, re-pair, Demo Mode toggle, reconcile
+    /// removal, see that method's doc comment), not a foreground re-preference of the same daemon. An
+    /// open terminal viewer for a non-selected device holds this same client instance
+    /// (`terminalContext(forDeviceID:)` reuses it), so resetting its resolvers in place, rather than
+    /// swapping in a fresh client the viewer never sees, is what gives that viewer's own foreground redial
+    /// the fresh top-of-hosts race too.
     ///
-    /// Synchronous and not `async`: `SpacesDeviceAPIClient.resetOverviewStreamEndpointResolution()` is a
-    /// plain, lock-based call, not actor-isolated, so this runs to completion before returning and the
-    /// caller can call `startDeviceStreams()` immediately afterward with no risk of the reset racing
-    /// behind the reconnect it is supposed to precede.
+    /// Two kinds of reset per device, because a client's command-path resolver and its overview-stream
+    /// resolver are reset through different means:
+    /// - The overview-stream reset (`resetOverviewStreamEndpointResolution()`) is synchronous and
+    ///   lock-based, so every device's reset below runs to completion before this function returns, and
+    ///   the caller can call `startDeviceStreams()` immediately afterward with no risk of the reset racing
+    ///   behind the reconnect it is supposed to precede.
+    /// - The command-path reset (`resetEndpointResolution()`) and its cached channel's close are `async`,
+    ///   the same shape `resetActiveConnectionEndpointAndWait()` awaits for the selected device. Fired off
+    ///   here instead of awaited: nothing here needs it to have landed, only a later row mutation on that
+    ///   device does, and one issued before the reset lands simply meets the resolver mid-reset, the same
+    ///   accepted race `resetActiveConnectionEndpoint()` documents for the selected device.
+    ///
+    /// The selected device's stream runs through `bridgeClient`, which the app keeps and reuses for the
+    /// whole session rather than rebuilding on every foreground, so its `overviewStreamResolver` keeps
+    /// whatever winner (and failed-host set) it learned in memory regardless of what the persisted
+    /// store now says. `clearActiveHosts()` alone never reaches it; it has to be told directly.
+    ///
+    /// Releases `nonSelectedForegroundResetWaiters` once every device's task above is recorded: see
+    /// `isNonSelectedForegroundResetPending`'s doc comment for why a non-selected terminal's own
+    /// foreground redial needs to wait for that, not just for the task it names.
     func resetDeviceStreamEndpointsForForeground() {
-        nonActiveDeviceStreamClients = [:]
+        for (deviceID, cached) in nonActiveDeviceStreamClients {
+            cached.client.resetOverviewStreamEndpointResolution()
+            let client = cached.client
+            let channel = nonSelectedDeviceCommandChannels[deviceID]
+            // Recorded so a terminal viewer's own foreground redial can await this exact reset instead
+            // of racing it; see `nonSelectedDeviceForegroundResetTasks`'s doc comment.
+            nonSelectedDeviceForegroundResetTasks[deviceID] = Task {
+                await client.resetEndpointResolution()
+                await channel?.close()
+            }
+        }
         bridgeClient.resetOverviewStreamEndpointResolution()
+        releaseNonSelectedForegroundResetWaiters()
     }
 
     /// Closes every paired device's overview stream and stops the age-clock beat. Called when the scene
@@ -1609,6 +1841,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// connect/retry cycle to exercise it indirectly.
     func overviewStreamClientForTesting(deviceID: String) -> SpacesDeviceAPIClient? { overviewStreamClient(forDeviceID: deviceID) }
 
+    /// Test-only: seeds `nonActiveDeviceStreamClients[deviceID]` directly with a caller-built client, so
+    /// a test can make a controllable fake (e.g. a backend whose `resetEndpointResolution()` blocks on a
+    /// gate) the one `resetDeviceStreamEndpointsForForeground()`/`isCurrentTerminalClient(_:forDeviceID:)`
+    /// treat as current for a non-selected device. `overviewStreamClientsForTesting` cannot stand in for
+    /// this: it is read and returned before `nonActiveDeviceStreamClients` is ever consulted, so nothing
+    /// backed by it lands in the cache these two read.
+    func setNonActiveDeviceStreamClientForTesting(_ client: SpacesDeviceAPIClient, settings: SpacesMobileConnectionSettings, deviceID: String) {
+        nonActiveDeviceStreamClients[deviceID] = (client: client, settings: settings)
+    }
+
     /// Test-only: the browser proxy's routing table, so a test can prove which of two racing
     /// `updateBrowserRoutes` merges (a stale one, or a fresher one) is the one actually reflected in it,
     /// which `model.overview` alone does not show.
@@ -1617,6 +1859,23 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Test-only: `deviceOverviews[deviceID]`, so a test can prove a device's cached delivery was
     /// dropped rather than merely not currently published through `overview`.
     func deviceOverviewForTesting(deviceID: String) -> SpacesDeviceOverviewPayload? { deviceOverviews[deviceID] }
+
+    /// Test-only: seeds a non-selected paired device's cached overview directly, so a cross-device
+    /// Agents/Alerts derivation can be exercised against two devices without driving a real stream
+    /// connect/push through the fake backend `SpacesMobileDeviceOverviewStreamTests` uses.
+    func setDeviceOverviewForTesting(_ overview: SpacesDeviceOverviewPayload, deviceID: String) { deviceOverviews[deviceID] = overview }
+
+    /// Test-only: sets `deviceID`'s offline marking directly, mirroring what a real stream failure/
+    /// delivery does inside `handleDeviceStreamFailure`/`handleDeviceStreamOverview`.
+    func setOfflineForTesting(_ isOffline: Bool, deviceID: String) {
+        if isOffline { offlineDeviceIDs.insert(deviceID) } else { offlineDeviceIDs.remove(deviceID) }
+    }
+
+    /// Test-only: `dismissedAlertIDsByDevice[deviceID]`, so a test can read or seed a device's in-memory
+    /// dismissed set directly (e.g. simulating a dismissal already on file before a `refresh()` that
+    /// should prune it) without going through the real paired-device store's persisted-load path.
+    func dismissedAlertIDsForTesting(deviceID: String) -> Set<String> { dismissedAlertIDsByDevice[deviceID] ?? [] }
+    func setDismissedAlertIDsForTesting(_ ids: Set<String>, deviceID: String) { dismissedAlertIDsByDevice[deviceID] = ids }
 
     /// Reconciles the coordinator's tracked devices to the current paired set and opens whatever it asks
     /// for. Called on every event that can change which devices should have a stream (foreground resume,
@@ -1634,12 +1893,53 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // never republishes the overview left over from before it was removed, or reconnects through a
         // client built for a record that no longer applies. Read from both caches' own keys, not just
         // one: a device still `.opening` with no push yet has a cached client but no cached overview.
-        let staleDeviceIDs = Set(deviceOverviews.keys).union(nonActiveDeviceStreamClients.keys).subtracting(desiredIDs)
+        let staleDeviceIDs = Set(deviceOverviews.keys).union(nonActiveDeviceStreamClients.keys).union(offlineDeviceIDs).subtracting(desiredIDs)
         for deviceID in staleDeviceIDs {
             deviceOverviews[deviceID] = nil
-            nonActiveDeviceStreamClients[deviceID] = nil
+            invalidateNonSelectedDeviceConnection(deviceID: deviceID)
+            offlineDeviceIDs.remove(deviceID)
         }
+        // A dropped device's own overview above is not routed through `publishOverview`, so its retained
+        // screens need this call spelled out here: this is also what drops them on a Demo Mode toggle,
+        // since Demo Mode swaps the whole paired set and every real device becomes stale the same way.
+        if !staleDeviceIDs.isEmpty { pruneRetainedTerminalScreens() }
         for (deviceID, attempt) in outcome.devicesToOpen { openDeviceStream(deviceID: deviceID, attempt: attempt) }
+    }
+
+    /// Drops `deviceID`'s cached stream client and row-mutation command channel and bumps its mutation
+    /// identity, so a `MutationConnectionToken` captured before this call is recognized as stale rather
+    /// than applying a response against a connection the app no longer dials. Called for every role change
+    /// (select, deselect, Demo Mode) as well as an unpair or a re-pair, so this is also where a device's
+    /// `blockedNonSelectedDeviceIDs` mark clears: a role change or a fresh pairing means a fresh
+    /// connection, and the block a previous connection's probe found must not outlive it. A device that is
+    /// genuinely still on an incompatible daemon re-earns the mark the next time its stream fails.
+    private func invalidateNonSelectedDeviceConnection(deviceID: String) {
+        if let channel = nonSelectedDeviceCommandChannels[deviceID] { Task { await channel.close() } }
+        nonSelectedDeviceCommandChannels[deviceID] = nil
+        nonActiveDeviceStreamClients[deviceID] = nil
+        nonSelectedDeviceIdentities[deviceID, default: 0] &+= 1
+        blockedNonSelectedDeviceIDs.remove(deviceID)
+        // A reset still in flight for the discarded client is no longer anything a redial should wait
+        // on; leaving it in place would let a *new* cached client for the same device id be awaited
+        // against a task that reset a client already gone.
+        nonSelectedDeviceForegroundResetTasks[deviceID] = nil
+    }
+
+    /// Drops `deviceID`'s cached stream client and row-mutation command channel, the same as
+    /// `invalidateNonSelectedDeviceConnection`, but leaves its mutation identity untouched. Used when
+    /// `deviceID`'s host list widens: the daemon on the other end has not changed, only the addresses it
+    /// can be reached at, so the next lookup should rebuild against the fuller list, but a
+    /// `MutationConnectionToken` already captured for an in-flight mutation must still read as current.
+    /// Without this distinction, a Run/Restart whose own response is what revealed the wider host list
+    /// would invalidate its own token before `performMutationReturningSession` re-checks it, and silently
+    /// drop a session the mutation actually produced.
+    private func rebuildNonSelectedDeviceConnectionForWidenedHosts(deviceID: String) {
+        if let channel = nonSelectedDeviceCommandChannels[deviceID] { Task { await channel.close() } }
+        nonSelectedDeviceCommandChannels[deviceID] = nil
+        nonActiveDeviceStreamClients[deviceID] = nil
+        // Same reasoning as `invalidateNonSelectedDeviceConnection`: a reset in flight for the discarded
+        // client must not be awaited by a redial that ends up with the next-built client instead.
+        nonSelectedDeviceForegroundResetTasks[deviceID] = nil
     }
 
     /// Whether `record` has what a stream needs to authenticate: a stored Keychain token and a
@@ -1713,9 +2013,77 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard let record = pairedDevices.first(where: { $0.id == deviceID }) else { return nil }
         let deviceSettings = SpacesMobileDeviceStore.settings(from: record, installationID: settings.installationID)
         if let cached = nonActiveDeviceStreamClients[deviceID], cached.settings == deviceSettings { return cached.client }
+        invalidateNonSelectedDeviceConnection(deviceID: deviceID)
         let client = SpacesDeviceAPIClient(settings: deviceSettings, deviceName: UIDevice.current.name)
         nonActiveDeviceStreamClients[deviceID] = (client: client, settings: deviceSettings)
         return client
+    }
+
+    /// The client, settings, and identity a terminal viewer should use for one paired device: the selected
+    /// device's is just one instance of this, not a separate path. Opening a terminal from a tapped
+    /// Agents/Alerts row for another paired device resolves its context the same way that device's
+    /// overview stream already does, so a viewer never juggles a second, independently-resolved client for
+    /// the same device.
+    struct DeviceTerminalContext {
+        let deviceID: String
+        let client: SpacesDeviceAPIClient
+        let settings: SpacesMobileConnectionSettings
+    }
+
+    /// Builds `deviceID`'s terminal context, or nil when it is not (or no longer) a paired device.
+    /// Reuses `overviewStreamClient(forDeviceID:)`'s cached client rather than building a second one: the
+    /// same client already keeps that device's endpoint resolver warm for its overview stream, so a
+    /// terminal opened on it starts from a proven address instead of re-racing every candidate host.
+    func terminalContext(forDeviceID deviceID: String) -> DeviceTerminalContext? {
+        guard let client = overviewStreamClient(forDeviceID: deviceID) else { return nil }
+        guard deviceID != activeDeviceID else { return DeviceTerminalContext(deviceID: deviceID, client: client, settings: settings) }
+        guard let record = pairedDevices.first(where: { $0.id == deviceID }) else { return nil }
+        let deviceSettings = SpacesMobileDeviceStore.settings(from: record, installationID: settings.installationID)
+        return DeviceTerminalContext(deviceID: deviceID, client: client, settings: deviceSettings)
+    }
+
+    /// A row mutation's connection and staleness token, resolved once at the start of `run`/`restart`/
+    /// `stop` and reused for the request and its response.
+    private struct MutationConnection {
+        let client: SpacesDeviceAPIClient
+        let channel: SpacesDeviceAPICommandChannel
+        let token: MutationConnectionToken
+    }
+
+    /// Whether a device was selected plus a connection identity, captured before a row mutation's request
+    /// goes out and compared again once it resumes. The selected device's identity is `overviewIdentity`;
+    /// another device's is `nonSelectedDeviceIdentities[deviceID]`. `isCurrent(_:)` requires both the
+    /// identity and the selected-ness to still match: if the device was made selected (or stopped being
+    /// selected) while the mutation was in flight, its connection changed shape underneath it (from the
+    /// per-device cached client to the shared `bridgeClient`, or back), so a response captured against the
+    /// old shape is treated as stale, the same as an identity mismatch.
+    private struct MutationConnectionToken: Equatable {
+        let deviceID: String
+        let isSelected: Bool
+        let identity: Int
+    }
+
+    private func isCurrent(_ token: MutationConnectionToken) -> Bool {
+        guard (token.deviceID == activeDeviceID) == token.isSelected else { return false }
+        return token.isSelected ? overviewIdentity == token.identity : nonSelectedDeviceIdentities[token.deviceID, default: 0] == token.identity
+    }
+
+    /// Resolves `deviceID`'s connection for a row mutation. The selected device reuses the shared
+    /// `bridgeClient`/`commandChannel`; any other paired device reuses `overviewStreamClient(forDeviceID:)`'s
+    /// cached client with a command channel created on first use and cached in `nonSelectedDeviceCommandChannels`.
+    /// Nil when `deviceID` is not (or no longer) paired.
+    private func mutationConnection(forDeviceID deviceID: String) -> MutationConnection? {
+        if deviceID == activeDeviceID {
+            return MutationConnection(
+                client: bridgeClient, channel: commandChannel,
+                token: MutationConnectionToken(deviceID: deviceID, isSelected: true, identity: overviewIdentity))
+        }
+        guard let client = overviewStreamClient(forDeviceID: deviceID) else { return nil }
+        let channel = nonSelectedDeviceCommandChannels[deviceID] ?? client.makeCommandChannel()
+        nonSelectedDeviceCommandChannels[deviceID] = channel
+        return MutationConnection(
+            client: client, channel: channel,
+            token: MutationConnectionToken(deviceID: deviceID, isSelected: false, identity: nonSelectedDeviceIdentities[deviceID, default: 0]))
     }
 
     /// Opens `deviceID`'s overview stream for the coordinator's `attempt`. `attempt` rides in both stream
@@ -1797,50 +2165,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // A queued payload can still arrive after `reconcile` already removed and cancelled this device's
         // subscription (unpaired, or Demo Mode toggled off); resurrecting a connection record for a device
         // no longer paired would leak state `reconcile` never has a reason to clean up again.
-        guard let record = pairedDevices.first(where: { $0.id == deviceID }) else { return }
+        guard pairedDevices.contains(where: { $0.id == deviceID }) else { return }
         guard overviewStreamSubscriptions.isCurrentAttempt(deviceID: deviceID, attempt: attempt) else { return }
         overviewStreamSubscriptions.noteOverviewDelivered(deviceID: deviceID, attempt: attempt)
-        deviceOverviews[deviceID] = overview
         guard deviceID == activeDeviceID else {
-            // Learned here rather than only inside `applyFetchedOverview` below (the active device's own
-            // path): every paired device's stream pushes its daemon's reachable addresses on every
-            // connection, and a non-selected device that gains Tailscale must not have to wait until it
-            // is selected to persist that address, the same way the Mac sidebar merges hosts for every
-            // device's subscription unconditionally (`SpacesDeviceClient.subscribeOverview`). This
-            // device's own stream keeps dialing whatever it already resolved until its own next
-            // reconnect, the same accepted residual `rebuildLiveClientAfterHostsBackfill` documents for
-            // the active device; dropping its cached client is what makes that next reconnect see the
-            // widened list instead of the one it was built from.
-            let hostsMerged = SpacesMobileDeviceStore.mergeAdvertisedHosts(
-                overview.daemonStatus.deviceAPIAddresses, certificateFingerprint: record.certificateFingerprint)
-            // `onProvenHost` -> `reportProvenHost` persists a newly proven host by hopping to the main
-            // queue from inside this same stream's connect, before the stream's first frame gets its own
-            // main-queue hop to `handleDeviceStreamOverview` (see `reportProvenHost`'s doc comment: the
-            // queue is FIFO), so the persisted `activeHost` read here already reflects this frame's own
-            // connect when it changed, never a stale value from before it. `record.activeHost` is the
-            // in-memory snapshot this call already holds, so a mismatch means only this comparison, not a
-            // real read, is what is stale.
-            let provenHostChanged = SpacesMobileDeviceStore.activeHost(certificateFingerprint: record.certificateFingerprint) != record.activeHost
-            if hostsMerged || provenHostChanged {
-                // `mergeAdvertisedHosts` and a proven-host update each only touch the persisted store;
-                // `pairedDevices` is a separate in-memory snapshot (the same gap `updateBrowserRoutes`
-                // reloads for the active device's own address label) that `ConnectionSettingsView` reads
-                // to show the address in use, so either change needs this reload to actually reach the
-                // screen. One reload covers both: a frame that merges new hosts and proves a new winner in
-                // the same connect (the common case for a first connect to a freshly widened candidate
-                // list) must not reload twice.
-                pairedDevices = SpacesMobileDeviceStore.load(fallbackSettings: settings).devices
-                // Only a widened host list invalidates the cached client: `overviewStreamClient(forDeviceID:)`
-                // would otherwise keep dialing the narrower list it was built from (the same accepted
-                // residual `rebuildLiveClientAfterHostsBackfill` documents for the active device). A proven
-                // host alone changes nothing the client needs rebuilt for (the stream that just proved it
-                // is already open and already on it), and `SpacesMobileConnectionSettings` excludes
-                // `activeHost` from its `Equatable` conformance, so reloading `pairedDevices` above never
-                // trips the cache's own settings-changed check either.
-                if hostsMerged { nonActiveDeviceStreamClients[deviceID] = nil }
-            }
+            acceptNonSelectedDeviceOverview(overview, deviceID: deviceID)
             return
         }
+        deviceOverviews[deviceID] = overview
+        offlineDeviceIDs.remove(deviceID)
         let identity = overviewIdentity
         let mutationGenerationAtFetch = mutationGeneration
         // Each frame applies in its own task, suspended at `applyFetchedOverview`'s internal await; a
@@ -1857,12 +2190,67 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    /// Routes a stream failure for `deviceID`. Only the selected device's failure surfaces anything: it
-    /// runs the shared failure handler so a stream failure raises the same delayed Connection Error alert
-    /// an explicit refresh failure did. A non-selected device's failure is left to the coordinator's own
-    /// retry bookkeeping.
+    /// Accepts one non-selected device's overview: writes it into `deviceOverviews`, clears its offline
+    /// marking, prunes its dismissals and every device's retained screens against it, and merges any newly
+    /// advertised hosts. Shared by a stream push (`handleDeviceStreamOverview`) and a row mutation's
+    /// response for the same device (`applyMutationResponse(_:token:)`), so the Agents/Alerts tabs and the
+    /// terminal detail read this device's state the same way regardless of which source produced it.
+    private func acceptNonSelectedDeviceOverview(_ overview: SpacesDeviceOverviewPayload, deviceID: String) {
+        deviceOverviews[deviceID] = overview
+        offlineDeviceIDs.remove(deviceID)
+        nonSelectedDeviceDeliveryGenerations[deviceID, default: 0] &+= 1
+        // A decoded, delivered overview is the freshest word on the device: a compatible one clears any
+        // block a previous stream failure's handshake found, the same way a fresh success clears the
+        // active device's own `compatibility`. One that reports incompatible inline leaves the mark (it is
+        // about to be recomputed as blocked anyway, by `overview(forDeviceID:)`'s own `raw.daemonStatus`
+        // check just below the mark it reads), so this never briefly "unblocks" a device this same payload
+        // still shows as incompatible.
+        if SpacesWireCompatibility.evaluate(daemonStatus: overview.daemonStatus).isCompatible { blockedNonSelectedDeviceIDs.remove(deviceID) }
+        // Pruned here for the same reason `publishOverview` prunes the selected device's own bucket and
+        // retained screens: a non-selected device's overview is just as authoritative about what it still
+        // lists, and the Agents/Alerts tabs read its dismissals and the terminal detail reads its retained
+        // screens regardless of which device is selected.
+        pruneDismissedAlertIDs(deviceID: deviceID, against: overview)
+        pruneRetainedTerminalScreens()
+        guard let record = pairedDevices.first(where: { $0.id == deviceID }) else { return }
+        // Every paired device's stream pushes its daemon's reachable addresses on every connection, the
+        // same way the Mac sidebar merges hosts for every device's subscription unconditionally
+        // (`SpacesDeviceClient.subscribeOverview`), so a non-selected device that gains Tailscale need not
+        // wait until it is selected to persist that address.
+        let hostsMerged = SpacesMobileDeviceStore.mergeAdvertisedHosts(
+            overview.daemonStatus.deviceAPIAddresses, certificateFingerprint: record.certificateFingerprint)
+        let provenHostChanged = SpacesMobileDeviceStore.activeHost(certificateFingerprint: record.certificateFingerprint) != record.activeHost
+        guard hostsMerged || provenHostChanged else { return }
+        // `mergeAdvertisedHosts` and a proven-host update each only touch the persisted store; `pairedDevices`
+        // is a separate in-memory snapshot that `ConnectionSettingsView` reads to show the address in use,
+        // so either change needs this reload to actually reach the screen.
+        pairedDevices = SpacesMobileDeviceStore.load(fallbackSettings: settings).devices
+        // Only a widened host list rebuilds the cached client and channel: a proven host alone changes
+        // nothing they need rebuilt for (the stream that just proved it is already open and already on
+        // it), and `SpacesMobileConnectionSettings` excludes `activeHost` from its `Equatable` conformance,
+        // so reloading `pairedDevices` above never trips the cache's own settings-changed check either.
+        // The identity-preserving rebuild, not `invalidateNonSelectedDeviceConnection`: this same overview
+        // can be a Run/Restart's own response, still in flight back to `performMutationReturningSession`,
+        // and that caller re-checks `isCurrent(connection.token)` right after this call returns: bumping
+        // the identity here would make a mutation invalidate its own token before its caller can read the
+        // session it just produced.
+        if hostsMerged { rebuildNonSelectedDeviceConnectionForWidenedHosts(deviceID: deviceID) }
+    }
+
+    /// Routes a stream failure for `deviceID`. The selected device's failure marks it offline immediately
+    /// (`offlineDeviceIDs`), no grace period, matching the Mac sidebar's own offline rule, and runs the
+    /// shared failure handler so it raises the same delayed Connection Error alert an explicit refresh
+    /// failure did. A non-selected device's failure is classified first, by `classifyNonSelectedDeviceStreamFailure`,
+    /// rather than marked offline on the spot: a decode failure from a daemon that has moved to a wire
+    /// version this app cannot read looks the same at this call site as a genuinely unreachable device, and
+    /// only the classifier's own frozen-core probe (decodable across versions) can tell them apart before
+    /// either marking is applied.
     private func handleDeviceStreamFailure(deviceID: String, error: Error?) {
-        guard deviceID == activeDeviceID else { return }
+        guard deviceID == activeDeviceID else {
+            classifyNonSelectedDeviceStreamFailure(deviceID: deviceID)
+            return
+        }
+        offlineDeviceIDs.insert(deviceID)
         let identity = overviewIdentity
         let mutationGenerationAtFetch = mutationGeneration
         // Captured at the moment the failure is observed (a stream failure has no attempt start to
@@ -1883,6 +2271,59 @@ private enum SpacesMobileMutationTimeoutRecovery {
             _ = await handleOverviewFailure(
                 identity: identity, mutationGenerationAtFetch: mutationGenerationAtFetch, deliveryGenerationAtAttempt: deliveryGenerationAtFailure,
                 attemptStartedAt: attemptStartedAt, monitoringGeneration: monitoringGeneration, error: effectiveError)
+        }
+    }
+
+    /// Classifies a non-selected device's stream failure with the same frozen-core handshake
+    /// `refreshCompatibility` uses for the selected device (`bridgeClient.fetchDaemonStatus`), through
+    /// `mutationConnection(forDeviceID:)` rather than a second client lookup: that is the same resolved
+    /// client and channel a row mutation against this device would use, so the probe rides the connection
+    /// the app already trusts for it. One probe per failure, no retry loop of its own: the stream
+    /// coordinator's own reconnect backoff is what paces how soon a failure (and so a fresh probe) can
+    /// recur.
+    ///
+    /// An incompatible verdict marks the device blocked (`blockedNonSelectedDeviceIDs`), which
+    /// `overview(forDeviceID:)` reads to drop its rows and badge count with no offline marking, per spec:
+    /// blocked, not offline. Anything else (unreachable, or compatible but the overview stream failed for
+    /// some other reason) marks it offline instead, the ordinary way.
+    ///
+    /// The token captured before the probe's `await` is the same `MutationConnectionToken` a row mutation
+    /// captures, and `isCurrent(_:)` is the same staleness check: if the device was selected, deselected,
+    /// unpaired, or re-paired while the probe was in flight, its connection changed shape underneath it,
+    /// and a verdict resolved against the old shape must not land, the same reasoning `mutationConnection`'s
+    /// own doc comment gives for a mutation response.
+    ///
+    /// `isCurrent(_:)` alone is not enough: the connection's identity does not change just because the
+    /// stream's own retry reconnected and delivered a fresh overview while this probe was still in flight
+    /// (a slow handshake racing a quick reconnect is exactly the case a fixed, growing backoff cannot rule
+    /// out), and a quiet device may never push again to correct a stale verdict applied on top of that
+    /// fresher, already-settled state. `deliveryGenerationAtFailure`, captured before the probe starts and
+    /// re-checked against `nonSelectedDeviceDeliveryGenerations[deviceID]` after, is what catches that: any
+    /// overview accepted for this device in between (`acceptNonSelectedDeviceOverview`, from either its
+    /// stream or a mutation response) has already said the last word, so this probe's own answer has
+    /// nothing left to contribute and must not overwrite it.
+    private func classifyNonSelectedDeviceStreamFailure(deviceID: String) {
+        guard let connection = mutationConnection(forDeviceID: deviceID) else { return }
+        let token = connection.token
+        let deliveryGenerationAtFailure = nonSelectedDeviceDeliveryGenerations[deviceID, default: 0]
+        let isStillCurrent = {
+            self.isCurrent(token) && self.nonSelectedDeviceDeliveryGenerations[deviceID, default: 0] == deliveryGenerationAtFailure
+        }
+        Task {
+            do {
+                let status = try await connection.client.fetchDaemonStatus(commandChannel: connection.channel)
+                guard isStillCurrent() else { return }
+                if SpacesWireCompatibility.evaluate(daemonStatus: status).isCompatible {
+                    offlineDeviceIDs.insert(deviceID)
+                } else {
+                    blockedNonSelectedDeviceIDs.insert(deviceID)
+                    offlineDeviceIDs.remove(deviceID)
+                }
+            } catch is CancellationError {} catch {
+                guard isStillCurrent() else { return }
+                // Could not read the handshake either: an unreachable device, not a version mismatch.
+                offlineDeviceIDs.insert(deviceID)
+            }
         }
     }
 
@@ -2118,6 +2559,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // banner, and an outage that starts while it is open goes unreported until the user leaves it.
         // Accepted: the ended pane is what the user is looking at, nothing on it can change, and the next
         // failure after leaving raises the alert with the streak intact.
+        // The open terminal can also belong to another paired device (opened from Agents or Alerts), whose
+        // banner says nothing about this device. Still held back, by product decision: an alert about the
+        // selected device must not interrupt the terminal the user is working in, and this device's
+        // Agents/Alerts rows already read offline in the meantime.
         guard activeTerminalSessionID == nil else { return outcome }
         errorMessage = error.localizedDescription
         return outcome
@@ -2748,7 +3193,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         workspaceCreateOptions = nil
         connectionNotice = nil
         pendingPairingLink = nil
-        loadDismissedAlertIDsForActiveDevice()
+        loadDismissedAlertIDsForPairedDevices()
         pruneDismissedAlertsForUnknownDevices()
         if let deviceID = activeDeviceID {
             // This call rebuilds `bridgeClient` above unconditionally, so a re-pair of the device already
@@ -2765,7 +3210,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // would sit there until the new stream's first push, or indefinitely if the new connection
             // never connects) and would merge its advertised addresses back into the persisted hosts.
             overviewStreamSubscriptions.resetForUserRetry(deviceID: deviceID)?.cancel()
-            nonActiveDeviceStreamClients[deviceID] = nil
+            // The full invalidation, not a bare cache clear: `deviceID` can carry a leftover
+            // `nonActiveDeviceStreamClients`/`nonSelectedDeviceCommandChannels` entry from before this
+            // device became selected (it was paired as a secondary device, or this same re-pair is what
+            // just made it active), built against the credential this re-pair is replacing. Only nilling
+            // the client cache would leave that entry's command channel open and its mutation identity
+            // unchanged, so a mutation issued through it before this call (back when it was still that
+            // stale client) would still read as current when its response lands and apply a result read
+            // with the credential this re-pair just retired.
+            invalidateNonSelectedDeviceConnection(deviceID: deviceID)
             deviceOverviews[deviceID] = nil
         }
         reconcileDeviceStreamsAfterIdentityChange()
@@ -2882,8 +3335,23 @@ private enum SpacesMobileMutationTimeoutRecovery {
     @ObservationIgnored private var latestForegroundResumeToken: UInt64 = 0
     @ObservationIgnored private var foregroundEndpointRefreshWaiters: [CheckedContinuation<Void, Never>] = []
 
+    /// Whether a non-selected device's own foreground redial still owes
+    /// `resetDeviceStreamEndpointsForForeground()` having recorded this backgrounding's per-device reset
+    /// tasks (`nonSelectedDeviceForegroundResetTasks`). Mirrors `isForegroundEndpointRefreshPending`'s own
+    /// reason for existing: SwiftUI gives no ordering between the shell's `scenePhase` observer (which
+    /// calls `resetDeviceStreamEndpointsForForeground()`) and a terminal detail's own, so a detail that
+    /// reaches `.active` first would find no task recorded yet for its device and redial the stale
+    /// pre-background address before the reset even starts. No generation/token pair like that gate's,
+    /// because its release site (`resetDeviceStreamEndpointsForForeground()`) runs to completion with no
+    /// `await` in between arming and releasing, so there is no window for a second backgrounding to
+    /// interleave and make a release answer for the wrong cycle.
+    @ObservationIgnored private var isNonSelectedForegroundResetPending = false
+    @ObservationIgnored private var nonSelectedForegroundResetWaiters: [CheckedContinuation<Void, Never>] = []
+
     /// Records that the app left the foreground, arming the gate `waitForForegroundEndpointRefresh()`
-    /// holds callers behind for this backgrounding.
+    /// holds callers behind for this backgrounding, and the one above it that a non-selected device's own
+    /// redial holds behind until `resetDeviceStreamEndpointsForForeground()` has started that device's
+    /// reset.
     ///
     /// Armed on the way out rather than on the way back in: SwiftUI gives no ordering between the shell's
     /// `scenePhase` observer and an open detail's, so a viewer that reaches `.active` first would find no
@@ -2892,6 +3360,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     func noteBackgroundedForEndpointRefresh() {
         foregroundEndpointRefreshGeneration &+= 1
         isForegroundEndpointRefreshPending = true
+        isNonSelectedForegroundResetPending = true
     }
 
     /// Arms the gate from the shell's very first scene phase, for an app that mounts with the scene
@@ -2923,6 +3392,72 @@ private enum SpacesMobileMutationTimeoutRecovery {
         await withCheckedContinuation { foregroundEndpointRefreshWaiters.append($0) }
     }
 
+    /// Client-scoped counterpart for a terminal viewer's foreground redial. Keyed on the exact client
+    /// instance the viewer captured when its route opened (`DeviceTerminalContext.client`), not on
+    /// `deviceID`'s current role: a device's role (selected/non-selected) can change after that capture
+    /// (a device switch, in either direction) while the viewer goes on dialing through the same client
+    /// object regardless, and `selectDevice`/`overviewStreamClient(forDeviceID:)` each hand out a fresh
+    /// client instance on a role change rather than reusing the old one, so the device's *current* role is
+    /// not necessarily the captured client's own.
+    ///
+    /// - The captured client is still `bridgeClient` (the device was selected when the viewer opened and
+    ///   still is): waits on the gate above, since `resumeFromBackground()` resets exactly this instance's
+    ///   command path and releases the gate only once that reset lands.
+    /// - Otherwise: never waits on the selected gate, since nothing about the selected device's own
+    ///   refresh says anything about this client (matches the previous device-scoped behavior for a
+    ///   non-selected device that stays non-selected). If the client is still the cached client for its
+    ///   own device, this call first waits for `resetDeviceStreamEndpointsForForeground()` to have even
+    ///   started this device's reset (`waitForNonSelectedForegroundResetToStart()`, needed because
+    ///   SwiftUI gives no ordering between the shell's `.active` callback and this one, so this call can
+    ///   run first and find nothing recorded yet), then awaits that same in-flight reset via
+    ///   `nonSelectedDeviceForegroundResetTasks` before returning, so the redial that follows never reads
+    ///   a still-stale address. If the client has instead stopped being the cached client for its own
+    ///   device (orphaned by a role change since the viewer opened: it was `bridgeClient` and the device
+    ///   has since been deselected, or it was a `nonActiveDeviceStreamClients` entry the device has since
+    ///   been selected away from), nothing else resets it going forward:
+    ///   `resetDeviceStreamEndpointsForForeground()` only walks `bridgeClient` and the *current*
+    ///   `nonActiveDeviceStreamClients` entries, neither of which is this stale instance anymore. Its
+    ///   resolvers are reset in place here instead, awaited so the reset lands before the redial that
+    ///   follows this call.
+    func waitForForegroundEndpointRefresh(client: SpacesDeviceAPIClient, deviceID: String) async {
+        if client.hasSameIdentity(as: bridgeClient) {
+            await waitForForegroundEndpointRefresh()
+            return
+        }
+        guard !isCurrentTerminalClient(client, forDeviceID: deviceID) else {
+            await waitForNonSelectedForegroundResetToStart()
+            await nonSelectedDeviceForegroundResetTasks[deviceID]?.value
+            return
+        }
+        client.resetOverviewStreamEndpointResolution()
+        await client.resetEndpointResolution()
+    }
+
+    /// Suspends until `resetDeviceStreamEndpointsForForeground()` has recorded this backgrounding's
+    /// per-device reset tasks, or returns immediately when none is owed. See
+    /// `isNonSelectedForegroundResetPending`'s doc comment for why a non-selected terminal's own
+    /// foreground redial needs this ahead of awaiting its device's own recorded task.
+    ///
+    /// A waiter cannot be stranded, for the same reason `waitForForegroundEndpointRefresh()`'s own
+    /// documents: `RootTabView` runs `resetDeviceStreamEndpointsForForeground()` on every `.active`, so
+    /// the backgrounding that armed this gate is always followed either by that call or by the app being
+    /// terminated, which takes the waiter with it.
+    private func waitForNonSelectedForegroundResetToStart() async {
+        guard isNonSelectedForegroundResetPending else { return }
+        await withCheckedContinuation { nonSelectedForegroundResetWaiters.append($0) }
+    }
+
+    /// Whether `client` is still the value actively serving `deviceID` right now: `bridgeClient` for the
+    /// selected device, or `nonActiveDeviceStreamClients[deviceID]`'s cached client for any other paired
+    /// device. Read-only by design (unlike `overviewStreamClient(forDeviceID:)`, which can build and
+    /// cache a fresh client as a side effect of a settings change): a foreground-refresh identity check
+    /// must never itself be what causes a client to be replaced.
+    private func isCurrentTerminalClient(_ client: SpacesDeviceAPIClient, forDeviceID deviceID: String) -> Bool {
+        guard deviceID != activeDeviceID else { return client.hasSameIdentity(as: bridgeClient) }
+        guard let cached = nonActiveDeviceStreamClients[deviceID]?.client else { return false }
+        return client.hasSameIdentity(as: cached)
+    }
+
     /// Opens the gate, but only for the newest resume of the backgrounding still outstanding: a later
     /// `noteBackgroundedForEndpointRefresh()`, or a later resume of the same backgrounding, leaves the
     /// gate armed for that later call to release. Everyone waiting is released together, since the gate
@@ -2936,12 +3471,26 @@ private enum SpacesMobileMutationTimeoutRecovery {
         for waiter in waiters { waiter.resume() }
     }
 
+    /// Opens `isNonSelectedForegroundResetPending`'s gate, releasing every non-selected device's own
+    /// foreground redial that was waiting only for the reset to have started (not for it to have landed:
+    /// each waiter still separately awaits its own device's recorded task after this). No generation check
+    /// like `releaseForegroundEndpointRefreshWaiters` needs: see `isNonSelectedForegroundResetPending`'s
+    /// doc comment for why this gate has no window for a release to answer for the wrong backgrounding.
+    private func releaseNonSelectedForegroundResetWaiters() {
+        guard isNonSelectedForegroundResetPending else { return }
+        isNonSelectedForegroundResetPending = false
+        let waiters = nonSelectedForegroundResetWaiters
+        nonSelectedForegroundResetWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
     func selectDevice(id: String) {
         guard !isDemoModeEnabled else {
             connectionNotice = Self.demoModeGuardNotice
             return
         }
         guard let deviceState = SpacesMobileDeviceStore.select(deviceID: id, installationID: settings.installationID) else { return }
+        let previousDeviceID = activeDeviceID
         let previousCommandChannel = commandChannel
         // Cleared before the identity moves, not after: what the previous device reported is read as a
         // statement about whichever device `activeDeviceID` names, so the two must never be crossed, not
@@ -2953,6 +3502,14 @@ private enum SpacesMobileMutationTimeoutRecovery {
         bridgeClient = SpacesDeviceAPIClient(settings: settings, deviceName: UIDevice.current.name)
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
+        // The device losing selection and the device gaining it both leave a non-selected identity
+        // behind them (see `nonSelectedDeviceIdentities`'s doc comment): without this, a mutation token
+        // captured against `id` while it was still non-selected could read as current again after `id`
+        // is selected and then deselected back, since nothing else bumps that identity across the trip.
+        // `previousDeviceID` reads nil only when nothing was selected before (first-ever selection), which
+        // leaves nothing to bump.
+        if let previousDeviceID { invalidateNonSelectedDeviceConnection(deviceID: previousDeviceID) }
+        invalidateNonSelectedDeviceConnection(deviceID: id)
         SpacesMobileSettingsStore.save(settings)
         // The report names the device it was raised for, so it goes with that device rather than being
         // read as a statement about the one just switched to. Its mark survives: the device it describes
@@ -2961,7 +3518,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         workspaceCreateOptions = nil
         connectionNotice = nil
         errorMessage = nil
-        loadDismissedAlertIDsForActiveDevice()
+        loadDismissedAlertIDsForPairedDevices()
         reconcileDeviceStreamsAfterIdentityChange()
         Task { await previousCommandChannel.close() }
     }
@@ -2976,9 +3533,20 @@ private enum SpacesMobileMutationTimeoutRecovery {
             connectionNotice = Self.demoModeGuardNotice
             return
         }
+        let previousDeviceID = activeDeviceID
         let previousCommandChannel = commandChannel
         let deviceState = SpacesMobileDeviceStore.remove(deviceID: id, fallbackSettings: settings)
-        // Cleared before the identity moves, for the reason `selectDevice` clears it there.
+        // Drops `id`'s own cached overview, client/channel, and mutation identity directly, rather than
+        // leaving it to `reconcileDeviceStreams`'s stale-device cleanup: that cleanup only runs while
+        // `overviewStreamSubscriptions.isEnabled` (streams are foreground-only), so without this an unpair
+        // made while streams happen to be stopped would leave a removed device's state in place, and a
+        // mutation already in flight against it could land afterward, its response still reading as
+        // current and resurrecting `deviceOverviews[id]` for a device the app no longer shows anywhere.
+        deviceOverviews[id] = nil
+        invalidateNonSelectedDeviceConnection(deviceID: id)
+        offlineDeviceIDs.remove(id)
+        // Cleared before the identity moves, for the reason `selectDevice` clears it there. Runs after the
+        // drop above so its retained-screen prune reads `deviceOverviews` with `id` already gone.
         clearActiveDeviceFacts()
         settings = deviceState.settings
         pairedDevices = deviceState.devices
@@ -2986,12 +3554,19 @@ private enum SpacesMobileMutationTimeoutRecovery {
         bridgeClient = SpacesDeviceAPIClient(settings: settings, deviceName: UIDevice.current.name)
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
+        // Removing a device that was active hands selection to a fallback device, the same role change
+        // `selectDevice` makes; bump both ends of it for the reason given there. `id` itself is already
+        // invalidated above regardless of which end of the change it was on. Either side can read nil
+        // (no device was active before, or none is active after removing the last paired device), which
+        // leaves nothing to bump on that side.
+        if let previousDeviceID { invalidateNonSelectedDeviceConnection(deviceID: previousDeviceID) }
+        if let activeDeviceID { invalidateNonSelectedDeviceConnection(deviceID: activeDeviceID) }
         SpacesMobileSettingsStore.save(settings)
         stagedApplyDidNotLandAlert = nil
         forgetStagedApplyState(deviceID: id)
         workspaceCreateOptions = nil
         connectionNotice = nil
-        loadDismissedAlertIDsForActiveDevice()
+        loadDismissedAlertIDsForPairedDevices()
         pruneDismissedAlertsForUnknownDevices()
         browserRoutingTable.removeDevice(deviceID: id)
         let table = browserRoutingTable
@@ -3030,6 +3605,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             return
         }
         parkedRealDeviceState = SpacesMobileDeviceStoreState(devices: pairedDevices, activeDeviceID: activeDeviceID, settings: settings)
+        let previousDeviceID = activeDeviceID
         let previousCommandChannel = commandChannel
         // Cleared before the identity moves, for the reason `selectDevice` clears it there.
         clearActiveConnectionState()
@@ -3041,8 +3617,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
         bridgeClient = SpacesDeviceAPIClient(settings: demoSettings, deviceName: UIDevice.current.name, backend: backend)
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
+        // The same role-change bump `selectDevice` makes, for the parked real device losing selection
+        // and the synthetic demo device gaining it. `previousDeviceID` reads nil only when nothing was
+        // selected before, which leaves nothing to bump on that side.
+        if let previousDeviceID { invalidateNonSelectedDeviceConnection(deviceID: previousDeviceID) }
+        invalidateNonSelectedDeviceConnection(deviceID: SpacesMobileDemoDevice.id)
         DemoModeStore.save(true)
-        loadDismissedAlertIDsForActiveDevice()
+        loadDismissedAlertIDsForPairedDevices()
         reconcileDeviceStreamsAfterIdentityChange()
         Task { await previousCommandChannel.close() }
     }
@@ -3050,6 +3631,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     private func disableDemoMode() {
         let restored = parkedRealDeviceState ?? SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileSettingsStore.load())
         parkedRealDeviceState = nil
+        let previousDeviceID = activeDeviceID
         let previousCommandChannel = commandChannel
         // Cleared before the identity moves, for the reason `selectDevice` clears it there.
         clearActiveConnectionState()
@@ -3060,8 +3642,14 @@ private enum SpacesMobileMutationTimeoutRecovery {
         bridgeClient = SpacesDeviceAPIClient(settings: restored.settings, deviceName: UIDevice.current.name)
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
+        // The same role-change bump `selectDevice` makes, for the demo device losing selection and the
+        // restored real device gaining it. Either side can read nil (no device was ever selected before
+        // Demo Mode, or the restored real state has no active device), which leaves nothing to bump on
+        // that side.
+        if let previousDeviceID { invalidateNonSelectedDeviceConnection(deviceID: previousDeviceID) }
+        if let activeDeviceID { invalidateNonSelectedDeviceConnection(deviceID: activeDeviceID) }
         DemoModeStore.save(false)
-        loadDismissedAlertIDsForActiveDevice()
+        loadDismissedAlertIDsForPairedDevices()
         pruneDismissedAlertsForUnknownDevices()
         reconcileDeviceStreamsAfterIdentityChange()
         Task { await previousCommandChannel.close() }
@@ -3070,11 +3658,20 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// What the active device itself reported: the overview, the wire status, and the verdict derived
     /// from it. Every path that points this model at a different device clears these, and clears them
     /// before it changes `activeDeviceID`, so no derivation ever reads one device's facts as the next
-    /// device's.
+    /// device's. Also prunes retained screens immediately, though nilling `overview` here does not by
+    /// itself drop the previous selected device's own: `pruneRetainedTerminalScreens` reads every device,
+    /// including whichever one `activeDeviceID` still names at this instant, through `overview(forDeviceID:)`,
+    /// which falls back to that device's own `deviceOverviews` entry once its `overview` reads nil (see
+    /// that accessor's and the prune's own doc comments), so the previous device's last-known overview
+    /// still vouches for its screens here. A device actually stops being that source of truth only once
+    /// its `deviceOverviews` entry itself is cleared: on unpair (`removeDevice`), on re-pair
+    /// (`applyConnectionSettings`), or once the compatibility gate blocks it (`overview(forDeviceID:)`
+    /// again).
     private func clearActiveDeviceFacts() {
         overview = nil
         daemonStatus = nil
         compatibility = nil
+        pruneRetainedTerminalScreens()
     }
 
     /// Clears every piece of published state tied to the previous active connection, matching what a
@@ -3112,12 +3709,38 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard connectionNotice != message else { return }
         overviewIdentity += 1
         overview = nil
+        pruneRetainedTerminalScreens()
         workspaceCreateOptions = nil
         connectionNotice = message
         pendingPairingLink = nil
         errorMessage = nil
         isShowingConnectionSettings = true
         resetActiveConnectionEndpoint()
+    }
+
+    /// Single entry for any authentication failure raised against a specific device, whether discovered
+    /// by a terminal viewer's own request (`TerminalSessionNavigationModifier`, after its route closes)
+    /// or by a row mutation issued from elsewhere (`handleBridgeError(_:deviceID:)`). The selected device
+    /// gets `handleAuthenticationFailure(message:)`'s full recovery; another device only gets the
+    /// device-named text below (its own stream already reports the rejection as an offline marking via
+    /// `handleDeviceStreamFailure`, with nothing else here to reset) plus the rejection signal above,
+    /// which closes any terminal route still open for it.
+    func handleAuthenticationFailure(message: String, deviceID: String) {
+        guard deviceID == activeDeviceID else {
+            errorMessage = deviceAuthenticationRejectedMessage(deviceID: deviceID)
+            nextDeviceAuthenticationRejectionToken += 1
+            nonSelectedDeviceAuthenticationRejection = DeviceAuthenticationRejection(
+                deviceID: deviceID, token: nextDeviceAuthenticationRejectionToken)
+            return
+        }
+        handleAuthenticationFailure(message: message)
+    }
+
+    /// Text for a paired device that has rejected this iPhone's credential: the only recovery is
+    /// re-pairing through Devices.
+    private func deviceAuthenticationRejectedMessage(deviceID: String) -> String {
+        let deviceName = pairedDevices.first(where: { $0.id == deviceID })?.name ?? "This device"
+        return "\(deviceName) no longer recognizes this iPhone. Open Devices and pair it again."
     }
 
     func preparePairingLink(_ url: URL) { stagePairingLink { try SpacesDevicePairingLink.parse(url) } }
@@ -3138,6 +3761,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
             errorMessage = nil
             isShowingConnectionSettings = true
         } catch { errorMessage = error.localizedDescription }
+    }
+
+    /// A link printed inside a terminal names that terminal's own device when it names none: daemons
+    /// print same-device links unqualified, and the terminal rendering the link may belong to a paired
+    /// device other than the one currently selected, which is what an unqualified link would otherwise
+    /// resolve against. Stamping the selected device's own id is harmless: `openTerminalDeepLink` treats
+    /// `deviceID == activeDeviceID` exactly like an unqualified link.
+    nonisolated static func deepLink(_ link: SpacesTerminalDeepLink, printedOnDeviceID deviceID: String) -> SpacesTerminalDeepLink {
+        guard link.deviceID == nil else { return link }
+        return SpacesTerminalDeepLink(sessionID: link.sessionID, deviceID: deviceID)
     }
 
     /// Focuses the terminal session named by a `spaces://terminal/…` deep link. When the link is
@@ -3190,76 +3823,85 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     func openWorkspaceTerminal(workspaceID: String) async -> SpacesDeviceTerminalSessionSummary? {
-        await performMutationReturningSession {
-            try await bridgeClient.openWorkspaceTerminal(workspaceID: workspaceID, commandChannel: commandChannel)
+        guard let activeDeviceID else { return nil }
+        return await performMutationReturningSession(deviceID: activeDeviceID) { channel, client in
+            try await client.openWorkspaceTerminal(workspaceID: workspaceID, commandChannel: channel)
         }
     }
 
-    func run(row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesDeviceTerminalSessionSummary? {
+    /// Runs a row's process on `deviceID`, the selected device or any other paired one alike: both resolve
+    /// their client and channel through `mutationConnection(forDeviceID:)` and apply the response through
+    /// the same `isCurrent(token)`-gated path (see `performMutationReturningSession`).
+    func run(row: SpacesMobileWorkspaceRuntimeRow, deviceID: String) async -> SpacesDeviceTerminalSessionSummary? {
         let timeoutRecovery = SpacesMobileMutationTimeoutRecovery.requireFreshOverview(previousSessionID: row.sessionID)
         switch row.source {
         case .process(let process):
             guard process.canRun else { return nil }
-            return await performMutationReturningSession(fallbackRowID: row.id, timeoutRecovery: timeoutRecovery) {
-                try await bridgeClient.runWorkspaceProcess(
+            return await performMutationReturningSession(deviceID: deviceID, fallbackRowID: row.id, timeoutRecovery: timeoutRecovery) {
+                channel, client in
+                try await client.runWorkspaceProcess(
                     workspaceID: process.workspaceID, processKey: process.name, processTemplateID: process.templateID ?? process.id,
-                    commandChannel: commandChannel)
+                    commandChannel: channel)
             }
         case .codingAgent, .terminal, .browserSession: return nil
         }
     }
 
-    func performPrimaryAction(for row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesDeviceTerminalSessionSummary? {
-        if let session = terminalSession(for: row) { return session }
-        return await run(row: row)
+    func performPrimaryAction(for row: SpacesMobileWorkspaceRuntimeRow, deviceID: String) async -> SpacesDeviceTerminalSessionSummary? {
+        // `terminalSession(for:)` alone reads the selected device's own `overview`, which is the wrong
+        // evidence for a row from any other paired device's Agents/Alerts entry: it would either resolve
+        // against a different device's sessions or find nothing and re-run an already-running row.
+        if let session = terminalSession(for: row, in: overview(forDeviceID: deviceID)) { return session }
+        return await run(row: row, deviceID: deviceID)
     }
 
-    func stop(row: SpacesMobileWorkspaceRuntimeRow) async {
+    func stop(row: SpacesMobileWorkspaceRuntimeRow, deviceID: String) async {
         guard !isMutating else { return }
+        guard let connection = mutationConnection(forDeviceID: deviceID) else { return }
         isMutating = true
         defer { isMutating = false }
-        let identity = overviewIdentity
         do {
             let response: SpacesDeviceAPIResponse
             switch row.source {
             case .process(let process):
                 guard let processID = process.processID else { return }
-                response = try await bridgeClient.stopWorkspaceProcess(
-                    workspaceID: process.workspaceID, processID: processID, processKey: process.name, commandChannel: commandChannel)
+                response = try await connection.client.stopWorkspaceProcess(
+                    workspaceID: process.workspaceID, processID: processID, processKey: process.name, commandChannel: connection.channel)
             case .codingAgent(let agent):
                 // Automation agents share the workspace terminal stop route: the daemon first cancels an
                 // active automation run, then stops the registered or pre-signal session. The server still
                 // recognizes ordinary configured-process agent rows on this route.
                 if let sessionID = agent.sessionID {
-                    response = try await bridgeClient.stopWorkspaceTerminal(
-                        workspaceID: agent.workspaceID, sessionID: sessionID, commandChannel: commandChannel)
+                    response = try await connection.client.stopWorkspaceTerminal(
+                        workspaceID: agent.workspaceID, sessionID: sessionID, commandChannel: connection.channel)
                 } else if let agentID = agent.agentID {
-                    response = try await bridgeClient.stopCodingAgent(
-                        workspaceID: agent.workspaceID, agentID: agentID, commandChannel: commandChannel)
+                    response = try await connection.client.stopCodingAgent(
+                        workspaceID: agent.workspaceID, agentID: agentID, commandChannel: connection.channel)
                 } else {
                     return
                 }
             case .terminal(let terminal):
                 guard let sessionID = terminal.sessionID else { return }
-                response = try await bridgeClient.stopWorkspaceTerminal(
-                    workspaceID: terminal.workspaceID, sessionID: sessionID, commandChannel: commandChannel)
+                response = try await connection.client.stopWorkspaceTerminal(
+                    workspaceID: terminal.workspaceID, sessionID: sessionID, commandChannel: connection.channel)
             case .browserSession: return
             }
-            await applyMutationResponse(response, identity: identity)
+            await applyMutationResponse(response, token: connection.token)
         } catch {
-            guard identity == overviewIdentity else { return }
-            handleBridgeError(error)
+            guard isCurrent(connection.token) else { return }
+            handleBridgeError(error, deviceID: deviceID)
         }
     }
 
-    func restart(row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesDeviceTerminalSessionSummary? {
+    func restart(row: SpacesMobileWorkspaceRuntimeRow, deviceID: String) async -> SpacesDeviceTerminalSessionSummary? {
         let timeoutRecovery = SpacesMobileMutationTimeoutRecovery.requireFreshOverview(previousSessionID: row.sessionID)
         switch row.source {
         case .process(let process):
             guard let processID = process.processID else { return nil }
-            return await performMutationReturningSession(fallbackRowID: row.id, timeoutRecovery: timeoutRecovery) {
-                try await bridgeClient.restartWorkspaceProcess(
-                    workspaceID: process.workspaceID, processID: processID, processKey: process.name, commandChannel: commandChannel)
+            return await performMutationReturningSession(deviceID: deviceID, fallbackRowID: row.id, timeoutRecovery: timeoutRecovery) {
+                channel, client in
+                try await client.restartWorkspaceProcess(
+                    workspaceID: process.workspaceID, processID: processID, processKey: process.name, commandChannel: channel)
             }
         case .codingAgent, .terminal, .browserSession: return nil
         }
@@ -3821,6 +4463,17 @@ private enum SpacesMobileMutationTimeoutRecovery {
         runtimeRowIndex.byRowID[rowID].flatMap { terminalSession(for: $0, in: overview) }
     }
 
+    /// `refreshedSession(forRowID:)`, scoped to any paired device: the selected device's cached
+    /// `runtimeRowIndex`, or a cold scan of `overview(forDeviceID:)` for any other device (mirrors
+    /// `runtimeRow(forSessionID:deviceID:)`).
+    func refreshedSession(forRowID rowID: String, deviceID: String) -> SpacesDeviceTerminalSessionSummary? {
+        guard deviceID != activeDeviceID else { return refreshedSession(forRowID: rowID) }
+        let deviceOverview = overview(forDeviceID: deviceID)
+        return deviceOverview?.workspaces.flatMap(workspaceRuntimeRows(for:)).first(where: { $0.id == rowID }).flatMap {
+            terminalSession(for: $0, in: deviceOverview)
+        }
+    }
+
     /// See `terminalSession(for:in:)`: a caller reading its own fetch or mutation response's evidence
     /// passes that overview explicitly instead of going through `refreshedSession(forRowID:)`.
     func refreshedSession(forRowID rowID: String, in searchOverview: SpacesDeviceOverviewPayload?) -> SpacesDeviceTerminalSessionSummary? {
@@ -3852,44 +4505,60 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
+    /// `operation` receives the connection's channel and client, so a caller issues its request through
+    /// whichever paired device `deviceID` resolves to (see `mutationConnection(forDeviceID:)`) without
+    /// knowing whether that is the selected device or another one.
     private func performMutationReturningSession(
-        fallbackRowID: String? = nil, timeoutRecovery: SpacesMobileMutationTimeoutRecovery = .acceptCachedOverview,
-        _ operation: () async throws -> SpacesDeviceAPIResponse
+        deviceID: String, fallbackRowID: String? = nil, timeoutRecovery: SpacesMobileMutationTimeoutRecovery = .acceptCachedOverview,
+        _ operation: (SpacesDeviceAPICommandChannel, SpacesDeviceAPIClient) async throws -> SpacesDeviceAPIResponse
     ) async -> SpacesDeviceTerminalSessionSummary? {
         guard !isMutating else { return nil }
+        guard let connection = mutationConnection(forDeviceID: deviceID) else { return nil }
         isMutating = true
         defer { isMutating = false }
-        let identity = overviewIdentity
         do {
-            let response = try await operation()
-            await applyMutationResponse(response, identity: identity)
+            let response = try await operation(connection.channel, connection.client)
+            await applyMutationResponse(response, token: connection.token)
             // The connection changed while the mutation was in flight: the response describes the
             // previous backend, so resolving a session from it would hand back the wrong device's row.
-            guard identity == overviewIdentity else { return nil }
-            // Resolved from `response.overview` — this mutation's own evidence of what it just did — not
-            // from the model's published `overview`. `applyMutationResponse` above gates its publish on
-            // `isOverviewFetchCurrent`, which answers a different question ("is this the freshest
-            // overview-derived fact right now") than the one this call owes its own caller ("did my own
-            // action produce a session"): a fresher, unrelated fetch (another mutation, a delete
-            // reconciliation, a timeout recovery) can bump `mutationGeneration` while this mutation's own
-            // `updateBrowserRoutes` await is suspended and make its publish lose that race even though
-            // the mutation itself fully succeeded. Reading `self.overview` here would then report a
-            // successful Run/Restart/Terminal as a failure, self-healing on the next overview delivery,
-            // but only after the launch flow already showed the wrong answer (#450).
+            guard isCurrent(connection.token) else { return nil }
+            // Resolved from `response.overview`, this mutation's own evidence of what it just did, not
+            // from the model's published state. `applyMutationResponse` above gates its own publish on
+            // freshness, which answers a different question ("is this the newest overview-derived fact
+            // right now") than the one this call owes its caller ("did my own action produce a session"):
+            // a fresher, unrelated fetch can win that race even though this mutation fully succeeded.
+            // Reading published state here would then report a successful Run/Restart/Terminal as a
+            // failure, self-healing on the next overview delivery, but only after already showing the
+            // wrong answer (#450).
             if let sessionID = response.sessionID { return response.overview?.sessions.first(where: { $0.id == sessionID }) }
             if let fallbackRowID { return refreshedSession(forRowID: fallbackRowID, in: response.overview) }
             return nil
         } catch {
-            guard identity == overviewIdentity else { return nil }
+            guard isCurrent(connection.token) else { return nil }
             if let fallbackRowID, isMutationTimeout(error),
-                let session = await reconciledSessionAfterMutationTimeout(rowID: fallbackRowID, timeoutRecovery: timeoutRecovery, identity: identity)
+                let session = await reconciledSessionAfterMutationTimeout(
+                    rowID: fallbackRowID, timeoutRecovery: timeoutRecovery, connection: connection)
             {
                 return session
             }
-            guard identity == overviewIdentity else { return nil }
-            handleBridgeError(error)
+            guard isCurrent(connection.token) else { return nil }
+            handleBridgeError(error, deviceID: deviceID)
             return nil
         }
+    }
+
+    /// Row-mutation counterpart of `applyMutationResponse(_:identity:)`: the selected device delegates to
+    /// it unchanged; another device applies through `acceptNonSelectedDeviceOverview`, the same function
+    /// its stream push uses. A response can land after a newer stream push already updated that device's
+    /// overview; the next push corrects it, the same accepted bound `applyMutationResponse(_:identity:)`
+    /// documents for the selected device.
+    private func applyMutationResponse(_ response: SpacesDeviceAPIResponse, token: MutationConnectionToken) async {
+        guard isCurrent(token) else { return }
+        guard token.isSelected else {
+            if let overview = response.overview { acceptNonSelectedDeviceOverview(overview, deviceID: token.deviceID) }
+            return
+        }
+        await applyMutationResponse(response, identity: token.identity)
     }
 
     /// Publishes a mutation's refreshed overview, but only while the connection it was issued against is
@@ -3986,26 +4655,72 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// repeat payload reproduces the same no-op), and `resolveDeferredWorkspaceDeletions` in particular is
     /// documented to treat "every published overview" — read: every successful fetch, not just the ones
     /// that changed `overview` — as a chance to settle a deferred delete.
+    /// Sessions `overview` says are still worth retaining a painted screen for: still open (not ended) and
+    /// not actively owned by an owner elsewhere. Shared by `pruneRetainedTerminalScreens` across every
+    /// paired device's own overview.
+    private func retainableSessionIDs(in overview: SpacesDeviceOverviewPayload) -> Set<String> {
+        Set(
+            overview.sessions.filter { session in
+                !TerminalViewerModel.isEndedRuntimeState(session.state) && !retainedTerminalScreens.isOwnedElsewhere(session.attachmentSnapshot)
+            }.map(\.id))
+    }
+
+    /// Recomputes `retainedTerminalScreens`' keep-set from the published `overview` plus every paired
+    /// device's last-known overview, and prunes down to just those sessions. Called whenever any device's
+    /// overview changes: the selected device's own publish, and a non-selected device's stream push, so a
+    /// non-selected device's own ended or reassigned session drops its retained screen as promptly as the
+    /// selected device's does, and the selected device publishing never evicts a screen retained for a
+    /// device its own payload says nothing about.
+    ///
+    /// Two sources, unioned, because neither alone covers every construction this app (and its tests) can
+    /// be in:
+    /// - The published `overview` field directly, unconditionally. This is the only source for a device
+    ///   that has no `pairedDevices` record at all (a bootstrap or single-connection state that never went
+    ///   through pairing), so its own retained screens would otherwise never be credited by anything.
+    /// - Every `pairedDevices` entry, read through `overview(forDeviceID:)` (the same accessor Agents/Alerts
+    ///   rows use), rather than a hand-split "this device's `overview`, every *other* device's
+    ///   `deviceOverviews` entry": `clearActiveDeviceFacts()` calls this between nilling `overview` and
+    ///   moving `activeDeviceID` to the device a switch, re-pair, or removal is headed to, so at that
+    ///   instant `overview` already reads nil but `activeDeviceID` still names the device leaving
+    ///   selection. A hand-split version keyed off `activeDeviceID` would credit that device with nothing
+    ///   (`overview` nil) while also skipping its own `deviceOverviews` entry, dropping every one of its
+    ///   retained screens even though it is still paired and its last known overview, sitting untouched in
+    ///   `deviceOverviews[id]`, still lists them. Reading through `overview(forDeviceID:)` for every paired
+    ///   device sidesteps the ordering entirely: whichever device `activeDeviceID` names at the moment this
+    ///   runs still gets `overview ?? deviceOverviews[activeDeviceID]`, exactly the fallback that accessor
+    ///   documents for the selected device.
+    ///
+    /// A blocked device's screens are dropped along with its rows: `overview(forDeviceID:)` reads nil for
+    /// one (see that accessor's own doc comment), so it contributes no session ids here either, the same
+    /// as a device this app has stopped hearing from entirely. Reopening it once it clears the block finds
+    /// nothing retained, the same first-open experience as any other freshly reachable device. This never
+    /// leaks through the unconditional `overview` read above either: `applyFetchedOverview` already nils
+    /// the published `overview` for a blocked active device before this runs.
+    private func pruneRetainedTerminalScreens() {
+        var keep: Set<String> = []
+        if let overview { keep.formUnion(retainableSessionIDs(in: overview)) }
+        for device in pairedDevices {
+            guard let deviceOverview = overview(forDeviceID: device.id) else { continue }
+            keep.formUnion(retainableSessionIDs(in: deviceOverview))
+        }
+        retainedTerminalScreens.retainOnly(sessionIDs: keep)
+    }
+
     private func publishOverview(_ payload: SpacesDeviceOverviewPayload?) {
         if payload != overview { overview = payload }
         if let payload {
-            pruneDismissedAlertIDs(against: payload)
+            if let activeDeviceID { pruneDismissedAlertIDs(deviceID: activeDeviceID, against: payload) }
             resolveDeferredWorkspaceDeletions(against: payload)
             // A session the device no longer lists cannot be reopened, an ended one is never painted from
             // memory (its final transcript is what it shows, and it stays listed for days), and one that
             // another device actively owns is being drawn somewhere else, so the screen this device last
             // saw is stale and a reopen would show the active-owner notice instead of it. Their retained
-            // screens are dropped here. An owner that is one of this app's own viewers does not count: the
+            // screens are dropped here (see `pruneRetainedTerminalScreens`, which also keeps every other
+            // paired device's own retained screens instead of evicting them the moment the selected device
+            // happens to publish). An owner that is one of this app's own viewers does not count: the
             // viewer keeps the store current itself, and it stays attached for a round trip after its
-            // detail is dismissed, which is exactly when the list's first refresh lands. This is the only
-            // place that knows which sessions still exist and who owns them, and it runs against every
-            // successful fetch rather than only the ones that changed `overview`.
-            retainedTerminalScreens.retainOnly(
-                sessionIDs: Set(
-                    payload.sessions.filter { session in
-                        !TerminalViewerModel.isEndedRuntimeState(session.state)
-                            && !retainedTerminalScreens.isOwnedElsewhere(session.attachmentSnapshot)
-                    }.map(\.id)))
+            // detail is dismissed, which is exactly when the list's first refresh lands.
+            pruneRetainedTerminalScreens()
         }
     }
 
@@ -4018,48 +4733,68 @@ private enum SpacesMobileMutationTimeoutRecovery {
         errorMessage = error.localizedDescription
     }
 
-    /// Reconciles a row's session after `run`/`restart` timed out, by refetching the overview and
-    /// looking for a fresh session in it. Guarded exactly like every other overview-derived fetch (#450
-    /// review round 5): `identity` catches a connection change, and `mutationGenerationAtFetch` — bumped
-    /// and captured immediately before the fetch, the same order `applyMutationResponse` uses — catches
-    /// a fresher overview-derived fact (another mutation response, a reconciliation fetch) landing while
-    /// this fetch or its route update is in flight. A generation mismatch alone skips only the publish
-    /// (and `updateBrowserRoutes` skips its own route-table merge and proxy update the same way); the
-    /// session lookup below still runs against whatever is currently published either way, which is the
-    /// fresher of the two overviews regardless of which one this call fetched.
-    private func reconciledSessionAfterMutationTimeout(rowID: String, timeoutRecovery: SpacesMobileMutationTimeoutRecovery, identity: Int) async
-        -> SpacesDeviceTerminalSessionSummary?
-    {
-        if timeoutRecovery.acceptsCachedOverview, let session = refreshedSession(forRowID: rowID) {
-            errorMessage = nil
-            connectionNotice = nil
+    /// Row-mutation counterpart of `handleBridgeError(_:)`, for a request issued against `deviceID` rather
+    /// than always the selected device. The selected device defers to it unchanged. Another device never
+    /// resets a connection or raises Paired Devices: its own stream already reports the disconnect through
+    /// `handleDeviceStreamFailure`. An authentication failure routes through `handleAuthenticationFailure(
+    /// message:deviceID:)` rather than setting `errorMessage` directly, so a device that rejects a
+    /// mutation also closes any terminal route still open for it, not just this one's error text; any
+    /// other failure only names it for the terminal the user was looking at.
+    private func handleBridgeError(_ error: Error, deviceID: String) {
+        guard deviceID != activeDeviceID else {
+            handleBridgeError(error)
+            return
+        }
+        guard !(error is CancellationError) else { return }
+        if let recoveryMessage = SpacesDeviceAPIAuthentication.recoveryMessage(for: error) {
+            handleAuthenticationFailure(message: recoveryMessage, deviceID: deviceID)
+            return
+        }
+        errorMessage = error.localizedDescription
+    }
+
+    /// Reconciles a row's session after `run`/`restart` timed out, by refetching the overview through
+    /// `connection` and looking for a fresh session in it. The selected device folds its fetch through the
+    /// same generation/identity guards `applyMutationResponse` uses; another device applies through
+    /// `acceptNonSelectedDeviceOverview`, gated only on `isCurrent(connection.token)` since it shares no
+    /// generation counter with the selected device's own fetches.
+    private func reconciledSessionAfterMutationTimeout(
+        rowID: String, timeoutRecovery: SpacesMobileMutationTimeoutRecovery, connection: MutationConnection
+    ) async -> SpacesDeviceTerminalSessionSummary? {
+        let token = connection.token
+        if timeoutRecovery.acceptsCachedOverview, let session = refreshedSession(forRowID: rowID, deviceID: token.deviceID) {
+            if token.isSelected {
+                errorMessage = nil
+                connectionNotice = nil
+            }
             return session
         }
         do {
-            // Fetched after the mutation was sent, so it supersedes any refresh already in flight. Captured
-            // right after bumping, before the fetch — not after it returns, or a fresher fact landing
-            // during the fetch itself would already be reflected in the "baseline" this compares against.
-            mutationGeneration &+= 1
-            let mutationGenerationAtFetch = mutationGeneration
-            let refreshedOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
-            // The connection changed while reconciling: this overview is the previous backend's, so it must
-            // not be published as the current connection's state.
-            guard identity == overviewIdentity else { return nil }
-            await updateBrowserRoutes(
-                overview: refreshedOverview, identity: identity, mutationGeneration: mutationGenerationAtFetch, isStillCurrent: { true })
-            guard identity == overviewIdentity else { return nil }
-            if mutationGeneration == mutationGenerationAtFetch {
-                errorMessage = nil
-                connectionNotice = nil
-                refreshFailureStreak = nil
-                publishOverview(refreshedOverview)
+            let refreshedOverview: SpacesDeviceOverviewPayload
+            if token.isSelected {
+                // Fetched after the mutation was sent, so it supersedes any refresh already in flight.
+                // Captured right after bumping, before the fetch: a fresher fact landing during the fetch
+                // itself must already be reflected in the baseline this compares against.
+                mutationGeneration &+= 1
+                let mutationGenerationAtFetch = mutationGeneration
+                refreshedOverview = try await connection.client.fetchOverview(commandChannel: connection.channel)
+                guard isCurrent(token) else { return nil }
+                await updateBrowserRoutes(
+                    overview: refreshedOverview, identity: token.identity, mutationGeneration: mutationGenerationAtFetch, isStillCurrent: { true })
+                guard isCurrent(token) else { return nil }
+                if mutationGeneration == mutationGenerationAtFetch {
+                    errorMessage = nil
+                    connectionNotice = nil
+                    refreshFailureStreak = nil
+                    publishOverview(refreshedOverview)
+                }
+            } else {
+                refreshedOverview = try await connection.client.fetchOverview(commandChannel: connection.channel)
+                guard isCurrent(token) else { return nil }
+                acceptNonSelectedDeviceOverview(refreshedOverview, deviceID: token.deviceID)
             }
-            // Resolved from `refreshedOverview` — this fetch's own evidence — not from the model's
-            // published `overview`, for the same reason `performMutationReturningSession` reads its
-            // `response.overview`: a fresher, unrelated overview-derived fact can win the publish race
-            // above even though this fetch genuinely found the session, and reading published state here
-            // would then report the timeout recovery as failed when it actually succeeded (#450 review
-            // round 7).
+            // Resolved from `refreshedOverview`, this fetch's own evidence, not from published state, for
+            // the same reason `performMutationReturningSession` reads its `response.overview`.
             return timeoutRecovery.acceptsFreshSession(refreshedSession(forRowID: rowID, in: refreshedOverview))
         } catch { return nil }
     }

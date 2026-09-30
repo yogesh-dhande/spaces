@@ -26,7 +26,7 @@ final class SpacesMobileUITests: XCTestCase {
 
     func testWorkspaceHideWhileScrollingList() throws { try runWorkspaceBandRemovalWhileScrollingScenario(action: .hide) }
 
-    func testWorkspaceDeleteAfterVisitingBandedTabs() throws { try runWorkspaceDeleteAfterVisitingBandedTabsScenario() }
+    func testWorkspaceDeleteAfterVisitingTabLists() throws { try runWorkspaceDeleteAfterVisitingTabListsScenario() }
 
     func testTerminalRowRemovedWhileScrollingList() throws { try runTerminalRowRemovalWhileScrollingScenario() }
 
@@ -346,7 +346,8 @@ final class SpacesMobileUITests: XCTestCase {
         captureScreenshot(app, name: "workspace-\(action.rawValue)-after-scroll", filePath: configuration.finalScreenshotPath)
     }
 
-    /// Deleting a workspace that owns several session-backed rows, with all three banded tabs in play.
+    /// Deleting a workspace that owns several session-backed rows, with the Agents and Alerts tabs also
+    /// visited first.
     ///
     /// The `workspace-delete-scroll` lane deletes a workspace whose rows are all configured, so its
     /// section's item count never moves. This one first gives the workspace rows that exist only while
@@ -362,7 +363,7 @@ final class SpacesMobileUITests: XCTestCase {
     /// items before the update` — the collection view's count for the target workspace's own section
     /// running one item short of what the list holds. It reproduces with the Agents and Alerts tabs never
     /// visited, so the flat lists on those tabs are not what asserts; the Spaces list is.
-    private func runWorkspaceDeleteAfterVisitingBandedTabsScenario() throws {
+    private func runWorkspaceDeleteAfterVisitingTabListsScenario() throws {
         let configuration = try UITestConfiguration.load(environment: ProcessInfo.processInfo.environment)
         let app = launchConfiguredApp(configuration)
         XCUIDevice.shared.orientation = .portrait
@@ -370,20 +371,36 @@ final class SpacesMobileUITests: XCTestCase {
 
         let workspaceID = configuration.targetWorkspaceID
         XCTAssertFalse(workspaceID.isEmpty, "Missing targetWorkspaceID in the UI test configuration")
+        // The one paired device the seed pairs this run against: agent-row ids are device-qualified
+        // (`agents.row.<deviceID>:<workspaceID>:<row.id>`), and so are alert rows (see `alertRow` below).
+        let deviceID = configuration.deviceID ?? ""
+        XCTAssertFalse(deviceID.isEmpty, "Missing deviceID in the UI test configuration")
 
         let band = app.buttons["workspace.band.\(workspaceID)"]
         XCTAssertTrue(scrollToElement(band, in: app, timeout: 60), "Workspace band \(workspaceID) never appeared in the Spaces list")
 
-        let agentRow = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "agents.row.\(workspaceID):"))
-            .firstMatch
-        let alertBand = app.descendants(matching: .any)["alerts.band.\(workspaceID)"]
+        let agentRow = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "agents.row.\(deviceID):\(workspaceID):")
+        ).firstMatch
+        // Title `demo_workspace_terminal_session` seeds for the Alerts event, in e2e_mobile.sh.
+        let seededAlertTitle = "e2e-tab-lists-alert"
+        // The Alerts tab has no per-workspace band (it is one flat, cross-device list; see
+        // `AlertsTabView`), so this matches the seeded exited terminal's own event row directly. Its
+        // identifier is `"alert.row.<deviceID>|terminal:<sourceID>|<kind>|<date>"`, but `sourceID` is
+        // `terminal-session:<sessionID>` or `terminal-window:<windowID>` depending on whether a Mac window
+        // tracked the session, and this lane runs where one does, so only the device and the `terminal:`
+        // source kind are known ahead of time; the seeded title disambiguates the row instead of the id.
+        let alertRow = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@ AND label BEGINSWITH %@", "alert.row.\(deviceID)|terminal:", seededAlertTitle)
+        ).firstMatch
         // Both tabs have to render the workspace's rows before the delete, or their lists never mount and
         // the deletion has nothing to diff there.
         XCTAssertTrue(selectTab("Agents", in: app), "The Agents tab was never selectable")
         XCTAssertTrue(scrollToElement(agentRow, in: app, timeout: 60), "The Agents tab never listed a coding-agent row for workspace \(workspaceID)")
 
         XCTAssertTrue(selectTab("Alerts", in: app), "The Alerts tab was never selectable")
-        XCTAssertTrue(scrollToElement(alertBand, in: app, timeout: 60), "The Alerts tab never listed an attention band for workspace \(workspaceID)")
+        XCTAssertTrue(
+            scrollToElement(alertRow, in: app, timeout: 60), "The Alerts tab never listed the seeded event row for workspace \(workspaceID)")
 
         XCTAssertTrue(selectTab("Spaces", in: app), "The Spaces tab was never selectable")
         XCTAssertTrue(scrollToElement(band, in: app, timeout: 30), "Workspace band \(workspaceID) was gone after visiting the other tabs")
@@ -454,7 +471,7 @@ final class SpacesMobileUITests: XCTestCase {
         XCTAssertTrue(selectTab("Alerts", in: app), "The Alerts tab was not selectable after the delete")
         RunLoop.current.run(until: Date().addingTimeInterval(1))
         XCTAssertEqual(app.state, .runningForeground, "The app was not running in the foreground on the Alerts tab after the delete")
-        XCTAssertFalse(alertBand.exists, "The Alerts tab still listed an attention band for the deleted workspace \(workspaceID)")
+        XCTAssertFalse(alertRow.exists, "The Alerts tab still listed the seeded event row for the deleted workspace \(workspaceID)")
 
         print("spaces-mobile-e2e workspace-delete-tab-lists connection_error_alerts=\(connectionErrorAlerts)")
         captureScreenshot(app, name: "workspace-delete-tab-lists-after-tour", filePath: configuration.finalScreenshotPath)

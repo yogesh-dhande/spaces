@@ -5,6 +5,17 @@
     @testable import SpacesMobile
 
     @MainActor final class SpacesMobileAgentsTests: XCTestCase {
+        /// Every single-overview test below shares one device with the device segment hidden, matching the
+        /// single-paired-device default: `SpacesMobileAgentGrouping.groups` itself is what changed for
+        /// #837's multi-device Agents tab, and these cases exercise everything about it *except* that.
+        func makeGroups(
+            _ overview: SpacesDeviceOverviewPayload, deviceID: String = "device-a", isOffline: Bool = false, showsDeviceSegment: Bool = false
+        ) -> [SpacesMobileAgentGroup] {
+            SpacesMobileAgentGrouping.groups(
+                devices: [SpacesMobileDeviceOverviewContext(deviceID: deviceID, deviceName: "Device", overview: overview, isOffline: isOffline)],
+                showsDeviceSegment: showsDeviceSegment)
+        }
+
         func testGroupsMembershipOrderingAndCounts() {
             let overview = makeOverview(codingAgentRows: [
                 makeAgentRow(id: "agent-idle-exited", runState: .exited, activityState: .idle),
@@ -14,7 +25,7 @@
                 makeAgentRow(id: "agent-done", runState: .running, activityState: .done),
             ])
 
-            let groups = SpacesMobileAgentGrouping.groups(in: overview)
+            let groups = makeGroups(overview)
 
             XCTAssertEqual(groups.map(\.kind), [.blocked, .done, .working])
             XCTAssertEqual(groups.map(\.kind.label), ["Blocked", "Done", "Working"])
@@ -32,7 +43,7 @@
                 makeAgentRow(id: "agent-exited", runState: .running, activityState: .exited),
             ])
 
-            XCTAssertEqual(SpacesMobileAgentGrouping.groups(in: overview), [])
+            XCTAssertEqual(makeGroups(overview), [])
         }
 
         /// A finished agent has a result the user has not read yet, so it bands ahead of the agents still
@@ -46,7 +57,7 @@
                 makeAgentRow(id: "agent-done", runState: .exited, activityState: .done),
             ])
 
-            XCTAssertEqual(SpacesMobileAgentGrouping.groups(in: overview).map(\.kind), [.done, .working])
+            XCTAssertEqual(makeGroups(overview).map(\.kind), [.done, .working])
         }
 
         /// An agent waiting for input is the one thing on this tab that needs the user, so it bands first.
@@ -59,7 +70,7 @@
                 makeAgentRow(id: "agent-waiting", runState: .running, activityState: .waiting),
             ])
 
-            XCTAssertEqual(SpacesMobileAgentGrouping.groups(in: overview).first?.kind, .blocked)
+            XCTAssertEqual(makeGroups(overview).first?.kind, .blocked)
         }
 
         /// An idle agent says nothing about itself, so its terminal decides which band it lands in.
@@ -81,7 +92,7 @@
         func testOmitsEmptyGroups() {
             let overview = makeOverview(codingAgentRows: [makeAgentRow(id: "agent-spinning", runState: .running, activityState: .spinning)])
 
-            let groups = SpacesMobileAgentGrouping.groups(in: overview)
+            let groups = makeGroups(overview)
 
             XCTAssertEqual(groups.map(\.kind), [.working])
         }
@@ -92,7 +103,7 @@
                 codingAgentRows: [makeAgentRow(id: "agent-a", runState: .running, activityState: .spinning)])
             let overview = makeOverview(workspaces: [workspace])
 
-            XCTAssertTrue(SpacesMobileAgentGrouping.groups(in: overview).isEmpty)
+            XCTAssertTrue(makeGroups(overview).isEmpty)
         }
 
         /// A workspace whose own `isHidden` flag is false but whose project is hidden must drop out of the
@@ -104,19 +115,56 @@
                 codingAgentRows: [makeAgentRow(id: "agent-a", runState: .running, activityState: .spinning)])
             let overview = makeOverview(workspaces: [workspace], projectIsHidden: true)
 
-            XCTAssertTrue(SpacesMobileAgentGrouping.groups(in: overview).isEmpty)
+            XCTAssertTrue(makeGroups(overview).isEmpty)
         }
 
-        func testDetailShowsProjectAndBranchOrSingleSharedName() {
-            let gitEntry = SpacesMobileAgentEntry(
-                row: makeAgentRow(id: "agent-a", runState: .running, activityState: .spinning), workspaceDisplayName: "ios-redesign",
-                projectName: "spaces")
-            XCTAssertEqual(gitEntry.detail, "spaces · ios-redesign")
+        /// The detail line always shows project and workspace together, mirroring the Mac's Alerts table,
+        /// and appends the device only when the caller passed a `deviceText` (the Agents tab's own
+        /// `showsDeviceSegment` rule decides that upstream, not this type).
+        func testDetailAlwaysShowsProjectAndWorkspacePlusOptionalDevice() {
+            let entry = SpacesMobileAgentEntry(
+                row: makeAgentRow(id: "agent-a", runState: .running, activityState: .spinning), deviceID: "device-a", projectName: "spaces",
+                workspaceDisplayName: "ios-redesign", deviceText: nil, isDeviceOffline: false)
+            XCTAssertEqual(entry.detail, "spaces / ios-redesign")
 
-            let nonGitEntry = SpacesMobileAgentEntry(
-                row: makeAgentRow(id: "agent-b", runState: .running, activityState: .idle), workspaceDisplayName: "notes-app",
-                projectName: "Notes-App")
-            XCTAssertEqual(nonGitEntry.detail, "notes-app")
+            let withDevice = SpacesMobileAgentEntry(
+                row: makeAgentRow(id: "agent-b", runState: .running, activityState: .idle), deviceID: "device-b", projectName: "Notes-App",
+                workspaceDisplayName: "notes-app", deviceText: "MacBook Pro", isDeviceOffline: false)
+            XCTAssertEqual(withDevice.detail, "Notes-App / notes-app · MacBook Pro")
+        }
+
+        /// Two paired devices' agents land in the same band, each device's own agents keeping the
+        /// overview's own order, and neither device's rows interleave with the other's.
+        func testGroupsMergeAcrossDevicesWithDeviceNamesWhenSegmentShown() {
+            let overviewA = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-a1", runState: .running, activityState: .waiting),
+                makeAgentRow(id: "agent-a2", runState: .running, activityState: .waiting),
+            ])
+            let overviewB = makeOverview(codingAgentRows: [makeAgentRow(id: "agent-b1", runState: .running, activityState: .waiting)])
+            let devices = [
+                SpacesMobileDeviceOverviewContext(deviceID: "device-a", deviceName: "MacBook Pro", overview: overviewA, isOffline: false),
+                SpacesMobileDeviceOverviewContext(deviceID: "device-b", deviceName: "Mac Studio", overview: overviewB, isOffline: false),
+            ]
+
+            let groups = SpacesMobileAgentGrouping.groups(devices: devices, showsDeviceSegment: true)
+
+            XCTAssertEqual(groups.map(\.kind), [.blocked])
+            XCTAssertEqual(groups[0].entries.map(\.row.id), ["agent-a1", "agent-a2", "agent-b1"])
+            XCTAssertEqual(groups[0].entries.map(\.deviceText), ["MacBook Pro", "MacBook Pro", "Mac Studio"])
+            // Two devices' rows share a workspace id ("workspace-feature") from the shared fixture, so
+            // only the device-qualified `id` keeps them apart in SwiftUI's `ForEach`.
+            XCTAssertEqual(Set(groups[0].entries.map(\.id)).count, 3)
+        }
+
+        /// An offline device's agents stay listed and carry "(offline)" in their device text, rather than
+        /// dropping out of the tab the moment its stream fails.
+        func testOfflineDeviceAgentsStayListedAndMarkedOffline() {
+            let overview = makeOverview(codingAgentRows: [makeAgentRow(id: "agent-a", runState: .running, activityState: .waiting)])
+
+            let groups = makeGroups(overview, isOffline: true, showsDeviceSegment: true)
+
+            XCTAssertEqual(groups[0].entries.map(\.deviceText), ["Device (offline)"])
+            XCTAssertEqual(groups[0].entries.map(\.isDeviceOffline), [true])
         }
 
         func testAgentStatusDotReflectsActivityState() {

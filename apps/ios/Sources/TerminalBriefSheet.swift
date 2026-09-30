@@ -10,9 +10,13 @@ import spacesdevicecore
 struct TerminalBriefSheet: View {
     let appModel: SpacesMobileAppModel
     let sessionID: String
+    let deviceID: String
 
     var body: some View {
-        let row = appModel.runtimeRow(forSessionID: sessionID)
+        // Device-aware: the selected-only overload would answer for whichever device happens to be
+        // selected right now, not the device this sheet's terminal actually belongs to, and go blank
+        // the moment the sheet's own device is not (or stops being) the selected one.
+        let row = appModel.runtimeRow(forSessionID: sessionID, deviceID: deviceID)
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("Brief").font(.system(size: 16, weight: .semibold)).foregroundStyle(Theme.text)

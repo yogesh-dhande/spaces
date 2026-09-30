@@ -137,7 +137,7 @@
             XCTAssertNil(model.errorMessage)
             XCTAssertFalse(model.isActiveDeviceBlocked)
             XCTAssertFalse(model.agentGroups.isEmpty, "the demo bundle should surface coding-agent groups")
-            XCTAssertFalse(model.attentionGroups.isEmpty, "the demo bundle should surface attention events")
+            XCTAssertFalse(model.attentionEvents.isEmpty, "the demo bundle should surface attention events")
             XCTAssertGreaterThan(model.undismissedAlertCount, 0)
         }
 

@@ -119,7 +119,11 @@ struct AutomationRunsView: View {
                 LazyVStack(spacing: 0) {
                     AutomationRunRowsList(
                         model: model, rows: rows, title: { $0.automationName ?? "Automation" }, onMutated: {},
-                        onOpenSession: { selectedSession = SelectedTerminalSessionRoute(session: $0) })
+                        onOpenSession: { session in
+                            // Automations are scoped to the selected device, so a run's session always belongs to it.
+                            guard let activeDeviceID = model.activeDeviceID else { return }
+                            selectedSession = SelectedTerminalSessionRoute(session: session, deviceID: activeDeviceID)
+                        })
                 }.padding(.vertical, 12)
             }.scrollContentBackground(.hidden).background(Theme.bg.ignoresSafeArea()).refreshable { await model.refresh() }
         }

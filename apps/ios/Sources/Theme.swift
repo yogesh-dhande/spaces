@@ -53,6 +53,9 @@ enum Theme {
     /// text clears WCAG's 4.5:1 floor; see `ThemeAppearanceTokens.connectionBannerFill`.
     static let connectionBannerFill = dynamic(\.connectionBannerFill)
     static let onConnectionBanner = dynamic(\.onConnectionBanner)
+    /// Row opacity for an offline paired device's rows on the Agents/Alerts tabs, matching the Mac
+    /// sidebar's own unreachable-device dimming (`AppKitController.unreachableDeviceAlpha`).
+    static let offlineRowOpacity: CGFloat = 0.55
 
     // MARK: Chips & tiles
 

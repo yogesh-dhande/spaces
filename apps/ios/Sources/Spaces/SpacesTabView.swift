@@ -33,9 +33,11 @@ struct SpacesTabView: View {
             }
         }.onChange(of: model.pendingTerminalDeepLinkSession) { _, session in
             // A `spaces://terminal/…` deep link resolves to a session on the model; consume it here so
-            // the Spaces tab (the deep link's landing tab) pushes its detail route.
-            guard let session else { return }
-            selectedSession = SelectedTerminalSessionRoute(session: session, openSource: "deep_link")
+            // the Spaces tab (the deep link's landing tab) pushes its detail route. `openTerminalDeepLink`
+            // already switched to the link's own device before staging this session, so `activeDeviceID`
+            // names it.
+            guard let session, let activeDeviceID = model.activeDeviceID else { return }
+            selectedSession = SelectedTerminalSessionRoute(session: session, deviceID: activeDeviceID, openSource: "deep_link")
             model.pendingTerminalDeepLinkSession = nil
         }.accessibilityIdentifier("tab.spaces").sheet(isPresented: workspaceCreateSheetBinding) { WorkspaceCreateSheet(model: model) }.sheet(
             isPresented: $isShowingVisibilitySheet
@@ -57,7 +59,9 @@ struct SpacesTabView: View {
 
     private func performPendingStop(_ stop: PendingStop) async {
         switch stop {
-        case .row(let row): await model.stop(row: row)
+        case .row(let row):
+            guard let activeDeviceID = model.activeDeviceID else { return }
+            await model.stop(row: row, deviceID: activeDeviceID)
         case .workspace(let workspace): await model.stopWorkspace(workspace)
         }
     }
@@ -441,7 +445,11 @@ struct SpacesTabView: View {
     }
 
     private func hasContextMenu(_ row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
-        row.canRun || row.canStop || row.canRestart || model.canRename(row: row) || model.hasUndismissedAlerts(for: row)
+        guard row.canRun || row.canStop || row.canRestart || model.canRename(row: row) else {
+            guard let activeDeviceID = model.activeDeviceID else { return false }
+            return model.hasUndismissedAlerts(for: row, deviceID: activeDeviceID)
+        }
+        return true
     }
 
     private func beginRename(for row: SpacesMobileWorkspaceRuntimeRow) {
@@ -540,7 +548,9 @@ struct SpacesTabView: View {
                 Label("Rename", systemImage: "pencil")
             }.disabled(model.isMutating)
         }
-        if model.hasUndismissedAlerts(for: row) { DismissAlertMenuButton(model: model, row: row) }
+        if let activeDeviceID = model.activeDeviceID, model.hasUndismissedAlerts(for: row, deviceID: activeDeviceID) {
+            DismissAlertMenuButton(model: model, row: row, deviceID: activeDeviceID)
+        }
     }
 
     private func activateRuntimeRow(_ row: SpacesMobileWorkspaceRuntimeRow) {
@@ -548,7 +558,10 @@ struct SpacesTabView: View {
             guard let proxyRequest = model.browserSessionProxyRequest(for: browserRow) else { return }
             selectedBrowserSession = SelectedBrowserSessionRoute(row: browserRow, proxyRequest: proxyRequest)
         } else if let session = model.terminalSession(for: row) {
-            selectedSession = SelectedTerminalSessionRoute(session: session)
+            // A resolved session implies a selected device: `terminalSession(for:)` reads the selected
+            // device's own `overview`, which is nil with none selected.
+            guard let activeDeviceID = model.activeDeviceID else { return }
+            selectedSession = SelectedTerminalSessionRoute(session: session, deviceID: activeDeviceID)
         } else if row.canRun {
             pendingTerminalLaunch = PendingTerminalLaunch(row: row, action: .primary)
         }
@@ -587,7 +600,8 @@ struct SpacesTabView: View {
 
     private func terminalSessionRow(_ session: SpacesDeviceTerminalSessionSummary, isDeleting: Bool) -> some View {
         Button {
-            selectedSession = SelectedTerminalSessionRoute(session: session)
+            guard let activeDeviceID = model.activeDeviceID else { return }
+            selectedSession = SelectedTerminalSessionRoute(session: session, deviceID: activeDeviceID)
         } label: {
             BandRow(
                 dotKind: StatusDot.Kind(session.state), tile: .tile(for: .workspaceTerminals), title: session.title, detail: session.liveTitle ?? ""

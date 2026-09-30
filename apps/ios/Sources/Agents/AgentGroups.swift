@@ -19,20 +19,29 @@ enum SpacesMobileAgentGroupKind: String, CaseIterable, Sendable {
     }
 }
 
-/// One coding-agent row plus the workspace context needed to render and activate it outside
+/// One coding-agent row plus the workspace and device context needed to render and activate it outside
 /// its home workspace list.
 struct SpacesMobileAgentEntry: Identifiable, Equatable, Sendable {
     let row: SpacesDeviceWorkspaceCodingAgentRow
-    let workspaceDisplayName: String
+    let deviceID: String
     let projectName: String
+    let workspaceDisplayName: String
+    /// "Device Name" / "Device Name (offline)", or nil when the device segment is hidden (see
+    /// `SpacesMobileDeviceDisplay.showsDeviceSegment`). Demo Mode's single always-online device always
+    /// derives nil here.
+    let deviceText: String?
+    let isDeviceOffline: Bool
 
-    var id: String { "\(row.workspaceID):\(row.id)" }
+    /// Qualified by device id, not just the row's own workspace-scoped id: the Agents tab lists every
+    /// paired device's rows in one set of bands, and two devices' rows must never collide in SwiftUI's
+    /// `ForEach` identity or in the row's own accessibility identifier.
+    var id: String { "\(deviceID):\(row.workspaceID):\(row.id)" }
 
-    /// "project · branch"; a non-git workspace whose project and workspace share a name shows
-    /// the name once.
+    /// "project / workspace" or "project / workspace · device".
     var detail: String {
-        if projectName.caseInsensitiveCompare(workspaceDisplayName) == .orderedSame { return workspaceDisplayName }
-        return "\(projectName) · \(workspaceDisplayName)"
+        let projectWorkspace = SpacesMobileDeviceDisplay.projectWorkspace(projectName: projectName, workspaceDisplayName: workspaceDisplayName)
+        guard let deviceText else { return projectWorkspace }
+        return "\(projectWorkspace) · \(deviceText)"
     }
 
     var runtimeRow: SpacesMobileWorkspaceRuntimeRow { SpacesMobileWorkspaceRuntimeRow(source: .codingAgent(row)) }
@@ -45,19 +54,31 @@ struct SpacesMobileAgentGroup: Identifiable, Equatable, Sendable {
     var id: String { kind.rawValue }
 }
 
-/// Pure grouping of every coding-agent row across visible workspaces into activity bands.
+/// Pure grouping of every coding-agent row, across every paired device's overview, into activity bands.
 /// Empty bands are omitted, and "Not running" is never listed at all: the tab surfaces agents with a
 /// state worth acting on, while stopped agents stay reachable from their workspace's rows on the
 /// Spaces tab.
 enum SpacesMobileAgentGrouping {
-    static func groups(in overview: SpacesDeviceOverviewPayload) -> [SpacesMobileAgentGroup] {
+    /// `devices` order decides the order agents from different devices appear in a shared band: each
+    /// device's own agents keep the overview's own workspace order (unchanged from the single-device
+    /// rule), and one device's agents are never interleaved with another's.
+    ///
+    /// `showsDeviceSegment` comes from the caller, not `devices.count`: `devices` only lists devices with
+    /// a cached overview, but the show/hide rule needs the full paired count, since a second paired device
+    /// that has not streamed anything yet still has to widen it.
+    static func groups(devices: [SpacesMobileDeviceOverviewContext], showsDeviceSegment: Bool) -> [SpacesMobileAgentGroup] {
         var entriesByKind: [SpacesMobileAgentGroupKind: [SpacesMobileAgentEntry]] = [:]
-        // Excludes a workspace hidden by its own flag or by its project's — see
-        // `SpacesDeviceOverviewPayload.isWorkspaceVisible`, the same rule the Spaces tab's browse list uses.
-        for workspace in overview.workspaces where overview.isWorkspaceVisible(workspace) {
-            for agent in workspace.codingAgentRows {
-                let entry = SpacesMobileAgentEntry(row: agent, workspaceDisplayName: workspace.displayName, projectName: workspace.projectName)
-                entriesByKind[kind(for: agent), default: []].append(entry)
+        for device in devices {
+            // Excludes a workspace hidden by its own flag or by its project's (see
+            // `SpacesDeviceOverviewPayload.isWorkspaceVisible`), the same rule the Spaces tab's browse list uses.
+            for workspace in device.overview.workspaces where device.overview.isWorkspaceVisible(workspace) {
+                for agent in workspace.codingAgentRows {
+                    let entry = SpacesMobileAgentEntry(
+                        row: agent, deviceID: device.deviceID, projectName: workspace.projectName, workspaceDisplayName: workspace.displayName,
+                        deviceText: showsDeviceSegment ? SpacesMobileDeviceDisplay.text(name: device.deviceName, isOffline: device.isOffline) : nil,
+                        isDeviceOffline: device.isOffline)
+                    entriesByKind[kind(for: agent), default: []].append(entry)
+                }
             }
         }
         return SpacesMobileAgentGroupKind.allCases.compactMap { kind in

@@ -36,12 +36,15 @@ struct RootTabView: View {
         VStack(spacing: 0) {
             demoModeBanner
             TabView(selection: $model.selectedTab) {
-                AlertsTabView(model: model).id(model.activeDeviceID).tag(SpacesMobileTab.alerts).tabItem { Label("Alerts", systemImage: "bell") }
-                    .badge(model.undismissedAlertCount)
+                // No `.id(model.activeDeviceID)` on Alerts/Agents: both list every paired device's own
+                // content regardless of which one is selected, so a device switch must not tear their
+                // navigation stacks down the way it does for the selected-device-only tabs below.
+                AlertsTabView(model: model).tag(SpacesMobileTab.alerts).tabItem { Label("Alerts", systemImage: "bell") }.badge(
+                    model.undismissedAlertCount)
                 SpacesTabView(model: model).id(model.activeDeviceID).tag(SpacesMobileTab.spaces).tabItem {
                     Label("Spaces", systemImage: "rectangle.stack")
                 }
-                AgentsTabView(model: model).id(model.activeDeviceID).tag(SpacesMobileTab.agents).tabItem { Label("Agents", systemImage: "cpu") }
+                AgentsTabView(model: model).tag(SpacesMobileTab.agents).tabItem { Label("Agents", systemImage: "cpu") }
                 AutomationsTabView(model: model).id(model.activeDeviceID).tag(SpacesMobileTab.automations).tabItem {
                     Label("Automations", systemImage: "clock.arrow.circlepath")
                 }.badge(model.automationRunningRunCount)
