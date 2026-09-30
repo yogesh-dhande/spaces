@@ -732,6 +732,18 @@ final class SpacesMobileUITests: XCTestCase {
         return surface
     }
 
+    /// The on-screen element the terminal's rendered rows are actually drawn inside, whichever
+    /// accessibility type XCUITest gives the host view: `terminal.surface` when it is classified as
+    /// `.otherElements`, or the first text view when the host view's `UITextInputTraits` conformance
+    /// classifies it as `.textViews` instead. Either way it is the same view, so its frame is where
+    /// `renderRowPitchPoints`/`renderTopOffsetPoints` are measured from.
+    private func terminalHostElement(in app: XCUIApplication) -> XCUIElement? {
+        if let surface = terminalSurfaceElement(in: app) { return surface }
+        let textView = app.textViews.firstMatch
+        guard textView.exists, textView.frame.width > 1, textView.frame.height > 1 else { return nil }
+        return textView
+    }
+
     private func tapTerminalText(_ target: String, in app: XCUIApplication, configuration: UITestConfiguration, timeout: TimeInterval) -> Bool {
         guard
             let dump = waitForRenderDump(
@@ -740,23 +752,34 @@ final class SpacesMobileUITests: XCTestCase {
                     isOwnerReady(dump, expectedSessionID: configuration.sessionID) && terminalTextContains(target, in: dump.renderedText)
                 })
         else { return false }
-        return tapTerminalText(target, in: app, configuration: configuration, dump: dump)
+        return tapTerminalText(target, in: app, dump: dump)
     }
 
     /// Taps the text where the given dump says it is, reporting whether a tap was delivered.
-    private func tapTerminalText(_ target: String, in app: XCUIApplication, configuration: UITestConfiguration, dump: UITestRenderDump) -> Bool {
+    ///
+    /// While the software keyboard is up, `renderedText` is a crop that no longer spans the host
+    /// element's whole frame, so the y coordinate comes from the dump's rendered row pitch and top
+    /// padding (`renderRowPitchPoints`/`renderTopOffsetPoints`) instead of a normalized offset over that
+    /// frame, which would land on the wrong row.
+    private func tapTerminalText(_ target: String, in app: XCUIApplication, dump: UITestRenderDump) -> Bool {
         let lines = dump.renderedText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard let columns = dump.viewportColumns, columns > 0 else { return false }
         let configuredRows = dump.viewportRows ?? lines.count
         let rows = min(max(configuredRows, 1), max(lines.count, 1))
         guard let tapLocation = terminalTextTapLocation(target, lines: lines, rows: rows, columns: columns) else { return false }
         let normalizedX = min(max(tapLocation.x / Double(columns), 0.01), 0.99)
-        let normalizedY = min(max((Double(tapLocation.row) + 0.5) / Double(rows), 0.01), 0.99)
-        if let surface = terminalSurfaceElement(in: app) {
-            surface.coordinate(withNormalizedOffset: CGVector(dx: normalizedX, dy: normalizedY)).tap()
-            return true
-        }
-        return tapTerminalSurfaceFallback(in: app, configuration: configuration, normalizedX: normalizedX, normalizedY: normalizedY)
+        guard let rowPitchPoints = dump.renderRowPitchPoints, let topOffsetPoints = dump.renderTopOffsetPoints,
+            let hostElement = terminalHostElement(in: app)
+        else { return false }
+        let hostFrame = hostElement.frame
+        let appFrame = app.frame
+        guard hostFrame.width > 1, hostFrame.height > 1, appFrame.width > 1, appFrame.height > 1 else { return false }
+        let point = CGPoint(
+            x: hostFrame.minX + CGFloat(normalizedX) * hostFrame.width,
+            y: hostFrame.minY + CGFloat(topOffsetPoints) + (CGFloat(tapLocation.row) + 0.5) * CGFloat(rowPitchPoints))
+        let offset = CGVector(dx: point.x - appFrame.minX, dy: point.y - appFrame.minY)
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0)).withOffset(offset).tap()
+        return true
     }
 
     /// What a run of `observeHostGridCropDuringOpen` observed, in seconds from the moment the observation
@@ -870,30 +893,6 @@ final class SpacesMobileUITests: XCTestCase {
             }
         }
         return nil
-    }
-
-    private func tapTerminalSurfaceFallback(in app: XCUIApplication, configuration: UITestConfiguration, normalizedX: Double, normalizedY: Double)
-        -> Bool
-    {
-        let appFrame = app.frame
-        guard appFrame.width > 1, appFrame.height > 1 else { return false }
-
-        let terminalTextView = app.textViews.firstMatch
-        var frame =
-            terminalTextView.exists && terminalTextView.frame.width > 1 && terminalTextView.frame.height > 1 ? terminalTextView.frame : appFrame
-        if frame == appFrame {
-            let ownerBadge = app.otherElements["terminal.ownerBadge"]
-            let ownerText = app.staticTexts["Owner"]
-            let chromeBottom = [ownerBadge, ownerText].filter { $0.exists && $0.frame.height > 1 }.map(\.frame.maxY).max()
-            let terminalTop = max(chromeBottom.map { $0 + 8 } ?? (frame.minY + 48), frame.minY)
-            if terminalTop < frame.maxY - 1 { frame = CGRect(x: frame.minX, y: terminalTop, width: frame.width, height: frame.maxY - terminalTop) }
-        }
-
-        guard frame.width > 1, frame.height > 1 else { return false }
-        let point = CGPoint(x: frame.minX + CGFloat(normalizedX) * frame.width, y: frame.minY + CGFloat(normalizedY) * frame.height)
-        let offset = CGVector(dx: point.x - appFrame.minX, dy: point.y - appFrame.minY)
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0)).withOffset(offset).tap()
-        return true
     }
 
     private func waitForLinkPreview(in app: XCUIApplication, configuration: UITestConfiguration, title: String, timeout: TimeInterval) -> Bool {
@@ -1529,6 +1528,13 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
     let linkPreviewErrorMessage: String?
     let visibleText: String
     let renderedText: String
+    /// The rendered grid's row height and the offset of its first row from the terminal host element's
+    /// own top, both in points. `tapTerminalText` uses these to place a tap on the row `renderedText`
+    /// says a target is on: the rendered rows are a keyboard-cropped window of the reported grid
+    /// (`viewportRows`), so they do not span the host element's whole frame once the keyboard is up, and
+    /// a tap proportioned over that frame lands on the wrong row.
+    let renderRowPitchPoints: Double?
+    let renderTopOffsetPoints: Double?
     let renderStateKey: String
 
     private enum CodingKeys: String, CodingKey {
@@ -1553,6 +1559,8 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         case linkPreviewErrorMessage
         case visibleText
         case renderedText
+        case renderRowPitchPoints
+        case renderTopOffsetPoints
         case renderStateKey
     }
 
@@ -1579,6 +1587,8 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         linkPreviewErrorMessage = try container.decodeIfPresent(String.self, forKey: .linkPreviewErrorMessage)
         visibleText = try container.decode(String.self, forKey: .visibleText)
         renderedText = try container.decode(String.self, forKey: .renderedText)
+        renderRowPitchPoints = try container.decodeIfPresent(Double.self, forKey: .renderRowPitchPoints)
+        renderTopOffsetPoints = try container.decodeIfPresent(Double.self, forKey: .renderTopOffsetPoints)
         renderStateKey = try container.decode(String.self, forKey: .renderStateKey)
     }
 
@@ -1625,7 +1635,8 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
             "errorMessage=\(errorMessage ?? "")", "isPreparingLinkPreview=\(isPreparingLinkPreview)", "linkPreviewTitle=\(linkPreviewTitle ?? "")",
             "linkPreviewArtifactKind=\(linkPreviewArtifactKind ?? "")", "linkPreviewErrorMessage=\(linkPreviewErrorMessage ?? "")",
             "visibleText=\(visibleText)", "snapshotTextLength=\(snapshotText?.count ?? 0)", "renderedTextLength=\(renderedText.count)",
-            "renderStateKey=\(renderStateKey)",
+            "renderRowPitchPoints=\(renderRowPitchPoints.map { String($0) } ?? "?")",
+            "renderTopOffsetPoints=\(renderTopOffsetPoints.map { String($0) } ?? "?")", "renderStateKey=\(renderStateKey)",
         ].joined(separator: " ")
     }
 }

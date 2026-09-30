@@ -85,6 +85,11 @@ import Foundation
         public let acceptsInput: Bool
         public let isBusy: Bool
         public let fontSize: TerminalFontSize
+        /// Increments once per dismissal of a sheet or full-screen cover the owning view presented over
+        /// the terminal. Presented content can take first responder for a focused field of its own (the
+        /// composer's message field does), and dismissing it does not hand first responder back on its
+        /// own, so a changed tick is what tells the host view to try reclaiming it.
+        public let sheetDismissalTick: Int
         public let onInputReadinessChanged: @MainActor (Bool) -> Void
         public let onScrollGestureBegan: (@MainActor () -> Void)?
         public let onScrollGestureApplied: (@MainActor () -> Void)?
@@ -114,7 +119,7 @@ import Foundation
 
         public init(
             ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil, fallbackText: String,
-            isVisible: Bool, acceptsInput: Bool, isBusy: Bool, fontSize: TerminalFontSize,
+            isVisible: Bool, acceptsInput: Bool, isBusy: Bool, fontSize: TerminalFontSize, sheetDismissalTick: Int,
             onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in }, onScrollGestureBegan: (@MainActor () -> Void)? = nil,
             onScrollGestureApplied: (@MainActor () -> Void)? = nil, onRenderedTextChanged: (@MainActor (String) -> Void)? = nil,
             onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void,
@@ -132,6 +137,7 @@ import Foundation
             self.acceptsInput = acceptsInput
             self.isBusy = isBusy
             self.fontSize = fontSize
+            self.sheetDismissalTick = sheetDismissalTick
             self.onInputReadinessChanged = onInputReadinessChanged
             self.onScrollGestureBegan = onScrollGestureBegan
             self.onScrollGestureApplied = onScrollGestureApplied
@@ -192,6 +198,7 @@ import Foundation
             hostView.setAcceptsTerminalInput(acceptsInput && !isBusy)
             hostView.setTerminalFontSize(fontSize)
             hostView.update(ownerEpoch: ownerEpoch, endedRender: endedRender, fallbackText: fallbackText)
+            hostView.reconcileFirstResponderAfterSheetDismissal(dismissalTick: sheetDismissalTick)
         }
 
         public static func dismantleUIView(_ hostView: GhosttyRemoteTerminalHostView, coordinator: ()) { hostView.prepareForDismantle() }
@@ -344,6 +351,12 @@ import Foundation
         /// `didSurrenderSharedMirror`.
         private var didFailMirrorAcquisition = false
         private var isTerminalVisible = true
+        /// The last `dismissalTick` this view has already reconciled first responder against, so a
+        /// SwiftUI update that repeats the same tick (every update between one sheet dismissal and the
+        /// next) does not re-request first responder on every unrelated `updateUIView` call. `nil` until
+        /// the first tick arrives, which never matches any `Int` `TerminalDetailView` sends, so the first
+        /// tick this view observes is always treated as a real dismissal signal.
+        private var lastReconciledSheetDismissalTick: Int?
         private var fallbackText = ""
         private var lastScrollTranslation = CGPoint.zero
         private var didScrollDuringCurrentPan = false
@@ -526,6 +539,7 @@ import Foundation
                 didFailMirrorAcquisition = false
                 reportViewportSizeIfNeeded()
                 renderLatestSnapshot()
+                reconcileFirstResponderIfNeeded()
             }
         }
 
@@ -611,7 +625,7 @@ import Foundation
         public func setTerminalVisible(_ visible: Bool) {
             guard isTerminalVisible != visible else { return }
             isTerminalVisible = visible
-            if !visible { resignFirstResponder() }
+            if !visible { resignFirstResponder() } else { reconcileFirstResponderIfNeeded() }
             setNeedsDisplay()
             reportInputReadinessIfNeeded(force: true)
         }
@@ -624,7 +638,7 @@ import Foundation
             acceptsTerminalInput = accepts
             if accepts {
                 terminalAccessoryView.isKeyboardVisible = !suppressesSoftwareKeyboard
-                scheduleFirstResponderRequest()
+                reconcileFirstResponderIfNeeded()
             } else {
                 clearAccessoryModifiers()
                 resignFirstResponder()
@@ -1052,12 +1066,71 @@ import Foundation
         @objc private func sendShiftTab() { sendAccessoryKey("shift+tab") }
         @objc private func sendEscape() { sendAccessoryKey("esc") }
 
-        private func scheduleFirstResponderRequest() {
+        /// Keeps the host first responder whenever it is entitled to be: accepting input, visible, in a
+        /// window, and not sitting behind something else presented over it. A tap in a mouse-tracking
+        /// program is forwarded as a click rather than raising the keyboard
+        /// (`handleTapToActivateInput(at:)`, #791), so this is the only thing that ever raises the
+        /// keyboard in such a session; missing any of the edges that can make the guard true leaves the
+        /// user with neither the key bar nor the keyboard until they leave the pane and reopen it. Called
+        /// from `setAcceptsTerminalInput`'s false-to-true flip, `setTerminalVisible`'s false-to-true flip,
+        /// `didMoveToWindow` landing in a window, and `reconcileFirstResponderAfterSheetDismissal` when a
+        /// sheet `TerminalDetailView` presented over the terminal is dismissed: none of the first three
+        /// edges fires there, since accepting, visible, and in a window were all already true before the
+        /// sheet opened and stay true through its dismissal, so nothing else would ever ask again.
+        ///
+        /// The "nothing covers this view" check belongs in this single guard rather than only on the
+        /// dismissal path: a responder change from any of the other edges that races a still-open sheet
+        /// must be refused the same way, so typing can never land in the terminal while a sheet is
+        /// reading it.
+        ///
+        /// `setAcceptsTerminalInput`/`setTerminalVisible` are called synchronously from SwiftUI's
+        /// `updateUIView`, and claiming first responder in the middle of that update fights SwiftUI's own
+        /// diffing; the yield defers the request to the next run loop turn, after the update that
+        /// triggered it has finished.
+        func reconcileFirstResponderIfNeeded() {
             Task { @MainActor [weak self] in
                 await Task.yield()
-                guard let self, self.acceptsTerminalInput, self.window != nil else { return }
+                // Accepted: a terminal that mounts underneath a presentation it does not own (a
+                // `spaces://terminal/...` deep link pushing this view while another tab's sheet, e.g.
+                // `SpacesTabView`'s workspace-create sheet, is already up) has every request refused here,
+                // and nothing retries once that other presentation closes, since only a presentation this
+                // terminal's own `TerminalDetailView` owns bumps `sheetDismissalTick`. This needs a deep
+                // link opened while another tab's sheet is up, a rare compound case, and leaving and
+                // reopening the terminal recovers it.
+                guard let self, self.acceptsTerminalInput, self.isTerminalVisible, self.window != nil, !self.isFirstResponder,
+                    !self.isCoveredByAWindowPresentation
+                else { return }
                 self.becomeFirstResponder()
             }
+        }
+
+        /// Whether the window has something presented over the terminal: a sheet, a full-screen cover, or
+        /// a confirmation dialog, anywhere in the window, not only one presented from this view's nearest
+        /// ancestor controller. `TabView`, `NavigationStack`, and hosting controllers sit between the
+        /// terminal and the window's root, and SwiftUI often presents from that root rather than from
+        /// wherever the terminal's own view happens to live, so a check scoped to the nearest ancestor
+        /// controller misses a presentation made further up. This walks from the root through every
+        /// `presentedViewController` to whichever one is topmost, then asks whether this view sits inside
+        /// THAT controller's view: if it does, the terminal itself lives inside the presented content
+        /// (nested presentations) and nothing covers it; if it does not, something does.
+        private var isCoveredByAWindowPresentation: Bool {
+            guard let rootViewController = window?.rootViewController else { return false }
+            var topmostPresentedViewController = rootViewController
+            while let presented = topmostPresentedViewController.presentedViewController { topmostPresentedViewController = presented }
+            guard topmostPresentedViewController !== rootViewController else { return false }
+            return !isDescendant(of: topmostPresentedViewController.view)
+        }
+
+        /// Signals that a sheet or full-screen cover `TerminalDetailView` presented over the terminal has
+        /// just been dismissed. `dismissalTick` increments once per dismissal; a tick this view has not
+        /// already reconciled against means the presented content may have taken first responder for a
+        /// focused field of its own (the composer's message field does), and UIKit does not hand first
+        /// responder back to whatever held it before the presentation on its own, so this view has to ask
+        /// for it again through the same guarded path every other edge uses.
+        func reconcileFirstResponderAfterSheetDismissal(dismissalTick: Int) {
+            defer { lastReconciledSheetDismissalTick = dismissalTick }
+            guard lastReconciledSheetDismissalTick != dismissalTick else { return }
+            reconcileFirstResponderIfNeeded()
         }
 
         private func reportViewportSizeIfNeeded() {

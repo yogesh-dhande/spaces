@@ -34,6 +34,13 @@ struct TerminalDetailView: View {
     @State private var isKeyboardVisibleForPerformanceLog = false
     @State private var isBackNavigationInProgress = false
     @State private var isShowingComposer = false
+    /// Bumped once for every dismissal of a sheet or full-screen cover presented over the terminal
+    /// (composer, agent brief, link preview, Safari view, Stop confirmation), and forwarded to
+    /// `GhosttyRemoteTerminalView` as `sheetDismissalTick`. Presented content can take first responder
+    /// for a focused field of its own (the composer's message field does), and UIKit does not hand
+    /// first responder back to the terminal on dismissal, so this is what tells the host view to try
+    /// reclaiming it.
+    @State private var terminalSheetDismissalTick = 0
     /// The row awaiting Stop confirmation from the toolbar menu. A separate state from `SpacesTabView`'s
     /// `pendingStop` because this is a different view with no shared owner to hold it.
     @State private var pendingStopRow: SpacesMobileWorkspaceRuntimeRow?
@@ -107,7 +114,7 @@ struct TerminalDetailView: View {
                         GhosttyRemoteTerminalView(
                             ownerEpoch: model.ownerRenderEpoch, endedRender: model.endedRender, fallbackText: model.visibleText,
                             isVisible: model.shouldPresentLiveSurface, acceptsInput: model.keepsTerminalInputSurfaceActive, isBusy: model.isBusy,
-                            fontSize: terminalFontSize,
+                            fontSize: terminalFontSize, sheetDismissalTick: terminalSheetDismissalTick,
                             onInputReadinessChanged: { ready in
                                 model.setInputSurfaceReady(ready)
                                 writeE2EEventIfNeeded(kind: "input_readiness", detail: ready ? "ready" : "pending")
@@ -191,12 +198,16 @@ struct TerminalDetailView: View {
             isKeyboardVisibleForPerformanceLog = false
             model.noteKeyboardToggled(visible: false)
         }.onChange(of: colorScheme) { newColorScheme in Task { await model.sendAppearance(newColorScheme == .dark ? .dark : .light) } }.sheet(
-            item: Binding(get: { model.linkPreview }, set: { preview in if preview == nil { model.dismissLinkPreview() } })
+            item: Binding(get: { model.linkPreview }, set: { preview in if preview == nil { model.dismissLinkPreview() } }),
+            onDismiss: { noteTerminalSheetDismissed() }
         ) { preview in TerminalLinkPreviewSheet(preview: preview) }.fullScreenCover(
-            item: Binding(get: { model.safariLink }, set: { link in if link == nil { model.dismissSafariLink() } })
-        ) { safariLink in TerminalSafariView(url: safariLink.url) }.sheet(isPresented: $isShowingComposer) {
-            TerminalComposerSheet(model: model, stagedScreenshots: appModel.stagedScreenshots)
-        }.sheet(isPresented: briefSheetBinding) { TerminalBriefSheet(appModel: appModel, sessionID: session.id) }.confirmationDialog(
+            item: Binding(get: { model.safariLink }, set: { link in if link == nil { model.dismissSafariLink() } }),
+            onDismiss: { noteTerminalSheetDismissed() }
+        ) { safariLink in TerminalSafariView(url: safariLink.url) }.sheet(
+            isPresented: $isShowingComposer, onDismiss: { noteTerminalSheetDismissed() }
+        ) { TerminalComposerSheet(model: model, stagedScreenshots: appModel.stagedScreenshots) }.sheet(
+            isPresented: briefSheetBinding, onDismiss: { noteTerminalSheetDismissed() }
+        ) { TerminalBriefSheet(appModel: appModel, sessionID: session.id) }.confirmationDialog(
             pendingStopRow.map { StopConfirmationCopy.rowTitle($0.title) } ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible,
             presenting: pendingStopRow
         ) { row in
@@ -207,7 +218,20 @@ struct TerminalDetailView: View {
         }.onDisappear { model.stop() }
     }
 
-    private var pendingStopDialogBinding: Binding<Bool> { Binding(get: { pendingStopRow != nil }, set: { if !$0 { pendingStopRow = nil } }) }
+    /// Every sheet and full-screen cover this view presents over the terminal routes its dismissal
+    /// here, which is what `terminalSheetDismissalTick` means: one shared signal regardless of which
+    /// presentation just closed, so the host view has exactly one thing to watch.
+    private func noteTerminalSheetDismissed() { terminalSheetDismissalTick += 1 }
+
+    private var pendingStopDialogBinding: Binding<Bool> {
+        Binding(
+            get: { pendingStopRow != nil },
+            set: { isPresented in
+                guard !isPresented else { return }
+                pendingStopRow = nil
+                noteTerminalSheetDismissed()
+            })
+    }
 
     /// The brief sheet is up exactly while `AgentBriefVisibility` says so, which is what opens it on its
     /// own for an agent with a brief the user has not hidden. A swipe or a tap outside the sheet closes
@@ -680,12 +704,19 @@ struct TerminalDetailView: View {
             model.isPreparingInput ? "preparing" : "prepared", model.isInputSurfaceReady ? "inputReady" : "inputPending", model.errorMessage ?? "",
             model.isPreparingLinkPreview ? "previewPreparing" : "previewIdle", model.linkPreview?.title ?? "",
             model.linkPreview?.kind?.rawValue ?? "", model.linkPreview?.content.caseName ?? "", model.linkPreviewErrorMessage ?? "",
-            model.linkNotice ?? "", renderedText, appliedFrameSize, viewportSize,
+            // The rendered row geometry the dump reports below is a pure function of this and the screen
+            // scale, and the scale never changes mid-session, so the font size alone is what the key needs
+            // to catch a geometry change that the other fields above would not otherwise reflect.
+            model.linkNotice ?? "", renderedText, appliedFrameSize, viewportSize, String(terminalFontSize.rawValue),
         ].joined(separator: "|")
     }
 
     private func writeE2EDumpIfNeeded() {
         guard e2eConfig.isEnabled, e2eConfig.matches(sessionID: session.id) else { return }
+        // Computed here rather than read off the model: it is a pure function of the font size and the
+        // screen scale, so nothing has to flow through the render path just to hand it to this e2e-only
+        // writer.
+        let renderGeometry = GhosttyRemoteTerminalViewport.renderedRowGeometry(fontSize: terminalFontSize)
         SpacesMobileE2EDumpWriter.writeCurrentDump(
             .init(
                 sessionID: session.id, title: model.title, renderMode: model.renderMode, isOwner: model.isOwner,
@@ -700,7 +731,8 @@ struct TerminalDetailView: View {
                 isPreparingLinkPreview: model.isPreparingLinkPreview, linkPreviewTitle: model.linkPreview?.title,
                 linkPreviewArtifactKind: model.linkPreview?.kind, linkPreviewContentKind: model.linkPreview?.content.caseName,
                 linkPreviewErrorMessage: model.linkPreviewErrorMessage, linkNotice: model.linkNotice, visibleText: model.visibleText,
-                renderedText: renderedText, renderStateKey: model.renderStateKey,
+                renderedText: renderedText, renderRowPitchPoints: renderGeometry.rowPitchPoints,
+                renderTopOffsetPoints: renderGeometry.topOffsetPoints, renderStateKey: model.renderStateKey,
                 emittedAt: model.latestState?.emittedAt ?? ISO8601DateFormatter().string(from: Date())), config: e2eConfig)
     }
 
