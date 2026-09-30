@@ -26,11 +26,6 @@ final class ClickableRowView: NSView {
     weak var labelField: NSTextField?
     weak var detailField: NSTextField?
 
-    /// A dense table row's non-hover background (the Alerts table's zebra striping on alternate rows).
-    /// nil, the default, means no striping, so every other `ClickableRowView` use is unaffected. Hover
-    /// still takes over on top of it, the same as an unstriped row.
-    var zebraFill: NSColor? { didSet { updateBackgroundColor() } }
-
     init(isInteractive: Bool) {
         self.isInteractive = isInteractive
         super.init(frame: .zero)
@@ -60,7 +55,7 @@ final class ClickableRowView: NSView {
     }
 
     private func resolvedBackground() -> NSColor {
-        guard isInteractive && isHovered else { return zebraFill ?? .clear }
+        guard isInteractive && isHovered else { return .clear }
         return NSColor(name: nil) { appearance in
             let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             return isDark ? NSColor(white: 1.0, alpha: 0.08) : NSColor(white: 0.0, alpha: 0.05)
