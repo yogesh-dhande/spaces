@@ -21,6 +21,7 @@
 
 ## Coding Guidelines
 - When planning a new feature (whether or not in plan mode), ask me lots of questions until we align on intent, design, UX, and implementation. Ask me questions to help me figure out my unknowns and better think through the feature, its intent, scope, and desired outcome. Don't present a plan until I explicitly ask you to.
+- Always put open questions for me in the Spaces agent brief (`spaces_agent_brief_write`) as well as asking them in the conversation, and keep each one there until I answer it. When the material a question depends on is too large for the brief (a draft, a mockup, a diff, a review triage table), write it to a file and link the file's path or URL from the question.
 - For all coding tasks use your judgement to decide an appropriate lower power model and run that in a subagent.
 - Subagents write code; `scripts/verify.sh`, E2E runs, and codex reviews run from the main agent, since a background subagent gets killed partway through a long run.
 - When user instruction contradicts previous instructions or documentation, explicitly ask for clarification before proceeding.
