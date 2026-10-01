@@ -41,7 +41,9 @@
                 makeAgentRow(id: "agent-done", activityState: .done),
             ])
 
-            let groups = SpacesMobileAgentGrouping.groups(in: overview)
+            let groups = SpacesMobileAgentGrouping.groups(
+                devices: [SpacesMobileDeviceOverviewContext(deviceID: "device-a", deviceName: "Device", overview: overview, isOffline: false)],
+                showsDeviceSegment: false)
 
             XCTAssertEqual(groups.map(\.kind), [.blocked, .done, .working])
             XCTAssertEqual(groups.map { $0.entries.map(\.row.id) }, [["agent-waiting"], ["agent-done"], ["agent-spinning"]])

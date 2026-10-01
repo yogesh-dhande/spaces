@@ -4231,13 +4231,13 @@ raise SystemExit(f"Timed out waiting for the Agents/Alerts seed rows on {workspa
 PY
 }
 
-# Regression lane for deleting a workspace that owns rows only a running session puts there, with all
-# three banded tabs in play. `workspace-delete-scroll` deletes a workspace whose rows are all configured,
-# so its section's item count never moves; here the workspace gets a running coding agent and a workspace
-# terminal whose command has exited, so tearing it down takes several rows out of a section that is
-# still listed. Those two rows are also what put the workspace on the Agents and Alerts tabs, which the
-# UI test visits before the delete so their lists mount — a TabView keeps a visited tab's collection
-# view alive, so one delete then diffs rows out of all three lists at once.
+# Regression lane for deleting a workspace that owns rows only a running session puts there, with the
+# Agents and Alerts tabs also visited first. `workspace-delete-scroll` deletes a workspace whose rows are
+# all configured, so its section's item count never moves; here the workspace gets a running coding agent
+# and a workspace terminal whose command has exited, so tearing it down takes several rows out of a
+# section that is still listed. Those two rows are also what put the workspace on the Agents and Alerts
+# tabs, which the UI test visits before the delete so their lists mount (a TabView keeps a visited tab's
+# collection view alive), so one delete then diffs rows out of all three lists at once.
 run_workspace_delete_tab_lists_scenario() {
   begin_scenario "workspace-delete-tab-lists"
 
@@ -4296,7 +4296,7 @@ run_workspace_delete_tab_lists_scenario() {
   export SPACES_MOBILE_E2E_TARGET_WORKSPACE_ID="$target_workspace_id"
   write_ui_test_config "workspace-delete-tab-lists" "$alert_session_id"
   MOBILE_APP_LAUNCH_MODE="console-capture"
-  run_ui_test "SpacesMobileUITests/SpacesMobileUITests/testWorkspaceDeleteAfterVisitingBandedTabs"
+  run_ui_test "SpacesMobileUITests/SpacesMobileUITests/testWorkspaceDeleteAfterVisitingTabLists"
   MOBILE_APP_LAUNCH_MODE="default"
 
   local connection_error_alerts

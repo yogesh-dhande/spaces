@@ -17,7 +17,8 @@
                     makeProcessRow(id: "process-live", name: "live", runState: .running, exitedAt: nil),
                 ], sessions: [makeSession(id: "session-loose", title: "zsh", state: .exited, updatedAt: "2026-01-01T00:01:00Z")])
 
-            let events = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+            let events = SpacesMobileAttention.events(
+                deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
 
             XCTAssertEqual(events.count, 4)
             let bySource = Dictionary(uniqueKeysWithValues: events.map { ($0.sourceID, $0) })
@@ -34,7 +35,9 @@
                 processRows: [makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: nil)],
                 sessions: [makeSession(id: "session-loose", title: "zsh", state: .exited, updatedAt: "not-a-timestamp")])
 
-            XCTAssertTrue(SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]).isEmpty)
+            XCTAssertTrue(
+                SpacesMobileAttention.events(deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+                    .isEmpty)
         }
 
         func testAcceptsFractionalLinuxDaemonTimestamps() {
@@ -42,7 +45,8 @@
                 processRows: [makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: "2026-07-12T12:34:56.123Z")],
                 sessions: [makeSession(id: "session-loose", title: "zsh", state: .failed, updatedAt: "2026-07-12T12:34:57.456Z")])
 
-            let events = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+            let events = SpacesMobileAttention.events(
+                deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
 
             XCTAssertEqual(Set(events.map(\.sourceID)), ["process:process-web", "session:session-loose"])
             XCTAssertTrue(events.allSatisfy { $0.date.timeIntervalSince1970 > 0 })
@@ -54,7 +58,8 @@
                     makeProcessRow(id: "process-web", name: "web", sessionID: "session-web", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")
                 ], sessions: [makeSession(id: "session-web", title: "web", state: .exited, updatedAt: "2026-01-01T00:05:30Z")])
 
-            let events = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+            let events = SpacesMobileAttention.events(
+                deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
 
             XCTAssertEqual(events.map(\.sourceID), ["process:process-web"])
         }
@@ -66,7 +71,8 @@
                     makeTerminalRow(id: "terminal-untracked", title: "lost", sessionID: nil, runState: .exited),
                 ], sessions: [makeSession(id: "session-shell", title: "zsh", state: .failed, updatedAt: "2026-01-01T00:07:00Z")])
 
-            let events = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+            let events = SpacesMobileAttention.events(
+                deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
 
             XCTAssertEqual(events.map(\.sourceID), ["terminal:terminal-shell"])
             XCTAssertEqual(events.first?.kind, .failed)
@@ -89,7 +95,9 @@
                     makeSession(id: "session-loose", title: "shell", state: .exited, updatedAt: "2026-01-01T00:04:00Z"),
                 ])
 
-            XCTAssertTrue(SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]).isEmpty)
+            XCTAssertTrue(
+                SpacesMobileAttention.events(deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+                    .isEmpty)
         }
 
         /// A workspace whose own `isHidden` flag is false but whose project is hidden is just as invisible
@@ -111,7 +119,9 @@
                     makeSession(id: "session-loose", title: "shell", state: .exited, updatedAt: "2026-01-01T00:04:00Z"),
                 ])
 
-            XCTAssertTrue(SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]).isEmpty)
+            XCTAssertTrue(
+                SpacesMobileAttention.events(deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+                    .isEmpty)
         }
 
         /// A deleted workspace's sessions outlive its record by a refresh or two. An event grouped under a
@@ -125,14 +135,22 @@
                     makeSession(id: "session-bell", title: "zsh", state: .running, updatedAt: "2026-01-01T00:05:00Z", bellAt: "2026-01-01T00:05:00Z"),
                 ])
 
-            XCTAssertTrue(SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]).isEmpty)
             XCTAssertTrue(
-                SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:], includingHiddenWorkspaces: true)
+                SpacesMobileAttention.events(deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
                     .isEmpty)
+            XCTAssertTrue(
+                SpacesMobileAttention.events(
+                    deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:],
+                    includingHiddenWorkspaces: true
+                ).isEmpty)
         }
 
-        func testGroupsSortNewestFirstAndEventsWithinGroupNewestFirst() {
-            let overview = makeOverview(workspaces: [
+        /// The Alerts tab shows one flat, newest-first list, not workspace bands: `model.attentionEvents`
+        /// sorts across every workspace by date alone, and each event's own `detail` carries the
+        /// project/workspace identity that a band header would otherwise be the only place showing.
+        func testAttentionEventsSortNewestFirstAcrossWorkspacesAndCarryProjectWorkspaceInDetail() {
+            let model = makeModel()
+            model.overview = makeOverview(workspaces: [
                 makeWorkspace(
                     id: "workspace-old", branch: "old",
                     codingAgentRows: [
@@ -151,13 +169,10 @@
                     ]),
             ])
 
-            let groups = SpacesMobileAttention.groups(in: overview, dismissedEventIDs: [], focusedSessionID: nil, watchWindowsBySessionID: [:])
+            let events = model.attentionEvents
 
-            XCTAssertEqual(groups.map(\.workspaceID), ["workspace-new", "workspace-old"])
-            XCTAssertEqual(groups.first?.events.map(\.sourceID), ["agent:agent-new-late", "agent:agent-new-early"])
-            XCTAssertEqual(groups.first?.workspaceDisplayName, "new")
-            XCTAssertEqual(groups.first?.projectName, "Project")
-            XCTAssertEqual(groups.first?.bandGlyph, .git)
+            XCTAssertEqual(events.map(\.sourceID), ["agent:agent-new-late", "agent:agent-new-early", "agent:agent-old"])
+            XCTAssertEqual(events.first?.detail, "Project / new")
         }
 
         func testClearDismissesCurrentEventsAndNewStateChangeReappears() {
@@ -171,7 +186,7 @@
             model.clearAlerts()
 
             XCTAssertEqual(model.undismissedAlertCount, 0)
-            XCTAssertTrue(model.attentionGroups.isEmpty)
+            XCTAssertTrue(model.attentionEvents.isEmpty)
 
             // The same source in a new state (later timestamp) mints a new identity and reappears.
             model.overview = makeOverview(codingAgentRows: [
@@ -187,7 +202,7 @@
                 makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z"),
                 makeAgentRow(id: "agent-b", name: "codex", activityState: .done, updatedAt: "2026-01-01T00:20:00Z"),
             ])
-            guard let dismissed = model.attentionGroups.first?.events.first(where: { $0.sourceID == "agent:agent-a" }) else {
+            guard let dismissed = model.attentionEvents.first(where: { $0.sourceID == "agent:agent-a" }) else {
                 XCTFail("Expected a derived event for agent-a.")
                 return
             }
@@ -195,7 +210,7 @@
             model.dismissAlert(dismissed)
 
             XCTAssertEqual(model.undismissedAlertCount, 1)
-            XCTAssertEqual(model.attentionGroups.first?.events.map(\.sourceID), ["agent:agent-b"])
+            XCTAssertEqual(model.attentionEvents.map(\.sourceID), ["agent:agent-b"])
 
             // The same source in a new state mints a new identity, so it alerts again.
             model.overview = makeOverview(codingAgentRows: [
@@ -219,7 +234,7 @@
             XCTAssertFalse(model.isExitAcknowledged(row))
             XCTAssertEqual(row.statusDotKind(exitAcknowledged: model.isExitAcknowledged(row)), .exited)
 
-            guard let exitEvent = model.undismissedAlerts(for: row).first(where: { $0.kind == .exited }) else {
+            guard let exitEvent = model.undismissedAlerts(for: row, deviceID: "device-a").first(where: { $0.kind == .exited }) else {
                 XCTFail("Expected an exited event for the process row.")
                 return
             }
@@ -260,7 +275,7 @@
             let rowB = SpacesMobileWorkspaceRuntimeRow(source: .process(processB))
             XCTAssertEqual(rowA.id, rowB.id, "both rows share the project template's id")
 
-            guard let exitEventA = model.undismissedAlerts(for: rowA).first(where: { $0.kind == .exited }) else {
+            guard let exitEventA = model.undismissedAlerts(for: rowA, deviceID: "device-a").first(where: { $0.kind == .exited }) else {
                 XCTFail("Expected an exited event for workspace A's row.")
                 return
             }
@@ -269,7 +284,7 @@
             XCTAssertTrue(model.isExitAcknowledged(rowA))
             XCTAssertFalse(model.isExitAcknowledged(rowB), "dismissing A's exit must not acknowledge B's identically-id'd row")
 
-            guard let exitEventB = model.undismissedAlerts(for: rowB).first(where: { $0.kind == .exited }) else {
+            guard let exitEventB = model.undismissedAlerts(for: rowB, deviceID: "device-a").first(where: { $0.kind == .exited }) else {
                 XCTFail("Expected an exited event for workspace B's row.")
                 return
             }
@@ -291,7 +306,7 @@
                     makeSession(id: "session-a", title: "web", state: .exited, updatedAt: "2026-01-01T00:05:00Z", bellAt: "2026-01-01T00:07:00Z")
                 ])
             let row = SpacesMobileWorkspaceRuntimeRow(source: .process(model.overview!.workspaces[0].processRows[0]))
-            guard let exitEvent = model.undismissedAlerts(for: row).first(where: { $0.kind == .exited }) else {
+            guard let exitEvent = model.undismissedAlerts(for: row, deviceID: "device-a").first(where: { $0.kind == .exited }) else {
                 XCTFail("Expected an exited event for the process row.")
                 return
             }
@@ -300,7 +315,7 @@
 
             XCTAssertTrue(model.isExitAcknowledged(row))
             XCTAssertEqual(row.statusDotKind(exitAcknowledged: model.isExitAcknowledged(row)), .idle)
-            XCTAssertTrue(model.hasUndismissedAlerts(for: row), "the bell on the same session is still undismissed")
+            XCTAssertTrue(model.hasUndismissedAlerts(for: row, deviceID: "device-a"), "the bell on the same session is still undismissed")
         }
 
         /// Agent activity and terminal exits never read `exitAcknowledged`: only a `.process` row's dot
@@ -328,19 +343,24 @@
             let now = Date()
             let ownExit = SpacesMobileAttentionEvent(
                 sourceID: "process:process-web", kind: .exited, date: now, title: "web", rowType: .processes, sessionID: "session-a",
-                workspaceID: "workspace-feature")
+                workspaceID: "workspace-feature", deviceID: "device-a", projectName: "Project", workspaceDisplayName: "feature", deviceText: nil,
+                isDeviceOffline: false)
             let ownBell = SpacesMobileAttentionEvent(
                 sourceID: "session:session-a", kind: .bell, date: now, title: "web", rowType: .processes, sessionID: "session-a",
-                workspaceID: "workspace-feature")
+                workspaceID: "workspace-feature", deviceID: "device-a", projectName: "Project", workspaceDisplayName: "feature", deviceText: nil,
+                isDeviceOffline: false)
             let otherProcessSameWorkspace = SpacesMobileAttentionEvent(
                 sourceID: "process:process-other", kind: .exited, date: now, title: "other", rowType: .processes, sessionID: "session-b",
-                workspaceID: "workspace-feature")
+                workspaceID: "workspace-feature", deviceID: "device-a", projectName: "Project", workspaceDisplayName: "feature", deviceText: nil,
+                isDeviceOffline: false)
             let sameSourceIDOtherWorkspace = SpacesMobileAttentionEvent(
                 sourceID: "process:process-web", kind: .exited, date: now, title: "web", rowType: .processes, sessionID: "session-a",
-                workspaceID: "workspace-other")
+                workspaceID: "workspace-other", deviceID: "device-a", projectName: "Project", workspaceDisplayName: "other", deviceText: nil,
+                isDeviceOffline: false)
             let bellOnAnotherSession = SpacesMobileAttentionEvent(
                 sourceID: "session:session-b", kind: .bell, date: now, title: "other", rowType: .processes, sessionID: "session-b",
-                workspaceID: "workspace-feature")
+                workspaceID: "workspace-feature", deviceID: "device-a", projectName: "Project", workspaceDisplayName: "feature", deviceText: nil,
+                isDeviceOffline: false)
 
             XCTAssertTrue(row.matches(ownExit))
             XCTAssertTrue(row.matches(ownBell))
@@ -369,12 +389,14 @@
             let agentRuntimeRow = SpacesMobileWorkspaceRuntimeRow(source: .codingAgent(workspace.codingAgentRows[0]))
             let terminalRuntimeRow = SpacesMobileWorkspaceRuntimeRow(source: .terminal(workspace.terminalRows[0]))
 
-            XCTAssertEqual(Set(model.undismissedAlerts(for: processRuntimeRow).map(\.sourceID)), ["process:process-web", "session:session-a"])
-            XCTAssertEqual(model.undismissedAlerts(for: agentRuntimeRow).map(\.sourceID), ["agent:agent-a"])
-            XCTAssertEqual(model.undismissedAlerts(for: terminalRuntimeRow).map(\.sourceID), ["terminal:terminal-a"])
-            XCTAssertTrue(model.hasUndismissedAlerts(for: processRuntimeRow))
-            XCTAssertTrue(model.hasUndismissedAlerts(for: agentRuntimeRow))
-            XCTAssertTrue(model.hasUndismissedAlerts(for: terminalRuntimeRow))
+            XCTAssertEqual(
+                Set(model.undismissedAlerts(for: processRuntimeRow, deviceID: "device-a").map(\.sourceID)),
+                ["process:process-web", "session:session-a"])
+            XCTAssertEqual(model.undismissedAlerts(for: agentRuntimeRow, deviceID: "device-a").map(\.sourceID), ["agent:agent-a"])
+            XCTAssertEqual(model.undismissedAlerts(for: terminalRuntimeRow, deviceID: "device-a").map(\.sourceID), ["terminal:terminal-a"])
+            XCTAssertTrue(model.hasUndismissedAlerts(for: processRuntimeRow, deviceID: "device-a"))
+            XCTAssertTrue(model.hasUndismissedAlerts(for: agentRuntimeRow, deviceID: "device-a"))
+            XCTAssertTrue(model.hasUndismissedAlerts(for: terminalRuntimeRow, deviceID: "device-a"))
         }
 
         /// `undismissedAlerts` must apply the same focus/watch-window bell suppression the Alerts tab
@@ -397,8 +419,8 @@
                         id: "session-bell", title: "web", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: iso8601(bellRungWhileWatching))
                 ])
 
-            XCTAssertTrue(model.undismissedAlerts(for: row).isEmpty)
-            XCTAssertFalse(model.hasUndismissedAlerts(for: row))
+            XCTAssertTrue(model.undismissedAlerts(for: row, deviceID: "device-a").isEmpty)
+            XCTAssertFalse(model.hasUndismissedAlerts(for: row, deviceID: "device-a"))
 
             // The same bell, rung outside any watch window, is one the user has not seen yet.
             let bellOutsideAnyWatch = clock.advance(60)
@@ -409,8 +431,34 @@
                         id: "session-bell", title: "web", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: iso8601(bellOutsideAnyWatch))
                 ])
 
-            XCTAssertFalse(model.undismissedAlerts(for: row).isEmpty)
-            XCTAssertTrue(model.hasUndismissedAlerts(for: row))
+            XCTAssertFalse(model.undismissedAlerts(for: row, deviceID: "device-a").isEmpty)
+            XCTAssertTrue(model.hasUndismissedAlerts(for: row, deviceID: "device-a"))
+        }
+
+        /// The same suppression has to hold for a non-selected device's row too: `watchedTerminalSessionID`
+        /// and the watch-window store are shared app state, not scoped to the selected device, since a
+        /// terminal opened from an Agents/Alerts row can belong to any paired device.
+        func testUndismissedAlertsSuppressesAWatchedBellOnANonSelectedDeviceToo() {
+            let clock = TestWallClock()
+            let model = makeModel(clock: clock)
+            model.pairedDevices = [makeDeviceRecord(id: Self.testDeviceID), makeDeviceRecord(id: "device-b")]
+            let processRow = makeProcessRow(id: "process-web", name: "web", sessionID: "session-bell", runState: .running, exitedAt: nil)
+            let row = SpacesMobileWorkspaceRuntimeRow(source: .process(processRow))
+            model.setActiveTerminalSession("session-bell")
+            let bellRungWhileWatching = clock.advance(60)
+            clock.advance(60)
+            model.setActiveTerminalSession(nil)
+
+            model.setDeviceOverviewForTesting(
+                makeOverview(
+                    processRows: [processRow],
+                    sessions: [
+                        makeSession(
+                            id: "session-bell", title: "web", state: .running, updatedAt: "2026-01-01T00:00:00Z",
+                            bellAt: iso8601(bellRungWhileWatching))
+                    ]), deviceID: "device-b")
+
+            XCTAssertTrue(model.undismissedAlerts(for: row, deviceID: "device-b").isEmpty, "a watch window applies to a non-selected device too")
         }
 
         /// The row-level "Dismiss Alert" action dismisses every one of the row's own undismissed events at
@@ -427,12 +475,12 @@
                 ])
             let row = SpacesMobileWorkspaceRuntimeRow(source: .process(model.overview!.workspaces[0].processRows[0]))
 
-            XCTAssertTrue(model.hasUndismissedAlerts(for: row))
+            XCTAssertTrue(model.hasUndismissedAlerts(for: row, deviceID: "device-a"))
             XCTAssertEqual(model.undismissedAlertCount, 2)
 
-            model.dismissAlerts(for: row)
+            model.dismissAlerts(for: row, deviceID: "device-a")
 
-            XCTAssertFalse(model.hasUndismissedAlerts(for: row))
+            XCTAssertFalse(model.hasUndismissedAlerts(for: row, deviceID: "device-a"))
             XCTAssertEqual(model.undismissedAlertCount, 0)
             XCTAssertTrue(model.isExitAcknowledged(row))
         }
@@ -493,13 +541,15 @@
             let overview = makeOverview(codingAgentRows: [
                 makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
             ])
-            let events = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
-            guard let liveID = events.first?.id else {
+            let events = SpacesMobileAttention.events(
+                deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+            guard let liveID = events.first?.eventKey else {
                 XCTFail("Expected a derived event.")
                 return
             }
 
-            let retained = SpacesMobileAttention.retainedDismissedEventIDs([liveID, "agent:agent-gone|finished|1"], in: overview)
+            let retained = SpacesMobileAttention.retainedDismissedEventIDs(
+                [liveID, "agent:agent-gone|finished|1"], deviceID: "device-a", in: overview)
 
             XCTAssertEqual(retained, [liveID])
         }
@@ -513,7 +563,11 @@
             let visibleOverview = makeOverview(codingAgentRows: [
                 makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
             ])
-            guard let liveID = SpacesMobileAttention.events(in: visibleOverview, focusedSessionID: nil, watchWindowsBySessionID: [:]).first?.id else {
+            guard
+                let liveID = SpacesMobileAttention.events(
+                    deviceID: "device-a", deviceText: nil, in: visibleOverview, focusedSessionID: nil, watchWindowsBySessionID: [:]
+                ).first?.eventKey
+            else {
                 XCTFail("Expected a derived event.")
                 return
             }
@@ -523,7 +577,7 @@
                     codingAgentRows: [makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")])
             ])
 
-            let retained = SpacesMobileAttention.retainedDismissedEventIDs([liveID], in: hiddenOverview)
+            let retained = SpacesMobileAttention.retainedDismissedEventIDs([liveID], deviceID: "device-a", in: hiddenOverview)
 
             XCTAssertEqual(retained, [liveID])
         }
@@ -534,7 +588,11 @@
             let visibleOverview = makeOverview(codingAgentRows: [
                 makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
             ])
-            guard let liveID = SpacesMobileAttention.events(in: visibleOverview, focusedSessionID: nil, watchWindowsBySessionID: [:]).first?.id else {
+            guard
+                let liveID = SpacesMobileAttention.events(
+                    deviceID: "device-a", deviceText: nil, in: visibleOverview, focusedSessionID: nil, watchWindowsBySessionID: [:]
+                ).first?.eventKey
+            else {
                 XCTFail("Expected a derived event.")
                 return
             }
@@ -545,7 +603,7 @@
                         codingAgentRows: [makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")])
                 ], projectIsHidden: true)
 
-            let retained = SpacesMobileAttention.retainedDismissedEventIDs([liveID], in: hiddenOverview)
+            let retained = SpacesMobileAttention.retainedDismissedEventIDs([liveID], deviceID: "device-a", in: hiddenOverview)
 
             XCTAssertEqual(retained, [liveID])
         }
@@ -555,14 +613,18 @@
         func testRetainedDismissalsSurviveWhenASessionsWorkspaceIsHidden() {
             let session = makeSession(id: "session-loose", title: "zsh", state: .exited, updatedAt: "2026-01-01T00:04:00Z")
             let visibleOverview = makeOverview(sessions: [session])
-            guard let liveID = SpacesMobileAttention.events(in: visibleOverview, focusedSessionID: nil, watchWindowsBySessionID: [:]).first?.id else {
+            guard
+                let liveID = SpacesMobileAttention.events(
+                    deviceID: "device-a", deviceText: nil, in: visibleOverview, focusedSessionID: nil, watchWindowsBySessionID: [:]
+                ).first?.eventKey
+            else {
                 XCTFail("Expected a derived event.")
                 return
             }
             let hiddenOverview = makeOverview(
                 workspaces: [makeWorkspace(id: "workspace-feature", branch: "feature", isHidden: true)], sessions: [session])
 
-            let retained = SpacesMobileAttention.retainedDismissedEventIDs([liveID], in: hiddenOverview)
+            let retained = SpacesMobileAttention.retainedDismissedEventIDs([liveID], deviceID: "device-a", in: hiddenOverview)
 
             XCTAssertEqual(retained, [liveID])
         }
@@ -578,12 +640,16 @@
                 SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
-            let liveID = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]).first?.id
-            model.dismissedAlertIDs = [liveID ?? "", "agent:agent-gone|finished|1"]
+            model.pairedDevices = [makeDeviceRecord(id: Self.testDeviceID)]
+            model.activeDeviceID = Self.testDeviceID
+            let liveID = SpacesMobileAttention.events(
+                deviceID: Self.testDeviceID, deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]
+            ).first?.eventKey
+            model.setDismissedAlertIDsForTesting([liveID ?? "", "agent:agent-gone|finished|1"], deviceID: Self.testDeviceID)
 
             await model.refresh()
 
-            XCTAssertEqual(model.dismissedAlertIDs, [liveID ?? ""])
+            XCTAssertEqual(model.dismissedAlertIDsForTesting(deviceID: Self.testDeviceID), [liveID ?? ""])
             XCTAssertEqual(model.undismissedAlertCount, 0)
         }
 
@@ -600,8 +666,12 @@
                 SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewBox.get()))
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
-            let liveID = SpacesMobileAttention.events(in: overviewBox.get(), focusedSessionID: nil, watchWindowsBySessionID: [:]).first?.id
-            model.dismissedAlertIDs = [liveID ?? ""]
+            model.pairedDevices = [makeDeviceRecord(id: Self.testDeviceID)]
+            model.activeDeviceID = Self.testDeviceID
+            let liveID = SpacesMobileAttention.events(
+                deviceID: Self.testDeviceID, deviceText: nil, in: overviewBox.get(), focusedSessionID: nil, watchWindowsBySessionID: [:]
+            ).first?.eventKey
+            model.setDismissedAlertIDsForTesting([liveID ?? ""], deviceID: Self.testDeviceID)
 
             overviewBox.set(
                 makeOverview(workspaces: [
@@ -611,7 +681,7 @@
                 ]))
             await model.refresh()
 
-            XCTAssertEqual(model.dismissedAlertIDs, [liveID ?? ""])
+            XCTAssertEqual(model.dismissedAlertIDsForTesting(deviceID: Self.testDeviceID), [liveID ?? ""])
             XCTAssertEqual(model.undismissedAlertCount, 0)
 
             overviewBox.set(
@@ -620,7 +690,7 @@
                 ]))
             await model.refresh()
 
-            XCTAssertEqual(model.dismissedAlertIDs, [liveID ?? ""])
+            XCTAssertEqual(model.dismissedAlertIDsForTesting(deviceID: Self.testDeviceID), [liveID ?? ""])
             XCTAssertEqual(model.undismissedAlertCount, 0)
         }
 
@@ -643,29 +713,29 @@
             model.overview = makeOverview(codingAgentRows: [
                 makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
             ])
-            guard let eventA = model.attentionGroups.first?.events.first else {
+            guard let eventA = model.attentionEvents.first else {
                 XCTFail("Expected a derived event for device A.")
                 return
             }
             model.dismissAlert(eventA)
             XCTAssertEqual(model.undismissedAlertCount, 0)
-            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: deviceA), [eventA.id])
+            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: deviceA), [eventA.eventKey])
 
             // Device B's own overview derives none of A's events; switching to it starts from an empty
             // bucket rather than inheriting A's dismissal.
             model.selectDevice(id: deviceB)
-            XCTAssertTrue(model.dismissedAlertIDs.isEmpty)
+            XCTAssertTrue(model.dismissedAlertIDsForTesting(deviceID: deviceB).isEmpty)
             model.overview = makeOverview(codingAgentRows: [
                 makeAgentRow(id: "agent-b", name: "codex", activityState: .waiting, updatedAt: "2026-01-01T00:20:00Z")
             ])
             XCTAssertEqual(model.undismissedAlertCount, 1)
 
             // A's persisted bucket is untouched by the time spent on B.
-            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: deviceA), [eventA.id])
+            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: deviceA), [eventA.eventKey])
 
             // Switching back to A reloads its dismissal from storage.
             model.selectDevice(id: deviceA)
-            XCTAssertEqual(model.dismissedAlertIDs, [eventA.id])
+            XCTAssertEqual(model.dismissedAlertIDsForTesting(deviceID: deviceA), [eventA.eventKey])
         }
 
         /// Turning Demo Mode on swaps the active device to the synthetic Demo Mac, which gets its own,
@@ -681,21 +751,24 @@
             model.overview = makeOverview(codingAgentRows: [
                 makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
             ])
-            guard let eventA = model.attentionGroups.first?.events.first else {
+            guard let eventA = model.attentionEvents.first else {
                 XCTFail("Expected a derived event for device A.")
                 return
             }
             model.dismissAlert(eventA)
-            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: deviceA), [eventA.id])
+            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: deviceA), [eventA.eventKey])
 
             model.setDemoMode(true)
-            XCTAssertTrue(model.dismissedAlertIDs.isEmpty, "the demo device starts with its own, empty bucket")
+            XCTAssertTrue(
+                model.dismissedAlertIDsForTesting(deviceID: model.activeDeviceID ?? "").isEmpty, "the demo device starts with its own, empty bucket")
 
             model.setDemoMode(false)
 
             XCTAssertEqual(model.activeDeviceID, deviceA)
-            XCTAssertEqual(model.dismissedAlertIDs, [eventA.id], "the real device's dismissal survives a Demo Mode round trip")
-            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: deviceA), [eventA.id])
+            XCTAssertEqual(
+                model.dismissedAlertIDsForTesting(deviceID: deviceA), [eventA.eventKey], "the real device's dismissal survives a Demo Mode round trip"
+            )
+            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: deviceA), [eventA.eventKey])
         }
 
         /// Unpairing a device drops its persisted dismissal bucket along with it, so the store stays
@@ -710,13 +783,13 @@
             model.overview = makeOverview(codingAgentRows: [
                 makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
             ])
-            guard let eventA = model.attentionGroups.first?.events.first else {
+            guard let eventA = model.attentionEvents.first else {
                 XCTFail("Expected a derived event for device A.")
                 return
             }
             model.dismissAlert(eventA)
             model.selectDevice(id: deviceB)
-            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: deviceA), [eventA.id])
+            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: deviceA), [eventA.eventKey])
 
             model.removeDevice(id: deviceA)
 
@@ -729,15 +802,150 @@
                 makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z"),
                 makeAgentRow(id: "agent-b", name: "codex", activityState: .done, updatedAt: "2026-01-01T00:20:00Z"),
             ])
-            guard let dismissed = model.attentionGroups.first?.events.last else {
+            guard let dismissed = model.attentionEvents.last else {
                 XCTFail("Expected derived events.")
                 return
             }
 
-            model.dismissedAlertIDs.insert(dismissed.id)
+            model.setDismissedAlertIDsForTesting(
+                model.dismissedAlertIDsForTesting(deviceID: Self.testDeviceID).union([dismissed.eventKey]), deviceID: Self.testDeviceID)
 
             XCTAssertEqual(model.undismissedAlertCount, 1)
-            XCTAssertEqual(model.attentionGroups.first?.events.map(\.sourceID), ["agent:agent-b"])
+            XCTAssertEqual(model.attentionEvents.map(\.sourceID), ["agent:agent-b"])
+        }
+
+        // MARK: - Cross-device Alerts (Agents and Alerts tabs list every paired device)
+
+        /// A second paired device's alerts join the flat list, sorted by date across both devices rather
+        /// than grouped by device, and an automation-run alert merges into the same list alongside
+        /// attention events (`SpacesMobileAppModel.alertItems`).
+        func testAlertItemsMergeAcrossDevicesNewestFirstIncludingAnAutomationAlert() {
+            let model = makeModel()
+            model.pairedDevices = [makeDeviceRecord(id: Self.testDeviceID), makeDeviceRecord(id: "device-b")]
+            model.overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-old", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:01:00Z")
+            ])
+            model.setDeviceOverviewForTesting(
+                makeOverview(codingAgentRows: [
+                    makeAgentRow(id: "agent-new", name: "codex", activityState: .waiting, updatedAt: "2026-01-01T00:30:00Z")
+                ]), deviceID: "device-b")
+
+            let items = model.alertItems
+
+            XCTAssertEqual(items.count, 2)
+            // Newest first regardless of which device it came from: device B's later event leads.
+            guard case .event(let first) = items[0], case .event(let second) = items[1] else {
+                XCTFail("Expected two attention events.")
+                return
+            }
+            XCTAssertEqual(first.sourceID, "agent:agent-new")
+            XCTAssertEqual(second.sourceID, "agent:agent-old")
+            // Two paired devices widens the device segment on every row, including device A's.
+            XCTAssertEqual(second.deviceText, Self.testDeviceID)
+            XCTAssertEqual(first.deviceText, "device-b")
+        }
+
+        /// The device segment is hidden only with exactly one paired device, online; a second paired
+        /// device (even one with no cached overview yet) widens it on every row, matching the Mac
+        /// sidebar's own rule.
+        func testDeviceSegmentHiddenOnlyWithExactlyOnePairedOnlineDevice() {
+            let model = makeModel()
+            model.overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
+            ])
+            XCTAssertNil(model.attentionEvents.first?.deviceText, "one online paired device shows no device text")
+
+            model.pairedDevices = [makeDeviceRecord(id: Self.testDeviceID), makeDeviceRecord(id: "device-b")]
+            XCTAssertEqual(model.attentionEvents.first?.deviceText, Self.testDeviceID, "a second paired device widens the segment")
+        }
+
+        /// An offline device's alerts stay listed (not dropped), carry "(offline)" in their device text,
+        /// and their `isDeviceOffline` flag is what the Alerts/Agents tabs dim the row on.
+        func testOfflineDevicesAlertsStayListedAndMarkedOffline() {
+            let model = makeModel()
+            model.pairedDevices = [makeDeviceRecord(id: Self.testDeviceID)]
+            model.overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
+            ])
+            model.setOfflineForTesting(true, deviceID: Self.testDeviceID)
+
+            guard let event = model.attentionEvents.first else {
+                XCTFail("Expected an offline device's event to stay listed.")
+                return
+            }
+            XCTAssertTrue(event.isDeviceOffline)
+            XCTAssertEqual(event.deviceText, "\(Self.testDeviceID) (offline)")
+
+            // Recovering (the stream delivers again) clears both the offline marking and the "(offline)"
+            // text on the next derivation.
+            model.setOfflineForTesting(false, deviceID: Self.testDeviceID)
+            XCTAssertFalse(model.attentionEvents.first?.isDeviceOffline ?? true)
+        }
+
+        /// The Alerts tab badge counts an offline device's own undismissed alerts the same as any other
+        /// paired device's, so it always equals the number of rows the tab actually shows.
+        func testBadgeCountsAnOfflineDevicesAlertsToo() {
+            let model = makeModel()
+            model.pairedDevices = [makeDeviceRecord(id: Self.testDeviceID), makeDeviceRecord(id: "device-b")]
+            model.overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
+            ])
+            model.setDeviceOverviewForTesting(
+                makeOverview(codingAgentRows: [makeAgentRow(id: "agent-b", name: "codex", activityState: .waiting, updatedAt: "2026-01-01T00:20:00Z")]
+                ), deviceID: "device-b")
+            model.setOfflineForTesting(true, deviceID: "device-b")
+
+            XCTAssertEqual(model.undismissedAlertCount, 2, "device B's alert still counts toward the badge while offline")
+        }
+
+        /// An auth rejection on the selected device nils `model.overview` (`handleAuthenticationFailure`),
+        /// but the same delivery is still sitting in `deviceOverviews[activeDeviceID]` (every stream push
+        /// writes there before publishing to `overview`, including for the selected device). Agents/Alerts
+        /// read through `overview(forDeviceID:)`, which falls back to that cache, so the selected device's
+        /// rows and badge count survive the rejection instead of vanishing until the next successful
+        /// refresh republishes `overview`.
+        func testSelectedDeviceKeepsItsRowsAfterAuthFailureClearsOverview() {
+            let model = makeModel()
+            model.pairedDevices = [makeDeviceRecord(id: Self.testDeviceID)]
+            let overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
+            ])
+            model.overview = overview
+            model.setDeviceOverviewForTesting(overview, deviceID: Self.testDeviceID)
+
+            model.handleAuthenticationFailure(message: "Device rejected this iPhone.")
+
+            XCTAssertNil(model.overview, "handleAuthenticationFailure should still clear the published overview")
+            XCTAssertEqual(model.attentionEvents.count, 1, "the selected device's row should survive via the stream cache fallback")
+            XCTAssertEqual(model.undismissedAlertCount, 1, "the badge count should still reflect the surviving row")
+            XCTAssertFalse(model.attentionEvents.first?.isDeviceOffline ?? true, "an auth failure alone does not mark the device offline")
+
+            // An auth failure that also leaves the device offline (the stream drops with it) keeps
+            // showing the row, now dimmed, rather than dropping it.
+            model.setOfflineForTesting(true, deviceID: Self.testDeviceID)
+            XCTAssertEqual(model.attentionEvents.count, 1, "the row should still show while offline")
+            XCTAssertTrue(model.attentionEvents.first?.isDeviceOffline ?? false, "the surviving row should be marked offline for dimming")
+        }
+
+        /// `clearAlerts()` dismisses every paired device's alerts in one action, including an offline
+        /// device's, and each device's dismissal lands in its own persisted bucket.
+        func testClearAlertsDismissesEveryPairedDeviceIncludingAnOfflineOne() {
+            let model = makeModel()
+            model.pairedDevices = [makeDeviceRecord(id: Self.testDeviceID), makeDeviceRecord(id: "device-b")]
+            model.overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
+            ])
+            model.setDeviceOverviewForTesting(
+                makeOverview(codingAgentRows: [makeAgentRow(id: "agent-b", name: "codex", activityState: .waiting, updatedAt: "2026-01-01T00:20:00Z")]
+                ), deviceID: "device-b")
+            model.setOfflineForTesting(true, deviceID: "device-b")
+            addTeardownBlock { SpacesMobileDismissedAlertsStore.save([], deviceID: "device-b") }
+
+            model.clearAlerts()
+
+            XCTAssertEqual(model.undismissedAlertCount, 0)
+            XCTAssertFalse(model.dismissedAlertIDsForTesting(deviceID: Self.testDeviceID).isEmpty)
+            XCTAssertFalse(model.dismissedAlertIDsForTesting(deviceID: "device-b").isEmpty)
         }
 
         // MARK: - Bell events
@@ -747,17 +955,18 @@
                 makeSession(id: "session-bell", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: "2026-01-01T00:10:00Z")
             ])
 
-            let events = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+            let events = SpacesMobileAttention.events(
+                deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
 
             XCTAssertEqual(events.map(\.sourceID), ["session:session-bell"])
             XCTAssertEqual(events.first?.kind, .bell)
             XCTAssertEqual(events.first?.date, SpacesMobileAttention.date(fromISO8601: "2026-01-01T00:10:00Z"))
         }
 
-        /// A bell row reads exactly as the session's own row does — its name, then what its program is
-        /// doing — because its presence under Alerts is what says the bell rang. A state change the row
-        /// cannot otherwise show still says so ("Exited").
-        func testBellEventIsNamedAndDescribedLikeItsSessionRow() {
+        /// A bell row is named for its session, like every other row, but its detail line is the flat
+        /// cross-device list's project/workspace text, not the session's live title or exit status (see
+        /// `SpacesMobileAttentionEvent.detail`).
+        func testBellEventIsNamedForItsSessionAndCarriesProjectWorkspaceDetail() {
             let overview = makeOverview(sessions: [
                 makeSession(
                     id: "session-bell", title: "build box", liveTitle: "vim main.swift", state: .running, updatedAt: "2026-01-01T00:00:00Z",
@@ -765,29 +974,35 @@
                 makeSession(id: "session-quiet", title: "shell-1", state: .exited, updatedAt: "2026-01-01T00:00:00Z"),
             ])
 
-            let events = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+            let events = SpacesMobileAttention.events(
+                deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
 
             let bell = events.first { $0.kind == .bell }
             XCTAssertEqual(bell?.title, "build box")
-            XCTAssertEqual(bell?.detail, "vim main.swift")
-            XCTAssertEqual(events.first { $0.kind == .exited }?.detail, "Exited")
+            XCTAssertEqual(bell?.detail, "Project / feature")
+            XCTAssertEqual(events.first { $0.kind == .exited }?.detail, "Project / feature")
         }
 
-        func testBellEventForASilentShellCarriesNoDetail() {
+        /// The detail line never depends on the session's live title: a bell on a silent shell (nothing
+        /// running to report) still carries the same project/workspace text as any other row.
+        func testBellEventDetailIsProjectAndWorkspaceRegardlessOfLiveTitle() {
             let overview = makeOverview(sessions: [
                 makeSession(id: "session-bell", title: "shell-1", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: "2026-01-01T00:10:00Z")
             ])
 
-            let events = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+            let events = SpacesMobileAttention.events(
+                deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
 
-            XCTAssertEqual(events.first?.detail, "")
+            XCTAssertEqual(events.first?.detail, "Project / feature")
         }
 
         func testSessionWithoutBellYieldsNoBellEvent() {
             let overview = makeOverview(sessions: [makeSession(id: "session-quiet", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z")]
             )
 
-            XCTAssertTrue(SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]).isEmpty)
+            XCTAssertTrue(
+                SpacesMobileAttention.events(deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+                    .isEmpty)
         }
 
         func testUnchangedBellAtProducesStableEventID() {
@@ -795,8 +1010,10 @@
                 makeSession(id: "session-bell", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: "2026-01-01T00:10:00Z")
             ])
 
-            let first = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
-            let second = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+            let first = SpacesMobileAttention.events(
+                deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+            let second = SpacesMobileAttention.events(
+                deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
 
             XCTAssertEqual(first.first?.id, second.first?.id)
         }
@@ -809,8 +1026,12 @@
                 makeSession(id: "session-bell", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: "2026-01-01T00:20:00Z")
             ])
 
-            let beforeID = SpacesMobileAttention.events(in: before, focusedSessionID: nil, watchWindowsBySessionID: [:]).first?.id
-            let afterID = SpacesMobileAttention.events(in: after, focusedSessionID: nil, watchWindowsBySessionID: [:]).first?.id
+            let beforeID = SpacesMobileAttention.events(
+                deviceID: "device-a", deviceText: nil, in: before, focusedSessionID: nil, watchWindowsBySessionID: [:]
+            ).first?.id
+            let afterID = SpacesMobileAttention.events(
+                deviceID: "device-a", deviceText: nil, in: after, focusedSessionID: nil, watchWindowsBySessionID: [:]
+            ).first?.id
 
             XCTAssertNotEqual(beforeID, afterID)
         }
@@ -820,7 +1041,10 @@
                 makeSession(id: "session-bell", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: "2026-01-01T00:10:00Z")
             ])
 
-            XCTAssertTrue(SpacesMobileAttention.events(in: overview, focusedSessionID: "session-bell", watchWindowsBySessionID: [:]).isEmpty)
+            XCTAssertTrue(
+                SpacesMobileAttention.events(
+                    deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: "session-bell", watchWindowsBySessionID: [:]
+                ).isEmpty)
         }
 
         /// A bell for the focused session is excluded live; once the user backs out the session is no
@@ -846,7 +1070,7 @@
 
             model.overview = bellOverview(at: clock.advance(60))
 
-            XCTAssertEqual(model.attentionGroups.first?.events.map(\.kind), [.bell])
+            XCTAssertEqual(model.attentionEvents.map(\.kind), [.bell])
         }
 
         /// A bell that rang before the user ever opened the session is not something they watched, so
@@ -861,7 +1085,7 @@
 
             model.overview = bellOverview(at: bellRungBeforeOpening)
 
-            XCTAssertEqual(model.attentionGroups.first?.events.map(\.kind), [.bell])
+            XCTAssertEqual(model.attentionEvents.map(\.kind), [.bell])
         }
 
         func testBellAfterASuppressedOneStillAlerts() {
@@ -876,7 +1100,7 @@
             XCTAssertEqual(model.undismissedAlertCount, 0)
 
             model.overview = bellOverview(at: clock.advance(60))
-            XCTAssertEqual(model.attentionGroups.first?.events.map(\.kind), [.bell])
+            XCTAssertEqual(model.attentionEvents.map(\.kind), [.bell])
         }
 
         /// Switching straight from one session's detail to another ends the watch on the one left behind.
@@ -912,7 +1136,7 @@
             model.overview = bellOverview(at: bellRungWithNoTerminalOnScreen)
 
             XCTAssertNil(model.watchedTerminalSessionID)
-            XCTAssertEqual(model.attentionGroups.first?.events.map(\.kind), [.bell])
+            XCTAssertEqual(model.attentionEvents.map(\.kind), [.bell])
         }
 
         /// The ordinary back-out drives both the route change and the detail's teardown, so the second one
@@ -955,7 +1179,7 @@
             model.overview = bellOverview(at: clock.advance(60))
 
             XCTAssertNil(model.watchedTerminalSessionID, "a backgrounded app is watching nothing")
-            XCTAssertEqual(model.attentionGroups.first?.events.map(\.kind), [.bell])
+            XCTAssertEqual(model.attentionEvents.map(\.kind), [.bell])
         }
 
         /// The realistic sequence: no stream is open while backgrounded, so the bell only arrives on the
@@ -975,7 +1199,7 @@
 
             model.overview = bellOverview(at: bellRungWhileAway)
 
-            XCTAssertEqual(model.attentionGroups.first?.events.map(\.kind), [.bell])
+            XCTAssertEqual(model.attentionEvents.map(\.kind), [.bell])
         }
 
         /// The whole visit, in order: the user watches the terminal and hears the bell, backgrounds the
@@ -1016,7 +1240,7 @@
             model.overview = bellOverview(at: bellRungInTheGap)
 
             XCTAssertEqual(model.terminalWatchWindowsBySessionID["session-bell"]?.count, 2)
-            XCTAssertEqual(model.attentionGroups.first?.events.map(\.kind), [.bell])
+            XCTAssertEqual(model.attentionEvents.map(\.kind), [.bell])
         }
 
         /// A visit that backgrounds and returns many times cannot grow without bound; the windows that
@@ -1040,7 +1264,7 @@
             XCTAssertEqual(windows, windows.sorted { $0.endedAt < $1.endedAt }, "windows are kept oldest first")
             // The dropped windows really are gone: a bell from the first, evicted watch no longer matches.
             model.overview = bellOverview(at: bellRungInTheFirstWatch)
-            XCTAssertEqual(model.attentionGroups.first?.events.map(\.kind), [.bell])
+            XCTAssertEqual(model.attentionEvents.map(\.kind), [.bell])
         }
 
         /// The bell the user did watch — rung before the app went away — stays suppressed.
@@ -1133,11 +1357,31 @@
             }
         }
 
+        /// The fixture device id every `makeModel()` test below runs as the selected device. Never a real
+        /// device's id, so a stray write under it in the real `UserDefaults.standard` dismissed-alerts
+        /// bucket (from `dismissAlert`/`clearAlerts` exercised against this model) is inert; cleaned up by
+        /// `makeModel`'s teardown block regardless.
+        private static let testDeviceID = "device-a"
+
+        private func makeDeviceRecord(id: String) -> SpacesMobilePairedDeviceRecord {
+            SpacesMobilePairedDeviceRecord(
+                id: id, name: id, hosts: ["127.0.0.1"], port: 47_847, certificateFingerprint: "fp-\(id)", createdAt: "2026-01-01T00:00:00Z",
+                updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil)
+        }
+
+        /// Every attention/automation derivation reads through `pairedDevices`/`activeDeviceID`
+        /// (Agents/Alerts span every paired device), so a lightweight model under test needs one paired,
+        /// selected device even when the test only cares about a single overview.
         private func makeModel(clock: TestWallClock? = nil) -> SpacesMobileAppModel {
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
-            guard let clock else { return SpacesMobileAppModel(settings: settings, bridgeClient: client) }
-            return SpacesMobileAppModel(settings: settings, bridgeClient: client, wallClock: { clock.now })
+            let model =
+                clock.map { clock in SpacesMobileAppModel(settings: settings, bridgeClient: client, wallClock: { clock.now }) }
+                ?? SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.pairedDevices = [makeDeviceRecord(id: Self.testDeviceID)]
+            model.activeDeviceID = Self.testDeviceID
+            addTeardownBlock { SpacesMobileDismissedAlertsStore.save([], deviceID: Self.testDeviceID) }
+            return model
         }
 
         /// Clears the real, on-disk paired-device and dismissed-alerts state the per-device persistence

@@ -83,7 +83,7 @@ The visual system and reusable interaction patterns for the Spaces Mac and iOS a
 - Operational sidebar rows tint the name and kind glyph instead of adding pills or row fills: green working or running, orange blocked, blue done, red exited, gray inactive. A workspace header rolls up its rows with priority red, orange, blue, green, gray. Selection uses its own neutral fill and accent rail without hiding that tint.
 - An alert wears the same color as the row it came from and keeps that item's own kind glyph.
 - When a state has exactly one recovery action, show the action alone, tinted with the state's color and with the detail in its tooltip, rather than a status label beside a button that says the same thing.
-- Rows that belong to an unreachable device stay listed at 55% opacity, with the device named in the tooltip. The dimming is the whole marking; the device's own header reports the state. A table with no grouping header to carry that state (the Alerts table's Device column) instead names it directly on the row, in red, beside the device name.
+- Rows that belong to an unreachable device stay listed at 55% opacity, with the device named in the tooltip. The dimming is the whole marking; the device's own header reports the state. A table with no grouping header to carry that state (the Alerts table's Device column) instead names it directly on the row, in red, beside the device name. Where there is no tooltip surface (iOS), the row's own device text carries the same fact inline instead, appended as "Device name (offline)".
 - Progressive content reveals structure before detail (for example, a diff's file list appears before its patches) and never replaces a pane with a blank loading state.
 
 ### Banners

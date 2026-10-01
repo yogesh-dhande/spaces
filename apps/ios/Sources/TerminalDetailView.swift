@@ -19,7 +19,10 @@ struct TerminalDetailView: View {
     private static let jumpToBottomTapTargetSize: CGFloat = 44
 
     let session: SpacesDeviceTerminalSessionSummary
-    let settings: SpacesMobileConnectionSettings
+    /// The device this terminal talks to: its client, settings, and id. The selected device's context is
+    /// just one instance of this, resolved by the caller (`TerminalSessionNavigationModifier`) the same
+    /// way any other paired device's is; see `SpacesMobileAppModel.DeviceTerminalContext`.
+    let deviceContext: SpacesMobileAppModel.DeviceTerminalContext
     let appModel: SpacesMobileAppModel
     let onAuthenticationRequired: @MainActor @Sendable (String) -> Void
     let onSessionChanged: (SpacesDeviceTerminalSessionSummary) -> Void
@@ -80,29 +83,36 @@ struct TerminalDetailView: View {
     }
 
     init(
-        session: SpacesDeviceTerminalSessionSummary, settings: SpacesMobileConnectionSettings, appModel: SpacesMobileAppModel,
+        session: SpacesDeviceTerminalSessionSummary, deviceContext: SpacesMobileAppModel.DeviceTerminalContext, appModel: SpacesMobileAppModel,
         openSource: String = "list", onAuthenticationRequired: @escaping @MainActor @Sendable (String) -> Void,
         onSessionChanged: @escaping (SpacesDeviceTerminalSessionSummary) -> Void, onBack: @escaping () -> Void
     ) {
         self.session = session
-        self.settings = settings
+        self.deviceContext = deviceContext
         self.appModel = appModel
         self.onAuthenticationRequired = onAuthenticationRequired
         self.onSessionChanged = onSessionChanged
         self.onBack = onBack
         let appModel = appModel
+        let deviceContext = deviceContext
         _model = State(
             initialValue: TerminalViewerModel(
-                session: session, settings: settings, onAuthenticationRequired: onAuthenticationRequired,
-                onOpenTerminalDeepLink: { link in Task { await appModel.openTerminalDeepLink(link) } },
-                awaitForegroundEndpointRefresh: { await appModel.waitForForegroundEndpointRefresh() }, bridgeClient: appModel.deviceClient,
-                isDemoMode: appModel.isDemoModeEnabled, openSource: openSource, retainedScreens: appModel.retainedTerminalScreens))
+                session: session, settings: deviceContext.settings, onAuthenticationRequired: onAuthenticationRequired,
+                onOpenTerminalDeepLink: { link in
+                    Task { await appModel.openTerminalDeepLink(SpacesMobileAppModel.deepLink(link, printedOnDeviceID: deviceContext.deviceID)) }
+                },
+                awaitForegroundEndpointRefresh: {
+                    await appModel.waitForForegroundEndpointRefresh(client: deviceContext.client, deviceID: deviceContext.deviceID)
+                }, bridgeClient: deviceContext.client, isDemoMode: appModel.isDemoModeEnabled, openSource: openSource,
+                retainedScreens: appModel.retainedTerminalScreens))
     }
 
     /// The overview observer sits outside `detailContent` because that modifier chain is at the type
     /// checker's limit: one more `.onChange` inside it fails with "unable to type-check this expression in
     /// reasonable time".
-    var body: some View { detailContent.onChange(of: appModel.overview) { _, _ in followReplacementSessionIfNeeded() } }
+    var body: some View {
+        detailContent.onChange(of: appModel.overview(forDeviceID: deviceContext.deviceID)) { _, _ in followReplacementSessionIfNeeded() }
+    }
 
     private var detailContent: some View {
         VStack(spacing: 0) {
@@ -207,11 +217,11 @@ struct TerminalDetailView: View {
             isPresented: $isShowingComposer, onDismiss: { noteTerminalSheetDismissed() }
         ) { TerminalComposerSheet(model: model, stagedScreenshots: appModel.stagedScreenshots) }.sheet(
             isPresented: briefSheetBinding, onDismiss: { noteTerminalSheetDismissed() }
-        ) { TerminalBriefSheet(appModel: appModel, sessionID: session.id) }.confirmationDialog(
+        ) { TerminalBriefSheet(appModel: appModel, sessionID: session.id, deviceID: deviceContext.deviceID) }.confirmationDialog(
             pendingStopRow.map { StopConfirmationCopy.rowTitle($0.title) } ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible,
             presenting: pendingStopRow
         ) { row in
-            Button("Stop", role: .destructive) { Task { await appModel.stop(row: row) } }
+            Button("Stop", role: .destructive) { Task { await stopRuntime(row) } }
             Button("Cancel", role: .cancel) {}
         } message: { _ in
             Text(StopConfirmationCopy.rowMessage)
@@ -481,7 +491,7 @@ struct TerminalDetailView: View {
         }.frame(height: Self.chromeControlHeight)
     }
 
-    private var runtimeRow: SpacesMobileWorkspaceRuntimeRow? { appModel.runtimeRow(forSessionID: session.id) }
+    private var runtimeRow: SpacesMobileWorkspaceRuntimeRow? { appModel.runtimeRow(forSessionID: session.id, deviceID: deviceContext.deviceID) }
 
     /// The brief pill sits immediately before the actions menu, or at the trailing edge on its own when
     /// the row has no actions, since an agent with nothing to stop can still keep a brief.
@@ -549,21 +559,23 @@ struct TerminalDetailView: View {
     }
 
     private func runRuntime(_ row: SpacesMobileWorkspaceRuntimeRow) async {
-        if let session = await appModel.run(row: row) { onSessionChanged(session) }
+        if let session = await appModel.run(row: row, deviceID: deviceContext.deviceID) { onSessionChanged(session) }
     }
 
     private func restartRuntime(_ row: SpacesMobileWorkspaceRuntimeRow) async {
-        if let session = await appModel.restart(row: row) { onSessionChanged(session) }
+        if let session = await appModel.restart(row: row, deviceID: deviceContext.deviceID) { onSessionChanged(session) }
     }
+
+    private func stopRuntime(_ row: SpacesMobileWorkspaceRuntimeRow) async { await appModel.stop(row: row, deviceID: deviceContext.deviceID) }
 
     /// Follows a restart made from any client the same way `restartRuntime` follows one this phone made:
     /// `onSessionChanged` replaces the route in place (no push or pop), and the detail rebuilds on the
     /// replacement session, which dismisses the keyboard just as the phone's own Restart does.
     private func followReplacementSessionIfNeeded() {
-        if followedProcessRow == nil, let runtimeRow = appModel.runtimeRow(forSessionID: session.id) {
+        if followedProcessRow == nil, let runtimeRow = appModel.runtimeRow(forSessionID: session.id, deviceID: deviceContext.deviceID) {
             followedProcessRow = TerminalSessionFollowDiff.processRowIdentity(for: runtimeRow)
         }
-        guard let followedProcessRow, let overview = appModel.overview,
+        guard let followedProcessRow, let overview = appModel.overview(forDeviceID: deviceContext.deviceID),
             let replacement = TerminalSessionFollowDiff.replacementSession(
                 for: followedProcessRow, displayedSessionID: session.id, displayedCreatedAt: session.createdAt, overview: overview)
         else { return }

@@ -49,9 +49,9 @@ export default function IOSDocsPage() {
           <div className="min-w-0">
             <SectionHeading>Tabs</SectionHeading>
             <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-              <li>• <strong>Alerts</strong>: blocked and finished agents, exited processes, terminals that exited or failed, bells, and failed or timed-out automation runs, for the device you have selected.</li>
-              <li>• <strong>Spaces</strong>: your projects and workspaces, with their targets.</li>
-              <li>• <strong>Agents</strong>: running coding agents, grouped Blocked, Done, and Working; an agent that isn&apos;t running stays reachable from its workspace on the Spaces tab.</li>
+              <li>• <strong>Alerts</strong>: blocked and finished agents, exited processes, terminals that exited or failed, bells, and failed or timed-out automation runs, across every paired device at once.</li>
+              <li>• <strong>Spaces</strong>: your projects and workspaces, with their targets, for the device you have selected.</li>
+              <li>• <strong>Agents</strong>: running coding agents across every paired device, grouped Blocked, Done, and Working; an agent that isn&apos;t running stays reachable from its workspace on the Spaces tab.</li>
               <li>• <strong>Automations</strong>: your automations and their runs.</li>
               <li>• <strong>Settings</strong>: paired devices, subscription, appearance, and Demo Mode.</li>
             </ul>

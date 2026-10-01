@@ -92,6 +92,24 @@
         func currentResolvedHost() async -> String? { resolvedHost }
     }
 
+    /// A backend whose `resetEndpointResolution()` blocks on a caller-controlled gate instead of
+    /// returning at once. The default backend a test's closure-handler client wraps has no concept of an
+    /// endpoint reset (`SpacesDeviceAPIBackend`'s own default is a no-op), so proving a caller actually
+    /// waits for a slow reset to land needs a fake that can be held open on demand.
+    private struct SpacesMobileGatedResetBackend: SpacesDeviceAPIBackend {
+        let gate: SpacesMobileAsyncGate
+        let handler: @Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse
+
+        func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { SpacesMobileFakeRequestTransport(handler: handler) }
+
+        func openSessionStream(
+            request: SpacesDeviceAPIRequest, initialEventTimeout: Duration, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+            onDisconnect: @escaping @MainActor (SpacesDeviceAPIStreamDisconnect) -> Void
+        ) async throws -> SpacesDeviceAPIStreamHandle { throw SpacesDeviceAPIClientError.invalidEndpoint }
+
+        func resetEndpointResolution() async { await gate.wait() }
+    }
+
     private struct SpacesMobileFakeRequestTransport: SpacesDeviceAPIRequestTransport {
         let handler: @Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse
         func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse { try await handler(request) }
@@ -1541,13 +1559,14 @@
                 return SpacesDeviceAPIResponse(ok: true, message: "stopped")
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
             let row = SpacesMobileWorkspaceRuntimeRow(
                 source: .terminal(
                     SpacesDeviceWorkspaceTerminalRow(
                         id: "terminal-shell", workspaceID: "workspace-docs", title: "shell", workingDirectory: "/repo/docs",
                         sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true)))
 
-            await model.stop(row: row)
+            await model.stop(row: row, deviceID: "device-1")
 
             let request = await recorder.snapshot().first
             XCTAssertEqual(request?.commandName, "stopWorkspaceTerminal")
@@ -1568,13 +1587,14 @@
                 return SpacesDeviceAPIResponse(ok: true, message: "stopped")
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
             let row = SpacesMobileWorkspaceRuntimeRow(
                 source: .codingAgent(
                     SpacesDeviceWorkspaceCodingAgentRow(
                         id: "agent-automation", workspaceID: "workspace-docs", name: "Nightly review", command: "codex", agentID: "agent-automation",
                         sessionID: "session-agent", runState: .running, activityState: .spinning, brief: nil, briefUpdatedAt: nil, canStop: true)))
 
-            await model.stop(row: row)
+            await model.stop(row: row, deviceID: "device-1")
 
             let request = await recorder.snapshot().first
             XCTAssertEqual(request?.commandName, "stopWorkspaceTerminal")
@@ -1595,13 +1615,14 @@
                 return SpacesDeviceAPIResponse(ok: true, message: "stopped")
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
             let row = SpacesMobileWorkspaceRuntimeRow(
                 source: .codingAgent(
                     SpacesDeviceWorkspaceCodingAgentRow(
                         id: "agent-automation", workspaceID: "workspace-docs", name: "Nightly review", command: "codex", agentID: "agent-automation",
                         sessionID: nil, runState: .running, activityState: .spinning, brief: nil, briefUpdatedAt: nil, canStop: true)))
 
-            await model.stop(row: row)
+            await model.stop(row: row, deviceID: "device-1")
 
             let request = await recorder.snapshot().first
             XCTAssertEqual(request?.commandName, "stopCodingAgent")
@@ -1646,13 +1667,14 @@
                 return SpacesDeviceAPIResponse(ok: true, message: "running")
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
             let row = SpacesMobileWorkspaceRuntimeRow(
                 source: .process(
                     SpacesDeviceWorkspaceProcessRow(
                         id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
                         processID: "runtime-api", sessionID: "session-api-old", runState: .exited, canRun: true, canStop: false, canRestart: false)))
 
-            _ = await model.run(row: row)
+            _ = await model.run(row: row, deviceID: "device-1")
 
             let request = await recorder.snapshot().first
             XCTAssertEqual(request?.commandName, "runWorkspaceProcess")
@@ -1682,9 +1704,10 @@
                 return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(refreshedOverview))
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
             model.overview = makeOverview(sessions: [makeSession(id: "session-api-old")], featureProcessRows: [oldRow])
 
-            let session = await model.run(row: SpacesMobileWorkspaceRuntimeRow(source: .process(oldRow)))
+            let session = await model.run(row: SpacesMobileWorkspaceRuntimeRow(source: .process(oldRow)), deviceID: "device-1")
             let requests = await recorder.snapshot()
 
             XCTAssertEqual(session?.id, "session-api-new")
@@ -1724,11 +1747,12 @@
                 }
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
             let baseOverview = makeOverview(sessions: [makeSession(id: "session-api-old")], featureProcessRows: [oldRow])
             model.overview = baseOverview
             let docsWorkspace = baseOverview.workspaces.first { $0.id == "workspace-docs" }!
 
-            let run = Task { await model.run(row: SpacesMobileWorkspaceRuntimeRow(source: .process(oldRow))) }
+            let run = Task { await model.run(row: SpacesMobileWorkspaceRuntimeRow(source: .process(oldRow)), deviceID: "device-1") }
             // Waits for the recovery's own overview fetch to actually be sent and gated, not merely for
             // the runWorkspaceProcess timeout.
             while (await recorder.snapshot()).map(\.commandName) != ["runWorkspaceProcess", "overview"] { await Task.yield() }
@@ -1877,6 +1901,31 @@
 
             XCTAssertNil(model.pendingTerminalDeepLinkSession)
             XCTAssertNotNil(model.errorMessage)
+        }
+
+        // MARK: - Terminal deep link device qualification (SpacesMobileAppModel.deepLink)
+
+        /// A daemon prints a same-device link unqualified, and the terminal rendering it can belong to a
+        /// paired device other than the one currently selected. `TerminalDetailView` must stamp that
+        /// terminal's own device onto the link before resolving it, or the link resolves against whichever
+        /// device happens to be selected instead.
+        func testDeepLinkStampsPrintingDeviceOntoUnqualifiedLink() {
+            let link = SpacesTerminalDeepLink(sessionID: "session-same-device")
+
+            let stamped = SpacesMobileAppModel.deepLink(link, printedOnDeviceID: "device-b")
+
+            XCTAssertEqual(stamped, SpacesTerminalDeepLink(sessionID: "session-same-device", deviceID: "device-b"))
+        }
+
+        /// A link already naming a device (e.g. an agent on device C posting a link from a session it
+        /// opened on device C while the terminal rendering it is device B's) must keep naming that device,
+        /// not the device the terminal happens to be rendered in.
+        func testDeepLinkKeepsAnExplicitDeviceOverThePrintingDevice() {
+            let link = SpacesTerminalDeepLink(sessionID: "session-cross-device", deviceID: "device-c")
+
+            let stamped = SpacesMobileAppModel.deepLink(link, printedOnDeviceID: "device-b")
+
+            XCTAssertEqual(stamped, link)
         }
 
         // MARK: - Incoming link routing (onOpenURL)
@@ -2064,6 +2113,7 @@
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in throw CancellationError() }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
 
             let session = await model.openWorkspaceTerminal(workspaceID: "workspace-feature")
 
@@ -2085,6 +2135,7 @@
                         SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: "workspace-feature", sessionID: startingSession.id)))
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
 
             let session = await model.openWorkspaceTerminal(workspaceID: "workspace-feature")
 
@@ -2518,13 +2569,14 @@
             let clock = TestClock()
             let model = SpacesMobileAppModel(
                 settings: settings, bridgeClient: client, refreshFailureAlertDelay: .milliseconds(50), now: { clock.now })
+            model.activeDeviceID = "device-1"
             let row = SpacesDeviceWorkspaceProcessRow(
                 id: "process-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", processID: "runtime-api",
                 sessionID: "session-api", runState: .notStarted, canRun: true, canStop: false, canRestart: false)
 
             await model.refresh()
             clock.advance(by: .milliseconds(60))
-            _ = await model.run(row: SpacesMobileWorkspaceRuntimeRow(source: .process(row)))
+            _ = await model.run(row: SpacesMobileWorkspaceRuntimeRow(source: .process(row)), deviceID: "device-1")
             XCTAssertEqual(model.overview, overview)
             await model.refresh()
 
@@ -2638,15 +2690,367 @@
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
             model.overview = makeOverview()
             let row = SpacesDeviceWorkspaceProcessRow(
                 id: "process-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", processID: "runtime-api",
                 sessionID: "session-api", runState: .notStarted, canRun: true, canStop: false, canRestart: false)
 
-            let session = await model.run(row: SpacesMobileWorkspaceRuntimeRow(source: .process(row)))
+            let session = await model.run(row: SpacesMobileWorkspaceRuntimeRow(source: .process(row)), deviceID: "device-1")
 
             XCTAssertNil(session)
             XCTAssertEqual(model.errorMessage, "Process failed to start.")
+        }
+
+        // MARK: - Non-selected device mutations
+
+        /// `run`/`restart`/`stop` route every device through the same request/response logic (one
+        /// mutation path, keyed by `deviceID:`), but a non-selected device's response must still land only
+        /// in that device's own `deviceOverviews` entry, never in the selected device's published
+        /// `overview`.
+        func testStopOnANonSelectedDeviceUpdatesOnlyThatDevicesOverview() async {
+            let selectedOverview = makeOverview()
+            let stoppedRow = SpacesDeviceWorkspaceProcessRow(
+                id: "process-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", processID: "runtime-api",
+                sessionID: "session-api", runState: .exited, canRun: true, canStop: false, canRestart: false)
+            let deviceBOverviewAfterStop = makeOverview(featureProcessRows: [stoppedRow], featureIsRunning: false)
+            let clientA = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { _ in
+                XCTFail("A non-selected device's mutation must never reach the selected device's client.")
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let clientB = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { _ in
+                SpacesDeviceAPIResponse(
+                    ok: true, message: "stopped",
+                    result: .mutation(SpacesDeviceMutationResult(overview: deviceBOverviewAfterStop, workspaceID: "workspace-feature")))
+            }
+            let model = SpacesMobileAppModel(
+                settings: SpacesMobileConnectionSettings(), bridgeClient: clientA, overviewStreamClientsForTesting: ["device-b": clientB])
+            model.activeDeviceID = "device-a"
+            model.pairedDevices = [makeDeviceRecord(id: "device-a"), makeDeviceRecord(id: "device-b")]
+            model.overview = selectedOverview
+            let row = SpacesMobileWorkspaceRuntimeRow(
+                source: .process(
+                    SpacesDeviceWorkspaceProcessRow(
+                        id: "process-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", processID: "runtime-api",
+                        sessionID: "session-api", runState: .running, canRun: false, canStop: true, canRestart: true)))
+
+            await model.stop(row: row, deviceID: "device-b")
+
+            XCTAssertEqual(model.overview, selectedOverview, "a non-selected device's mutation must never touch the selected device's overview")
+            XCTAssertEqual(model.overview(forDeviceID: "device-b"), deviceBOverviewAfterStop)
+            XCTAssertFalse(model.isMutating)
+        }
+
+        /// An auth failure from a non-selected device's mutation names that device and changes nothing
+        /// else: no reset of the selected device's own connection, and no navigation. Mirrors the
+        /// selected-device behavior (`testAuthenticationFailureIsReportedOnTheFirstRefresh`) staying
+        /// unaffected. It also publishes `nonSelectedDeviceAuthenticationRejection` for that device, which
+        /// is what `TerminalSessionNavigationModifier` watches to close any terminal route still open for
+        /// it (`handleBridgeError(_:deviceID:)` routes its own auth failures through
+        /// `handleAuthenticationFailure(message:deviceID:)`, the single place that signal is raised).
+        func testStopOnANonSelectedDeviceWithAuthFailureNamesTheDeviceAndLeavesTheSelectedDeviceUntouched() async {
+            let selectedOverview = makeOverview()
+            let clientA = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { _ in
+                XCTFail("A non-selected device's auth failure must never reach the selected device's client.")
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let clientB = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { _ in
+                SpacesDeviceAPIResponse(ok: false, message: "Invalid device auth token.", errorCode: .unauthorized)
+            }
+            let model = SpacesMobileAppModel(
+                settings: SpacesMobileConnectionSettings(), bridgeClient: clientA, overviewStreamClientsForTesting: ["device-b": clientB])
+            model.activeDeviceID = "device-a"
+            model.pairedDevices = [makeDeviceRecord(id: "device-a", name: "Other Mac"), makeDeviceRecord(id: "device-b", name: "Other Mac")]
+            model.overview = selectedOverview
+            let row = SpacesMobileWorkspaceRuntimeRow(
+                source: .process(
+                    SpacesDeviceWorkspaceProcessRow(
+                        id: "process-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", processID: "runtime-api",
+                        sessionID: "session-api", runState: .running, canRun: false, canStop: true, canRestart: true)))
+
+            await model.stop(row: row, deviceID: "device-b")
+
+            XCTAssertEqual(model.errorMessage, "Other Mac no longer recognizes this iPhone. Open Devices and pair it again.")
+            XCTAssertNil(model.connectionNotice, "only the selected-device recovery surface uses connectionNotice/isShowingConnectionSettings")
+            XCTAssertFalse(model.isShowingConnectionSettings)
+            XCTAssertEqual(model.overview, selectedOverview, "the selected device's own connection and overview stay untouched")
+            XCTAssertEqual(model.activeDeviceID, "device-a", "no navigation side effect: the selected device never changes")
+            XCTAssertEqual(model.pairedDevices.map(\.id), ["device-a", "device-b"], "no unpair side effect")
+            XCTAssertEqual(
+                model.nonSelectedDeviceAuthenticationRejection?.deviceID, "device-b",
+                "the rejection signal names device-b, so a terminal route open on it gets closed")
+        }
+
+        /// A non-selected device's own timeout recovery fetches through that device's client (never the
+        /// selected device's), and the reconciled session/overview lands only in that device's own
+        /// `deviceOverviews` entry.
+        func testRunTimeoutOnANonSelectedDeviceRecoversThroughThatDevicesOwnOverview() async {
+            let oldRow = SpacesDeviceWorkspaceProcessRow(
+                id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
+                processID: "runtime-api-old", sessionID: "session-api-old", runState: .exited, canRun: true, canStop: false, canRestart: false)
+            let newRow = SpacesDeviceWorkspaceProcessRow(
+                id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
+                processID: "runtime-api-new", sessionID: "session-api-new", runState: .running, canRun: false, canStop: true, canRestart: true)
+            let deviceBRefreshedOverview = makeOverview(sessions: [makeSession(id: "session-api-new")], featureProcessRows: [newRow])
+            let clientA = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { _ in
+                XCTFail("A non-selected device's recovery fetch must never reach the selected device's client.")
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let clientB = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { request in
+                if request.commandName == "runWorkspaceProcess" { throw SpacesDeviceAPIClientError.requestTimedOut }
+                return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(deviceBRefreshedOverview))
+            }
+            let model = SpacesMobileAppModel(
+                settings: SpacesMobileConnectionSettings(), bridgeClient: clientA, overviewStreamClientsForTesting: ["device-b": clientB])
+            model.activeDeviceID = "device-a"
+            model.pairedDevices = [makeDeviceRecord(id: "device-a"), makeDeviceRecord(id: "device-b")]
+            model.setDeviceOverviewForTesting(
+                makeOverview(sessions: [makeSession(id: "session-api-old")], featureProcessRows: [oldRow]), deviceID: "device-b")
+
+            let session = await model.run(row: SpacesMobileWorkspaceRuntimeRow(source: .process(oldRow)), deviceID: "device-b")
+
+            XCTAssertEqual(session?.id, "session-api-new")
+            XCTAssertEqual(model.overview(forDeviceID: "device-b"), deviceBRefreshedOverview)
+            XCTAssertNil(model.overview, "the selected device published nothing; only device-b's own entry changed")
+            XCTAssertFalse(model.isMutating)
+        }
+
+        /// A non-selected device's own Restart response can be what first reveals a widened host list (the
+        /// daemon started advertising a new address, e.g. Tailscale coming up), which
+        /// `acceptNonSelectedDeviceOverview` reacts to by rebuilding that device's cached client/channel
+        /// (`rebuildNonSelectedDeviceConnectionForWidenedHosts`). That rebuild must preserve the device's
+        /// mutation identity rather than bump it the way `invalidateNonSelectedDeviceConnection` does:
+        /// bumping it here would make the Restart's own response invalidate the very
+        /// `MutationConnectionToken` `performMutationReturningSession` is about to re-check, silently
+        /// dropping a session the mutation actually produced.
+        func testRestartOnANonSelectedDeviceThatAdvertisesANewlyLearnedHostStillReturnsItsSession() async throws {
+            let fingerprint = "fp-device-b-widen"
+            var settingsB = SpacesMobileConnectionSettings()
+            settingsB.hosts = ["10.0.0.50"]
+            settingsB.certificateFingerprint = fingerprint
+            settingsB.authToken = "token-b-widen"
+            let afterB = SpacesMobileDeviceStore.upsert(settings: settingsB, name: "device-b-widen")
+            let deviceB = try XCTUnwrap(afterB.devices.first(where: { $0.certificateFingerprint == fingerprint }))
+            defer {
+                _ = SpacesMobileDeviceStore.remove(deviceID: deviceB.id, fallbackSettings: SpacesMobileConnectionSettings())
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.paired-devices")
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.active-device-id")
+            }
+
+            let oldRow = SpacesDeviceWorkspaceProcessRow(
+                id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
+                processID: "runtime-api-old", sessionID: "session-api-old", runState: .exited, canRun: true, canStop: false, canRestart: false)
+            // The daemon's own response advertises a second, previously-unknown address alongside the one
+            // this device was paired with, which is what `mergeAdvertisedHosts` sees as a widened host list.
+            let widenedOverview = makeOverview(
+                sessions: [makeSession(id: "session-api-new")],
+                daemonStatus: TerminalServiceDaemonStatus(
+                    version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+                    protocolVersion: SpacesWireProtocol.version, deviceAPIAddresses: ["10.0.0.50", "100.64.0.9"]))
+            let clientA = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { _ in
+                XCTFail("A non-selected device's mutation must never reach the selected device's client.")
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let clientB = SpacesDeviceAPIClient(settings: settingsB) { _ in
+                SpacesDeviceAPIResponse(
+                    ok: true, message: "restarted",
+                    result: .mutation(
+                        SpacesDeviceMutationResult(overview: widenedOverview, workspaceID: "workspace-feature", sessionID: "session-api-new")))
+            }
+            let model = SpacesMobileAppModel(
+                settings: SpacesMobileConnectionSettings(), bridgeClient: clientA, overviewStreamClientsForTesting: [deviceB.id: clientB])
+            model.activeDeviceID = "device-a"
+            model.pairedDevices = [makeDeviceRecord(id: "device-a"), deviceB]
+
+            let session = await model.restart(row: SpacesMobileWorkspaceRuntimeRow(source: .process(oldRow)), deviceID: deviceB.id)
+
+            XCTAssertEqual(session?.id, "session-api-new", "the widened-host rebuild must not invalidate this in-flight mutation's own token")
+            XCTAssertTrue(
+                SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings()).devices.first(where: { $0.id == deviceB.id })?.hosts
+                    .contains("100.64.0.9") ?? false, "the newly advertised host should be persisted")
+        }
+
+        /// `applyConnectionSettings` (re-pair) must invalidate the device's connection the same full way
+        /// `removeDevice`/`reconcileDeviceStreams`'s stale-device sweep do
+        /// (`invalidateNonSelectedDeviceConnection`), not just drop the cached client: a mutation issued
+        /// against a device while it was still non-selected, still in flight when that same device is
+        /// re-paired (which always makes it the newly active device, since `SpacesMobileDeviceStore.upsert`
+        /// unconditionally repoints `activeDeviceID` at the upserted record), must not apply its stale
+        /// response once it finally lands.
+        func testMutationInFlightWhenItsOwnDeviceIsRePairedMidFlightDoesNotApplyItsResponse() async throws {
+            let fingerprint = "fp-device-b-repair"
+            var settingsB = SpacesMobileConnectionSettings()
+            settingsB.hosts = ["10.0.0.60"]
+            settingsB.certificateFingerprint = fingerprint
+            settingsB.authToken = "token-b-original"
+            let afterB = SpacesMobileDeviceStore.upsert(settings: settingsB, name: "device-b-repair")
+            let deviceB = try XCTUnwrap(afterB.devices.first(where: { $0.certificateFingerprint == fingerprint }))
+            defer {
+                _ = SpacesMobileDeviceStore.remove(deviceID: deviceB.id, fallbackSettings: SpacesMobileConnectionSettings())
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.paired-devices")
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.active-device-id")
+            }
+
+            let requestStarted = SpacesMobileAsyncGate()
+            let releaseResponse = SpacesMobileAsyncGate()
+            let staleOverview = makeOverview(featureIsRunning: false)
+            let clientA = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { _ in
+                XCTFail("A non-selected device's mutation must never reach the selected device's client.")
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let clientB = SpacesDeviceAPIClient(settings: settingsB) { _ in
+                await requestStarted.open()
+                await releaseResponse.wait()
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "stopped",
+                    result: .mutation(SpacesDeviceMutationResult(overview: staleOverview, workspaceID: "workspace-feature")))
+            }
+            let model = SpacesMobileAppModel(
+                settings: SpacesMobileConnectionSettings(), bridgeClient: clientA, overviewStreamClientsForTesting: [deviceB.id: clientB])
+            model.activeDeviceID = "device-a"
+            model.pairedDevices = [makeDeviceRecord(id: "device-a"), deviceB]
+            let row = SpacesMobileWorkspaceRuntimeRow(source: .process(configuredProcessRow()))
+
+            let stopTask = Task { await model.stop(row: row, deviceID: deviceB.id) }
+            await requestStarted.wait()
+
+            // Re-pairs device B (same fingerprint, a fresh token) while its own mutation is still gated
+            // inside the request above. This always makes B the newly active device.
+            var settingsBRepaired = settingsB
+            settingsBRepaired.authToken = "token-b-repaired"
+            model.applyConnectionSettings(settingsBRepaired, deviceName: "device-b-repair")
+            XCTAssertEqual(model.activeDeviceID, deviceB.id, "re-pairing device B must make it the newly active device")
+
+            await releaseResponse.open()
+            await stopTask.value
+
+            XCTAssertNil(model.overview(forDeviceID: deviceB.id), "the stale response must not be applied now that B is a different connection")
+            XCTAssertFalse(model.isMutating)
+        }
+
+        /// A mutation started while B is non-selected, whose own device then round-trips through being
+        /// selected and back to non-selected before the response lands, must not apply that response.
+        /// `isCurrent(_:)` only re-checks `nonSelectedDeviceIdentities[B]` once B reads as non-selected
+        /// again, so if nothing bumps that identity across the round trip (nothing else about B's
+        /// connection changed shape, `selectDevice` merely rebuilt `bridgeClient` for the device that was
+        /// and then was not selected), the token's captured identity matches again by the time the
+        /// response resumes and a stale response would be accepted as current.
+        func testMutationOnANonSelectedDeviceThatRoundTripsThroughSelectionBeforeItsResponseLandsDiscardsTheResponse() async throws {
+            let fingerprintA = "fp-device-a-roundtrip"
+            let fingerprintB = "fp-device-b-roundtrip"
+            var settingsA = SpacesMobileConnectionSettings()
+            settingsA.certificateFingerprint = fingerprintA
+            settingsA.authToken = "token-a-roundtrip"
+            var settingsB = SpacesMobileConnectionSettings()
+            settingsB.certificateFingerprint = fingerprintB
+            settingsB.authToken = "token-b-roundtrip"
+            let afterA = SpacesMobileDeviceStore.upsert(settings: settingsA, name: "device-a-roundtrip")
+            let deviceA = try XCTUnwrap(afterA.devices.first(where: { $0.certificateFingerprint == fingerprintA }))
+            let afterB = SpacesMobileDeviceStore.upsert(settings: settingsB, name: "device-b-roundtrip")
+            let deviceB = try XCTUnwrap(afterB.devices.first(where: { $0.certificateFingerprint == fingerprintB }))
+            defer {
+                _ = SpacesMobileDeviceStore.remove(deviceID: deviceA.id, fallbackSettings: SpacesMobileConnectionSettings())
+                _ = SpacesMobileDeviceStore.remove(deviceID: deviceB.id, fallbackSettings: SpacesMobileConnectionSettings())
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.paired-devices")
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.active-device-id")
+            }
+
+            let requestStarted = SpacesMobileAsyncGate()
+            let releaseResponse = SpacesMobileAsyncGate()
+            let staleOverview = makeOverview(featureIsRunning: false)
+            let clientA = SpacesDeviceAPIClient(settings: settingsA) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
+            let clientB = SpacesDeviceAPIClient(settings: settingsB) { _ in
+                await requestStarted.open()
+                await releaseResponse.wait()
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "stopped",
+                    result: .mutation(SpacesDeviceMutationResult(overview: staleOverview, workspaceID: "workspace-feature")))
+            }
+            let model = SpacesMobileAppModel(settings: settingsA, bridgeClient: clientA, overviewStreamClientsForTesting: [deviceB.id: clientB])
+            model.activeDeviceID = deviceA.id
+            model.pairedDevices = [deviceA, deviceB]
+            let row = SpacesMobileWorkspaceRuntimeRow(source: .process(configuredProcessRow()))
+
+            let stopTask = Task { await model.stop(row: row, deviceID: deviceB.id) }
+            await requestStarted.wait()
+
+            // B round-trips through being selected and back to non-selected while its own mutation is
+            // still gated inside the request above.
+            model.selectDevice(id: deviceB.id)
+            model.selectDevice(id: deviceA.id)
+            XCTAssertEqual(model.activeDeviceID, deviceA.id, "the round trip ends back on device A")
+
+            await releaseResponse.open()
+            await stopTask.value
+
+            XCTAssertNil(
+                model.overview(forDeviceID: deviceB.id),
+                "a mutation response captured before B's selection round trip must read as stale once it lands")
+            XCTAssertFalse(model.isMutating)
+        }
+
+        /// A response already in flight when its own device is unpaired must not be applied. `removeDevice`
+        /// drops that device's cached overview and bumps its mutation identity unconditionally (not only
+        /// through the stream-gated `reconcileDeviceStreams` cleanup, which no-ops whenever
+        /// `overviewStreamSubscriptions` is not enabled), so by the time the suspended request finally
+        /// resolves, `isCurrent` reads it as stale before `applyMutationResponse` ever reaches
+        /// `acceptNonSelectedDeviceOverview`: the response neither resolves a session nor resurrects a
+        /// `deviceOverviews` entry for a device the app no longer shows anywhere.
+        func testMidMutationUnpairDiscardsTheLateResponse() async throws {
+            let fingerprintA = "fp-device-a-midunpair"
+            let fingerprintB = "fp-device-b-midunpair"
+            var settingsA = SpacesMobileConnectionSettings()
+            settingsA.certificateFingerprint = fingerprintA
+            settingsA.authToken = "token-a-midunpair"
+            var settingsB = SpacesMobileConnectionSettings()
+            settingsB.certificateFingerprint = fingerprintB
+            settingsB.authToken = "token-b-midunpair"
+            let afterA = SpacesMobileDeviceStore.upsert(settings: settingsA, name: "device-a-midunpair")
+            let deviceA = try XCTUnwrap(afterA.devices.first(where: { $0.certificateFingerprint == fingerprintA }))
+            let afterB = SpacesMobileDeviceStore.upsert(settings: settingsB, name: "device-b-midunpair")
+            let deviceB = try XCTUnwrap(afterB.devices.first(where: { $0.certificateFingerprint == fingerprintB }))
+            defer {
+                _ = SpacesMobileDeviceStore.remove(deviceID: deviceA.id, fallbackSettings: SpacesMobileConnectionSettings())
+                _ = SpacesMobileDeviceStore.remove(deviceID: deviceB.id, fallbackSettings: SpacesMobileConnectionSettings())
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.paired-devices")
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.active-device-id")
+            }
+
+            let gate = SpacesMobileAsyncGate()
+            let seedOverview = makeOverview(sessions: [makeSession(id: "session-api-seed")])
+            let lateOverview = makeOverview(featureIsRunning: true)
+            let clientA = SpacesDeviceAPIClient(settings: settingsA) { _ in
+                XCTFail("A non-selected device's mutation must never reach the selected device's client.")
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let clientB = SpacesDeviceAPIClient(settings: settingsB) { _ in
+                await gate.wait()
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "restarted",
+                    result: .mutation(SpacesDeviceMutationResult(overview: lateOverview, workspaceID: "workspace-feature")))
+            }
+            let model = SpacesMobileAppModel(settings: settingsA, bridgeClient: clientA, overviewStreamClientsForTesting: [deviceB.id: clientB])
+            model.activeDeviceID = deviceA.id
+            model.pairedDevices = [deviceA, deviceB]
+            model.setDeviceOverviewForTesting(seedOverview, deviceID: deviceB.id)
+            let row = SpacesMobileWorkspaceRuntimeRow(
+                source: .process(
+                    SpacesDeviceWorkspaceProcessRow(
+                        id: "process-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", processID: "runtime-api",
+                        sessionID: "session-api", runState: .running, canRun: false, canStop: true, canRestart: true)))
+
+            let mutation = Task { await model.restart(row: row, deviceID: deviceB.id) }
+            while !model.isMutating { await Task.yield() }
+            model.removeDevice(id: deviceB.id)
+            XCTAssertNil(model.deviceOverviewForTesting(deviceID: deviceB.id), "unpairing must drop the removed device's cached overview at once")
+            await gate.open()
+            let session = await mutation.value
+
+            XCTAssertNil(session, "the unpaired device's late response must not resolve a session")
+            XCTAssertNil(
+                model.deviceOverviewForTesting(deviceID: deviceB.id), "the late response must not resurrect an overview for a removed device")
+            XCTAssertEqual(model.pairedDevices.map(\.id), [deviceA.id], "the unpair itself must still take effect")
+            XCTAssertFalse(model.isMutating)
         }
 
         // MARK: - Daemon update
@@ -3590,6 +3994,205 @@
             XCTAssertTrue(flag.didResume, "the newest resume opens the gate")
         }
 
+        /// The client-scoped gate a terminal viewer's foreground redial waits on: a viewer whose captured
+        /// client is still `bridgeClient` waits on the shared gate above, but a viewer holding any other
+        /// client does not wait on it at all, since that client is reset in place by
+        /// `resetDeviceStreamEndpointsForForeground()` rather than tracked by this gate. Waiting here would
+        /// block a non-selected viewer's redial behind a device it has nothing to do with, including one
+        /// that never comes back.
+        func testWaitForForegroundEndpointRefreshDoesNotBlockANonSelectedDeviceOnTheSelectedDevicesGate() async {
+            let overview = makeOverview()
+            let client = pairedClient { _ in SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview)) }
+            let model = SpacesMobileAppModel(settings: pairedSettings(), bridgeClient: client)
+            model.activeDeviceID = "device-a"
+            model.pairedDevices = [makeDeviceRecord(id: "device-a"), makeDeviceRecord(id: "device-b")]
+            guard let nonSelectedClient = model.overviewStreamClientForTesting(deviceID: "device-b") else {
+                return XCTFail("Expected device-b to resolve a cached client")
+            }
+
+            model.noteBackgroundedForEndpointRefresh()
+            // The product sequence: `RootTabView`'s `.active` branch always runs this before anything else
+            // reaches the foreground. It is what starts device-b's own reset and releases the "reset
+            // started" signal `waitForForegroundEndpointRefresh(client:deviceID:)` waits on first for a
+            // still-current non-selected client; without it the wait below has nothing to resume it.
+            model.resetDeviceStreamEndpointsForForeground()
+            let nonSelectedFlag = ForegroundGateWaiterFlag()
+            Task {
+                await model.waitForForegroundEndpointRefresh(client: nonSelectedClient, deviceID: "device-b")
+                nonSelectedFlag.didResume = true
+            }
+            // Bounded rather than a plain `await task.value`: this wait depends on the product having
+            // already started device-b's reset above, and a regression in that ordering must fail this
+            // test in seconds, not strand it for the run's full timeout budget.
+            await waitUntil("device-b's non-selected foreground wait to resume") { nonSelectedFlag.didResume }
+            XCTAssertTrue(nonSelectedFlag.didResume, "a non-selected device's redial must not wait on the selected device's own foreground gate")
+
+            // The selected device's own wait is unaffected: passing its own captured client
+            // (`bridgeClient` itself) still gates it the same as `waitForForegroundEndpointRefresh()` alone.
+            let selectedFlag = ForegroundGateWaiterFlag()
+            let selectedWaiter = Task {
+                await model.waitForForegroundEndpointRefresh(client: client, deviceID: "device-a")
+                selectedFlag.didResume = true
+            }
+            for _ in 0..<100 { await Task.yield() }
+            XCTAssertFalse(selectedFlag.didResume, "the selected device's own wait must still be gated behind the foreground refresh")
+
+            await model.resumeFromBackground()
+            await selectedWaiter.value
+            XCTAssertTrue(selectedFlag.didResume, "the foreground resume releases the selected device's own gate as before")
+        }
+
+        /// A terminal viewer captures its device's client once, when its route opens
+        /// (`DeviceTerminalContext.client`), and keeps dialing through that exact instance for the life of
+        /// the route. If the device is later selected, `selectDevice` builds a brand-new `bridgeClient` for
+        /// it rather than reusing the client the viewer already holds, orphaning the captured one: it is no
+        /// longer `bridgeClient`, and no longer `nonActiveDeviceStreamClients[deviceID]` either, since that
+        /// cache is not consulted for the now-selected device. Nothing else resets an orphaned client's
+        /// resolvers on a later foreground (`resetDeviceStreamEndpointsForForeground()` only walks
+        /// `bridgeClient` and the *current* `nonActiveDeviceStreamClients` entries), so this call has to
+        /// both recognize the orphaning and reset it in place itself, rather than waiting on the selected
+        /// device's own gate, which would reset the wrong client and answer for a device this call was
+        /// never asked about.
+        func testCapturedClientOrphanedByASelectionIsResetInPlaceAndDoesNotWaitOnTheSelectedGate() async throws {
+            let fingerprintA = "fp-device-a-orphan"
+            let fingerprintB = "fp-device-b-orphan"
+            var settingsA = SpacesMobileConnectionSettings()
+            settingsA.certificateFingerprint = fingerprintA
+            settingsA.authToken = "token-a-orphan"
+            var settingsB = SpacesMobileConnectionSettings()
+            settingsB.certificateFingerprint = fingerprintB
+            settingsB.authToken = "token-b-orphan"
+            let afterA = SpacesMobileDeviceStore.upsert(settings: settingsA, name: "device-a-orphan")
+            let deviceA = try XCTUnwrap(afterA.devices.first(where: { $0.certificateFingerprint == fingerprintA }))
+            let afterB = SpacesMobileDeviceStore.upsert(settings: settingsB, name: "device-b-orphan")
+            let deviceB = try XCTUnwrap(afterB.devices.first(where: { $0.certificateFingerprint == fingerprintB }))
+            defer {
+                _ = SpacesMobileDeviceStore.remove(deviceID: deviceA.id, fallbackSettings: SpacesMobileConnectionSettings())
+                _ = SpacesMobileDeviceStore.remove(deviceID: deviceB.id, fallbackSettings: SpacesMobileConnectionSettings())
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.paired-devices")
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.active-device-id")
+            }
+
+            let clientA = SpacesDeviceAPIClient(settings: settingsA) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
+            let model = SpacesMobileAppModel(settings: settingsA, bridgeClient: clientA)
+            model.activeDeviceID = deviceA.id
+            model.pairedDevices = [deviceA, deviceB]
+
+            // A viewer opens device B's terminal while B is not selected: this is the exact client
+            // `terminalContext(forDeviceID:)` would have handed it.
+            let capturedClient = try XCTUnwrap(model.overviewStreamClientForTesting(deviceID: deviceB.id))
+
+            // B is selected: `bridgeClient` is rebuilt for B, orphaning `capturedClient`.
+            model.selectDevice(id: deviceB.id)
+            XCTAssertFalse(
+                capturedClient.hasSameIdentity(as: model.deviceClient),
+                "selecting the device must rebuild its client rather than reuse the captured one")
+
+            model.noteBackgroundedForEndpointRefresh()
+            let flag = ForegroundGateWaiterFlag()
+            let waiter = Task {
+                await model.waitForForegroundEndpointRefresh(client: capturedClient, deviceID: deviceB.id)
+                flag.didResume = true
+            }
+            await waiter.value
+            XCTAssertTrue(flag.didResume, "an orphaned client must never wait on the selected device's own gate")
+
+            // The selected gate is still armed and untouched by the call above: a genuinely selected-device
+            // viewer's own wait (through the current `bridgeClient`) still blocks until the resume lands.
+            let selectedFlag = ForegroundGateWaiterFlag()
+            let selectedWaiter = Task {
+                await model.waitForForegroundEndpointRefresh(client: model.deviceClient, deviceID: deviceB.id)
+                selectedFlag.didResume = true
+            }
+            for _ in 0..<100 { await Task.yield() }
+            XCTAssertFalse(selectedFlag.didResume, "the orphaned client's own reset must not have released the selected gate")
+
+            await model.resumeFromBackground()
+            await selectedWaiter.value
+            XCTAssertTrue(selectedFlag.didResume, "the foreground resume still releases the selected device's own gate as before")
+        }
+
+        /// `resetDeviceStreamEndpointsForForeground()` fires a non-selected device's command-path reset in
+        /// an unawaited `Task`, since nothing at that call site needs it to have landed. A terminal
+        /// viewer's own foreground redial does need it landed: without tracking the reset and awaiting it
+        /// here, `waitForForegroundEndpointRefresh(client:deviceID:)` would return immediately for a
+        /// still-current non-selected client and the redial could reach the stale pre-reset address before
+        /// the reset actually finishes.
+        func testWaitForForegroundEndpointRefreshAwaitsANonSelectedDevicesPendingReset() async throws {
+            let client = pairedClient { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
+            let model = SpacesMobileAppModel(settings: pairedSettings(), bridgeClient: client)
+            model.activeDeviceID = "device-a"
+            model.pairedDevices = [makeDeviceRecord(id: "device-a"), makeDeviceRecord(id: "device-b")]
+
+            let resetGate = SpacesMobileAsyncGate()
+            let deviceBSettings = pairedSettings()
+            let deviceBClient = SpacesDeviceAPIClient(
+                settings: deviceBSettings,
+                backend: SpacesMobileGatedResetBackend(gate: resetGate, handler: { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }))
+            model.setNonActiveDeviceStreamClientForTesting(deviceBClient, settings: deviceBSettings, deviceID: "device-b")
+
+            // Fires device-b's reset off (unawaited at this call site, as it is for the real foreground
+            // path); it will not finish until `resetGate` opens.
+            model.resetDeviceStreamEndpointsForForeground()
+
+            let flag = ForegroundGateWaiterFlag()
+            Task {
+                await model.waitForForegroundEndpointRefresh(client: deviceBClient, deviceID: "device-b")
+                flag.didResume = true
+            }
+            for _ in 0..<100 { await Task.yield() }
+            XCTAssertFalse(flag.didResume, "the wait must not return before device-b's own in-flight reset has landed")
+
+            await resetGate.open()
+            // Bounded rather than a plain `await task.value`: a regression that stops this gate from
+            // releasing must fail this test in seconds, not strand it for the run's full timeout budget.
+            await waitUntil("device-b's foreground wait to resume once its reset lands") { flag.didResume }
+            XCTAssertTrue(flag.didResume, "the wait returns once the reset it was tracking actually completes")
+        }
+
+        /// SwiftUI gives no ordering between the shell's `.active` callback (which calls
+        /// `resetDeviceStreamEndpointsForForeground()`) and a terminal detail's own. If the detail's own
+        /// foreground redial reaches `waitForForegroundEndpointRefresh(client:deviceID:)` first, nothing
+        /// has recorded a reset task for its device yet, so without a gate ahead of that lookup the call
+        /// would return at once and let the redial reach the stale pre-background address.
+        func testWaitForForegroundEndpointRefreshStaysSuspendedUntilTheForegroundResetHasEvenStarted() async throws {
+            let client = pairedClient { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
+            let model = SpacesMobileAppModel(settings: pairedSettings(), bridgeClient: client)
+            model.activeDeviceID = "device-a"
+            model.pairedDevices = [makeDeviceRecord(id: "device-a"), makeDeviceRecord(id: "device-b")]
+
+            let resetGate = SpacesMobileAsyncGate()
+            let deviceBSettings = pairedSettings()
+            let deviceBClient = SpacesDeviceAPIClient(
+                settings: deviceBSettings,
+                backend: SpacesMobileGatedResetBackend(gate: resetGate, handler: { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }))
+            model.setNonActiveDeviceStreamClientForTesting(deviceBClient, settings: deviceBSettings, deviceID: "device-b")
+
+            model.noteBackgroundedForEndpointRefresh()
+
+            // Calls the wait before `resetDeviceStreamEndpointsForForeground()` ever runs, the ordering a
+            // terminal detail's `.active` callback firing first would produce.
+            let flag = ForegroundGateWaiterFlag()
+            Task {
+                await model.waitForForegroundEndpointRefresh(client: deviceBClient, deviceID: "device-b")
+                flag.didResume = true
+            }
+            for _ in 0..<100 { await Task.yield() }
+            XCTAssertFalse(flag.didResume, "the wait must not return before the foreground reset has even started")
+
+            // The shell's own `.active` callback now runs, starting (but not landing) device-b's reset.
+            model.resetDeviceStreamEndpointsForForeground()
+            for _ in 0..<100 { await Task.yield() }
+            XCTAssertFalse(flag.didResume, "starting the reset is not enough; the wait still owes the reset actually landing")
+
+            await resetGate.open()
+            // Bounded rather than a plain `await task.value`: a regression that strands this class of
+            // wait (a gate armed at background and released only by a specific later call) must fail this
+            // test in seconds, not stall for the run's full timeout budget.
+            await waitUntil("device-b's foreground wait to resume once its reset lands") { flag.didResume }
+            XCTAssertTrue(flag.didResume, "the wait returns once the reset it was tracking actually completes")
+        }
+
         private func overviewReadCount(_ recorder: SpacesMobileRequestRecorder) async -> Int {
             await recorder.snapshot().filter { $0.commandName == "overview" }.count
         }
@@ -3625,6 +4228,12 @@
             SpacesDeviceWorkspaceProcessRow(
                 id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
                 processID: "runtime-api", sessionID: "session-api", runState: .running, canRun: false, canStop: true, canRestart: true)
+        }
+
+        private func makeDeviceRecord(id: String, name: String? = nil) -> SpacesMobilePairedDeviceRecord {
+            SpacesMobilePairedDeviceRecord(
+                id: id, name: name ?? id, hosts: ["127.0.0.1"], port: 47_847, certificateFingerprint: "fp-\(id)", createdAt: "2026-01-01T00:00:00Z",
+                updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil)
         }
 
         private func makeOverview(

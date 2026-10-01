@@ -128,7 +128,11 @@ struct AutomationDetailView: View {
             } else {
                 AutomationRunRowsList(
                     model: model, rows: runs, title: { SpacesMobileAutomations.statusTitle($0) }, onMutated: { await loadRuns() },
-                    onOpenSession: { selectedSession = SelectedTerminalSessionRoute(session: $0) }
+                    onOpenSession: { session in
+                        // Automations are scoped to the selected device, so a run's session always belongs to it.
+                        guard let activeDeviceID = model.activeDeviceID else { return }
+                        selectedSession = SelectedTerminalSessionRoute(session: session, deviceID: activeDeviceID)
+                    }
                 ).padding(.top, 4)
             }
         }

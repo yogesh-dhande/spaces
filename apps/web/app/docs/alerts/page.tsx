@@ -40,25 +40,29 @@ export default function AlertsDocsPage() {
         <Prose>
           The sidebar&apos;s Alerts row (<InlineCode>⌘⌥A</InlineCode>, which works inside Spaces and is
           not a global key), first in the command palette, the Alerts cycling mode, and the iPhone
-          Alerts tab. The Mac sidebar aggregates alerts across every paired device; the iPhone Alerts tab
-          shows only the currently selected device. A hidden workspace or project is skipped, the same as
-          everywhere else it is hidden from (see{" "}
-          <DocLink href="/docs/workspaces#hiding">hiding</DocLink>).
+          Alerts tab. Both the Mac sidebar and the iPhone Alerts tab aggregate alerts across every paired
+          device, newest first, with no per-device or per-workspace grouping. A row names its project and
+          workspace, and names its device too whenever more than one device is paired or any paired
+          device is offline. A hidden workspace or project is skipped, the same as everywhere else it is
+          hidden from (see <DocLink href="/docs/workspaces#hiding">hiding</DocLink>).
         </Prose>
         <Prose>
-          On the Mac, Alerts is one list across every device, newest first. <InlineCode>⌘1</InlineCode>{" "}
-          through <InlineCode>⌘9</InlineCode>, and <InlineCode>⌘0</InlineCode> for the tenth, follow
-          that same order, and clicking a row does the same thing its number does.
+          <InlineCode>⌘1</InlineCode> through <InlineCode>⌘9</InlineCode>, and{" "}
+          <InlineCode>⌘0</InlineCode> for the tenth, follow that same order on the Mac, and clicking a
+          row does the same thing its number does. On iPhone, tapping another paired device&apos;s row
+          opens its terminal without switching which device is selected elsewhere in the app. A paired
+          device that has gone unreachable keeps its alerts listed, dimmed, with its last-known state,
+          rather than dropping them.
         </Prose>
       </Section>
 
       <Section id="dismissing" title="Dismissing an alert">
         <Prose>
           Dismiss one alert from its row (&quot;Dismiss Alert&quot;), with <InlineCode>⌘X</InlineCode>{" "}
-          in the command palette, or with &quot;Clear&quot; on iPhone, which dismisses every alert on
-          screen at once. A dismissed alert stays dismissed until the event behind it changes again,
-          except a blocked agent&apos;s alert: that one clears on its own the moment the agent starts
-          working again.
+          in the command palette, or with &quot;Clear&quot; on iPhone, which dismisses every alert across
+          every paired device at once, including an unreachable one&apos;s. A dismissed alert stays
+          dismissed until the event behind it changes again, except a blocked agent&apos;s alert: that
+          one clears on its own the moment the agent starts working again.
         </Prose>
         <Prose>
           Dismissing an alert only removes it from Alerts. It never hides the process or agent row it

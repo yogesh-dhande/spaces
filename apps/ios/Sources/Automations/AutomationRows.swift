@@ -21,28 +21,51 @@ struct SpacesMobileAutomationRunRow: Identifiable, Equatable, Sendable {
     var isRunning: Bool { AutomationRunStatus(rawValue: run.status) == .running }
 }
 
-/// A derived alert entry for a failed or timed-out automation run. Automation failures keep their own
-/// flat list, separate from coding-agent attention grouped by workspace, mirroring the
-/// Mac's synthetic "Automations" alerts group (`AutomationsViewModel.alertEntries` /
-/// `AppKitController.alertsGroups`). Unlike the Mac, which streams every paired device's overview at once
-/// and so names the device in the entry text, the iOS app shows one active device at a time (see
-/// `SpacesMobileAppModel`), so there is no ambiguity to resolve and no device name to carry.
+/// A derived alert entry for a failed or timed-out automation run, joining the Alerts tab's flat,
+/// cross-device, newest-first list (mirroring the Mac's synthetic "Automations" alerts group:
+/// `AutomationsViewModel.alertEntries` / `AppKitController.alertsGroups`) rather than a band of its own.
 struct SpacesMobileAutomationAlertEntry: Identifiable, Equatable, Sendable {
-    let id: String
+    /// Stable dismissal identity within this entry's own device: the same string
+    /// `SpacesMobileDismissedAlertsStore` has always persisted in a device's bucket, unprefixed, so a
+    /// dismissal made before entries carried a device id still suppresses its entry.
+    let eventKey: String
+    let deviceID: String
     let automationName: String
-    /// Human-readable outcome, e.g. "Failed (exit 3)" or "Timed out".
-    let outcome: String
     let runID: String
     let status: String
+    /// The run's end (or, absent that, start) time, for the Alerts tab's cross-device newest-first sort
+    /// and its age label. Nil when the daemon reported neither, which sorts the entry last.
+    let date: Date?
+    /// "Device Name" / "Device Name (offline)", or nil when the device segment is hidden; see
+    /// `SpacesMobileDeviceDisplay.showsDeviceSegment`.
+    let deviceText: String?
+    /// Whether this entry's device is currently offline; see `SpacesMobileAttentionEvent.isDeviceOffline`.
+    let isDeviceOffline: Bool
+
+    /// `Identifiable` conformance, qualified by device; see `SpacesMobileAttentionEvent.id`'s doc
+    /// comment for why `eventKey` alone is not enough once the list spans every paired device.
+    var id: String { "\(deviceID)|\(eventKey)" }
+
+    /// "Automation" or "Automation · device": automation runs are workspace-less, so this stands in for
+    /// the project/workspace text every other Alerts row shows, mirroring the Mac's synthetic
+    /// "Automations" group name. Deliberately omits the run's own outcome ("Failed (exit 3)", "Timed
+    /// out"), by design: the row's dot kind already signals failure, and the outcome text stays
+    /// available where it matters, one tap away on the automation's own Runs list
+    /// (`AutomationRows.statusTitle(_:)`).
+    var detail: String {
+        guard let deviceText else { return "Automation" }
+        return "Automation · \(deviceText)"
+    }
 }
 
 /// Pure merge/derivation logic for the iOS Automations feature, mirroring the Mac's
-/// `AutomationsViewModel`. The iOS app connects to one paired device at a time and refreshes that
-/// device's whole overview as a unit (see `SpacesMobileAppModel`), unlike the Mac sidebar, which streams
-/// every paired device's overview simultaneously and merges their automations/runs into one cross-device
-/// table.
-/// There is therefore no cross-device merge to do here: switching the active device on iOS discards the
-/// previous overview and loads the new device's own automations from scratch.
+/// `AutomationsViewModel`. The Automations tab itself connects to one paired device at a time and
+/// refreshes that device's whole overview as a unit (see `SpacesMobileAppModel`), unlike the Mac sidebar,
+/// which streams every paired device's overview simultaneously and merges their automations/runs into one
+/// cross-device table: switching the active device on iOS discards the previous overview and loads the
+/// new device's own automations from scratch. `SpacesMobileAutomationAlertEntry` above is the one
+/// exception: the Alerts tab merges every paired device's failed/timed-out runs into its own flat list
+/// (see `SpacesMobileAppModel.automationAlerts`), independent of which device is selected.
 enum SpacesMobileAutomations {
     static func rows(automations: [TerminalServiceAutomationSummary], runs: [TerminalServiceAutomationRunSummary]) -> [SpacesMobileAutomationRow] {
         automations.map { automation in
@@ -306,29 +329,28 @@ enum SpacesMobileAutomations {
 }
 
 enum SpacesMobileAutomationAlerts {
-    static func entries(runs: [TerminalServiceAutomationRunSummary]) -> [SpacesMobileAutomationAlertEntry] {
+    /// `deviceText` is stamped onto every entry this call produces (nil hides the device segment); the
+    /// Alerts tab merges the result with every other device's own call and with attention events into one
+    /// flat, newest-first list (see `SpacesMobileAppModel.automationAlerts`), so entries are returned in
+    /// this device's own newest-first order rather than the caller having to re-sort a single device's run.
+    static func entries(deviceID: String, deviceText: String?, runs: [TerminalServiceAutomationRunSummary], isDeviceOffline: Bool = false)
+        -> [SpacesMobileAutomationAlertEntry]
+    {
         runs.filter { run in
             let status = AutomationRunStatus(rawValue: run.status)
             return status == .failed || status == .timedOut
-        }.map { run -> (entry: SpacesMobileAutomationAlertEntry, date: Date?) in
-            let entry = SpacesMobileAutomationAlertEntry(
-                id: "alert:automationrun:\(run.id):\(run.status)", automationName: run.automationName ?? "Automation", outcome: outcome(for: run),
-                runID: run.id, status: run.status)
-            return (entry, TerminalSessionTimestamp.date(from: run.endedAt ?? run.createdAt))
+        }.map { run in
+            SpacesMobileAutomationAlertEntry(
+                eventKey: "alert:automationrun:\(run.id):\(run.status)", deviceID: deviceID, automationName: run.automationName ?? "Automation",
+                runID: run.id, status: run.status, date: TerminalSessionTimestamp.date(from: run.endedAt ?? run.createdAt), deviceText: deviceText,
+                isDeviceOffline: isDeviceOffline)
         }.sorted { lhs, rhs in
             switch (lhs.date, rhs.date) {
             case (let a?, let b?): return a > b
             case (nil, _): return false
             case (_, nil): return true
             }
-        }.map(\.entry)
-    }
-
-    private static func outcome(for run: TerminalServiceAutomationRunSummary) -> String {
-        switch AutomationRunStatus(rawValue: run.status) {
-        case .timedOut: "Timed out"
-        case .failed: run.exitCode.map { "Failed (exit \($0))" } ?? "Failed"
-        default: run.status
         }
     }
+
 }
