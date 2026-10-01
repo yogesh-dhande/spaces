@@ -1,9 +1,9 @@
 import Image from "next/image";
 import Link from "next/link";
+import { githubReleasesURL } from "../content";
 import SpacesLogo from "../spaces.svg";
 
 const githubRepoURL = "https://github.com/yogesh-dhande/spaces";
-const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
 
 export function SiteFooter() {
   return (
@@ -38,6 +38,7 @@ export function SiteFooter() {
           </Link>
           <a
             href={githubReleasesURL}
+            data-download-placement="footer"
             target="_blank"
             rel="noopener noreferrer"
             className="transition-colors hover:text-foreground"

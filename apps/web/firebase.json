@@ -8,6 +8,15 @@
     ],
     "headers": [
       {
+        "source": "/opengraph-image",
+        "headers": [
+          {
+            "key": "Content-Type",
+            "value": "image/png"
+          }
+        ]
+      },
+      {
         "source": "**/*.@(mp4|m4v|mov|webm)",
         "headers": [
           {
@@ -15,12 +24,6 @@
             "value": "public, max-age=14400, no-transform"
           }
         ]
-      }
-    ],
-    "rewrites": [
-      {
-        "source": "**",
-        "destination": "/index.html"
       }
     ]
   }

@@ -3,9 +3,9 @@ import Link from "next/link";
 import { CodeBlock, InlineCode } from "../components/code-block";
 import { DocLink } from "../components/doc-link";
 import { DocsShell } from "../components/docs-shell";
+import { githubReleasesURL } from "../../content";
 import { Prose, Section } from "../components/section";
 
-const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
 
 export const metadata: Metadata = {
   title: "Install on your Mac",
@@ -33,6 +33,7 @@ export default function InstallationDocsPage() {
             1. Download the DMG from the{" "}
             <Link
               href={githubReleasesURL}
+              data-download-placement="docs_install"
               className="text-accent hover:underline"
               target="_blank"
               rel="noopener noreferrer"

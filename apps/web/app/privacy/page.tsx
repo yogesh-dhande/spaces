@@ -7,7 +7,7 @@ const githubDiscussionsURL = "https://github.com/yogesh-dhande/spaces/discussion
 export const metadata: Metadata = {
   title: "Privacy Policy",
   description:
-    "Spaces has no accounts, collects no personal data, and routes nothing through developer-operated servers. Read the full privacy policy.",
+    "The Spaces apps have no accounts, collect no personal data, and route nothing through developer-operated servers. The website counts visits without cookies.",
 };
 
 export default function PrivacyPolicyPage() {
@@ -21,10 +21,11 @@ export default function PrivacyPolicyPage() {
             Privacy Policy
           </h1>
           <p className="mt-4 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-            Effective July 16, 2026. Spaces (the macOS app, the iOS app, and the
+            Effective October 1, 2026. Spaces (the macOS app, the iOS app, and the
             <code className="mx-1 rounded bg-background-soft px-1.5 py-0.5 text-sm">spacesd</code>
             daemon) is built so your terminal and workspace data never has a reason to leave your
-            own devices.
+            own devices. This website, usespaces.dev, counts visits; the &ldquo;This website&rdquo;
+            section explains exactly what it records.
           </p>
         </section>
 
@@ -38,12 +39,12 @@ export default function PrivacyPolicyPage() {
           </article>
 
           <article className="border-t border-line/70 pt-8">
-            <h2 className="text-2xl font-semibold tracking-tight">No data collection</h2>
+            <h2 className="text-2xl font-semibold tracking-tight">No data collection in the apps</h2>
             <p className="mt-3 text-sm leading-7 text-foreground-soft">
-              The developer collects no personal data from Spaces. There is no analytics, no
-              usage tracking, and no third-party SDK phoning data home. The apps and the daemon
-              do not report what you run, what you type, or which projects and workspaces you
-              have.
+              The developer collects no personal data from the Spaces apps or the daemon. They
+              contain no analytics, no usage tracking, and no third-party SDK phoning data home,
+              and they do not report what you run, what you type, or which projects and
+              workspaces you have.
             </p>
           </article>
 
@@ -82,6 +83,29 @@ export default function PrivacyPolicyPage() {
             <p className="mt-3 text-sm leading-7 text-foreground-soft">
               The iOS app&apos;s subscription is purchased and managed through Apple via the App
               Store. Apple handles payment; the developer never receives your payment details.
+            </p>
+          </article>
+
+          <article className="border-t border-line/70 pt-8">
+            <h2 className="text-2xl font-semibold tracking-tight">This website</h2>
+            <p className="mt-3 text-sm leading-7 text-foreground-soft">
+              usespaces.dev uses PostHog, a product analytics service, to count visits, so the
+              developer can see which pages and links bring people to Spaces. It records the pages
+              you view, the site that sent you, campaign tags and ad click IDs in the link (such as
+              utm_source or gclid), which Download link you clicked, and your browser and device
+              type. It does not record your IP address or your location.
+            </p>
+            <p className="mt-3 text-sm leading-7 text-foreground-soft">
+              The site sets no cookies and stores nothing in your browser. PostHog tells visits
+              apart with a hash of your IP address and browser that changes every day, so visits
+              on different days cannot be linked to each other. There is no session recording, no
+              click tracking beyond the Download links, and nothing you type is recorded. If your
+              browser sends Do Not Track or Global Privacy Control, the site does not load PostHog
+              at all, and blocking it with a content blocker does not change how the site works.
+              PostHog processes this data in the United States.
+            </p>
+            <p className="mt-3 text-sm leading-7 text-foreground-soft">
+              None of this applies to the Spaces apps or the daemon.
             </p>
           </article>
 
