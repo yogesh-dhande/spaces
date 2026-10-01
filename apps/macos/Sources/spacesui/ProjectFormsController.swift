@@ -47,7 +47,9 @@ protocol FormGenerationTagged { var formTag: Int { get } }
     // happen from several paths; flushing here covers them all so a deferred
     // database/worktree reload is never stranded once the user is idle again.
     var projectHasUnsavedChanges = false { didSet { if oldValue, !projectHasUnsavedChanges { host.flushDeferredSidebarReloadsIfNeeded() } } }
-    var activeAddWorkspaceFormTag: Int? { didSet { if oldValue != nil, activeAddWorkspaceFormTag == nil { host.flushDeferredSidebarReloadsIfNeeded() } } }
+    var activeAddWorkspaceFormTag: Int? {
+        didSet { if oldValue != nil, activeAddWorkspaceFormTag == nil { host.flushDeferredSidebarReloadsIfNeeded() } }
+    }
     var activeAddProjectFormTag: Int? { didSet { if oldValue != nil, activeAddProjectFormTag == nil { host.flushDeferredSidebarReloadsIfNeeded() } } }
 
     private enum AddWorkspaceBranchMode: String {
@@ -313,8 +315,7 @@ protocol FormGenerationTagged { var formTag: Int { get } }
 
     private func presentProjectSettingsWindow(hosting stack: NSStackView, project: ProjectSummary) {
         projectSettingsProjectID = project.id
-        let header = buildFormWindowHeader(
-            symbol: "gearshape", title: project.name, closeAction: #selector(closeProjectSettingsWindow), target: self)
+        let header = buildFormWindowHeader(symbol: "gearshape", title: project.name, closeAction: #selector(closeProjectSettingsWindow), target: self)
         projectSettingsWindow = host.presentFormWindow(existing: projectSettingsWindow, header: header, hosting: stack)
     }
 
@@ -970,8 +971,7 @@ protocol FormGenerationTagged { var formTag: Int { get } }
     }
 
     private func presentAddProjectWindow(hosting stack: NSStackView, title: String) {
-        let header = buildFormWindowHeader(
-            symbol: "square.and.pencil", title: title, closeAction: #selector(closeAddProjectWindow), target: self)
+        let header = buildFormWindowHeader(symbol: "square.and.pencil", title: title, closeAction: #selector(closeAddProjectWindow), target: self)
         addProjectWindow = host.presentFormWindow(existing: addProjectWindow, header: header, hosting: stack)
     }
 
@@ -1001,6 +1001,7 @@ protocol FormGenerationTagged { var formTag: Int { get } }
                     gitURL = nil
                 }
                 let config = Self.deviceProjectConfig(from: refs)
+                let replaceExistingManagedDirectories = gitURL != nil && refs.replaceExistingManagedDirectories
                 // For a git source the daemon clones the repository now and applies this config (the
                 // preview only fetched spaces.yaml). Cloning at Create means nothing is left behind if
                 // the user cancels, so there is no prepared clone to track or discard.
@@ -1021,6 +1022,7 @@ protocol FormGenerationTagged { var formTag: Int { get } }
                     let result = await AppKitController.deviceMutation(device: device) { device in
                         try SpacesDeviceClient.createProject(
                             projectDir: projectDir, gitURL: gitURL, config: config,
+                            replaceExistingManagedDirectories: replaceExistingManagedDirectories,
                             context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
                     }
                     switch result {
@@ -1106,6 +1108,7 @@ protocol FormGenerationTagged { var formTag: Int { get } }
                         presentAddProjectSourceStep(refs)
                         return
                     }
+                    refs.replaceExistingManagedDirectories = !preview.replacementCandidates.isEmpty
                     refs.spacesYAMLMissing = !preview.spacesYAMLFound
                     hydrateAddProjectSettings(refs, from: preview.config ?? SpacesDeviceProjectConfig())
                     showAddProjectConfigStep(refs)
@@ -1609,8 +1612,8 @@ protocol FormGenerationTagged { var formTag: Int { get } }
     nonisolated private static func deviceDirectorySuggestions(path: String, device: SpacesPairedDeviceRecord) async -> [String] {
         await Task.detached(priority: .userInitiated) {
             (try? SpacesDeviceClient.listDirectories(
-                path: path,
-                context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))) ?? []
+                path: path, context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))))
+                ?? []
         }.value
     }
 

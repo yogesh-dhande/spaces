@@ -47,6 +47,14 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
             SpacesDeviceClient.requestTimeoutSeconds(for: .stopCodingAgent(.init(workspaceID: "workspace-1", agentID: "agent-1"))),
             SpacesDeviceClient.longRunningMutationTimeoutSeconds)
         XCTAssertEqual(SpacesDeviceClient.requestTimeoutSeconds(for: .agentHooksStatus), SpacesDeviceClient.agentHooksStatusRequestTimeoutSeconds)
+        // A git URL create clones before it answers; the Mac app waits as long as the CLI does, while the
+        // git preview, which fetches one file, keeps the long-running mutation deadline.
+        XCTAssertEqual(
+            SpacesDeviceClient.requestTimeoutSeconds(for: .createProject(.init(projectDir: nil, gitURL: "https://example.com/repo.git"))),
+            SpacesDeviceAPICommand.projectCreateTimeoutSeconds)
+        XCTAssertEqual(
+            SpacesDeviceClient.requestTimeoutSeconds(for: .previewGitProject(.init(gitURL: "https://example.com/repo.git"))),
+            SpacesDeviceClient.longRunningMutationTimeoutSeconds)
         XCTAssertGreaterThan(SpacesDeviceClient.agentHooksStatusRequestTimeoutSeconds, SpacesDeviceClient.defaultRequestTimeoutSeconds)
     }
 

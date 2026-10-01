@@ -4,6 +4,7 @@ import Network
 import XCTest
 import spacesterminalcore
 
+@testable import spacescli
 @testable import spacesdeviceapi
 @testable import spacesdevicecore
 @testable import workspacecore
@@ -720,6 +721,94 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             XCTAssertEqual(response.overview?.projects.first(where: { $0.id == projectID })?.dir, projectDir.path)
             XCTAssertEqual(response.overview?.workspaces.first(where: { $0.projectID == projectID })?.isDefault, true)
             XCTAssertEqual(response.workspaceID, response.overview?.workspaces.first(where: { $0.projectID == projectID && $0.isDefault })?.id)
+            XCTAssertEqual(response.spacesYAMLImported, false)
+        }
+    }
+
+    /// A create without a reviewed configuration imports the folder's `spaces.yaml` and says so, and the
+    /// CLI and MCP read that response into the same report the local daemon's profile command produces.
+    /// A create carrying the Mac app's reviewed configuration applies it instead and reports no import.
+    func testCreateProjectReportsSpacesYAMLImportUnlessTheConfigWasReviewed() throws {
+        try withTemporaryProfile { root in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-PROJECT-YAML", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let yaml = "version: 1\nstop_script: echo yaml-stop\n"
+            let importedDir = root.appendingPathComponent("imported-project", isDirectory: true)
+            let reviewedDir = root.appendingPathComponent("reviewed-project", isDirectory: true)
+            for dir in [importedDir, reviewedDir] {
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                try yaml.write(to: dir.appendingPathComponent("spaces.yaml"), atomically: true, encoding: .utf8)
+            }
+
+            let imported = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .createProject(.init(projectDir: importedDir.path, gitURL: nil)), authToken: pairingStore.authToken, clientApp: clientApp
+                ), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            let reviewed = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .createProject(
+                        .init(projectDir: reviewedDir.path, gitURL: nil, config: SpacesDeviceProjectConfig(stopScript: "echo edited"))),
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
+
+            XCTAssertTrue(imported.ok, imported.message)
+            XCTAssertEqual(imported.spacesYAMLImported, true)
+            XCTAssertTrue(reviewed.ok, reviewed.message)
+            XCTAssertEqual(reviewed.spacesYAMLImported, false)
+
+            let report = try CreatedProjectReport(deviceResponse: imported)
+            XCTAssertEqual(report.project.id, imported.projectID)
+            XCTAssertEqual(report.project.dir, importedDir.path)
+            XCTAssertEqual(report.project.isGitRepo, false)
+            XCTAssertEqual(report.defaultWorkspaceID, imported.workspaceID)
+            XCTAssertTrue(report.spacesYAMLImported)
+            XCTAssertEqual(report.message, "Created project 'imported-project'.")
+        }
+    }
+
+    /// The Device API create holds the same rules as the CLI: a repository subfolder is refused naming
+    /// the root to add instead, and a folder that is already a project is refused naming that project.
+    func testCreateProjectRefusesRepositorySubfolderAndDuplicateFolder() throws {
+        try withTemporaryProfile { root in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-PROJECT-RULES", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let repo = root.appendingPathComponent("rules-repo", isDirectory: true)
+            try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+            try initializeGitRepository(at: repo, initialBranch: "main")
+            let subfolder = repo.appendingPathComponent("packages", isDirectory: true)
+            try FileManager.default.createDirectory(at: subfolder, withIntermediateDirectories: true)
+            func create(_ dir: URL) throws -> SpacesDeviceAPIResponse {
+                try sendTLSRequest(
+                    SpacesDeviceAPIRequest(
+                        command: .createProject(.init(projectDir: dir.path, gitURL: nil)), authToken: pairingStore.authToken, clientApp: clientApp),
+                    port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            }
+            let repoRoot = repo.resolvingSymlinksInPath().path
+
+            let subfolderResponse = try create(subfolder)
+            XCTAssertFalse(subfolderResponse.ok)
+            XCTAssertEqual(subfolderResponse.errorCode, .invalidArgument)
+            XCTAssertTrue(subfolderResponse.message.contains("add \(repoRoot) instead"), subfolderResponse.message)
+
+            let created = try create(repo)
+            XCTAssertTrue(created.ok, created.message)
+            let projectID = try XCTUnwrap(created.projectID)
+            let duplicate = try create(repo)
+            XCTAssertFalse(duplicate.ok)
+            XCTAssertEqual(duplicate.errorCode, .invalidArgument)
+            XCTAssertTrue(duplicate.message.contains("rules-repo (\(projectID))"), duplicate.message)
         }
     }
 

@@ -34,6 +34,9 @@ enum AddProjectSourceKind {
     let spacesYAMLMissingLabel: NSTextField
     /// Whether the loaded git source had no `spaces.yaml`, driving the note above.
     var spacesYAMLMissing = false
+    /// Whether the user confirmed, at the git preview, replacing the folders an earlier import of this
+    /// repository left behind. Create sends it; without it the daemon refuses those folders.
+    var replaceExistingManagedDirectories = false
 
     // MARK: Shared
     /// The device the project will be created on, chosen in the device step (or the local Mac when it

@@ -23,7 +23,8 @@ public struct SpacesCommand: ParsableCommand {
               - Runtime state defaults to <profile-root>/runtime unless `SPACES_RUNTIME_DIR` overrides it.
               - The running spacesd owns profile schema upgrades. If a staged helper requires a newer schema, run `spaces daemon apply-update` so the daemon updates in place without stopping its sessions.
               - Workspace start/stop/restart default to the deepest workspace containing the current directory; pass --workspace to override (and always for --device). Agent signal defaults workspace/session IDs from Spaces terminal environment.
-              - `project list`, `workspace list`, and `workspace create`/`start`/`stop`/`restart` accept `--device <name-or-id>` to read or act on a paired device; the discovery listings read the device's overview. Omitting `--device` targets this device's spacesd daemon.
+              - `project list`/`create`, `workspace list`, and `workspace create`/`start`/`stop`/`restart` accept `--device <name-or-id>` to read or act on a paired device; the discovery listings read the device's overview. Omitting `--device` targets this device's spacesd daemon.
+              - `project create` registers a project from `--dir` (the root of a repository's main checkout, or any folder outside git) or `--git-url` (cloned by the daemon). It imports the repository's spaces.yaml when present and creates the default workspace without starting it. A relative `--dir` resolves against the current directory; with `--device` it must be absolute or start with ~, which the device expands against its own home.
               - `workspace start` waits for pending/running setup to complete and fails with the setup error if setup failed. It is convergent: it launches whichever configured processes are not already running (a never-started one launches fresh, an exited one restarts) and leaves already-running processes, ad hoc terminals, and coding-agent sessions untouched; a workspace whose configured processes are all already running succeeds as a no-op. Windows open without activating the app.
               - `workspace stop` stops a workspace: the daemon terminates its processes and terminal sessions. A running Spaces app closes that workspace's panes and tracked browser tabs when it sees the transition, the same cleanup the app's own Stop gets; with no app running, the tracked tabs stay open.
               - `workspace restart` runs the stop script, then relaunches every configured process (running or not) in place, keeping each one's identity across the swap. Ad hoc terminals, coding-agent sessions, and running automations are left untouched.
@@ -43,7 +44,7 @@ public struct SpacesCommand: ParsableCommand {
 
 struct ProjectCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "project", abstract: "Manage Spaces projects.", subcommands: [ProjectListCommand.self])
+        commandName: "project", abstract: "Manage Spaces projects.", subcommands: [ProjectListCommand.self, ProjectCreateCommand.self])
 }
 
 /// Renders one project as a tab-separated row. Shared by the local and `--device` paths so both forms
@@ -83,6 +84,43 @@ struct ProjectListCommand: ParsableCommand {
         }
         let projects = try TerminalService.sendProfileCommand(.projectList).projects ?? []
         context.output.emitLines(projects.map(projectListRow))
+    }
+}
+
+struct ProjectCreateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "create", abstract: "Create a project from a folder or a git URL on this or a paired device.")
+
+    @Option(
+        name: .long,
+        help:
+            "Folder to register: the root of a repository's main checkout, or any folder outside git. With --device, an absolute or ~ path on that device."
+    ) var dir: String?
+    @Option(name: .customLong("git-url"), help: "Git repository URL for the daemon to clone.") var gitURL: String?
+    @Option(name: .long, help: "Paired device name or ID. Defaults to this machine.") var device: String?
+
+    func validate() throws {
+        guard (normalizedNonEmpty(dir) == nil) != (normalizedNonEmpty(gitURL) == nil) else {
+            throw ValidationError("Provide exactly one of --dir or --git-url.")
+        }
+        if device != nil, let dir = normalizedNonEmpty(dir), !isDaemonResolvableProjectDirectory(dir) {
+            throw ValidationError("--dir must be an absolute path or start with ~ when used with --device: the device resolves it, not this shell.")
+        }
+    }
+
+    func run() throws {
+        let context = CLIContext()
+        let record = try device.map { try SpacesPairedDeviceSelection.resolve($0) }
+        let source: TerminalServiceProjectCreateSource
+        if let dir = normalizedNonEmpty(dir) {
+            source = .dir(record == nil ? localProjectDirectory(dir, currentDirectory: context.currentDirectoryPath()) : dir)
+        } else if let gitURL = normalizedNonEmpty(gitURL) {
+            source = .gitURL(gitURL)
+        } else {
+            throw ValidationError("Provide exactly one of --dir or --git-url.")
+        }
+        let report = try createProject(source, device: record)
+        context.output.emit(report.row)
     }
 }
 

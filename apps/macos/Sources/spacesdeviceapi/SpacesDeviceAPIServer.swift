@@ -4882,33 +4882,48 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
         let store = try context.store()
         let orchestrator = try context.orchestrator()
-        let project: ProjectRecord
+        // A create carrying the configuration the user reviewed in the add-project form applies that
+        // configuration in place of the repository's `spaces.yaml`, so it never reports an import.
+        let created: CreatedProject
         if let projectDir {
             if let config = request.config {
-                project = try orchestrator.addReviewedProject(dir: projectDir) { project in applyProjectConfig(config, to: &project) }
+                let project = try orchestrator.addReviewedProject(dir: projectDir) { project in applyProjectConfig(config, to: &project) }
+                created = CreatedProject(project: project, spacesYAMLImported: false)
             } else {
-                project = try orchestrator.addProject(dir: projectDir)
+                created = try orchestrator.createProject(dir: projectDir)
             }
         } else if let gitURL {
-            // Clone the repository now (deferred from the add-project preview, which only fetched
-            // spaces.yaml) and apply the client's reviewed config. addPreparedGitProject applies the
-            // config unconditionally; addProject(gitURL:) would instead discard it in favor of the
-            // repo's own spaces.yaml, dropping any edits the user made in the form.
-            let prepared = try orchestrator.prepareGitProject(gitURL: gitURL, replaceExistingManagedDirectories: true)
-            do {
-                project = try orchestrator.addPreparedGitProject(prepared) { project in
-                    if let config = request.config { applyProjectConfig(config, to: &project) }
-                }
-            } catch {
-                try? orchestrator.discardPreparedGitProject(prepared)
-                throw error
+            if let config = request.config {
+                created = try createReviewedGitProject(
+                    gitURL: gitURL, config: config, replaceExistingManagedDirectories: request.replaceExistingManagedDirectories,
+                    orchestrator: orchestrator)
+            } else {
+                created = try orchestrator.createProject(gitURL: gitURL, replaceExistingManagedDirectories: request.replaceExistingManagedDirectories)
             }
         } else {
             return SpacesDeviceAPIResponse(ok: false, message: "Provide exactly one project directory or Git URL.", errorCode: .invalidArgument)
         }
+        let project = created.project
         let defaultWorkspaceID = try store.workspaces(projectID: project.id).first(where: \.isDefault)?.id
         return try refreshedMutationResponse(
-            context: context, message: "Created project '\(project.name)'.", projectID: project.id, workspaceID: defaultWorkspaceID)
+            context: context, message: "Created project '\(project.name)'.", projectID: project.id, workspaceID: defaultWorkspaceID,
+            spacesYAMLImported: created.spacesYAMLImported)
+    }
+
+    /// Clones the repository now (deferred from the add-project preview, which only fetched spaces.yaml)
+    /// and applies the reviewed config unconditionally, where `createProject(gitURL:)` would keep the
+    /// repository's own spaces.yaml and drop the edits the user made in the form.
+    private func createReviewedGitProject(
+        gitURL: String, config: SpacesDeviceProjectConfig, replaceExistingManagedDirectories: Bool, orchestrator: WorkspaceOrchestrator
+    ) throws -> CreatedProject {
+        let prepared = try orchestrator.prepareGitProject(gitURL: gitURL, replaceExistingManagedDirectories: replaceExistingManagedDirectories)
+        do {
+            let project = try orchestrator.addPreparedGitProject(prepared) { project in applyProjectConfig(config, to: &project) }
+            return CreatedProject(project: project, spacesYAMLImported: false)
+        } catch {
+            try? orchestrator.discardPreparedGitProject(prepared)
+            throw error
+        }
     }
 
     /// Loads a git repository's `spaces.yaml` for the add-project preview by fetching only that single
@@ -7109,14 +7124,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     private func refreshedMutationResponse(
         context: RequestContext, message: String, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil,
-        launchedTerminalSession: SpacesDeviceTerminalSessionSummary? = nil, notice: String? = nil, terminatedTerminalSession: Bool? = nil
+        launchedTerminalSession: SpacesDeviceTerminalSessionSummary? = nil, notice: String? = nil, terminatedTerminalSession: Bool? = nil,
+        spacesYAMLImported: Bool? = nil
     ) throws -> SpacesDeviceAPIResponse {
         SpacesDeviceAPIResponse(
             ok: true, message: message,
             result: .mutation(
                 SpacesDeviceMutationResult(
                     overview: try loadOverview(store: context.store()), projectID: projectID, workspaceID: workspaceID, sessionID: sessionID,
-                    launchedTerminalSession: launchedTerminalSession, notice: notice, terminatedTerminalSession: terminatedTerminalSession)))
+                    launchedTerminalSession: launchedTerminalSession, notice: notice, terminatedTerminalSession: terminatedTerminalSession,
+                    spacesYAMLImported: spacesYAMLImported)))
     }
 
     /// Carries the launched terminal's own metadata in the start-command mutation response so the

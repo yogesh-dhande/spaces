@@ -5,7 +5,9 @@ import XCTest
 final class ErrorsTests: XCTestCase {
     func testErrorDescriptionsCoverAllCases() {
         XCTAssertEqual(WorkspaceError.missingProject(dir: "/tmp/project").errorDescription, "Project not found: /tmp/project")
-        XCTAssertEqual(WorkspaceError.projectAlreadyExists(dir: "/tmp/project").errorDescription, "Project already exists: /tmp/project")
+        XCTAssertEqual(
+            WorkspaceError.projectAlreadyExists(name: "project", id: "project-1", dir: "/tmp/project").errorDescription,
+            "Project already exists: project (project-1) at /tmp/project")
         XCTAssertEqual(
             WorkspaceError.missingWorkspace(project: "App", workspace: "feature").errorDescription, "Workspace not found for project App: feature")
         XCTAssertEqual(

@@ -2897,7 +2897,7 @@ public final class WorkspaceOrchestrator {
     }
 
     private enum ManagedDirectoryOwnershipConflict {
-        case project(String)
+        case project(ProjectRecord)
         case workspace(WorkspaceRecord)
         case descendant(String)
     }
@@ -2905,7 +2905,7 @@ public final class WorkspaceOrchestrator {
     func validateManagedDirectoryIsUnowned(path: String) throws {
         guard let conflict = try managedDirectoryOwnershipConflict(path: path) else { return }
         switch conflict {
-        case .project(let path): throw WorkspaceError.projectAlreadyExists(dir: path)
+        case .project(let project): throw WorkspaceError.projectAlreadyExists(name: project.name, id: project.id, dir: project.dir)
         case .workspace(let workspace): throw WorkspaceError.invalidArgument(message: "Workspace already exists: \(workspace.displayName)")
         case .descendant(let path):
             throw WorkspaceError.invalidArgument(message: "Managed folder contains a project or workspace owned by Spaces: \(path)")
@@ -2918,7 +2918,7 @@ public final class WorkspaceOrchestrator {
         var ownershipPaths = [entryPath]
         if resolvedPath != entryPath { ownershipPaths.append(resolvedPath) }
         for ownershipPath in ownershipPaths {
-            if try store.project(dir: ownershipPath) != nil { return .project(ownershipPath) }
+            if let project = try store.project(dir: ownershipPath) { return .project(project) }
             if let workspace = try store.workspace(dir: ownershipPath) { return .workspace(workspace) }
         }
         for ownershipPath in ownershipPaths where try managedDirectoryContainsOwnedDescendant(path: ownershipPath) {

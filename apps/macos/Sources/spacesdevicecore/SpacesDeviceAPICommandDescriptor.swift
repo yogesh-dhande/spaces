@@ -76,6 +76,13 @@ extension SpacesDeviceAPICommand {
     /// reconciles the outcome itself rather than reporting the deadline as a failure (see the Files
     /// tree's entry move below).
     public static let longRunningMutationTimeoutSeconds: TimeInterval = 60
+    /// `.createProject` from a git URL clones the repository before it answers, and clone time scales with
+    /// the repository's size: a large repository over a slow link takes minutes. The daemon keeps cloning
+    /// after a client stops waiting, so a deadline shorter than the clone reports a failure for a create
+    /// that then succeeds, and the user's retry hits the duplicate-project error. Every client waits this
+    /// long, including the CLI's local profile command for the same create (public for that reason).
+    /// The git preview stays on the long-running deadline: it fetches one file, not the repository.
+    public static let projectCreateTimeoutSeconds: TimeInterval = 600
     /// `.agentHooksStatus` probes every configured coding agent's shell/config state, which can take
     /// longer than the default deadline but far less than a long-running mutation.
     private static let agentHooksStatusRequestTimeoutSeconds: TimeInterval = 20
@@ -103,8 +110,7 @@ extension SpacesDeviceAPICommand {
         case .requestDaemonRestart:
             return Self.descriptor(wireKey: "requestDaemonRestart", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .overview: return Self.descriptor(wireKey: "overview", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
-        case .createProject:
-            return Self.descriptor(wireKey: "createProject", lane: .projectClone, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
+        case .createProject: return Self.descriptor(wireKey: "createProject", lane: .projectClone, timeoutSeconds: Self.projectCreateTimeoutSeconds)
         case .previewProject: return Self.descriptor(wireKey: "previewProject", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .previewGitProject:
             return Self.descriptor(wireKey: "previewGitProject", lane: .projectClone, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)

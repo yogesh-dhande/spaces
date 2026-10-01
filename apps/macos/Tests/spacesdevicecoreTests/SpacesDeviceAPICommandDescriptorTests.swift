@@ -124,10 +124,13 @@ import Testing
     /// delete that postdate that switch take the long-running mutation deadline: they share one serial
     /// per-workspace queue with the 60-second reads, writes, listings, and diff chunks, so their wait is
     /// the queue's, not their own one-entry cost. The rename/move on that same queue takes it for the same
-    /// reason (see `theEntryMoveTakesTheLongRunningMutationDeadlineItsSiblingMutationsTake`).
+    /// reason (see `theEntryMoveTakesTheLongRunningMutationDeadlineItsSiblingMutationsTake`). A project
+    /// create waits ten minutes on every client: a git URL create clones the whole repository before it
+    /// answers, and the daemon finishes a clone the client stopped waiting for.
     private static func expectedTimeoutSeconds(for command: SpacesDeviceAPICommand) -> TimeInterval {
         switch command {
-        case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
+        case .createProject: 600
+        case .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
             .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .startWorkspaceCommandSession, .stopWorkspaceTerminal,
             .stopWorkspaceTerminalIfBareShell, .runWorkspaceProcess, .stopWorkspaceProcess, .restartWorkspaceProcess, .stopCodingAgent,
             .installAgentHooks, .spawnAgentSession, .killAgentSession, .createAutomation, .updateAutomation, .setAutomationNextRun, .deleteAutomation,

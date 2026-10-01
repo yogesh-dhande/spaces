@@ -156,6 +156,33 @@ struct WorkspaceListArguments: Decodable {
     }
 }
 
+// MARK: - spaces_project_create
+
+struct ProjectCreateArguments: Decodable {
+    let source: TerminalServiceProjectCreateSource
+    let device: String?
+
+    private enum CodingKeys: String, CodingKey { case dir, gitURL, device }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let dir = try container.mcpOptionalString(forKey: .dir)
+        let gitURL = try container.mcpOptionalString(forKey: .gitURL)
+        device = try container.mcpOptionalString(forKey: .device)
+        switch (dir, gitURL) {
+        case (let dir?, nil):
+            // A relative path is refused even for this machine: the MCP server's working directory is
+            // wherever its client launched it, not a folder the calling agent can rely on.
+            guard isDaemonResolvableProjectDirectory(dir) else {
+                throw MCPError.invalidArguments("dir must be an absolute path or start with ~ (expanded against the target device's home).")
+            }
+            source = .dir(dir)
+        case (nil, let gitURL?): source = .gitURL(gitURL)
+        default: throw MCPError.invalidArguments("Provide exactly one of dir or gitURL.")
+        }
+    }
+}
+
 // MARK: - spaces_workspace_create / spaces_workspace_start / spaces_workspace_restart
 
 struct WorkspaceCreateArguments: Decodable {

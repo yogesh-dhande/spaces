@@ -55,6 +55,21 @@ export default function ProjectsDocsPage() {
           exists but is not registered to any project, Continue asks first before Create replaces
           it.
         </p>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          A folder has to be a Git repository&apos;s root, or a folder that isn&apos;t in a Git
+          repository at all. Spaces turns down a subfolder of a repository or a worktree, including a
+          workspace&apos;s own folder, and tells you which project already has it or which folder to
+          add instead. Adding something that is already a project tells you which one.
+        </p>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          A coding agent or script can add a project with{" "}
+          <InlineCode>spaces project create</InlineCode> (see{" "}
+          <DocLink href="/docs/cli#projects">CLI</DocLink>) or the{" "}
+          <InlineCode>spaces_project_create</InlineCode> MCP tool. There is no Configure step: any{" "}
+          <InlineCode>spaces.yaml</InlineCode> is used as found, and you can change the settings
+          afterwards. Neither replaces leftover managed clone folders; add that project from the app
+          instead, which asks first.
+        </p>
       </Section>
 
       <Section id="git-and-folder-projects" title="Git and folder projects">

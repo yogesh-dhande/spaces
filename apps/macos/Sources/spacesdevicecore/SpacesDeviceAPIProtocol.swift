@@ -850,11 +850,31 @@ public struct SpacesDeviceProjectCreateRequest: Codable, Sendable, Equatable {
     public let projectDir: String?
     public let gitURL: String?
     public let config: SpacesDeviceProjectConfig?
+    /// Whether a git URL create may replace folders an earlier import of the same repository left behind
+    /// (folders no project or workspace owns). Only a client that showed the user those folders at
+    /// preview and got a confirmation sends `true`; absent decodes as `false`, so the create refuses.
+    public let replaceExistingManagedDirectories: Bool
 
-    public init(projectDir: String?, gitURL: String?, config: SpacesDeviceProjectConfig? = nil) {
+    public init(projectDir: String?, gitURL: String?, config: SpacesDeviceProjectConfig? = nil, replaceExistingManagedDirectories: Bool = false) {
         self.projectDir = projectDir
         self.gitURL = gitURL
         self.config = config
+        self.replaceExistingManagedDirectories = replaceExistingManagedDirectories
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case projectDir
+        case gitURL
+        case config
+        case replaceExistingManagedDirectories
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        projectDir = try container.decodeIfPresent(String.self, forKey: .projectDir)
+        gitURL = try container.decodeIfPresent(String.self, forKey: .gitURL)
+        config = try container.decodeIfPresent(SpacesDeviceProjectConfig.self, forKey: .config)
+        replaceExistingManagedDirectories = try container.decodeIfPresent(Bool.self, forKey: .replaceExistingManagedDirectories) ?? false
     }
 }
 
@@ -3268,10 +3288,15 @@ public struct SpacesDeviceMutationResult: Codable, Sendable, Equatable {
     /// process, a surviving owner attachment, or a configured owner). `nil` for every other mutation,
     /// which has no such choice to report.
     public let terminatedTerminalSession: Bool?
+    /// `createProject` reports whether the new project's configuration was imported from the repository's
+    /// `spaces.yaml`; a create carrying a reviewed configuration reports `false`. `nil` for every other
+    /// mutation.
+    public let spacesYAMLImported: Bool?
 
     public init(
         overview: SpacesDeviceOverviewPayload? = nil, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil,
-        launchedTerminalSession: SpacesDeviceTerminalSessionSummary? = nil, notice: String? = nil, terminatedTerminalSession: Bool? = nil
+        launchedTerminalSession: SpacesDeviceTerminalSessionSummary? = nil, notice: String? = nil, terminatedTerminalSession: Bool? = nil,
+        spacesYAMLImported: Bool? = nil
     ) {
         self.overview = overview
         self.projectID = projectID
@@ -3280,6 +3305,7 @@ public struct SpacesDeviceMutationResult: Codable, Sendable, Equatable {
         self.launchedTerminalSession = launchedTerminalSession
         self.notice = notice
         self.terminatedTerminalSession = terminatedTerminalSession
+        self.spacesYAMLImported = spacesYAMLImported
     }
 }
 
@@ -3459,6 +3485,10 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     /// Whether a conditional terminal stop terminated the session (see
     /// `SpacesDeviceMutationResult.terminatedTerminalSession`).
     public var terminatedTerminalSession: Bool? { if case .mutation(let payload) = result { payload.terminatedTerminalSession } else { nil } }
+
+    /// Whether a created project's configuration came from its `spaces.yaml` (see
+    /// `SpacesDeviceMutationResult.spacesYAMLImported`).
+    public var spacesYAMLImported: Bool? { if case .mutation(let payload) = result { payload.spacesYAMLImported } else { nil } }
 
     public var issuedAuthToken: String? { if case .issuedAuthToken(let payload) = result { payload.authToken } else { nil } }
 
