@@ -1389,6 +1389,27 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         }
     }
 
+    /// An address change alone (a Mac joining Tailscale) pushes a fresh overview to a subscriber whose
+    /// stream is otherwise idle, so a client learns the new address before it leaves the LAN.
+    func testOverviewSubscriberReceivesNewAddressesWithNoDatabaseOrTerminalChange() throws {
+        try withTemporaryProfile { _ in
+            let advertised = LockedAddresses(["192.168.1.10"])
+            let server = SpacesDeviceAPIServer(
+                host: "0.0.0.0", port: 0, identity: try testTLSIdentity(), pairingStoreProtocol: AlwaysAuthorizedDevicePairingStore(),
+                advertisedAddressesProvider: { _ in advertised.value }, addressWatchInterval: 0.1)
+            try server.start()
+            defer { server.stop() }
+
+            let subscriber = try OverviewSocketSubscriber(path: TerminalServicePaths.deviceOverviewSocketPath())
+            defer { subscriber.close() }
+            XCTAssertEqual(try subscriber.nextOverview().daemonStatus.deviceAPIAddresses, ["192.168.1.10"])
+
+            advertised.value = ["192.168.1.10", "100.101.102.103"]
+            let updated = try subscriber.nextOverview()
+            XCTAssertEqual(updated.daemonStatus.deviceAPIAddresses, ["192.168.1.10", "100.101.102.103"])
+        }
+    }
+
     func testCreateProjectRequiresOneSource() throws {
         try withTemporaryProfile { root in
             let identity = try testTLSIdentity()
@@ -2336,5 +2357,57 @@ private func runDeviceAPITestGit(_ arguments: [String], cwd: String) throws {
         throw NSError(
             domain: "spaces.tests", code: Int(process.terminationStatus),
             userInfo: [NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed: \(message)"])
+    }
+}
+
+private final class LockedAddresses: @unchecked Sendable {
+    private let lock = NSLock()
+    private var addresses: [String]
+    init(_ addresses: [String]) { self.addresses = addresses }
+    var value: [String] {
+        get { lock.withLock { addresses } }
+        set { lock.withLock { addresses = newValue } }
+    }
+}
+
+/// A raw reader of the daemon's device-overview unix socket, the producer the Device API relays to clients.
+private final class OverviewSocketSubscriber {
+    private let fileDescriptor: Int32
+    private var buffered = Data()
+
+    init(path: String) throws {
+        fileDescriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fileDescriptor >= 0 else { throw POSIXError(.EIO) }
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
+            path.utf8CString.withUnsafeBufferPointer { _ = memcpy(pointer, $0.baseAddress!, $0.count) }
+        }
+        let result = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fileDescriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        }
+        guard result == 0 else {
+            Darwin.close(fileDescriptor)
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        var timeout = timeval(tv_sec: 10, tv_usec: 0)
+        setsockopt(fileDescriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    }
+
+    func close() { Darwin.close(fileDescriptor) }
+
+    /// The next newline-terminated overview frame, failing if none arrives within the receive timeout.
+    func nextOverview() throws -> SpacesDeviceOverviewPayload {
+        while true {
+            if let newline = buffered.firstIndex(of: 0x0A) {
+                let line = Data(buffered[buffered.startIndex..<newline])
+                buffered.removeSubrange(buffered.startIndex...newline)
+                return try SpacesDeviceOverviewStreamCodec.decodeLine(line)
+            }
+            var chunk = [UInt8](repeating: 0, count: 65536)
+            let count = read(fileDescriptor, &chunk, chunk.count)
+            guard count > 0 else { throw POSIXError(count == 0 ? .ECONNRESET : (POSIXErrorCode(rawValue: errno) ?? .EIO)) }
+            buffered.append(contentsOf: chunk[0..<count])
+        }
     }
 }

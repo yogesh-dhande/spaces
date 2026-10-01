@@ -52,7 +52,10 @@ actor SpacesDeviceEndpointResolver {
     /// per-candidate timeout (up to 5 s) before the Tailscale candidate even starts.
     private static let candidateStaggerDelay: Duration = .milliseconds(250)
 
-    private let hosts: [String]
+    /// The candidate addresses, in preference order. Not fixed at construction: a client (an open terminal
+    /// viewer's, say) can outlive the address list it was built with, so every dial first re-reads the
+    /// stored record (`reconcileHostsWithStore`) and picks up an address learned since.
+    private var hosts: [String]
     private let port: Int
     private let certificateFingerprint: String
     /// The candidate that most recently completed the pinned handshake. Tried first on every later
@@ -77,6 +80,24 @@ actor SpacesDeviceEndpointResolver {
         if let seeded = SpacesMobileDeviceStore.activeHost(certificateFingerprint: certificateFingerprint), hosts.contains(seeded) {
             cachedHost = seeded
         }
+    }
+
+    /// Adopts the stored record's current candidate list, so an address learned after this resolver was
+    /// built (`SpacesMobileDeviceStore.mergeAdvertisedHosts`) is dialed by the next attempt without
+    /// rebuilding the client that owns it. Takes effect on the next dial only; a live stream or command
+    /// connection is left alone.
+    ///
+    /// The store, not the settings this resolver was built from, is the authority: a long-lived holder's
+    /// settings are only as fresh as the moment it was built. A device with no stored record (or an empty
+    /// one) leaves the list untouched, so a resolver is never emptied of the addresses it has. A cached
+    /// winner or stream-failure verdict about an address the list no longer contains is dropped with it.
+    private func reconcileHostsWithStore() {
+        guard let stored = SpacesMobileDeviceStore.hosts(certificateFingerprint: certificateFingerprint), !stored.isEmpty, stored != hosts else {
+            return
+        }
+        hosts = stored
+        streamFailedHosts.formIntersection(stored)
+        if let cachedHost, !stored.contains(cachedHost) { self.cachedHost = nil }
     }
 
     /// The candidate most recently proven reachable by this resolver instance, if any.
@@ -111,6 +132,7 @@ actor SpacesDeviceEndpointResolver {
     /// restarts from the top — bounded (at most `hosts.count` candidates are ever "recently failed" at
     /// once) and self-resetting, so it can never wedge on a permanently dead candidate.
     func nextStreamHost() -> String? {
+        reconcileHostsWithStore()
         if let cachedHost { return cachedHost }
         if let candidate = hosts.first(where: { !streamFailedHosts.contains($0) }) { return candidate }
         streamFailedHosts.removeAll()
@@ -164,6 +186,7 @@ actor SpacesDeviceEndpointResolver {
     /// an `NWConnection` may only be started once, on one queue — so pass the same queue the caller
     /// intends to keep using for send/receive after this returns.
     func connect(timeout: Duration, queue: DispatchQueue) async throws -> ResolvedConnection {
+        reconcileHostsWithStore()
         // `UInt16(exactly:)` rather than `UInt16(_:)`: the latter traps on an out-of-range `Int`, so the
         // guard could never actually reject a bad port — it would crash before reaching it.
         guard !hosts.isEmpty, let portValue = UInt16(exactly: port), let nwPort = NWEndpoint.Port(rawValue: portValue) else {

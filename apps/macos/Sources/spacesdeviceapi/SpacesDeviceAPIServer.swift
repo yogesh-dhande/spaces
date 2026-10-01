@@ -1140,6 +1140,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// DB-only listing, same as before this provider existed.
     private let liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])?
     private let overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)?
+    /// Resolves the addresses this daemon advertises (to clients in `daemonStatus`, and in pairing links) from
+    /// the bound host. Injected so tests can change the reachable address set without touching real interfaces.
+    private let advertisedAddressesProvider: @Sendable (String) -> [String]
+    private let addressWatchInterval: TimeInterval
     private let agentHookStatusLoader: AgentHookStatusLoader
     private let agentHookInstallHandler: AgentHookInstallHandler
     private let agentHookTrustHandler: AgentHookTrustHandler
@@ -1378,6 +1382,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private var overviewTerminalChangeObserver: NSObjectProtocol?
     private var overviewTerminalDistributedObserver: NSObjectProtocol?
     private var overviewBroadcastScheduled = false
+    /// Polls the advertised address set so an interface change (a Mac joining Tailscale) reaches clients
+    /// whose overview streams are otherwise idle: the addresses ride in `daemonStatus`, and nothing else
+    /// raises an overview broadcast when only they change. Polling instead of watching routing events
+    /// keeps one portable path for the macOS and Linux daemons. Both fields are confined to `overviewStreamQueue`.
+    private var addressWatchTimer: DispatchSourceTimer?
+    private var lastObservedAddresses: [String] = []
+    static let defaultAddressWatchInterval: TimeInterval = 15
+    static let currentAdvertisedAddresses: @Sendable (String) -> [String] = { SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: $0) }
     /// The encoded line and metadata-cleared projection of the last overview actually sent to clients, and
     /// when it was sent. All three are `nil` before the first broadcast (which then always sends, since
     /// there is nothing to compare against) and are confined to `overviewStreamQueue`, same as every other
@@ -1455,6 +1467,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         liveTerminalSessionStateProvider = nil
         liveInMemoryTerminalSessionsProvider = nil
         overviewLoaderForTesting = nil
+        advertisedAddressesProvider = Self.currentAdvertisedAddresses
+        addressWatchInterval = Self.defaultAddressWatchInterval
         agentHookStatusLoader = { AgentHookInstaller.status() }
         agentHookInstallHandler = { try AgentHookInstaller.install($0) }
         agentHookTrustHandler = { try AgentHookInstaller.trust($0) }
@@ -1479,6 +1493,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])? = nil,
         terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL,
         overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil,
+        advertisedAddressesProvider: @escaping @Sendable (String) -> [String] = SpacesDeviceAPIServer.currentAdvertisedAddresses,
+        addressWatchInterval: TimeInterval = SpacesDeviceAPIServer.defaultAddressWatchInterval,
         agentHookStatusLoader: @escaping AgentHookStatusLoader = { AgentHookInstaller.status() },
         agentHookInstallHandler: @escaping AgentHookInstallHandler = { try AgentHookInstaller.install($0) },
         agentHookTrustHandler: @escaping AgentHookTrustHandler = { try AgentHookInstaller.trust($0) },
@@ -1498,6 +1514,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.liveTerminalSessionStateProvider = liveTerminalSessionStateProvider
         self.liveInMemoryTerminalSessionsProvider = liveInMemoryTerminalSessionsProvider
         self.overviewLoaderForTesting = overviewLoaderForTesting
+        self.advertisedAddressesProvider = advertisedAddressesProvider
+        self.addressWatchInterval = addressWatchInterval
         self.agentHookStatusLoader = agentHookStatusLoader
         self.agentHookInstallHandler = agentHookInstallHandler
         self.agentHookTrustHandler = agentHookTrustHandler
@@ -1744,6 +1762,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return
         }
         overviewStreamServer = server
+        startAddressWatch()
         overviewDatabaseChangeObserver = NotificationCenter.default.addObserver(forName: IPCNotification.databaseDidChange, object: nil, queue: nil) {
             [weak self] _ in self?.scheduleOverviewBroadcast()
         }
@@ -1788,6 +1807,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         overviewStreamServer?.stop()
         overviewStreamServer = nil
+        stopAddressWatch()
         // Confined to `overviewStreamQueue`, same as every other overview-broadcast field: a restart must
         // not compare its first rebuild against state a torn-down server broadcast, which could wrongly
         // skip or defer that first push.
@@ -1799,6 +1819,29 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             self.lastOverviewBroadcastProjection = nil
             self.lastOverviewBroadcastAt = nil
         }
+    }
+
+    private func startAddressWatch() {
+        let host = host
+        let provider = advertisedAddressesProvider
+        let timer = DispatchSource.makeTimerSource(queue: overviewStreamQueue)
+        // The baseline is taken on the queue the ticks run on, so the first tick compares against it.
+        overviewStreamQueue.async { [weak self] in self?.lastObservedAddresses = provider(host) }
+        timer.schedule(deadline: .now() + addressWatchInterval, repeating: addressWatchInterval)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            let current = provider(host)
+            guard current != self.lastObservedAddresses else { return }
+            self.lastObservedAddresses = current
+            self.scheduleOverviewBroadcast()
+        }
+        addressWatchTimer = timer
+        timer.resume()
+    }
+
+    private func stopAddressWatch() {
+        addressWatchTimer?.cancel()
+        addressWatchTimer = nil
     }
 
     /// Coalesces database-change bursts into one overview rebuild + broadcast decision every 250 ms.
@@ -4443,8 +4486,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: nil,
             activeSessionCount: activeSessionCount, protocolVersion: SpacesWireProtocol.version, runningProcesses: impact.runningProcesses,
             activeAgents: impact.activeAgents, waitingAgents: impact.waitingAgents,
-            timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier,
-            deviceAPIAddresses: SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: host), restorableSessions: restorableSessions)
+            timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier, deviceAPIAddresses: advertisedAddressesProvider(host),
+            restorableSessions: restorableSessions)
     }
 
     /// Builds the device overview. Request handlers pass their shared per-request `store` so a

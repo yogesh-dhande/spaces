@@ -847,6 +847,30 @@
             XCTAssertEqual(nextHost, "127.0.0.1", "a probe cancelled mid-connect must not record anything against the host it was probing")
         }
 
+        /// A backend built before the device advertised a new address (an open terminal viewer's client)
+        /// must dial that address on its next attempt once `mergeAdvertisedHosts` has stored it, without
+        /// being rebuilt: the app model's own client rebuild never reaches a viewer already on screen.
+        func testBackendBuiltBeforeAnAddressWasLearnedDialsItOnTheNextAttempt() async throws {
+            let server = try PinnedTLSLoopbackServer()
+            let port = try await server.start()
+            defer { server.stop() }
+
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["192.0.2.1"]
+            settings.port = Int(port)
+            settings.certificateFingerprint = server.certificateFingerprint
+            _ = SpacesMobileDeviceStore.upsert(settings: settings, name: "Mac")
+            let viewerBackend = SpacesDeviceNetworkBackend(settings: settings)
+
+            XCTAssertTrue(SpacesMobileDeviceStore.mergeAdvertisedHosts(["127.0.0.1"], certificateFingerprint: server.certificateFingerprint))
+
+            let streamHost = await viewerBackend.resolver.nextStreamHost()
+            XCTAssertEqual(streamHost, "127.0.0.1")
+            _ = try await viewerBackend.resolver.connect(timeout: .seconds(3), queue: .main)
+            let provenHost = await viewerBackend.resolver.currentCachedHost()
+            XCTAssertEqual(provenHost, "127.0.0.1")
+        }
+
         private func resetDeviceStorePersistedState() {
             for device in SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings()).devices {
                 _ = SpacesMobileDeviceStore.remove(deviceID: device.id, fallbackSettings: SpacesMobileConnectionSettings())
