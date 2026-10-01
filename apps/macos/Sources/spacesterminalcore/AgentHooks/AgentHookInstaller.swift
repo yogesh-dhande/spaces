@@ -15,12 +15,17 @@ public struct AgentHookStatus: Sendable, Equatable, Codable {
     public let available: Bool
     /// How completely the agent's config carries the hooks this Spaces build writes.
     public let installState: AgentHookInstallState
+    /// The Spaces entries the agent has not trusted yet, exactly as they would run, for the confirmation
+    /// a user sees before trusting them. Empty unless `installState` is `awaitingTrust`.
+    public let untrustedEntries: [AgentHookEntry]
 
-    public init(kind: CodingAgent, displayName: String, available: Bool, installState: AgentHookInstallState) {
+    public init(kind: CodingAgent, displayName: String, available: Bool, installState: AgentHookInstallState, untrustedEntries: [AgentHookEntry] = [])
+    {
         self.kind = kind
         self.displayName = displayName
         self.available = available
         self.installState = installState
+        self.untrustedEntries = untrustedEntries
     }
 }
 
@@ -37,9 +42,9 @@ public struct AgentHookInstallFailure: Sendable, Equatable, Codable {
     }
 }
 
-/// The result of an install request: fresh status for every supported agent, plus one entry per agent
-/// that could not be installed. `failures` being empty is the only signal that everything requested
-/// landed.
+/// The result of an install or trust request: fresh status for every supported agent, plus one entry
+/// per agent the request could not finish. `failures` being empty is the only signal that everything
+/// requested landed.
 public struct AgentHookInstallOutcome: Sendable, Equatable, Codable {
     public let agents: [AgentHookStatus]
     public let failures: [AgentHookInstallFailure]
@@ -70,14 +75,15 @@ public enum AgentHookInstallerError: Error, LocalizedError, Sendable, Equatable 
 ///
 /// Every install is "ensure desired state," so replaying it never duplicates a hook; a reinstall is
 /// also how an agent whose hooks an older Spaces build wrote is brought back to `.current`.
-/// Installs are always user-initiated — from the launch setup step or Settings → Coding Agents.
+/// Installs and trusts are always user-initiated, from the launch setup step or Settings → Coding Agents.
 public enum AgentHookInstaller {
     typealias ShellPathDirectoryResolver = (URL, [String: String], FileManager) -> [String]
 
     /// Reports availability + hook status for every supported agent.
     public static func status(home: URL = defaultHome(), fileManager: FileManager = .default) -> [AgentHookStatus] {
         var executableResolver = ExecutableResolver(home: home, fileManager: fileManager)
-        return status(home: home, fileManager: fileManager, executableResolver: &executableResolver)
+        return status(
+            home: home, fileManager: fileManager, executableResolver: &executableResolver, codexAppServer: AgentHookCodexAppServer.launchProcess)
     }
 
     /// Idempotently installs hooks for `kinds`, then returns fresh status for every supported agent
@@ -87,7 +93,19 @@ public enum AgentHookInstaller {
         -> AgentHookInstallOutcome
     {
         var executableResolver = ExecutableResolver(home: home, fileManager: fileManager)
-        return try install(kinds, home: home, fileManager: fileManager, executableResolver: &executableResolver)
+        return try install(
+            kinds, home: home, fileManager: fileManager, executableResolver: &executableResolver,
+            codexAppServer: AgentHookCodexAppServer.launchProcess)
+    }
+
+    /// Records the agent's trust in the Spaces hooks this device installed, through the agent itself,
+    /// then returns fresh status for every supported agent. Only Codex keeps such a trust. The agent's
+    /// own reason for not recording it comes back as that agent's failure entry.
+    public static func trust(_ kind: CodingAgent, home: URL = defaultHome(), fileManager: FileManager = .default) throws -> AgentHookInstallOutcome {
+        var executableResolver = ExecutableResolver(home: home, fileManager: fileManager)
+        return try trust(
+            kind, home: home, fileManager: fileManager, executableResolver: &executableResolver, codexAppServer: AgentHookCodexAppServer.launchProcess
+        )
     }
 
     public static func defaultHome() -> URL { URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true) }
@@ -97,21 +115,33 @@ public enum AgentHookInstaller {
     // Availability depends on the daemon user's environment and login shell. These overloads let tests
     // supply both, so no test spawns the developer's real login shell or reads the real `PATH`.
 
+    // `codexAppServer` stands in for `codex app-server`, so no test spawns a real Codex.
+
     static func status(
-        home: URL, fileManager: FileManager, environment: [String: String], shellPathDirectoryResolver: @escaping ShellPathDirectoryResolver
+        home: URL, fileManager: FileManager, environment: [String: String], shellPathDirectoryResolver: @escaping ShellPathDirectoryResolver,
+        codexAppServer: AgentHookCodexAppServer.Launcher
     ) -> [AgentHookStatus] {
         var executableResolver = ExecutableResolver(
             home: home, fileManager: fileManager, environment: environment, shellPathDirectoryResolver: shellPathDirectoryResolver)
-        return status(home: home, fileManager: fileManager, executableResolver: &executableResolver)
+        return status(home: home, fileManager: fileManager, executableResolver: &executableResolver, codexAppServer: codexAppServer)
     }
 
     @discardableResult static func install(
         _ kinds: [CodingAgent], home: URL, fileManager: FileManager, environment: [String: String],
-        shellPathDirectoryResolver: @escaping ShellPathDirectoryResolver
+        shellPathDirectoryResolver: @escaping ShellPathDirectoryResolver, codexAppServer: AgentHookCodexAppServer.Launcher
     ) throws -> AgentHookInstallOutcome {
         var executableResolver = ExecutableResolver(
             home: home, fileManager: fileManager, environment: environment, shellPathDirectoryResolver: shellPathDirectoryResolver)
-        return try install(kinds, home: home, fileManager: fileManager, executableResolver: &executableResolver)
+        return try install(kinds, home: home, fileManager: fileManager, executableResolver: &executableResolver, codexAppServer: codexAppServer)
+    }
+
+    static func trust(
+        _ kind: CodingAgent, home: URL, fileManager: FileManager, environment: [String: String],
+        shellPathDirectoryResolver: @escaping ShellPathDirectoryResolver, codexAppServer: AgentHookCodexAppServer.Launcher
+    ) throws -> AgentHookInstallOutcome {
+        var executableResolver = ExecutableResolver(
+            home: home, fileManager: fileManager, environment: environment, shellPathDirectoryResolver: shellPathDirectoryResolver)
+        return try trust(kind, home: home, fileManager: fileManager, executableResolver: &executableResolver, codexAppServer: codexAppServer)
     }
 
     static func isAvailable(
@@ -131,11 +161,11 @@ public enum AgentHookInstaller {
     /// An agent that is not available, or whose config cannot be edited, becomes a failure entry; the
     /// remaining agents still install. Only a missing `spaces` CLI aborts the request, because every
     /// hook command it would write invokes that binary by absolute path.
-    private static func install(_ kinds: [CodingAgent], home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver) throws
-        -> AgentHookInstallOutcome
-    {
-        guard let resolvedSpacesExecutablePath = executableResolver.resolve(named: AgentHookCommand.spacesExecutableName),
-            let spacesExecutablePath = hookSpacesExecutablePath(resolvedPath: resolvedSpacesExecutablePath, home: home, fileManager: fileManager)
+    private static func install(
+        _ kinds: [CodingAgent], home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver,
+        codexAppServer: AgentHookCodexAppServer.Launcher
+    ) throws -> AgentHookInstallOutcome {
+        guard let spacesExecutablePath = hookSpacesExecutablePath(home: home, fileManager: fileManager, executableResolver: &executableResolver)
         else { throw AgentHookInstallerError.spacesCLINotFound }
         var failures: [AgentHookInstallFailure] = []
         for kind in kinds {
@@ -149,15 +179,63 @@ public enum AgentHookInstaller {
             } catch { failures.append(.init(kind: kind, message: error.localizedDescription)) }
         }
         return AgentHookInstallOutcome(
-            agents: status(home: home, fileManager: fileManager, executableResolver: &executableResolver), failures: failures)
+            agents: status(home: home, fileManager: fileManager, executableResolver: &executableResolver, codexAppServer: codexAppServer),
+            failures: failures)
     }
 
-    private static func status(home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver) -> [AgentHookStatus] {
+    /// Trust is asked of the agent only for entries this device would write, so the `spaces` path is
+    /// resolved exactly as an install resolves it.
+    private static func trust(
+        _ kind: CodingAgent, home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver,
+        codexAppServer: AgentHookCodexAppServer.Launcher
+    ) throws -> AgentHookInstallOutcome {
+        guard let spacesExecutablePath = hookSpacesExecutablePath(home: home, fileManager: fileManager, executableResolver: &executableResolver)
+        else { throw AgentHookInstallerError.spacesCLINotFound }
+        var failures: [AgentHookInstallFailure] = []
+        if kind != .codex {
+            failures.append(.init(kind: kind, message: "\(kind.displayName) does not ask to trust its hooks."))
+        } else if let codexExecutablePath = resolvedExecutablePath(for: kind, executableResolver: &executableResolver) {
+            do {
+                try AgentHookCodexTrust.trust(
+                    codexExecutablePath: codexExecutablePath, codexHome: kind.configDirectoryURL(home: home),
+                    spacesExecutablePath: spacesExecutablePath, launcher: codexAppServer)
+            } catch { failures.append(.init(kind: kind, message: error.localizedDescription)) }
+        } else {
+            failures.append(.init(kind: kind, message: "\(kind.displayName) was not detected on this machine."))
+        }
+        return AgentHookInstallOutcome(
+            agents: status(home: home, fileManager: fileManager, executableResolver: &executableResolver, codexAppServer: codexAppServer),
+            failures: failures)
+    }
+
+    /// Each agent's config files decide its state, except that a Codex whose files are current is then
+    /// asked through `codex app-server` whether it trusts the entries (`AgentHookCodexTrust`), which can
+    /// still move the row to `awaitingTrust`, `disabledByAgent`, or `outdated`. Codex is asked only then,
+    /// so a status read spawns at most one app-server, and only for a row that has something to trust.
+    private static func status(
+        home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver, codexAppServer: AgentHookCodexAppServer.Launcher
+    ) -> [AgentHookStatus] {
         CodingAgent.allCases.map { kind in
             let executablePath = resolvedExecutablePath(for: kind, executableResolver: &executableResolver)
+            var installState = kind.configState(home: home, fileManager: fileManager, agentExecutablePath: executablePath)
+            var untrustedEntries: [AgentHookEntry] = []
+            if kind == .codex, installState == .current, let executablePath {
+                // Without a `spaces` CLI to resolve there is no command to match the entries against,
+                // and an install, which this state offers, is what reports the missing CLI.
+                if let spacesExecutablePath = hookSpacesExecutablePath(home: home, fileManager: fileManager, executableResolver: &executableResolver)
+                {
+                    let reading = AgentHookCodexTrust.status(
+                        codexExecutablePath: executablePath, codexHome: kind.configDirectoryURL(home: home),
+                        spacesExecutablePath: spacesExecutablePath, launcher: codexAppServer)
+                    installState = reading.installState
+                    untrustedEntries = reading.untrustedEntries
+                } else {
+                    installState = .outdated
+                }
+            }
             return AgentHookStatus(
-                kind: kind, displayName: kind.displayName, available: executablePath != nil,
-                installState: kind.installState(home: home, fileManager: fileManager, agentExecutablePath: executablePath))
+                kind: kind, displayName: kind.displayName, available: executablePath != nil, installState: installState,
+                untrustedEntries: untrustedEntries)
         }
     }
 
@@ -222,6 +300,12 @@ public enum AgentHookInstaller {
             "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", home.appendingPathComponent(".local/bin").path,
             home.appendingPathComponent(".bun/bin").path, home.appendingPathComponent(".deno/bin").path, home.appendingPathComponent("bin").path,
         ]
+    }
+
+    /// The `spaces` path this device's hook commands carry, or nil when no CLI resolves.
+    private static func hookSpacesExecutablePath(home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver) -> String? {
+        guard let resolvedPath = executableResolver.resolve(named: AgentHookCommand.spacesExecutableName) else { return nil }
+        return hookSpacesExecutablePath(resolvedPath: resolvedPath, home: home, fileManager: fileManager)
     }
 
     /// Linux releases live under a versioned directory, but the installer also maintains one stable

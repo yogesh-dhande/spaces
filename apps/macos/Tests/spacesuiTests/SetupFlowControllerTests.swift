@@ -106,9 +106,9 @@ import Testing
 
     /// No detected agent is not "everything is current" — there is nothing that finished installing,
     /// so the step's button must not read "Done".
-    /// Hooks an agent has not been told to trust, and hooks it was told to stop running, both report
-    /// nothing, so the step stays on offer and the button does not read "Done" even though the remedy
-    /// is the user's to apply inside the agent rather than an install Spaces can run.
+    /// Hooks an agent has not trusted, and hooks it was told to stop running, both report nothing, so
+    /// the step stays on offer and the button does not read "Done": the step's row trusts the first in
+    /// one click and explains the second, which only the user can switch back on inside the agent.
     @Test func hooksTheAgentIsNotRunningStillCountAsUnfinished() {
         for state in [AgentHookInstallState.awaitingTrust, .disabledByAgent] {
             #expect(requires([agent(.codex, available: true, installState: state)], dismissed: nil))

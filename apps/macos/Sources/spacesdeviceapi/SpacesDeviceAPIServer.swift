@@ -141,6 +141,7 @@ final class TerminalControlLaneRegistry: @unchecked Sendable {
 public final class SpacesDeviceAPIServer: @unchecked Sendable {
     typealias AgentHookStatusLoader = @Sendable () -> [AgentHookStatus]
     typealias AgentHookInstallHandler = @Sendable ([CodingAgent]) throws -> AgentHookInstallOutcome
+    typealias AgentHookTrustHandler = @Sendable (CodingAgent) throws -> AgentHookInstallOutcome
     /// Exports the current state of a session this daemon hosts live, or nil when it hosts no live core for
     /// that session id (the reader then falls through to the persisted/socket read).
     /// Answers a one-shot state read for a session this process hosts. `TerminalOneShotStateRead` is what
@@ -1141,6 +1142,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private let overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)?
     private let agentHookStatusLoader: AgentHookStatusLoader
     private let agentHookInstallHandler: AgentHookInstallHandler
+    private let agentHookTrustHandler: AgentHookTrustHandler
     /// Login-shell probing and config writes can take seconds. Serialize them independently so they
     /// cannot stall terminal controls, overview requests, or the rest of the Device API state queue.
     private let agentHookQueue = DispatchQueue(label: "spaces.device.api.agent-hooks", qos: .userInitiated)
@@ -1455,6 +1457,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         overviewLoaderForTesting = nil
         agentHookStatusLoader = { AgentHookInstaller.status() }
         agentHookInstallHandler = { try AgentHookInstaller.install($0) }
+        agentHookTrustHandler = { try AgentHookInstaller.trust($0) }
         if let pairingStore { self.pairingStore = pairingStore } else { self.pairingStore = try SpacesDevicePairingStore() }
         #if canImport(Network) && canImport(Security)
             networkShaper = NetworkShaper()
@@ -1478,6 +1481,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil,
         agentHookStatusLoader: @escaping AgentHookStatusLoader = { AgentHookInstaller.status() },
         agentHookInstallHandler: @escaping AgentHookInstallHandler = { try AgentHookInstaller.install($0) },
+        agentHookTrustHandler: @escaping AgentHookTrustHandler = { try AgentHookInstaller.trust($0) },
         workspaceGitClient: RemoteWorkspaceGitClient = RemoteWorkspaceGitClient()
     ) {
         self.host = host
@@ -1496,6 +1500,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.overviewLoaderForTesting = overviewLoaderForTesting
         self.agentHookStatusLoader = agentHookStatusLoader
         self.agentHookInstallHandler = agentHookInstallHandler
+        self.agentHookTrustHandler = agentHookTrustHandler
         self.workspaceGitClient = workspaceGitClient
         #if canImport(Network) && canImport(Security)
             networkShaper = NetworkShaper(environment: networkEnvironment)
@@ -3406,7 +3411,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
             .subscribeWorkspaceFileListSignature:
             return SpacesDeviceAPIResponse(ok: false, message: "Subscription requests must use the stream path.", errorCode: .misroutedRequest)
-        case .agentHooksStatus, .installAgentHooks: return try handleAgentHookRequest(request)
+        case .agentHooksStatus, .installAgentHooks, .trustAgentHooks: return try handleAgentHookRequest(request)
         case .spawnAgentSession(let payload): return try handleSpawnAgentSessionRequest(payload, context: context)
         case .listAgentSessions(let payload): return try handleListAgentSessionsRequest(payload, context: context)
         case .writeAgentBrief(let payload): return try handleWriteAgentBriefRequest(payload, context: context)
@@ -3437,6 +3442,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return SpacesDeviceAPIResponse(
                 ok: true, message: "Loaded agent hook status.", result: .agentHooksStatus(.init(agents: agentHookStatusLoader())))
         case .installAgentHooks(let payload): return try handleInstallAgentHooksRequest(payload)
+        case .trustAgentHooks(let payload): return try handleTrustAgentHooksRequest(payload)
         default: preconditionFailure("Only agent-hook commands run on the agent-hook queue.")
         }
     }
@@ -3812,6 +3818,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let message =
             outcome.failures.isEmpty
             ? "Installed agent hooks." : "Installed agent hooks, except: \(outcome.failures.map(\.message).joined(separator: " "))"
+        return SpacesDeviceAPIResponse(ok: true, message: message, result: .agentHooksInstall(outcome))
+    }
+
+    /// Records the agent's trust in the Spaces hooks installed in this daemon's home, through the agent
+    /// itself, then returns fresh status for every supported agent. The agent's refusal is reported
+    /// inside the payload, like an install's per-agent failure, so the caller still gets the status it
+    /// left behind; only a missing `spaces` CLI, which leaves no hook to match, throws.
+    private func handleTrustAgentHooksRequest(_ payload: SpacesDeviceTrustAgentHooksRequest) throws -> SpacesDeviceAPIResponse {
+        let outcome = try agentHookTrustHandler(payload.kind)
+        let message =
+            outcome.failures.isEmpty ? "Trusted agent hooks." : "Did not trust agent hooks: \(outcome.failures.map(\.message).joined(separator: " "))"
         return SpacesDeviceAPIResponse(ok: true, message: message, result: .agentHooksInstall(outcome))
     }
 

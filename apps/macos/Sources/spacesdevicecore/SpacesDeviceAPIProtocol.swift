@@ -2664,6 +2664,9 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case agentHooksStatus
     /// Idempotently installs Spaces lifecycle hooks for the requested coding agents on the daemon host.
     case installAgentHooks(SpacesDeviceInstallAgentHooksRequest)
+    /// Records the agent's own trust in the Spaces hooks installed on the daemon host, through the agent
+    /// itself, and answers with fresh status like `installAgentHooks`.
+    case trustAgentHooks(SpacesDeviceTrustAgentHooksRequest)
     /// Spawns a coding-agent terminal session on the daemon host after the same hook gate as the local
     /// spawn, then returns the created session so the client can poll readiness. Remote ad-hoc-command
     /// session creation, the Device API's missing spawn primitive.
@@ -2796,6 +2799,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .subscribeDeviceOverview: "subscribeDeviceOverview"
         case .agentHooksStatus: "agentHooksStatus"
         case .installAgentHooks: "installAgentHooks"
+        case .trustAgentHooks: "trustAgentHooks"
         case .spawnAgentSession: "spawnAgentSession"
         case .listAgentSessions: "listAgentSessions"
         case .writeAgentBrief: "writeAgentBrief"
@@ -2997,6 +3001,7 @@ extension SpacesDeviceAPICommand: Codable {
         case subscribeDeviceOverview
         case agentHooksStatus
         case installAgentHooks
+        case trustAgentHooks
         case spawnAgentSession
         case listAgentSessions
         case writeAgentBrief
@@ -3104,6 +3109,7 @@ extension SpacesDeviceAPICommand: Codable {
             _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
             self = .agentHooksStatus
         case .installAgentHooks: self = .installAgentHooks(try container.decode(SpacesDeviceInstallAgentHooksRequest.self, forKey: key))
+        case .trustAgentHooks: self = .trustAgentHooks(try container.decode(SpacesDeviceTrustAgentHooksRequest.self, forKey: key))
         case .spawnAgentSession: self = .spawnAgentSession(try container.decode(SpacesDeviceSpawnAgentSessionRequest.self, forKey: key))
         case .listAgentSessions: self = .listAgentSessions(try container.decode(SpacesDeviceListAgentSessionsRequest.self, forKey: key))
         case .writeAgentBrief: self = .writeAgentBrief(try container.decode(SpacesDeviceWriteAgentBriefRequest.self, forKey: key))
@@ -3206,6 +3212,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .subscribeDeviceOverview: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .subscribeDeviceOverview)
         case .agentHooksStatus: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .agentHooksStatus)
         case .installAgentHooks(let payload): try container.encode(payload, forKey: .installAgentHooks)
+        case .trustAgentHooks(let payload): try container.encode(payload, forKey: .trustAgentHooks)
         case .spawnAgentSession(let payload): try container.encode(payload, forKey: .spawnAgentSession)
         case .listAgentSessions(let payload): try container.encode(payload, forKey: .listAgentSessions)
         case .writeAgentBrief(let payload): try container.encode(payload, forKey: .writeAgentBrief)

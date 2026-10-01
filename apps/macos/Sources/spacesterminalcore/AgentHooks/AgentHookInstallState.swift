@@ -9,19 +9,19 @@ public enum AgentHookInstallState: String, Sendable, Equatable, Codable {
     /// No Spaces-owned hook entry exists for this agent.
     case notInstalled
     /// Spaces-owned entries exist, but they are not what this build writes: an older
-    /// `AgentHookCommand.hookVersion`, a bound event with no entry, or (for Codex) hooks the agent's
-    /// own config has not enabled. Reinstalling brings them current.
+    /// `AgentHookCommand.hookVersion`, a bound event with no entry, or, for Codex, an entry naming a
+    /// `spaces` other than the one this device resolves or hooks the agent's own config has not enabled.
+    /// Reinstalling brings them current.
     case outdated
-    /// Codex only: entries this build wrote that the user reviewed and then switched off in Codex.
-    /// Distinct from `awaitingTrust` because Codex asks for no review of a hook it was told to stop
-    /// running, so the user is sent to re-enable it rather than to approve it. Reported ahead of
-    /// `awaitingTrust` when both apply, since a hook that is switched off stays switched off however
-    /// the review goes.
+    /// Codex only: entries this build wrote that the user switched off in Codex. Codex runs no hook it
+    /// was told to stop running, whatever its trust says, and Spaces never switches one back on, so the
+    /// user is sent to Codex to turn it on again. Reported ahead of `awaitingTrust` when both apply,
+    /// since a hook that is switched off stays switched off however the trust goes.
     case disabledByAgent
-    /// Codex only: every bound event carries a current-version Spaces entry and the `hooks` feature is
-    /// on, but Codex has not been told to trust those entries, so it runs none of them. Reinstalling
-    /// cannot fix it, because rewriting the file is what puts Codex back into review, so this is the
-    /// one state whose remedy belongs to the agent rather than to Spaces.
+    /// Codex only: every bound event carries this build's exact Spaces entry and the `hooks` feature is
+    /// on, but Codex has not trusted those entries at their current text, so it runs none of them.
+    /// Reinstalling cannot fix it; trusting can, which the user does from Spaces (recorded through Codex
+    /// itself) or inside Codex.
     case awaitingTrust
     /// Every bound event carries a current-version Spaces entry, and the agent will run them.
     case current

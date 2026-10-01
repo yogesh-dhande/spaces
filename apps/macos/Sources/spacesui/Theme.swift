@@ -154,6 +154,24 @@ enum Theme {
         applyButtonLayout(to: button)
     }
 
+    /// Applies the style of a state's one recovery action: `color`, the state's own, for the title,
+    /// over a light wash of it with a stronger stroke of it as the border.
+    @MainActor static func applyTintedStyle(to button: NSButton, color: NSColor) {
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 5
+        button.layer?.masksToBounds = true
+        button.layer?.borderWidth = 1
+        bindAppearanceReactiveLayer(button) { view in
+            view.layer?.backgroundColor = color.withAlphaComponent(0.12).cgColor
+            view.layer?.borderColor = color.withAlphaComponent(0.55).cgColor
+        }
+        button.contentTintColor = color
+        button.attributedTitle = NSAttributedString(
+            string: button.title, attributes: [.foregroundColor: color, .font: Typography.secondaryButtonLabel])
+        applyButtonLayout(to: button)
+    }
+
     /// Applies a borderless text-button style for low-emphasis actions.
     @MainActor static func applyTextStyle(to button: NSButton, color: NSColor = .secondaryLabelColor) {
         button.isBordered = false

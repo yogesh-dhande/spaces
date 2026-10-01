@@ -67,6 +67,8 @@ SUITE_TIMEOUT_SECONDS=400
 
 for suite in \
   AgentHookSubprocessTests \
+  AgentHookCodexAppServerProcessTests \
+  AgentHookCodexTrustTests \
   SpacesTestHostDetectionTests \
   TerminalServiceSystemdUnitTests \
   TerminalServiceSystemdStartDeadlineTests \

@@ -30,6 +30,31 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
     }
 
+    /// A trust writes the agent's own config, so a dropped connection must not send it a second time.
+    func testTrustAgentHooksCommandRoundTripsAndIsNotReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(command: .trustAgentHooks(.init(kind: .codex)), authToken: "SECRET")
+        XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    /// The confirmation a client shows lists exactly the commands the status carries, so they have to
+    /// survive the wire as written.
+    func testAgentHooksStatusCarriesTheUntrustedEntriesThroughResponse() throws {
+        let untrusted = [
+            AgentHookEntry(
+                eventName: "SessionStart", command: "'/usr/local/bin/spaces' agent signal init >/dev/null 2>&1 || true # spaces-agent-hook v5"),
+            AgentHookEntry(eventName: "Stop", command: "'/usr/local/bin/spaces' agent signal done >/dev/null 2>&1 || true # spaces-agent-hook v5"),
+        ]
+        let payload = SpacesAgentHooksStatusPayload(agents: [
+            AgentHookStatus(kind: .codex, displayName: "Codex", available: true, installState: .awaitingTrust, untrustedEntries: untrusted)
+        ])
+        let response = SpacesDeviceAPIResponse(ok: true, message: "Loaded agent hook status.", result: .agentHooksStatus(payload))
+
+        let decoded = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))
+
+        XCTAssertEqual(decoded.agentHooksStatus?.agents.first?.untrustedEntries, untrusted)
+    }
+
     func testAgentHooksStatusResultRoundTripsThroughResponse() throws {
         let payload = SpacesAgentHooksStatusPayload(agents: [
             AgentHookStatus(kind: .claudeCode, displayName: "Claude Code", available: true, installState: .current),

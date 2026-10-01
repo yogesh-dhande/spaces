@@ -56,15 +56,9 @@ enum AgentHookCodexFeatureToggle {
 
     private static func run(executablePath: String, arguments: [String], codexHome: URL, timeoutSeconds: TimeInterval) throws -> CommandResult {
         #if os(macOS) || os(Linux)
-            var environment = ProcessInfo.processInfo.environment
-            environment["CODEX_HOME"] = codexHome.path
-            // Version-manager launchers commonly use `#!/usr/bin/env node`; resolving the launcher
-            // by absolute path is not enough unless its sibling runtime also leads PATH.
-            let executableDirectory = URL(fileURLWithPath: executablePath).deletingLastPathComponent().path
-            let currentPathDirectories = environment["PATH"]?.split(separator: ":").map(String.init) ?? []
-            environment["PATH"] = ([executableDirectory] + currentPathDirectories.filter { $0 != executableDirectory }).joined(separator: ":")
             let result = try AgentHookSubprocess.run(
-                executablePath: executablePath, arguments: arguments, environment: environment, timeoutSeconds: timeoutSeconds)
+                executablePath: executablePath, arguments: arguments,
+                environment: AgentHookCodexCLI.environment(executablePath: executablePath, codexHome: codexHome), timeoutSeconds: timeoutSeconds)
             let output = String(decoding: result.output, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
             return CommandResult(terminationStatus: result.terminationStatus, output: output)
         #else

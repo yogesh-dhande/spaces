@@ -37,9 +37,20 @@ export default function CodingAgentsDocsPage() {
         </Prose>
         <Prose>
           Settings &rarr; Coding Agents shows, per agent, one of five states: not installed, out of
-          date, switched off in the agent, awaiting Codex trust review (Codex asks you to approve a hook
-          before it will run it), or installed. A detected agent gets an Install, Update, or Reinstall
-          action to match.
+          date, switched off in the agent, not yet trusted in Codex, or installed. A row shows a button
+          only when there is something to do: <strong>Install</strong>, <strong>Update</strong>, or, for
+          Codex hooks waiting for trust, <strong>Trust in Codex</strong>. Hooks switched off in the
+          agent are turned back on in the agent itself.
+        </Prose>
+        <Prose>
+          Codex runs no hook until you trust it. <strong>Trust in Codex</strong> first lists the exact
+          commands Codex will run, then records the trust through Codex for those Spaces hooks only.
+          Hooks from other tools, and hooks you switched off in Codex, stay as they are. Codex sessions
+          already running pick up the hooks when they restart. If Codex can&apos;t record the trust,
+          the row shows Codex&apos;s reason: update Codex, or open it in a terminal and trust the hooks
+          there. Installing again keeps the trust as long as the hooks come out the same; a Spaces update
+          that changes them asks for trust again, and hooks you switched off in Codex stay off through
+          it.
         </Prose>
       </Section>
 

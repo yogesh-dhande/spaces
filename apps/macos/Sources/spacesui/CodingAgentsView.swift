@@ -53,14 +53,14 @@ struct AgentConfigWatchTargets: Sendable {
 }
 
 /// Lists supported coding agents for a selected device (This Mac or a paired remote), showing whether
-/// each agent's CLI is detected and how completely its Spaces hooks are installed, with a per-agent
-/// Install / Update / Reinstall action.
+/// each agent's CLI is detected and how completely its Spaces hooks are installed, with the one action
+/// (Install, Update, or Trust) that moves a row toward reporting, when Spaces has one.
 ///
-/// Status and installs run against the selected device's daemon over the Device API, so one view
-/// manages local and remote hooks. It is embedded in Settings → Coding Agents and in the launch setup
-/// flow's coding-agents step.
+/// Status, installs, and trusts run against the selected device's daemon over the Device API, so one
+/// view manages local and remote hooks. It is embedded in Settings → Coding Agents and in the launch
+/// setup flow's coding-agents step.
 ///
-/// Install failures are held in memory rather than persisted: every install is user-initiated, so the
+/// Failures are held in memory rather than persisted: every install and trust is user-initiated, so the
 /// failure is on screen at the moment it happens and cannot outlive the problem it describes.
 @MainActor final class CodingAgentsView {
     /// What the local device's agents look like right now, for a setup step that wants to relabel its
@@ -69,14 +69,15 @@ struct AgentConfigWatchTargets: Sendable {
         /// Every detected agent on This Mac carries current hooks. False when no agent is detected at
         /// all — there is nothing to have finished installing.
         let allDetectedCurrent: Bool
-        /// Some detected agent is not reporting yet: hooks missing, hooks from an older Spaces, or
-        /// hooks the agent has not been told to trust. The last of those is finished by the user inside
-        /// the agent rather than by an install, but it is still work standing between them and an agent
-        /// that reports anything, so it counts here for the same reason it keeps the setup step up.
+        /// Some detected agent is not reporting yet: hooks missing, hooks from an older Spaces, hooks
+        /// the agent has not trusted, or hooks switched off in the agent. The last of those is finished
+        /// by the user inside the agent rather than by a button here, but it is still work standing
+        /// between them and an agent that reports anything, so it counts here for the same reason it
+        /// keeps the setup step up.
         let hasActionableAgent: Bool
     }
 
-    /// Fires after any status fetch or install that targeted the local device. Remote devices do not
+    /// Fires after any status fetch, install, or trust that targeted the local device. Remote devices do not
     /// emit: the setup step's gating is deliberately local-only.
     var onLocalStatusChange: ((LocalSummary) -> Void)?
 
@@ -85,15 +86,19 @@ struct AgentConfigWatchTargets: Sendable {
     private var deviceID: String = SpacesPairedDeviceRecord.localDeviceID
     private weak var rowsContainer: NSStackView?
     private var status: [AgentHookStatus] = []
-    /// The failure from the install just run, per agent, so a row that Spaces could not fix explains
-    /// itself instead of only reporting "hooks not installed".
-    private var failures: [CodingAgent: String] = [:]
+    /// The failure from the install or trust just run, per agent, so a row that Spaces could not fix
+    /// explains itself instead of only reporting "hooks not installed". Every fresh status prunes it
+    /// (`standingFailures`).
+    private var failures: [CodingAgent: RowFailure] = [:]
     /// Increments per reload so a stale in-flight fetch's result is discarded when the user switches devices.
     private var reloadToken = 0
-    /// Increments per install so a stale completion cannot update rows for a different selected device.
-    private var installToken = 0
-    /// Non-nil while an Install/Update/Reinstall request is in flight.
-    private var installingKind: CodingAgent?
+    /// Increments per install or trust so a stale completion cannot update rows for a different selected device.
+    private var actionToken = 0
+    /// The row action whose request is in flight, if any. One at a time across every row.
+    private var inFlight: (kind: CodingAgent, action: RowAction)?
+    /// Rows whose hooks this view trusted since the card was built. Trust reaches only sessions that
+    /// start afterwards, so such a row says so for as long as the user is looking at the result.
+    private var trustedRows: Set<TrustedRow> = []
     /// Watches the local Codex config directory while a row waits on something the user does outside
     /// Spaces. Nil whenever nothing is waiting; see `updateAgentConfigWatch`.
     private var agentConfigWatcher: FileSystemWatcher?
@@ -120,8 +125,8 @@ struct AgentConfigWatchTargets: Sendable {
     /// Whether the Codex row can change from under Spaces, through Codex's own config writes rather than
     /// through this view's button.
     ///
-    /// Every state an installed Codex row moves between is one Codex writes: approving the review,
-    /// switching the hooks off, switching them on again, and turning `features.hooks` off and on, which
+    /// Every state an installed Codex row moves between is one Codex writes: trusting the hooks,
+    /// switching them off, switching them on again, and turning `features.hooks` off and on, which
     /// moves the row between `current` and `outdated` while the entries themselves stay put. A row
     /// sitting at `current` is the one the user is most likely to invalidate next, so watching only the
     /// waiting states leaves it reporting green after Codex has stopped running the hooks, and dropping
@@ -146,6 +151,7 @@ struct AgentConfigWatchTargets: Sendable {
     /// Builds the card and starts a status reload for the selected device.
     func makeCard(subtitle: String = "Install Spaces lifecycle hooks on this machine's coding agents.") -> NSView {
         isActive = true  // the rows are going on screen, so a change made outside Spaces has somewhere to land
+        trustedRows = []
         let devices = self.devices()
         if !devices.contains(where: { $0.record.id == deviceID }) { deviceID = devices.first?.record.id ?? SpacesPairedDeviceRecord.localDeviceID }
 
@@ -168,9 +174,7 @@ struct AgentConfigWatchTargets: Sendable {
         rowsContainer = rows
         renderRows(message: nil, isLoading: true)
 
-        let hint = host.helpTextLabel(
-            "Hooks let each agent report when it starts, is working, is blocked on you, or finishes. "
-                + "Reinstall after moving the Spaces CLI or updating an agent.")
+        let hint = host.helpTextLabel("Hooks let each agent report when it starts, is working, is blocked on you, or finishes.")
 
         let card = host.formSectionCard(
             icon: "chevron.left.forwardslash.chevron.right", title: "Coding Agents", subtitle: subtitle, iconColor: nil, trailingView: nil,
@@ -189,7 +193,7 @@ struct AgentConfigWatchTargets: Sendable {
         return devices
     }
 
-    private func resolvedDevice() -> SpacesPairedDeviceRecord? { devices().first { $0.record.id == deviceID }?.record }
+    private func resolvedDevice() -> (record: SpacesPairedDeviceRecord, label: String)? { devices().first { $0.record.id == deviceID } }
 
     private var isLocalDeviceSelected: Bool { deviceID == SpacesPairedDeviceRecord.localDeviceID }
 
@@ -198,7 +202,7 @@ struct AgentConfigWatchTargets: Sendable {
         deviceID = id
         status = []
         failures = [:]
-        installingKind = nil
+        inFlight = nil
         dropAgentConfigWatch()  // the rows are about to describe a different machine's files
         reload()
     }
@@ -208,7 +212,7 @@ struct AgentConfigWatchTargets: Sendable {
     func reload() {
         reloadToken += 1
         let token = reloadToken
-        guard let device = resolvedDevice() else {
+        guard let device = resolvedDevice()?.record else {
             renderRows(message: "This device is unavailable.", isLoading: false)
             return
         }
@@ -227,6 +231,7 @@ struct AgentConfigWatchTargets: Sendable {
         switch result {
         case .success(let fetched):
             status = fetched
+            failures = Self.standingFailures(failures, after: fetched)
             renderRows(message: nil, isLoading: false)
         case .failure(let error):
             status = []
@@ -243,8 +248,8 @@ struct AgentConfigWatchTargets: Sendable {
 
     // MARK: - Watching the agent's own config
 
-    /// Approving a hook review, switching a hook off, and switching it back on all happen in a terminal
-    /// while this view is on screen and Spaces is not involved. Without a watch the row goes on
+    /// Trusting the hooks inside Codex, switching a hook off, and switching it back on all happen in a
+    /// terminal while this view is on screen and Spaces is not involved. Without a watch the row goes on
     /// reporting the task it asked the user to do after they have done it, reports green after Codex has
     /// stopped running the hooks, and the launch setup step never reaches Done.
     ///
@@ -369,9 +374,9 @@ struct AgentConfigWatchTargets: Sendable {
             view.removeFromSuperview()
         }
 
-        let canInstall = resolvedDevice() != nil && !isLoading && installingKind == nil
+        let canAct = resolvedDevice() != nil && !isLoading && inFlight == nil
         for (index, kind) in CodingAgent.allCases.enumerated() {
-            let row = agentRow(kind: kind, status: status.first { $0.kind == kind }, index: index, isLoading: isLoading, canInstall: canInstall)
+            let row = agentRow(kind: kind, status: status.first { $0.kind == kind }, index: index, isLoading: isLoading, canAct: canAct)
             container.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
         }
@@ -383,7 +388,7 @@ struct AgentConfigWatchTargets: Sendable {
         }
     }
 
-    private func agentRow(kind: CodingAgent, status: AgentHookStatus?, index: Int, isLoading: Bool, canInstall: Bool) -> NSView {
+    private func agentRow(kind: CodingAgent, status: AgentHookStatus?, index: Int, isLoading: Bool, canAct: Bool) -> NSView {
         let available = status?.available ?? false
         let installState = status?.installState ?? .notInstalled
 
@@ -392,21 +397,31 @@ struct AgentConfigWatchTargets: Sendable {
         let name = NSTextField(labelWithString: kind.displayName)
         name.font = Typography.rowLabel
 
-        // A recorded failure explains a row Spaces just tried and could not fix — most often a
-        // `config.toml` only the user can untangle. Once hooks are current the message is stale by
-        // definition, so it is never shown then.
-        let failureMessage = installState == .current ? nil : failures[kind]
-        let caption = NSTextField(labelWithString: captionText(status: status, failureMessage: failureMessage, isLoading: isLoading))
+        // A recorded failure explains a row Spaces just tried and could not fix, most often a
+        // `config.toml` only the user can untangle, or an agent that would not record a trust.
+        let failureMessage = failures[kind]?.message
+        let caption = NSTextField(labelWithString: Self.captionText(status: status, failureMessage: failureMessage, isLoading: isLoading))
         caption.font = Typography.metadata
         caption.textColor = (failureMessage != nil && !isLoading) ? .systemRed : .secondaryLabelColor
         caption.lineBreakMode = .byWordWrapping
         caption.maximumNumberOfLines = 3
-        // A caption's single-line intrinsic width is otherwise a hard floor, so the long awaiting-review
-        // sentence widens the settings window instead of wrapping inside the row, and the window keeps
-        // that width afterwards. Let it compress and wrap, as the help text under the card does.
+        // A caption's single-line intrinsic width is otherwise a hard floor, so a long sentence widens
+        // the settings window instead of wrapping inside the row, and the window keeps that width
+        // afterwards. Let it compress and wrap, as the help text under the card does.
         caption.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let labelStack = NSStackView(views: [name, caption])
+        var labels: [NSView] = [name, caption]
+        if !isLoading, installState == .current, trustedRows.contains(TrustedRow(deviceID: deviceID, kind: kind)) {
+            let note = NSTextField(labelWithString: Self.trustedNote(agentName: kind.displayName))
+            note.font = Typography.metadata
+            note.textColor = Theme.mutedSecondary
+            note.lineBreakMode = .byWordWrapping
+            note.maximumNumberOfLines = 2
+            note.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            labels.append(note)
+        }
+
+        let labelStack = NSStackView(views: labels)
         labelStack.orientation = .vertical
         labelStack.alignment = .leading
         labelStack.spacing = 2
@@ -417,15 +432,17 @@ struct AgentConfigWatchTargets: Sendable {
             RowPrimitives.statusSlot(RowPrimitives.statusDot(statusDotKind(available: available, installState: installState))), tile, labelStack,
             NSView(),
         ]
-        if available {
-            let isInstalling = installingKind == kind
+        let inFlightAction = inFlight?.kind == kind ? inFlight?.action : nil
+        if let action = inFlightAction ?? (isLoading ? nil : Self.rowAction(for: status)) {
             let button = NSButton(
-                title: isInstalling ? "Installing..." : installActionTitle(installState), target: self, action: #selector(installHooks(_:)))
-            button.bezelStyle = .rounded
-            button.controlSize = .small
+                title: Self.actionTitle(action, agentName: kind.displayName, inProgress: inFlightAction != nil), target: self,
+                action: #selector(performRowAction(_:)))
             button.tag = index
-            button.isEnabled = canInstall
-            button.setAccessibilityIdentifier("settings-coding-agents-install-\(kind.rawValue)")
+            button.isEnabled = canAct
+            button.toolTip = Self.actionToolTip(action, agentName: kind.displayName)
+            // The tint marks the row's one way forward; a button that cannot fire right now goes quiet.
+            Theme.applyTintedStyle(to: button, color: button.isEnabled ? Theme.orange : Theme.mutedSecondary)
+            button.setAccessibilityIdentifier("settings-coding-agents-action-\(kind.rawValue)")
             rowViews.append(button)
         }
 
@@ -449,76 +466,210 @@ struct AgentConfigWatchTargets: Sendable {
         }
     }
 
-    /// `awaitingTrust` and `disabledByAgent` read "Reinstall" rather than Install or Update: the
-    /// entries are already the ones this build writes, so nothing is missing or out of date, and the
-    /// click is the same one that repoints hooks at a moved Spaces CLI. It does not finish either
-    /// state, but it costs the user nothing and is the only way to reach a reinstall while one is
-    /// outstanding.
-    private func installActionTitle(_ installState: AgentHookInstallState) -> String {
-        switch installState {
-        case .awaitingTrust, .disabledByAgent, .current: "Reinstall"
-        case .outdated: "Update"
-        case .notInstalled: "Install"
+    /// The step Spaces can take for a row.
+    enum RowAction: Equatable {
+        /// Write the hooks for the first time.
+        case install
+        /// Rewrite hooks that are not what this device writes: an older Spaces's, ones naming a
+        /// `spaces` CLI that moved, or (for Codex) ones its `hooks` feature leaves off.
+        case update
+        /// Ask the agent to trust the hooks it has, after the user confirms the exact commands.
+        case trust
+    }
+
+    /// A row action that failed, and the message the row explains itself with.
+    struct RowFailure: Equatable {
+        let action: RowAction
+        let message: String
+    }
+
+    /// The failures that still explain their rows once a fresh `status` is in. A failure stands only
+    /// while the row is still where the failed action left it: a refused trust while the hooks still
+    /// await trust, and a failed install or update while the hooks are short of current. Anything else
+    /// means the user got past it outside Spaces (trusted the hooks in the agent, untangled its config),
+    /// and a failure kept past that would come back as the caption of some later, unrelated state. An
+    /// agent the status does not cover keeps its failure, since nothing says it was fixed.
+    static func standingFailures(_ failures: [CodingAgent: RowFailure], after status: [AgentHookStatus]) -> [CodingAgent: RowFailure] {
+        failures.filter { kind, failure in
+            guard let installState = status.first(where: { $0.kind == kind })?.installState else { return true }
+            switch failure.action {
+            case .trust: return installState == .awaitingTrust
+            case .install, .update: return installState != .current
+            }
         }
     }
 
-    private func captionText(status: AgentHookStatus?, failureMessage: String?, isLoading: Bool) -> String {
+    /// The one action a row offers, or nil when Spaces has nothing to do for it.
+    ///
+    /// A row shows a button only when there is something to do, because the state it is in has exactly
+    /// one way forward. `current` needs nothing, and switched-off hooks are turned back on in the agent,
+    /// never by Spaces, whose caption says so. An agent that is not detected has nothing to install into.
+    static func rowAction(for status: AgentHookStatus?) -> RowAction? {
+        guard let status, status.available else { return nil }
+        switch status.installState {
+        case .notInstalled: return .install
+        case .outdated: return .update
+        case .awaitingTrust: return .trust
+        case .current, .disabledByAgent: return nil
+        }
+    }
+
+    static func actionTitle(_ action: RowAction, agentName: String, inProgress: Bool) -> String {
+        switch action {
+        case .install: inProgress ? "Installing…" : "Install"
+        case .update: inProgress ? "Updating…" : "Update"
+        case .trust: inProgress ? "Trusting…" : "Trust in \(agentName)…"
+        }
+    }
+
+    /// The detail a tinted action carries in place of a caption that repeats it.
+    static func actionToolTip(_ action: RowAction, agentName: String) -> String {
+        switch action {
+        case .install: "Add Spaces' hooks to \(agentName)'s config."
+        case .update: "Rewrite Spaces' hooks in \(agentName)'s config as this Spaces writes them."
+        case .trust: "\(agentName) runs none of Spaces' hooks until they are trusted. Review the commands, then trust them."
+        }
+    }
+
+    static func captionText(status: AgentHookStatus?, failureMessage: String?, isLoading: Bool) -> String {
         if isLoading { return "Checking availability and hooks" }
         if let failureMessage { return failureMessage }
         guard let status else { return "Status unavailable" }
-        let hooks =
-            switch status.installState {
-            case .current: "hooks installed"
-            case .awaitingTrust: "hooks awaiting \(status.displayName) trust review"
-            case .disabledByAgent: "hooks switched off in \(status.displayName)"
-            case .outdated: "hooks out of date"
-            case .notInstalled: "hooks not installed"
-            }
-        let summary = "\(status.available ? "Detected" : "Not detected"), \(hooks)"
-        // The row's button finishes neither of these, so the caption carries the step that does, and
-        // the two differ: one sends the user to a review prompt, the other to a switch they turned off.
+        let detected = status.available ? "Detected" : "Not detected"
+        let agentName = status.displayName
         switch status.installState {
-        case .awaitingTrust: return summary + ". Open \(status.displayName) in a terminal and approve the hooks it reports need review."
-        case .disabledByAgent: return summary + ". Re-enable them in \(status.displayName) to restore agent status."
-        default: return summary
+        case .current: return "\(detected), hooks installed"
+        case .awaitingTrust: return "\(detected), hooks installed but not yet trusted in \(agentName)"
+        // No button fixes this one: Spaces never switches a hook the user switched off back on, so the
+        // caption carries the step instead.
+        case .disabledByAgent: return "\(detected), hooks switched off in \(agentName). Turn them back on in \(agentName) to restore agent status."
+        case .outdated: return "\(detected), hooks out of date"
+        case .notInstalled: return "\(detected), hooks not installed"
         }
     }
 
-    // MARK: - Install
+    /// The caption a row carries when the agent would not record a trust. The agent's own reason leads,
+    /// and the two ways past it follow: a newer agent whose `app-server` Spaces can ask, or trusting
+    /// inside the agent, which never depends on Spaces.
+    static func trustFailureCaption(agentName: String, reason: String) -> String {
+        let reason = reason.hasSuffix(".") ? String(reason.dropLast()) : reason
+        return "\(agentName) didn't record the trust: \(reason). Update \(agentName), or open it in a terminal and trust the hooks there."
+    }
 
-    @objc private func installHooks(_ sender: NSButton) {
-        guard installingKind == nil else { return }
+    /// Shown under a row this view just trusted. An agent reads its hooks when a session starts, so the
+    /// sessions already running keep reporting nothing, and without this the row's green would claim
+    /// otherwise.
+    static func trustedNote(agentName: String) -> String { "\(agentName) sessions already running stay without Spaces status until they restart." }
+
+    // MARK: - Actions
+
+    @objc private func performRowAction(_ sender: NSButton) {
+        guard inFlight == nil else { return }
         let kinds = CodingAgent.allCases
-        guard kinds.indices.contains(sender.tag), let device = resolvedDevice() else { return }
+        guard kinds.indices.contains(sender.tag) else { return }
         let kind = kinds[sender.tag]
-        reloadToken += 1  // an in-flight status fetch must not overwrite this install's result
-        installToken += 1
-        let token = installToken
+        switch Self.rowAction(for: status.first { $0.kind == kind }) {
+        case .install, .update: installHooks(kind: kind)
+        case .trust: confirmTrust(kind: kind)
+        case nil: return
+        }
+    }
+
+    private func installHooks(kind: CodingAgent) {
+        guard let device = resolvedDevice()?.record, let action = Self.rowAction(for: status.first { $0.kind == kind }) else { return }
+        let token = beginAction(kind: kind, action: action)
         let targetDeviceID = device.id
-        installingKind = kind
-        renderRows(message: nil, isLoading: false)
         let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()
         Task.detached(priority: .userInitiated) { [weak self] in
             let result = Result { try SpacesDeviceClient.installAgentHooks([kind], context: DeviceRequestContext(device: device, profile: profile)) }
-            await self?.applyInstall(result, token: token, deviceID: targetDeviceID, kind: kind)
+            await self?.applyInstall(result, token: token, deviceID: targetDeviceID, kind: kind, action: action)
         }
+    }
+
+    /// Marks `action` in flight for `kind` and returns the token its completion must still match.
+    private func beginAction(kind: CodingAgent, action: RowAction) -> Int {
+        reloadToken += 1  // an in-flight status fetch must not overwrite this action's result
+        actionToken += 1
+        inFlight = (kind, action)
+        renderRows(message: nil, isLoading: false)
+        return actionToken
     }
 
     /// An install request can succeed while the agent it targeted fails, so the per-agent failures are
     /// what decide whether the user sees an error.
-    private func applyInstall(_ result: Result<AgentHookInstallOutcome, any Error>, token: Int, deviceID: String, kind: CodingAgent) {
-        guard token == installToken, deviceID == self.deviceID else { return }
-        installingKind = nil
+    private func applyInstall(
+        _ result: Result<AgentHookInstallOutcome, any Error>, token: Int, deviceID: String, kind: CodingAgent, action: RowAction
+    ) {
+        guard token == actionToken, deviceID == self.deviceID else { return }
+        inFlight = nil
         switch result {
         case .success(let outcome):
             status = outcome.agents
             // Keep this agent's message in step with what just happened, so a row stops explaining a
             // problem the user has since fixed.
-            failures[kind] = outcome.failures.first { $0.kind == kind }?.message
+            failures[kind] = outcome.failures.first { $0.kind == kind }.map { RowFailure(action: action, message: $0.message) }
+            failures = Self.standingFailures(failures, after: outcome.agents)
             renderRows(message: outcome.failures.first.map { "Install failed: \($0.message)" }, isLoading: false)
         case .failure(let error): renderRows(message: "Install failed: \(error.localizedDescription)", isLoading: false)
         }
         updateAgentConfigWatch()
         emitLocalStatusChangeIfLocal()
     }
+
+    /// Shows the exact commands the agent has not trusted and trusts them only once the user confirms.
+    /// The list comes from the status already on screen, which is the device's own report of what the
+    /// trust would cover.
+    private func confirmTrust(kind: CodingAgent) {
+        guard let window = rowsContainer?.window, let device = resolvedDevice(),
+            let entries = status.first(where: { $0.kind == kind })?.untrustedEntries, !entries.isEmpty
+        else { return }
+        let confirmation = AgentHookTrustConfirmation(agentName: kind.displayName, deviceName: device.label, entries: entries)
+        let targetDeviceID = device.record.id
+        confirmation.present(on: window) { [weak self] in
+            // The rows may have moved on while the sheet was up: to another device, or into another action.
+            guard let self, self.isActive, self.deviceID == targetDeviceID, self.inFlight == nil else { return }
+            self.trustHooks(kind: kind, device: device.record)
+        }
+    }
+
+    private func trustHooks(kind: CodingAgent, device: SpacesPairedDeviceRecord) {
+        let token = beginAction(kind: kind, action: .trust)
+        let targetDeviceID = device.id
+        let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let result = Result { try SpacesDeviceClient.trustAgentHooks(kind, context: DeviceRequestContext(device: device, profile: profile)) }
+            await self?.applyTrust(result, token: token, deviceID: targetDeviceID, kind: kind)
+        }
+    }
+
+    /// The agent's refusal arrives as this agent's failure entry and reads in the row's caption, where
+    /// the Trust button stays for another try; only a request that never reached the device reads under
+    /// the rows.
+    private func applyTrust(_ result: Result<AgentHookInstallOutcome, any Error>, token: Int, deviceID: String, kind: CodingAgent) {
+        guard token == actionToken, deviceID == self.deviceID else { return }
+        inFlight = nil
+        let trustedRow = TrustedRow(deviceID: deviceID, kind: kind)
+        switch result {
+        case .success(let outcome):
+            status = outcome.agents
+            if let failure = outcome.failures.first(where: { $0.kind == kind }) {
+                failures[kind] = RowFailure(action: .trust, message: Self.trustFailureCaption(agentName: kind.displayName, reason: failure.message))
+                trustedRows.remove(trustedRow)
+            } else {
+                failures[kind] = nil
+                trustedRows.insert(trustedRow)
+            }
+            failures = Self.standingFailures(failures, after: outcome.agents)
+            renderRows(message: nil, isLoading: false)
+        case .failure(let error): renderRows(message: "Trust failed: \(error.localizedDescription)", isLoading: false)
+        }
+        updateAgentConfigWatch()
+        emitLocalStatusChangeIfLocal()
+    }
+}
+
+/// One agent row on one device, for remembering which rows this view trusted.
+private struct TrustedRow: Hashable {
+    let deviceID: String
+    let kind: CodingAgent
 }
