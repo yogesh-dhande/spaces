@@ -232,7 +232,8 @@ final class TerminalServiceProtocolTests: XCTestCase {
 
     func testProfileCommandRoundTripsEveryOperation() throws {
         let commands: [TerminalServiceProfileCommand] = [
-            .projectList, .terminalList, .workspaceList(.init(projectID: "project-1")), .workspaceList(.init()),
+            .projectList, .projectCreate(.dir("~/code/app")), .projectCreate(.gitURL("https://example.com/repo.git")), .terminalList,
+            .workspaceList(.init(projectID: "project-1")), .workspaceList(.init()),
             .workspaceCreate(.init(projectID: "project-1", branch: "feature", baseBranch: "main", existingBranch: true)),
             .workspaceCreate(.init(projectID: "project-1", branch: "feature")), .workspaceStart(.init(cwd: "/tmp", workspaceID: "workspace-1")),
             .workspaceStart(.init(cwd: "/tmp")), .workspaceStop(.init(cwd: "/tmp", workspaceID: "workspace-1")), .workspaceStop(.init(cwd: "/tmp")),
@@ -385,6 +386,34 @@ final class TerminalServiceProtocolTests: XCTestCase {
         XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"projectList":{},"terminalList":{}}"#.utf8)))
     }
 
+    /// A project create names exactly one source, and that source is never blank.
+    func testProjectCreateSourceRejectsZeroTwoAndBlankSources() throws {
+        let decoder = JSONDecoder()
+
+        XCTAssertEqual(
+            try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"projectCreate":{"dir":" /tmp/app "}}"#.utf8)),
+            .projectCreate(.dir("/tmp/app")))
+        XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"projectCreate":{}}"#.utf8)))
+        XCTAssertThrowsError(
+            try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"projectCreate":{"dir":"/tmp/app","gitURL":"https://x"}}"#.utf8)))
+        XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"projectCreate":{"gitURL":"  "}}"#.utf8)))
+    }
+
+    /// The created project's fields survive a busy orchestrator's piggybacked agent events.
+    func testProjectCreateResponseKeepsItsProjectWhenPendingEventsAreAttached() {
+        let response = TerminalServiceProfileCommandResponse(
+            message: "Created project 'app'.",
+            project: TerminalServiceProfileProjectSummary(id: "project-1", name: "app", dir: "/tmp/app", isGitRepo: true, defaultBranch: "main"),
+            defaultWorkspaceID: "workspace-1", spacesYAMLImported: true)
+
+        let attached = response.addingPendingAgentEvents(["event"])
+
+        XCTAssertEqual(attached.project, response.project)
+        XCTAssertEqual(attached.defaultWorkspaceID, "workspace-1")
+        XCTAssertEqual(attached.spacesYAMLImported, true)
+        XCTAssertEqual(attached.pendingAgentEvents, ["event"])
+    }
+
     func testTerminalProfileInputRejectsZeroAndTwoKeyPayloads() throws {
         let decoder = JSONDecoder()
 
@@ -492,6 +521,54 @@ final class TerminalServiceProtocolTests: XCTestCase {
 
         XCTAssertTrue(ping.ok)
         XCTAssertLessThan(elapsed, 1.5, "A ping must not be head-of-line-blocked behind an in-flight slow request")
+    }
+
+    /// A project create cloning a large repository must not hold every other request behind it: agent
+    /// hook signals, other CLI and MCP calls, and the Mac app's park before Stop All and Quit all share
+    /// the server's work queue.
+    func testRequestIsAnsweredWhileProjectCreateIsInFlight() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let socketPath = root.appendingPathComponent("service.sock").path
+        let queue = DispatchQueue(label: "terminal-service-project-create-test")
+
+        // Released unconditionally via defer so the create handler, and the client waiting on it, never
+        // outlive the test when an assertion fails first.
+        let createStarted = DispatchSemaphore(value: 0)
+        let releaseCreate = DispatchSemaphore(value: 0)
+        defer { releaseCreate.signal() }
+        let server = TerminalServiceServer(socketPath: socketPath, queue: queue) { request in
+            if case .profileCommand(.projectCreate) = request.command {
+                createStarted.signal()
+                releaseCreate.wait()
+                return TerminalServiceResponse(ok: true, message: "created")
+            }
+            return TerminalServiceResponse(ok: true, message: "listed")
+        }
+        try server.start()
+        defer { server.stop() }
+
+        let createAnswered = DispatchSemaphore(value: 0)
+        let createSucceeded = LockedFlag()
+        DispatchQueue.global().async {
+            let response = try? TerminalServiceClient.send(
+                request: TerminalServiceRequest(command: .profileCommand(.projectCreate(.gitURL("https://example.com/repo.git")))),
+                socketPath: socketPath, timeout: 10)
+            if response?.ok == true, response?.message == "created" { createSucceeded.set() }
+            createAnswered.signal()
+        }
+        XCTAssertEqual(createStarted.wait(timeout: .now() + 2), .success, "Project create never reached the server")
+
+        // Bounded by the client timeout: routed behind the blocked create, this throws instead of hanging.
+        let listed = try TerminalServiceClient.send(
+            request: TerminalServiceRequest(command: .profileCommand(.projectList)), socketPath: socketPath, timeout: 2)
+        XCTAssertEqual(listed.message, "listed")
+
+        releaseCreate.signal()
+        XCTAssertEqual(createAnswered.wait(timeout: .now() + 5), .success, "Project create was never answered after it was released")
+        XCTAssertTrue(createSucceeded.value)
     }
 
     func testRelaunchIfIdleLeavesBusyDaemonRunningWhenItRefuses() throws {

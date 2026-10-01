@@ -25,7 +25,7 @@ public struct MissingTrackedWindowContext: Sendable {
 
 public enum WorkspaceError: LocalizedError {
     case missingProject(dir: String)
-    case projectAlreadyExists(dir: String)
+    case projectAlreadyExists(name: String, id: String, dir: String)
     case missingWorkspace(project: String, workspace: String)
     case workspaceAlreadyExists(project: String, workspace: String)
     case invalidWorkspace(path: String)
@@ -48,7 +48,7 @@ public enum WorkspaceError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .missingProject(let dir): return "Project not found: \(dir)"
-        case .projectAlreadyExists(let dir): return "Project already exists: \(dir)"
+        case .projectAlreadyExists(let name, let id, let dir): return "Project already exists: \(name) (\(id)) at \(dir)"
         case .missingWorkspace(let project, let workspace): return "Workspace not found for project \(project): \(workspace)"
         case .workspaceAlreadyExists(let project, let workspace): return "Workspace already exists for project \(project): \(workspace)"
         case .invalidWorkspace(let path): return "Workspace path does not exist: \(path)"

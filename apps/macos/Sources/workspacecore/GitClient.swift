@@ -171,6 +171,41 @@ public final class GitClient {
         return url.resolvingSymlinksInPath().path
     }
 
+    /// Locates `path` inside its git repository with one `rev-parse` spawn, or returns `nil` when git reports
+    /// that `path` is not inside a repository. Every other failure (a timeout, a repository git cannot read,
+    /// unexpected output) throws: callers decide whether a folder may become a project from this answer, so
+    /// an unanswered probe must not read as "outside git". `--show-cdup` stands in for `--show-toplevel`,
+    /// which exits nonzero when there is no work tree and would fail the whole call for a bare repository.
+    /// Relative outputs are relative to `path`, so they are resolved against its symlink-resolved form:
+    /// `--show-cdup` walks up the physical directory tree.
+    public func repositoryLocation(path: String) throws -> GitRepositoryLocation? {
+        let arguments = ["-C", path, "rev-parse", "--is-inside-work-tree", "--git-dir", "--git-common-dir", "--show-cdup"]
+        let process = makeGitProcess(arguments)
+        // Pinned so the discovery message matched below reads the same under any user locale.
+        process.environment?["LC_ALL"] = "C"
+        let result = try runGitCapturing(process, arguments: arguments, timeout: metadataCommandTimeout)
+        guard result.status == 0 else {
+            // Only discovery that walked up without finding a repository answers "not inside one". The
+            // shorter "not a git repository: <dir>" names a `.git` file pointing at a missing repository,
+            // which is a broken checkout, not a plain folder.
+            if result.errorMessage.contains("not a git repository (or any") { return nil }
+            throw WorkspaceError.gitCommandFailed(message: result.errorMessage)
+        }
+        let lines = result.output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard lines.count >= 3, !lines[1].isEmpty, !lines[2].isEmpty else {
+            throw WorkspaceError.gitCommandFailed(message: "Unexpected git rev-parse output for \(path): \(result.output)")
+        }
+        let base = URL(fileURLWithPath: path, isDirectory: true).resolvingSymlinksInPath()
+        func resolved(_ relativeOrAbsolute: String) -> String {
+            URL(fileURLWithPath: relativeOrAbsolute, isDirectory: true, relativeTo: base).standardizedFileURL.resolvingSymlinksInPath().path
+        }
+        let isInsideWorkTree = lines[0] == "true"
+        let cdup = lines.count > 3 ? lines[3] : ""
+        return GitRepositoryLocation(
+            topLevel: isInsideWorkTree ? (cdup.isEmpty ? base.standardizedFileURL.path : resolved(cdup)) : nil, gitDirectory: resolved(lines[1]),
+            commonDirectory: resolved(lines[2]))
+    }
+
     public func listWorktrees(path repoPath: String) throws -> [WorktreeInfo] {
         let output = try runGitAndCapture(["-C", repoPath, "worktree", "list", "--porcelain"])
         return parseWorktreeList(output)
@@ -357,7 +392,14 @@ public final class GitClient {
     }
 
     public func runGitAndCapture(_ arguments: [String], timeout: TimeInterval? = nil) throws -> String {
-        let process = makeGitProcess(arguments)
+        let result = try runGitCapturing(makeGitProcess(arguments), arguments: arguments, timeout: timeout)
+        guard result.status == 0 else { throw WorkspaceError.gitCommandFailed(message: result.errorMessage) }
+        return result.output
+    }
+
+    private func runGitCapturing(_ process: Process, arguments: [String], timeout: TimeInterval?) throws -> (
+        status: Int32, output: String, errorMessage: String
+    ) {
         let out = Pipe()
         let err = Pipe()
         process.standardOutput = out
@@ -365,12 +407,9 @@ public final class GitClient {
         try process.run()
         try waitForProcess(process, timeout: timeout, arguments: arguments)
         let outputData = out.fileHandleForReading.readDataToEndOfFile()
-        if process.terminationStatus != 0 {
-            let errData = err.fileHandleForReading.readDataToEndOfFile()
-            let message = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
-            throw WorkspaceError.gitCommandFailed(message: message)
-        }
-        return String(data: outputData, encoding: .utf8) ?? ""
+        let errorData = err.fileHandleForReading.readDataToEndOfFile()
+        let errorMessage = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
+        return (process.terminationStatus, String(data: outputData, encoding: .utf8) ?? "", errorMessage)
     }
 
     private func runGitOrThrow(_ arguments: [String]) throws {

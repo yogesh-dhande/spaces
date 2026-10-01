@@ -10,15 +10,14 @@ extension WorkspaceOrchestrator {
         }
     }
 
+    /// Registers `dir` as a project without the repository-root rule, so internal callers (fixtures and
+    /// harnesses that register a folder inside another checkout) keep working. A user-initiated create goes
+    /// through `createProject(dir:)` or, with a reviewed configuration, `addReviewedProject(dir:configure:)`.
     public func addProject(dir: String) throws -> ProjectRecord { try addProject(dir: dir) { _ in } }
 
     public func previewProject(dir: String) throws -> ProjectRecord {
-        let normalizedDir = normalizePath(dir)
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: normalizedDir, isDirectory: &isDir), isDir.boolValue else {
-            throw WorkspaceError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
-        }
-        if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
+        let normalizedDir = try newProjectDirectory(dir)
+        try requireRepositoryRoot(normalizedDir)
         let importedDocument = try spacesYAMLDocumentIfPresent(in: URL(fileURLWithPath: normalizedDir, isDirectory: true))
         return try configuredProjectRecord(baseRecord: normalizeDir(id: UUID().uuidString, normalizedDir)) { project in
             importedDocument?.applying(to: &project)
@@ -26,31 +25,20 @@ extension WorkspaceOrchestrator {
     }
 
     public func addProject(dir: String, configure: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
-        let normalizedDir = normalizePath(dir)
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: normalizedDir, isDirectory: &isDir), isDir.boolValue else {
-            throw WorkspaceError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
-        }
-        if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
-        let importedDocument = try spacesYAMLDocumentIfPresent(in: URL(fileURLWithPath: normalizedDir, isDirectory: true))
-        let record = try configuredProjectRecord(baseRecord: normalizeDir(id: UUID().uuidString, normalizedDir)) { project in
-            guard let importedDocument else {
-                configure(&project)
-                return
-            }
-            importedDocument.applying(to: &project)
-        }
-        try store.upsert(project: record)
-        do { try ensureDefaultWorkspace(for: record) } catch {
-            try? store.deleteProject(id: record.id)
-            throw error
-        }
-        return record
+        try insertProject(directory: newProjectDirectory(dir), configure: configure).project
+    }
+
+    /// Creates a project from a folder on a user's request: the folder must be the root of a repository's
+    /// main checkout (any folder outside git is accepted), and its `spaces.yaml` is imported when present.
+    public func createProject(dir: String) throws -> CreatedProject {
+        let normalizedDir = try newProjectDirectory(dir)
+        try requireRepositoryRoot(normalizedDir)
+        return try insertProject(directory: normalizedDir) { _ in }
     }
 
     public func addReviewedProject(dir: String, configure: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
-        let normalizedDir = normalizePath(dir)
-        if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
+        let normalizedDir = try newProjectDirectory(dir)
+        try requireRepositoryRoot(normalizedDir)
         let baseRecord = try normalizeDir(id: UUID().uuidString, normalizedDir)
         let record = try configuredProjectRecord(baseRecord: baseRecord, update: configure)
         try store.upsert(project: record)
@@ -59,6 +47,20 @@ extension WorkspaceOrchestrator {
             throw error
         }
         return record
+    }
+
+    /// Creates a project from a git URL on a user's request, importing the default branch's `spaces.yaml`
+    /// when present. `replaceExistingManagedDirectories` is true only after the user confirmed replacing
+    /// folders an earlier import left behind; otherwise those folders refuse the create.
+    public func createProject(gitURL: String, replaceExistingManagedDirectories: Bool) throws -> CreatedProject {
+        let prepared = try prepareGitProject(gitURL: gitURL, replaceExistingManagedDirectories: replaceExistingManagedDirectories)
+        do {
+            let project = try addPreparedGitProject(prepared) { _ in }
+            return CreatedProject(project: project, spacesYAMLImported: prepared.importedDocument != nil)
+        } catch {
+            try? discardPreparedGitProject(prepared)
+            throw error
+        }
     }
 
     public func addProject(gitURL: String) throws -> ProjectRecord { try addProject(gitURL: gitURL) { _ in } }
@@ -136,7 +138,7 @@ extension WorkspaceOrchestrator {
         guard FileManager.default.fileExists(atPath: normalizedDir, isDirectory: &isDir), isDir.boolValue else {
             throw WorkspaceError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
         }
-        if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
+        try requireNoProject(at: normalizedDir)
         var workspaceIsDir = ObjCBool(false)
         guard FileManager.default.fileExists(atPath: prepared.defaultWorkspace.dir, isDirectory: &workspaceIsDir), workspaceIsDir.boolValue else {
             throw WorkspaceError.invalidArgument(message: "Default workspace directory not found: \(prepared.defaultWorkspace.dir)")
@@ -309,6 +311,105 @@ extension WorkspaceOrchestrator {
         try removeManagedProjectDirectoryIfNeeded(project: project)
     }
 
+    /// Normalizes `dir` for a new project, refusing a missing folder or one a project is registered at.
+    private func newProjectDirectory(_ dir: String) throws -> String {
+        let normalizedDir = normalizePath(dir)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: normalizedDir, isDirectory: &isDir), isDir.boolValue else {
+            throw WorkspaceError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
+        }
+        try requireNoProject(at: normalizedDir)
+        return normalizedDir
+    }
+
+    /// Inserts the project at an already validated `normalizedDir` with its default workspace. A
+    /// `spaces.yaml` in the folder wins over `configure`.
+    private func insertProject(directory normalizedDir: String, configure: (inout ProjectRecord) -> Void) throws -> CreatedProject {
+        let importedDocument = try spacesYAMLDocumentIfPresent(in: URL(fileURLWithPath: normalizedDir, isDirectory: true))
+        let record = try configuredProjectRecord(baseRecord: normalizeDir(id: UUID().uuidString, normalizedDir)) { project in
+            guard let importedDocument else {
+                configure(&project)
+                return
+            }
+            importedDocument.applying(to: &project)
+        }
+        try store.upsert(project: record)
+        do { try ensureDefaultWorkspace(for: record) } catch {
+            try? store.deleteProject(id: record.id)
+            throw error
+        }
+        return CreatedProject(project: record, spacesYAMLImported: importedDocument != nil)
+    }
+
+    private func requireNoProject(at normalizedDir: String) throws {
+        guard let existing = try store.project(dir: normalizedDir) else { return }
+        throw WorkspaceError.projectAlreadyExists(name: existing.name, id: existing.id, dir: existing.dir)
+    }
+
+    /// A git project is added at the root of its repository's main checkout. A subfolder or a linked
+    /// worktree (including a Spaces workspace) would register a second project over the same repository,
+    /// whose workspaces then collide with the first project's branches and worktrees. The error names the
+    /// project that already covers the repository when there is one, and otherwise the root to add instead.
+    /// Folders outside git are accepted as they are.
+    ///
+    /// Accepted behavior: when the home directory is itself a git repository, every folder under it is
+    /// inside that repository, so a folder the user thinks of as outside git is refused as inside the home
+    /// project `~`. Registering it would make a second git project over the home repository, with the same
+    /// branch and worktree collisions this rule exists to prevent.
+    private func requireRepositoryRoot(_ normalizedDir: String) throws {
+        guard let location = try git.repositoryLocation(path: normalizedDir) else { return }
+        let topLevel = location.topLevel.map(normalizePath)
+        // Accepted as rare: a project already registered at a subfolder or linked worktree of this repository
+        // is not looked up here. Finding one needs a git probe per registered project (a path-prefix check
+        // would wrongly match a submodule registered as its own project), and such a project exists only in
+        // data written without this rule.
+        if location.isMainWorktree, topLevel == normalizedDir { return }
+        let commonDirectory = normalizePath(location.commonDirectory)
+        let commonDirectoryURL = URL(fileURLWithPath: commonDirectory, isDirectory: true)
+        // Inside the main checkout its top level is the root, wherever the git directory lives (a submodule
+        // keeps its own under the superproject's `.git/modules`). From a linked worktree the root is found
+        // only through a `.git` common directory; any other common directory is taken to be a bare
+        // repository, whose worktrees have no root folder to add.
+        let mainRoot: String?
+        if location.isMainWorktree, let topLevel {
+            mainRoot = topLevel
+        } else {
+            mainRoot = commonDirectoryURL.lastPathComponent == ".git" ? commonDirectoryURL.deletingLastPathComponent().path : nil
+        }
+        let relation: String
+        if topLevel == nil {
+            relation = "inside the git directory of"
+        } else if location.isMainWorktree {
+            relation = "inside"
+        } else {
+            relation = topLevel == normalizedDir ? "a worktree of" : "inside a worktree of"
+        }
+        let rootRule = "Only the root folder of a repository's main checkout can be added as a project"
+        if let owner = try repositoryOwner(topLevel: topLevel, mainRoot: mainRoot, commonDirectory: commonDirectory) {
+            throw WorkspaceError.invalidArgument(message: "\(normalizedDir) is \(relation) project \(owner.name) (\(owner.id)). \(rootRule).")
+        }
+        if let mainRoot {
+            throw WorkspaceError.invalidArgument(
+                message: "\(normalizedDir) is \(relation) the git repository at \(mainRoot). \(rootRule): add \(mainRoot) instead.")
+        }
+        if normalizedDir == commonDirectory {
+            throw WorkspaceError.invalidArgument(message: "\(normalizedDir) is a bare git repository. Add the repository by its git URL instead.")
+        }
+        throw WorkspaceError.invalidArgument(
+            message: "\(normalizedDir) is \(relation) the bare repository at \(commonDirectory). Add the repository by its git URL instead.")
+    }
+
+    /// The project that already covers a repository: one whose workspace is the containing worktree, one
+    /// registered at the main checkout, or a git-URL project, whose directory is the bare clone that every
+    /// one of its worktrees shares as the common directory.
+    private func repositoryOwner(topLevel: String?, mainRoot: String?, commonDirectory: String) throws -> ProjectRecord? {
+        if let topLevel, let workspace = try store.workspace(dir: topLevel), let project = try store.project(id: workspace.projectID) {
+            return project
+        }
+        if let mainRoot, let project = try store.project(dir: mainRoot) { return project }
+        return try store.project(dir: commonDirectory)
+    }
+
     func configuredProjectRecord(baseRecord: ProjectRecord, update: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
         var record = baseRecord
         update(&record)
@@ -395,7 +496,9 @@ extension WorkspaceOrchestrator {
         guard !candidates.isEmpty else { return }
         guard allowReplacement else {
             throw WorkspaceError.invalidArgument(
-                message: "Managed project import folders already exist: \(candidates.map(\.path).joined(separator: ", "))")
+                message:
+                    "Folders left over from an earlier import of this repository already exist: \(candidates.map(\.path).joined(separator: ", ")). "
+                    + "Remove them, or add the project from the Spaces Mac app, which asks before replacing them.")
         }
         let orderedCandidates = candidates.sorted { lhs, rhs in lhs.kind == .workspaceDirectory && rhs.kind == .projectRepository }
         for candidate in orderedCandidates { try removeReplaceableManagedDirectory(candidate) }

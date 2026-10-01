@@ -363,8 +363,9 @@ spawn_fails_fast_when_the_child_exits() {
 # and the daemon's foreground classifier match on (the classifier reads argv[0], which carries the
 # symlink path), and a symlink runs the real signed zsh, which a copy of a system binary would not. It
 # runs a probe script that counts the PATH entries it was given that a NON-interactive login shell would
-# not have produced, then blocks on the `read` builtin so it stays the terminal's foreground process for
-# detection to identify.
+# not have produced, then turns bracketed paste on (DECSET 2004, as an agent TUI does when its composer
+# takes input, which spawn's readiness gate waits for) and blocks on the `read` builtin so it stays the
+# terminal's foreground process for detection to identify.
 #
 # That count is the regression guard: it is zero for a `-l`-only shell and non-zero once `~/.zshrc` runs.
 # The same probe is run locally under a scrubbed interactive login shell first; when it finds nothing
@@ -382,6 +383,7 @@ spawn_runs_the_command_through_the_login_environment() {
 baseline=("${(@f)$(env -i HOME=$HOME /bin/zsh -l -c 'print -rl -- $path')}")
 extra=(${path:|baseline})
 print -r -- "spawnpathextra=${#extra}"
+print -n -- $'\e[?2004h'
 # Blocks so the spawned agent stays the terminal's foreground process for detection to identify. The
 # baseline run below feeds it /dev/null, where `read` returns 1 at EOF — tolerated so that a probe
 # doing exactly what it was asked cannot fail the step under `set -e`/`pipefail`.

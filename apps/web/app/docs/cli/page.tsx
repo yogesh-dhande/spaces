@@ -35,12 +35,29 @@ export default function CliReferencePage() {
       </Section>
 
       <Section id="projects" title="Projects">
-        <CodeBlock>{`spaces project list [--device <name-or-id>]`}</CodeBlock>
+        <CodeBlock>{`spaces project list [--device <name-or-id>]
+spaces project create (--dir <path> | --git-url <url>) [--device <name-or-id>]`}</CodeBlock>
         <Prose>
-          Lists the projects on this machine, or on a paired device with{" "}
-          <InlineCode>--device</InlineCode>. See{" "}
-          <DocLink href="/docs/projects">Projects</DocLink>.
+          Lists or adds projects on this machine, or on a paired device with{" "}
+          <InlineCode>--device</InlineCode>. Create takes exactly one source, imports any{" "}
+          <InlineCode>spaces.yaml</InlineCode> it finds, and prints the new project with its
+          default workspace, which is created but not started. See{" "}
+          <DocLink href="/docs/projects#adding-a-project">Adding a project</DocLink>.
         </Prose>
+        <RefTable
+          columns={["Flag", "Description"]}
+          rows={[
+            [
+              <InlineCode key="dir">--dir &lt;path&gt;</InlineCode>,
+              "A folder: a non-git folder or a Git repository's root. A relative path is resolved against the current directory; with --device, pass an absolute or ~ path.",
+            ],
+            [
+              <InlineCode key="git-url">--git-url &lt;url&gt;</InlineCode>,
+              "A Git repository to clone. Spaces clones it into its managed folder and checks out the default branch.",
+            ],
+            [<InlineCode key="device">--device &lt;name-or-id&gt;</InlineCode>, "Paired device selector. Defaults to this machine."],
+          ]}
+        />
       </Section>
 
       <Section id="workspaces" title="Workspaces">

@@ -61,6 +61,24 @@ final class GitClientTests: XCTestCase {
         XCTAssertNil(client.commonDirectory(path: root.appendingPathComponent("not-a-repo").path))
     }
 
+    func testRepositoryLocationIsNilOnlyWhenGitFindsNoRepository() throws {
+        let client = GitClient()
+        XCTAssertNil(try client.repositoryLocation(path: try makeTempDirectory().path))
+
+        // A `.git` git cannot read is a broken checkout, not a plain folder, so the probe fails rather than
+        // answering "outside git": a malformed gitfile, and one pointing at a repository that is gone.
+        let invalidGitfile = try makeTempDirectory()
+        try "garbage\n".write(to: invalidGitfile.appendingPathComponent(".git"), atomically: true, encoding: .utf8)
+        let dangling = try makeTempDirectory()
+        try "gitdir: \(dangling.appendingPathComponent("missing").path)\n".write(
+            to: dangling.appendingPathComponent(".git"), atomically: true, encoding: .utf8)
+        for folder in [invalidGitfile, dangling] {
+            XCTAssertThrowsError(try client.repositoryLocation(path: folder.path), folder.path) { error in
+                guard case WorkspaceError.gitCommandFailed = error else { return XCTFail("Expected gitCommandFailed, got \(error)") }
+            }
+        }
+    }
+
     func testCreateWorktreeWhenBranchExistsOnlyOnRemote() throws {
         let fixture = try makeRemoteFixture()
         let client = GitClient()

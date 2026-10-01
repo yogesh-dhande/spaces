@@ -13,6 +13,10 @@ export const metadata: Metadata = {
 
 const TOOL_ROWS: [string, string][] = [
   ["spaces_project_list", "List projects on this or a paired device."],
+  [
+    "spaces_project_create",
+    "Add a project from a folder (an absolute or ~ path) or a Git URL, with an optional device. Imports any spaces.yaml and returns the project and its default workspace, not started.",
+  ],
   ["spaces_workspace_list", "List workspaces, optionally filtered by project."],
   [
     "spaces_workspace_create",

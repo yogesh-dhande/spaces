@@ -57,6 +57,39 @@ public enum TerminalProfileInput: Codable, Sendable, Equatable {
     }
 }
 
+/// Where `projectCreate` gets the project from: exactly one of a folder on the daemon's machine or a git
+/// URL the daemon clones. A one-key-tagged union, so a payload can carry neither zero nor both sources.
+/// `dir` is absolute or `~`-relative by the time it is sent; the daemon expands `~` against its own home.
+public enum TerminalServiceProjectCreateSource: Codable, Sendable, Equatable {
+    case dir(String)
+    case gitURL(String)
+
+    private enum CodingKeys: String, CodingKey {
+        case dir
+        case gitURL
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard container.allKeys.count == 1, let key = container.allKeys.first else {
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Project source must contain exactly one of dir or gitURL."))
+        }
+        switch key {
+        case .dir: self = .dir(try container.decodeRequiredNonEmpty(forKey: .dir))
+        case .gitURL: self = .gitURL(try container.decodeRequiredNonEmpty(forKey: .gitURL))
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .dir(let dir): try container.encode(dir, forKey: .dir)
+        case .gitURL(let gitURL): try container.encode(gitURL, forKey: .gitURL)
+        }
+    }
+}
+
 public struct TerminalServiceWorkspaceListPayload: Codable, Sendable, Equatable {
     /// Optional project filter. `nil` (or an empty value the daemon normalizes away) lists every
     /// project's workspaces.
@@ -523,6 +556,9 @@ public struct TerminalServiceTerminalCommandPayload: Codable, Sendable, Equatabl
 /// `runProfileCommand` destructures payloads directly rather than re-validating each field.
 public enum TerminalServiceProfileCommand: Sendable, Equatable {
     case projectList
+    /// Creates a project from a folder or a git URL, importing its `spaces.yaml` when present. Never
+    /// replaces folders an earlier import left behind: only the Mac app's confirmed create does that.
+    case projectCreate(TerminalServiceProjectCreateSource)
     case terminalList
     case workspaceList(TerminalServiceWorkspaceListPayload)
     case workspaceCreate(TerminalServiceWorkspaceCreatePayload)
@@ -579,6 +615,7 @@ public enum TerminalServiceProfileCommand: Sendable, Equatable {
 extension TerminalServiceProfileCommand: Codable {
     private enum CodingKeys: String, CodingKey {
         case projectList
+        case projectCreate
         case terminalList
         case workspaceList
         case workspaceCreate
@@ -622,6 +659,7 @@ extension TerminalServiceProfileCommand: Codable {
         case .projectList:
             _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
             self = .projectList
+        case .projectCreate: self = .projectCreate(try container.decode(TerminalServiceProjectCreateSource.self, forKey: key))
         case .terminalList:
             _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
             self = .terminalList
@@ -667,6 +705,7 @@ extension TerminalServiceProfileCommand: Codable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .projectList: try container.encode(TerminalServiceEmptyPayload(), forKey: .projectList)
+        case .projectCreate(let source): try container.encode(source, forKey: .projectCreate)
         case .terminalList: try container.encode(TerminalServiceEmptyPayload(), forKey: .terminalList)
         case .workspaceList(let payload): try container.encode(payload, forKey: .workspaceList)
         case .workspaceCreate(let payload): try container.encode(payload, forKey: .workspaceCreate)

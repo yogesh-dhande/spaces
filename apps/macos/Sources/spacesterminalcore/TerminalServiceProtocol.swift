@@ -446,6 +446,11 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
     /// record again and drop it if the quit does not happen. Nil when the park found no live coding agents
     /// (nothing was written), and for every other command.
     public let parkedRestoreGeneration: String?
+    /// The project `projectCreate` created, with its default workspace (created, not started) and whether
+    /// its configuration was imported from the repository's `spaces.yaml`. Nil for every other command.
+    public let project: TerminalServiceProfileProjectSummary?
+    public let defaultWorkspaceID: String?
+    public let spacesYAMLImported: Bool?
 
     public init(
         message: String, projects: [TerminalServiceProfileProjectSummary]? = nil, workspaces: [TerminalServiceProfileWorkspaceRecord]? = nil,
@@ -453,7 +458,8 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         terminalSession: TerminalServiceSessionSummary? = nil, terminalOutput: String? = nil, agentSessions: [TerminalServiceAgentSessionRow]? = nil,
         agentBrief: TerminalServiceAgentBriefResult? = nil, agentSpawn: TerminalServiceAgentSpawnResult? = nil, pendingAgentEvents: [String]? = nil,
         automations: [TerminalServiceAutomationSummary]? = nil, automationRuns: [TerminalServiceAutomationRunSummary]? = nil,
-        parkedRestoreGeneration: String? = nil
+        parkedRestoreGeneration: String? = nil, project: TerminalServiceProfileProjectSummary? = nil, defaultWorkspaceID: String? = nil,
+        spacesYAMLImported: Bool? = nil
     ) {
         self.message = message
         self.projects = projects
@@ -469,6 +475,9 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         self.automations = automations
         self.automationRuns = automationRuns
         self.parkedRestoreGeneration = parkedRestoreGeneration
+        self.project = project
+        self.defaultWorkspaceID = defaultWorkspaceID
+        self.spacesYAMLImported = spacesYAMLImported
     }
 
     /// Returns a copy with `pendingAgentEvents` attached, or `self` unchanged when there is nothing to
@@ -480,7 +489,8 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
             message: message, projects: projects, workspaces: workspaces, workspace: workspace, terminalSessions: terminalSessions,
             terminalSession: terminalSession, terminalOutput: terminalOutput, agentSessions: agentSessions, agentBrief: agentBrief,
             agentSpawn: agentSpawn, pendingAgentEvents: events, automations: automations, automationRuns: automationRuns,
-            parkedRestoreGeneration: parkedRestoreGeneration)
+            parkedRestoreGeneration: parkedRestoreGeneration, project: project, defaultWorkspaceID: defaultWorkspaceID,
+            spacesYAMLImported: spacesYAMLImported)
     }
 }
 
@@ -987,8 +997,19 @@ public final class TerminalServiceServer {
     /// main actor is never contended by a burst of concurrent session `.create`s (that congestion starves
     /// the foreground-detection reconciler and makes spawns miss their readiness budget). The accept
     /// source reads each request on `queue` and hands only the non-liveness ones here, keeping the accept
-    /// loop — and the ping fast path — free while a create runs.
+    /// loop — and the ping fast path — free while a create runs. Project creates are the one exception
+    /// (see `projectCreateQueue`), so `handleRequest` must tolerate a project create running beside it.
     private let workQueue = DispatchQueue(label: "spaces.terminal.service.work")
+    /// `.profileCommand(.projectCreate)` runs here instead of on `workQueue`. A create from a git URL clones
+    /// the whole repository before it answers, which can take minutes, and on `workQueue` every request
+    /// behind it would wait that long: agent hook signals (so agent rows go stale), every other CLI and MCP
+    /// call (which time out), and the Mac app's park before Stop All and Quit. Serial, so creates still run
+    /// one at a time among themselves. `stop()` drains neither queue, so a clone still running when the
+    /// daemon exits or execs in place is abandoned like any other in-flight request. Not serialized against
+    /// the Device API's `projectCloneQueue`, so the Mac app and the CLI creating the same git URL at the
+    /// same instant can race on its managed folders; accepted, since that takes two clients creating one
+    /// repository simultaneously.
+    private let projectCreateQueue = DispatchQueue(label: "spaces.terminal.service.project-create")
     private var acceptSource: DispatchSourceRead?
 
     public init(
@@ -1066,17 +1087,17 @@ public final class TerminalServiceServer {
                 return
             }
             // Accepted sockets must not survive an exec-in-place daemon handoff: a request queued on
-            // `workQueue` but not yet answered when the old image execs would otherwise leave its FD
-            // open in the new image, leaking it while the caller hangs to its full RPC timeout instead
-            // of seeing the connection reset. `accept4` with `SOCK_CLOEXEC` would set this atomically,
+            // `workQueue` or `projectCreateQueue` but not yet answered when the old image execs would
+            // otherwise leave its FD open in the new image, leaking it while the caller hangs to its full
+            // RPC timeout instead of seeing the connection reset. `accept4` with `SOCK_CLOEXEC` would set this atomically,
             // but it isn't portable to both of this file's targets (macOS/Linux), so it's set here instead.
             _ = fcntl(clientFD, F_SETFD, FD_CLOEXEC)
 
             // Read and decode on the accept queue (a request is small and sent in one go, so this stays
             // fast). A liveness ping is answered inline off the main actor; every other request is handed
-            // to the serial work queue so a slow `handleRequest` never blocks the accept loop or a
-            // following ping. Passing the Sendable closures by value keeps the non-Sendable server
-            // instance off the worker.
+            // to a serial worker queue (`projectCreateQueue` for a project create, `workQueue` for the
+            // rest) so a slow `handleRequest` never blocks the accept loop or a following ping. Passing the
+            // Sendable closures by value keeps the non-Sendable server instance off the worker.
             let request: TerminalServiceRequest
             do {
                 try Self.setBlocking(clientFD)
@@ -1092,7 +1113,9 @@ public final class TerminalServiceServer {
             }
 
             let handleRequest = handleRequest
-            workQueue.async {
+            let requestQueue: DispatchQueue
+            if case .profileCommand(.projectCreate) = request.command { requestQueue = projectCreateQueue } else { requestQueue = workQueue }
+            requestQueue.async {
                 let response: TerminalServiceResponse
                 do { response = try handleRequest(request) } catch { response = .init(ok: false, message: String(describing: error)) }
                 Self.respond(response, to: clientFD)

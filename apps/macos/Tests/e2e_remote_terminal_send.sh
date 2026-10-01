@@ -7,9 +7,8 @@
 #
 # Every terminal session is workspace-owned, so the session cannot be a standalone shell: the script
 # first creates a git project + default workspace on the remote daemon through the Device API
-# (`spacese2e mobile-request createProject`, the only project-creation surface — the shipped `spaces`
-# CLI has no project-add command), then creates the session with `spaces terminal create --workspace`
-# inside that workspace. The Device-API setup pairing (mobile-request) and the CLI link pairing are
+# (`spacese2e mobile-request createProject`, under the setup pairing), then creates the session with
+# `spaces terminal create --workspace` inside that workspace. The Device-API setup pairing (mobile-request) and the CLI link pairing are
 # two separate device registrations against the same daemon; send/tail is token-authorized without
 # owner gating, so the CLI-paired device drives the session the setup device created.
 set -euo pipefail

@@ -143,6 +143,20 @@ final class SpacesMCPStdioServer {
                 return .profile(try TerminalService.sendProfileCommand(.projectList))
             },
             MCPToolDescriptor(
+                name: "spaces_project_create",
+                description:
+                    "Register a Spaces project on this or a paired device from a folder (dir) or a git URL (gitURL); pass exactly one. A folder must be the root of a repository's main checkout (a subfolder or a worktree is refused, naming the project that already covers the repository or the root to add instead), or any folder outside git. A git URL is cloned by the target device's daemon, which can take minutes for a large repository. The repository's spaces.yaml is imported when present (spacesYAMLImported reports whether it was). Creating also creates the project's default workspace but does NOT start it: call spaces_workspace_start with defaultWorkspaceID to launch it. A folder or git URL that is already a project is refused with the existing project's name and ID; existing project IDs come from spaces_project_list.",
+                properties: [
+                    "dir": stringSchema(
+                        "Folder on the target device: an absolute path, or one starting with ~ (expanded against that device's home). Relative paths are refused."
+                    ), "gitURL": stringSchema("Git repository URL to clone."),
+                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
+                ], required: [], oneOf: [["required": ["dir"]], ["required": ["gitURL"]]]
+            ) { server, arguments in
+                let args = try decodeMCPArguments(ProjectCreateArguments.self, from: arguments)
+                return .profile(try createProject(args.source, device: server.resolvedDevice(args.device)).profileResponse)
+            },
+            MCPToolDescriptor(
                 name: "spaces_workspace_list", description: "List Spaces workspaces on this or a paired device.",
                 properties: [
                     "project": stringSchema("Project ID filter."), "device": stringSchema("Paired device name or ID. Defaults to this machine."),

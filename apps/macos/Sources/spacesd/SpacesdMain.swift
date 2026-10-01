@@ -214,6 +214,9 @@ enum SpacesDaemonProfileCommandRouting {
         case .automationCreate, .automationUpdate, .automationSetNextRun, .automationDelete, .automationList, .automationRunsList, .automationTrigger,
             .automationRunCancel, .automationEndAgents:
             true
+        // Engine-free, but a git URL create clones the whole repository before it answers, which can take
+        // minutes; on the main actor that would stall the daemon's terminal work for as long.
+        case .projectCreate: true
         // Engine-free: pure store/disk reads and metadata writes with no launcher/terminator reach.
         case .terminalTail, .projectList, .workspaceList, .workspaceCreate, .agentList, .agentBriefWrite, .agentBriefRead, .agentBriefClear,
             .agentSubscribe, .agentUnsubscribe, .agentConsumePendingEvents:
@@ -1088,8 +1091,9 @@ enum SpacesDaemonErrorClassification {
     /// work here on the transport thread and hop to the main actor only for the narrow sections that touch
     /// `sessionCores`/Ghostty. Every other command funnels through `handle` wholly on the main actor,
     /// exactly as before. Keeping the blocking classes off the main actor is what lets embedded terminals
-    /// keep ticking (the main actor pumps `ghostty_app_tick`) while a slow RPC is in flight. The serial
-    /// transport contract is unchanged — one RPC is processed at a time; this only moves where it blocks.
+    /// keep ticking (the main actor pumps `ghostty_app_tick`) while a slow RPC is in flight. The transport
+    /// processes one RPC at a time, except that a project create runs on its own queue beside the others
+    /// (see `projectCreateOffMain`); this only moves where each blocks.
     private nonisolated func dispatch(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
         switch request.command {
         case .runWorkspaceCommand(let payload): return runWorkspaceCommandOffMain(payload)
@@ -1150,6 +1154,7 @@ enum SpacesDaemonErrorClassification {
         case .profileCommand(.automationTrigger(let id)): return automationCommandOffMain(.automationTrigger(id: id))
         case .profileCommand(.automationRunCancel(let runID)): return automationCommandOffMain(.automationRunCancel(runID: runID))
         case .profileCommand(.automationEndAgents(let runID)): return automationCommandOffMain(.automationEndAgents(runID: runID))
+        case .profileCommand(.projectCreate(let source)): return projectCreateOffMain(source)
         // Every remaining profile command (listings, workspace/agent metadata, subscriptions) touches no
         // engine state, so it keeps running the *bulk* of its work on the main actor (through
         // `handleProfileCommand`/`runProfileCommand`, unchanged main-actor methods) — only the calling
@@ -1981,6 +1986,7 @@ enum SpacesDaemonErrorClassification {
         // switch for exhaustiveness and to fail loudly if that peeling ever regresses.
         case .terminalList: preconditionFailure("`.terminalList` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .terminalSend: preconditionFailure("`.terminalSend` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        case .projectCreate: preconditionFailure("`.projectCreate` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .terminalTail(let payload): return try tailProfileTerminalOutput(payload)
         case .projectList:
             let orchestrator = try makeProfileOrchestrator()
@@ -2299,6 +2305,35 @@ enum SpacesDaemonErrorClassification {
                 message: restartIfRunning ? "Workspace restarted." : "Workspace is running.",
                 workspace: profileWorkspaceRecord(workspace, projectKind: try profileWorkspaceProjectKind(workspace, orchestrator: orchestrator)))
             return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
+        } catch { return Self.failureResponse(error) }
+    }
+
+    /// RPC `.profileCommand(.projectCreate)` handler (`spaces project create`). It never replaces folders an
+    /// earlier import of the same git URL left behind: only the Mac app, which shows those folders and asks
+    /// first, sends a create that may.
+    ///
+    /// The transport runs this on its own queue beside every other request (see
+    /// `TerminalServiceServer.projectCreateQueue`), which is safe because it shares no state with them:
+    /// `makeProfileOrchestrator()` opens a store connection for this call alone, SQLite's busy timeout
+    /// serializes its writes against theirs, and the clone holds no transaction. The Device API runs the
+    /// same orchestrator create on its own clone lane beside its other lanes in the same way.
+    private nonisolated func projectCreateOffMain(_ source: TerminalServiceProjectCreateSource) -> TerminalServiceResponse {
+        if let rejection = livenessState.teardownRejection() { return rejection }
+        do {
+            let orchestrator = try makeProfileOrchestrator()
+            let created: CreatedProject
+            switch source {
+            case .dir(let dir): created = try orchestrator.createProject(dir: dir)
+            case .gitURL(let gitURL): created = try orchestrator.createProject(gitURL: gitURL, replaceExistingManagedDirectories: false)
+            }
+            let project = created.project
+            let defaultWorkspaceID = try orchestrator.store.workspaces(projectID: project.id).first(where: \.isDefault)?.id
+            let profile = TerminalServiceProfileCommandResponse(
+                message: "Created project '\(project.name)'.",
+                project: TerminalServiceProfileProjectSummary(
+                    id: project.id, name: project.name, dir: project.dir, isGitRepo: project.isGitRepo, defaultBranch: project.defaultBranch),
+                defaultWorkspaceID: defaultWorkspaceID, spacesYAMLImported: created.spacesYAMLImported)
+            return TerminalServiceResponse(ok: true, message: profile.message, profile: profile)
         } catch { return Self.failureResponse(error) }
     }
 

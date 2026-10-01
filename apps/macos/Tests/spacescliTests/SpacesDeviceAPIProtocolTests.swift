@@ -501,6 +501,29 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(decoded.gitProjectPreview, result)
     }
 
+    /// Only a client that showed the user the leftover folders sends a replacing create; a request that
+    /// omits the flag (an older script, or any client that never asked) refuses them.
+    func testProjectCreateReplacementFlagRoundTripsAndDefaultsToRefusing() throws {
+        let replacing = SpacesDeviceAPIRequest(
+            command: .createProject(.init(projectDir: nil, gitURL: "https://example.com/repo.git", replaceExistingManagedDirectories: true)),
+            authToken: "SECRET")
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(replacing)), replacing)
+
+        let omitted = try JSONDecoder().decode(SpacesDeviceProjectCreateRequest.self, from: Data(#"{"gitURL":"https://example.com/repo.git"}"#.utf8))
+        XCTAssertFalse(omitted.replaceExistingManagedDirectories)
+    }
+
+    func testCreateProjectMutationResultCarriesSpacesYAMLImport() throws {
+        let response = SpacesDeviceAPIResponse(
+            ok: true, message: "Created project 'app'.",
+            result: .mutation(SpacesDeviceMutationResult(projectID: "project-1", workspaceID: "workspace-1", spacesYAMLImported: true)))
+
+        let decoded = try JSONDecoder().decode(SpacesDeviceAPIResponse.self, from: JSONEncoder().encode(response))
+
+        XCTAssertEqual(decoded.spacesYAMLImported, true)
+        XCTAssertNil(SpacesDeviceAPIResponse(ok: true, message: "ok", result: .mutation(SpacesDeviceMutationResult())).spacesYAMLImported)
+    }
+
     func testAmbiguousRequestPayloadIsRejected() throws {
         let payload = #"{"command":{"overview":{},"ping":{}}}"#.data(using: .utf8)!
 

@@ -6,6 +6,7 @@ import spacesdeviceapi
 import spacesdevicecore
 import spacesterminalcore
 import spacesterminalghostty
+import spacestestsupport
 
 @testable import spacescli
 @testable import spacesclientcore
@@ -36,6 +37,143 @@ final class SpacesCommandTests: XCTestCase {
         let expected = "project-1\tname=Spaces\tdir=/repos/spaces"
         XCTAssertEqual(projectListRow(local), expected)
         XCTAssertEqual(projectListRow(remote), expected)
+    }
+
+    func testProjectCreateParsesExactlyOneSource() throws {
+        let fromDir = try ProjectCreateCommand.parse(["--dir", "/srv/app", "--device", "phone"])
+        XCTAssertEqual(fromDir.dir, "/srv/app")
+        XCTAssertEqual(fromDir.device, "phone")
+        XCTAssertEqual(try ProjectCreateCommand.parse(["--git-url", "https://example.com/repo.git"]).gitURL, "https://example.com/repo.git")
+
+        XCTAssertThrowsError(try ProjectCreateCommand.parse([]))
+        XCTAssertThrowsError(try ProjectCreateCommand.parse(["--dir", "app", "--git-url", "https://example.com/repo.git"]))
+        XCTAssertThrowsError(try ProjectCreateCommand.parse(["--dir", "  "]))
+    }
+
+    /// A paired device resolves `--dir` on its own machine, so a relative path is refused before anything
+    /// is sent; on this machine the CLI resolves it against the shell instead.
+    func testProjectCreateRefusesRelativeDirectoryOnlyWithDevice() throws {
+        XCTAssertThrowsError(try ProjectCreateCommand.parse(["--dir", "code/app", "--device", "phone"])) { error in
+            XCTAssertTrue(
+                ProjectCreateCommand.message(for: error).contains("--dir must be an absolute path or start with ~"),
+                ProjectCreateCommand.message(for: error))
+        }
+        XCTAssertNoThrow(try ProjectCreateCommand.parse(["--dir", "~/code/app", "--device", "phone"]))
+        XCTAssertNoThrow(try ProjectCreateCommand.parse(["--dir", "~", "--device", "phone"]))
+        XCTAssertNoThrow(try ProjectCreateCommand.parse(["--dir", "code/app"]))
+    }
+
+    func testLocalProjectDirectoryResolvesRelativePathsAgainstTheShell() {
+        XCTAssertEqual(localProjectDirectory("app", currentDirectory: "/Users/person/code"), "/Users/person/code/app")
+        XCTAssertEqual(localProjectDirectory("../other/./app", currentDirectory: "/Users/person/code"), "/Users/person/other/app")
+        XCTAssertEqual(localProjectDirectory(".", currentDirectory: "/Users/person/code"), "/Users/person/code")
+        // Absolute and home-relative paths go to the daemon as typed; the daemon expands `~` itself.
+        XCTAssertEqual(localProjectDirectory("/srv/app", currentDirectory: "/Users/person/code"), "/srv/app")
+        XCTAssertEqual(localProjectDirectory("~", currentDirectory: "/Users/person/code"), "~")
+        XCTAssertEqual(localProjectDirectory("~/app", currentDirectory: "/Users/person/code"), "~/app")
+        XCTAssertEqual(localProjectDirectory("~person/app", currentDirectory: "/tmp"), "/tmp/~person/app")
+    }
+
+    func testMCPProjectCreateArgumentsRequireOneSourceAndAnAbsoluteDirectory() throws {
+        XCTAssertEqual(try decodeMCPArguments(ProjectCreateArguments.self, from: ["dir": "/srv/app"]).source, .dir("/srv/app"))
+        XCTAssertEqual(try decodeMCPArguments(ProjectCreateArguments.self, from: ["dir": "~/app", "device": "phone"]).source, .dir("~/app"))
+        XCTAssertEqual(
+            try decodeMCPArguments(ProjectCreateArguments.self, from: ["gitURL": "https://example.com/repo.git"]).source,
+            .gitURL("https://example.com/repo.git"))
+
+        for relative in ["app", "./app", "~person/app"] {
+            XCTAssertThrowsError(try decodeMCPArguments(ProjectCreateArguments.self, from: ["dir": relative])) { error in
+                XCTAssertTrue(error.localizedDescription.hasPrefix("dir must be an absolute path or start with ~"), error.localizedDescription)
+            }
+        }
+        XCTAssertThrowsError(try decodeMCPArguments(ProjectCreateArguments.self, from: [:])) { error in
+            XCTAssertEqual(error.localizedDescription, "Provide exactly one of dir or gitURL.")
+        }
+        XCTAssertThrowsError(try decodeMCPArguments(ProjectCreateArguments.self, from: ["dir": "/srv/app", "gitURL": "https://example.com/r.git"]))
+    }
+
+    /// The local daemon's profile response and a paired device's mutation response produce the same row
+    /// and the same MCP JSON, so a caller cannot tell the paths apart by shape.
+    func testCreatedProjectReportIsIdenticalFromTheLocalDaemonAndAPairedDevice() throws {
+        let summary = TerminalServiceProfileProjectSummary(id: "project-1", name: "app", dir: "/srv/app", isGitRepo: true, defaultBranch: "main")
+        let local = try CreatedProjectReport(
+            profileResponse: TerminalServiceProfileCommandResponse(
+                message: "Created project 'app'.", project: summary, defaultWorkspaceID: "workspace-1", spacesYAMLImported: true))
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [
+                SpacesDeviceProjectSummary(id: "project-0", name: "other", dir: "/srv/other", isGitRepo: false, defaultBranch: nil),
+                SpacesDeviceProjectSummary(id: "project-1", name: "app", dir: "/srv/app", isGitRepo: true, defaultBranch: "main"),
+            ], workspaces: [], sessions: [])
+        let remote = try CreatedProjectReport(
+            deviceResponse: SpacesDeviceAPIResponse(
+                ok: true, message: "Created project 'app'.",
+                result: .mutation(
+                    SpacesDeviceMutationResult(overview: overview, projectID: "project-1", workspaceID: "workspace-1", spacesYAMLImported: true))))
+
+        XCTAssertEqual(local, remote)
+        XCTAssertEqual(local.row, "Created project project-1\tname=app\tdir=/srv/app\tworkspace=workspace-1\tspaces.yaml=imported")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: encoder.encode(remote.profileResponse)) as? [String: Any])
+        XCTAssertEqual(Set(json.keys), ["message", "project", "defaultWorkspaceID", "spacesYAMLImported"])
+        XCTAssertEqual(try encoder.encode(local.profileResponse), try encoder.encode(remote.profileResponse))
+
+        let plain = CreatedProjectReport(
+            message: "Created project 'app'.", project: summary, defaultWorkspaceID: "workspace-1", spacesYAMLImported: false)
+        XCTAssertTrue(plain.row.hasSuffix("\tspaces.yaml=none"))
+        XCTAssertThrowsError(try CreatedProjectReport(profileResponse: TerminalServiceProfileCommandResponse(message: "Created project 'app'.")))
+    }
+
+    /// A paired device on another wire protocol would read the create under a different contract, so the
+    /// create is refused from its status alone and never sent.
+    func testPairedDeviceProjectCreateIsRefusedBeforeSendingWhenTheDaemonSpeaksAnotherProtocol() {
+        for (protocolVersion, remedy) in [
+            (SpacesWireProtocol.version - 1, "update Spaces there"), (SpacesWireProtocol.version + 1, "update this app"),
+        ] {
+            var sentCreates = 0
+            XCTAssertThrowsError(
+                try createProject(
+                    .gitURL("https://example.com/repo.git"), onDeviceNamed: "build-box",
+                    daemonStatus: { Self.daemonStatus(protocolVersion: protocolVersion) },
+                    create: { _, _ in
+                        sentCreates += 1
+                        return SpacesDeviceAPIResponse(ok: true, message: "Created project 'repo'.")
+                    })
+            ) { error in
+                let message = (error as? LocalizedError)?.errorDescription ?? ""
+                XCTAssertTrue(error is DeviceWireIncompatibleError, "\(error)")
+                XCTAssertTrue(message.contains("build-box"), message)
+                XCTAssertTrue(message.contains(remedy), message)
+            }
+            XCTAssertEqual(sentCreates, 0)
+        }
+    }
+
+    func testPairedDeviceProjectCreateIsSentWhenTheDaemonSpeaksThisProtocol() throws {
+        var sent: [(projectDir: String?, gitURL: String?)] = []
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "app", dir: "/srv/app", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [], sessions: [])
+
+        let report = try createProject(
+            .dir("/srv/app"), onDeviceNamed: "build-box", daemonStatus: { Self.daemonStatus(protocolVersion: SpacesWireProtocol.version) },
+            create: { projectDir, gitURL in
+                sent.append((projectDir, gitURL))
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Created project 'app'.",
+                    result: .mutation(
+                        SpacesDeviceMutationResult(overview: overview, projectID: "project-1", workspaceID: "workspace-1", spacesYAMLImported: false))
+                )
+            })
+
+        XCTAssertEqual(sent.map(\.projectDir), ["/srv/app"])
+        XCTAssertEqual(sent.map(\.gitURL), [nil])
+        XCTAssertEqual(report.row, "Created project project-1\tname=app\tdir=/srv/app\tworkspace=workspace-1\tspaces.yaml=none")
+    }
+
+    private static func daemonStatus(protocolVersion: Int) -> TerminalServiceDaemonStatus {
+        TerminalServiceDaemonStatus(
+            version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: protocolVersion)
     }
 
     func testWorkspaceListRowRendersColumnsFromLocalAndDeviceSummaries() {
@@ -536,10 +674,10 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(
             names,
             [
-                "spaces_project_list", "spaces_workspace_list", "spaces_workspace_create", "spaces_workspace_start", "spaces_workspace_restart",
-                "spaces_terminal_list", "spaces_terminal_tail", "spaces_terminal_send", "spaces_agent_list", "spaces_agent_status",
-                "spaces_agent_brief_write", "spaces_agent_brief_read", "spaces_agent_brief_clear", "spaces_agent_spawn", "spaces_agent_kill",
-                "spaces_agent_subscribe", "spaces_agent_unsubscribe", "spaces_device_list",
+                "spaces_project_list", "spaces_project_create", "spaces_workspace_list", "spaces_workspace_create", "spaces_workspace_start",
+                "spaces_workspace_restart", "spaces_terminal_list", "spaces_terminal_tail", "spaces_terminal_send", "spaces_agent_list",
+                "spaces_agent_status", "spaces_agent_brief_write", "spaces_agent_brief_read", "spaces_agent_brief_clear", "spaces_agent_spawn",
+                "spaces_agent_kill", "spaces_agent_subscribe", "spaces_agent_unsubscribe", "spaces_device_list",
             ])
         // `agent signal` is CLI-only forever: an orchestrating agent may read peers' status but must not forge it.
         XCTAssertFalse(names.contains("spaces_agent_signal"))
@@ -565,12 +703,16 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertNotNil(sendProperties["submit"])
         XCTAssertEqual(sendSchema["oneOf"] as? [[String: [String]]], [["required": ["text"]], ["required": ["bytes"]]])
 
+        let projectCreateTool = try XCTUnwrap(tools.first { ($0["name"] as? String) == "spaces_project_create" })
+        let projectCreateSchema = try XCTUnwrap(projectCreateTool["inputSchema"] as? [String: Any])
+        XCTAssertEqual(projectCreateSchema["oneOf"] as? [[String: [String]]], [["required": ["dir"]], ["required": ["gitURL"]]])
+
         // Pins every remaining tool's `required` set against the Codable argument structs in
         // SpacesMCPServerArguments.swift: each struct's non-optional fields must exactly match what its
         // descriptor advertises, so a struct that silently drops or adds a required field is caught here
         // rather than only surfacing as a client-visible schema/decoding mismatch.
         let expectedRequired: [String: [String]] = [
-            "spaces_project_list": [], "spaces_workspace_list": [], "spaces_workspace_start": ["workspace"],
+            "spaces_project_list": [], "spaces_project_create": [], "spaces_workspace_list": [], "spaces_workspace_start": ["workspace"],
             "spaces_workspace_restart": ["workspace"], "spaces_terminal_list": [], "spaces_agent_list": [], "spaces_agent_status": [],
             "spaces_agent_brief_write": ["markdown"], "spaces_agent_brief_read": [], "spaces_agent_brief_clear": [],
             "spaces_agent_spawn": ["command"], "spaces_agent_kill": ["session"], "spaces_agent_subscribe": ["session"],

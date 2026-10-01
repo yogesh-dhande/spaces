@@ -39,6 +39,13 @@ import XCTest
             }
         }
 
+        /// A project create touches no engine state, but a git URL create clones the repository before it
+        /// answers, so both sources run off the main actor rather than holding it for the clone.
+        func testProjectCreateRunsOffMain() {
+            XCTAssertTrue(SpacesDaemonProfileCommandRouting.requiresOffMainExecution(.projectCreate(.gitURL("https://example.com/repo.git"))))
+            XCTAssertTrue(SpacesDaemonProfileCommandRouting.requiresOffMainExecution(.projectCreate(.dir("/tmp/project"))))
+        }
+
         /// Every engine-free command (pure store/disk reads and metadata writes) keeps running its bulk on
         /// the main actor through the `profileCommandOffMain` bridge.
         func testEngineFreeCommandsRunOnMain() {

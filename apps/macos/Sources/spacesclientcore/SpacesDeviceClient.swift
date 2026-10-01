@@ -500,9 +500,19 @@ public enum SpacesDeviceClient {
         return response.directorySuggestions?.paths ?? []
     }
 
-    public static func createProject(projectDir: String?, gitURL: String?, config: SpacesDeviceProjectConfig? = nil, context: DeviceRequestContext)
-        throws -> SpacesDeviceAPIResponse
-    { try request(.init(command: .createProject(.init(projectDir: projectDir, gitURL: gitURL, config: config))), context: context) }
+    /// `replaceExistingManagedDirectories` is true only when the user confirmed, at the git preview,
+    /// replacing the folders an earlier import of the same repository left behind.
+    public static func createProject(
+        projectDir: String?, gitURL: String?, config: SpacesDeviceProjectConfig?, replaceExistingManagedDirectories: Bool,
+        context: DeviceRequestContext
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(
+                command: .createProject(
+                    .init(
+                        projectDir: projectDir, gitURL: gitURL, config: config, replaceExistingManagedDirectories: replaceExistingManagedDirectories))
+            ), context: context)
+    }
 
     /// Loads a git repository's `spaces.yaml` (single file, no clone) to populate the add-project form,
     /// along with any managed directories a later Create would replace. The full clone happens at Create.
