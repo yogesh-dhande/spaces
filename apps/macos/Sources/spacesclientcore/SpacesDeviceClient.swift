@@ -342,6 +342,18 @@ public enum SpacesDeviceClient {
         return payload
     }
 
+    /// Records `kind`'s own trust in the Spaces hooks installed on `context`'s device (local or remote),
+    /// through the agent itself. Returns fresh status for every supported agent; the agent's reason for
+    /// not recording the trust comes back as `kind`'s failure entry. Throws only when the request itself
+    /// fails.
+    @discardableResult public static func trustAgentHooks(_ kind: CodingAgent, context: DeviceRequestContext) throws -> AgentHookInstallOutcome {
+        let response = try request(.init(command: .trustAgentHooks(.init(kind: kind))), context: context)
+        guard let payload = response.agentHooksInstall else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
+        return payload
+    }
+
     /// Refreshes a device, reading its compatibility verdict from the overview's inline frozen-core
     /// status so the common compatible case costs a single round-trip. The standalone `daemonStatus`
     /// handshake is issued only as a fallback when the overview itself fails to decode — a

@@ -63,8 +63,8 @@ enum AgentHookJSONWriter {
 
         // Strip every Spaces-owned entry from all events first, so a reinstall with a changed event set
         // leaves no stale entries behind. Each one leaves a placeholder at the coordinate it held rather
-        // than closing the array up: Codex identifies a hook by its group index and its index inside
-        // that group (`AgentHookCodexTrustState`), so putting the replacement back at both is what keeps
+        // than closing the array up: Codex keys a hook's trust and its switch-off by the hook's group
+        // index and its index inside that group, so putting the replacement back at both is what keeps
         // the rewrite from renumbering the user's own hooks and sending them back through review.
         var strippedEvents: [String: [StrippedGroup]] = [:]
         for (eventName, value) in hooks {

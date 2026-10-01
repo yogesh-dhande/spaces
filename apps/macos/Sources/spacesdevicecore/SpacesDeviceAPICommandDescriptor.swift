@@ -44,10 +44,10 @@ public struct SpacesDeviceAPICommandDescriptor: Sendable, Equatable {
     /// `SpacesDeviceAPICommand.CodingKeys`). Populated with the auto-derived raw string for each case
     /// (the case name); `init(from:)`/`encode(to:)` are unchanged by this descriptor.
     public let wireKey: String
-    /// Which serial lane the device-API server routes this command's handling to. The two agent-hook
-    /// commands (`.agentHooksStatus`, `.installAgentHooks`) are exactly the `.agentHook` lane; a
-    /// caller that needs to gate on "is this an agent-hook command" checks `lane == .agentHook` rather
-    /// than a separate flag.
+    /// Which serial lane the device-API server routes this command's handling to. The agent-hook
+    /// commands (`.agentHooksStatus`, `.installAgentHooks`, `.trustAgentHooks`) are exactly the
+    /// `.agentHook` lane; a caller that needs to gate on "is this an agent-hook command" checks
+    /// `lane == .agentHook` rather than a separate flag.
     public let lane: SpacesDeviceAPICommandLane
     /// The deadline every client uses when sending this command. Pinned per case, except
     /// `.terminalTranscript`, whose response size the request itself picks and whose deadline is therefore
@@ -83,8 +83,9 @@ extension SpacesDeviceAPICommand {
     /// long, including the CLI's local profile command for the same create (public for that reason).
     /// The git preview stays on the long-running deadline: it fetches one file, not the repository.
     public static let projectCreateTimeoutSeconds: TimeInterval = 600
-    /// `.agentHooksStatus` probes every configured coding agent's shell/config state, which can take
-    /// longer than the default deadline but far less than a long-running mutation.
+    /// `.agentHooksStatus` probes every configured coding agent's shell/config state, and asks Codex for
+    /// its hook trust, each bounded at a few seconds, which together can take longer than the default
+    /// deadline but far less than a long-running mutation.
     private static let agentHooksStatusRequestTimeoutSeconds: TimeInterval = 20
     /// A response carrying a large embedded payload (a workspace file read/write, or one bounded
     /// workspace-diff patch range) needs more than the default timeout on slow remote links. A transcript
@@ -169,6 +170,8 @@ extension SpacesDeviceAPICommand {
             return Self.descriptor(wireKey: "agentHooksStatus", lane: .agentHook, timeoutSeconds: Self.agentHooksStatusRequestTimeoutSeconds)
         case .installAgentHooks:
             return Self.descriptor(wireKey: "installAgentHooks", lane: .agentHook, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
+        case .trustAgentHooks:
+            return Self.descriptor(wireKey: "trustAgentHooks", lane: .agentHook, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .spawnAgentSession:
             return Self.descriptor(wireKey: "spawnAgentSession", lane: .mainQueue, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .killAgentSession:

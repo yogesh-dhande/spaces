@@ -87,49 +87,40 @@ extension CodingAgent {
             let hooksFileURL = codexDir.appendingPathComponent("hooks.json")
             try AgentHookJSONWriter.install(
                 fileURL: hooksFileURL, bindings: jsonEventBindings, spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
-            // The clear runs after the toggle, because the Codex CLI rewrites `config.toml` on its way
-            // through, and it runs whether or not the toggle succeeds: the entries are already on disk
-            // by this point, so their trust records describe text that no longer exists. Leaving them
-            // behind after a failed toggle is what would let a later read report `current` for hooks
-            // Codex will not run, so the toggle's error is held and rethrown after the clear.
-            let toggle = Result { try AgentHookCodexFeatureToggle.ensureEnabled(executablePath: agentExecutablePath, codexHome: codexDir) }
-            try AgentHookCodexTrustState.clearTrustRecords(
-                hooksFileURL: hooksFileURL, configURL: codexDir.appendingPathComponent("config.toml"), fileManager: fileManager)
-            try toggle.get()
+            // Codex's records of the entries (`[hooks.state."<key>"]` in `config.toml`) are left as they
+            // are. Codex compares a record's `trusted_hash` with the entry's current text, so an entry the
+            // rewrite changed already reads untrusted and is asked about again, while one written back
+            // unchanged at the same coordinate keeps its trust. The same record holds the user's
+            // `enabled = false`, which has to outlast a Spaces update that changes the hook.
+            try AgentHookCodexFeatureToggle.ensureEnabled(executablePath: agentExecutablePath, codexHome: codexDir)
         case .opencode:
             try AgentHookOpencodePluginWriter.install(
                 pluginURL: opencodePluginURL(home: home), spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
         }
     }
 
-    func installState(home: URL, fileManager: FileManager, agentExecutablePath: String?) -> AgentHookInstallState {
+    /// How completely the agent's own config files carry the hooks this build writes.
+    ///
+    /// For Codex this covers the hooks file and the `hooks` feature flag only, and its `current` means
+    /// "ready to be trusted": whether Codex has trusted the entries, or the user switched them off, is
+    /// Codex's to say and is read through `AgentHookCodexTrust` once this reports `current`. The states
+    /// are ordered by what fixes them. Entries an older Spaces wrote, or the feature flag being off, are
+    /// `.outdated` because reinstalling fixes both, and reinstalling first is what makes the trust
+    /// question worth asking, since it is the entries this build writes that the user is asked to trust.
+    func configState(home: URL, fileManager: FileManager, agentExecutablePath: String?) -> AgentHookInstallState {
         switch self {
         case .claudeCode:
             return AgentHookJSONWriter.installState(
                 fileURL: configDirectoryURL(home: home).appendingPathComponent("settings.json"), bindings: jsonEventBindings, fileManager: fileManager
             )
         case .codex:
-            // Codex needs three things to run a Spaces hook: the hook entries, `features.hooks = true`,
-            // and its own record that the user reviewed and trusted those entries. The states are
-            // ordered by what fixes them. Entries an older Spaces wrote, or the feature flag being off,
-            // are `.outdated` because reinstalling fixes both, and reinstalling first is what makes the
-            // trust question worth asking, since it is the entries this build writes that the user is
-            // being asked to trust. Past that, Codex's own record decides: entries it was told to stop
-            // running are `.disabledByAgent` and entries it has never been asked about are
-            // `.awaitingTrust`. Both exist and cannot fire, and each sends the user somewhere
-            // different inside Codex, which is why they are not one state.
             let codexDir = configDirectoryURL(home: home)
-            let hooksFileURL = codexDir.appendingPathComponent("hooks.json")
-            let json = AgentHookJSONWriter.installState(fileURL: hooksFileURL, bindings: jsonEventBindings, fileManager: fileManager)
+            let json = AgentHookJSONWriter.installState(
+                fileURL: codexDir.appendingPathComponent("hooks.json"), bindings: jsonEventBindings, fileManager: fileManager)
             guard json != .notInstalled else { return .notInstalled }
             guard let agentExecutablePath else { return .outdated }
             let enabled = AgentHookCodexFeatureToggle.isEnabled(executablePath: agentExecutablePath, codexHome: codexDir)
-            guard json == .current, enabled else { return .outdated }
-            switch AgentHookCodexTrustState.verdict(hooksFileURL: hooksFileURL, configURL: codexDir.appendingPathComponent("config.toml")) {
-            case .trusted: return .current
-            case .switchedOff: return .disabledByAgent
-            case .awaitingReview: return .awaitingTrust
-            }
+            return json == .current && enabled ? .current : .outdated
         case .opencode: return AgentHookOpencodePluginWriter.installState(pluginURL: opencodePluginURL(home: home), fileManager: fileManager)
         }
     }
