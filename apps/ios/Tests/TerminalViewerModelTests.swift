@@ -10230,6 +10230,10 @@
             let prefetch = try XCTUnwrap(pageReads.first)
             XCTAssertEqual(prefetch.maxBytes, TerminalScrollbackBudget.initialLocalScrollbackPageBytes)
             XCTAssertNil(prefetch.fromByteOffset, "the first read is a suffix of the transcript, not a continuation of anything")
+            // The count above only proves the prefetch's request went out; wait for its verdict to be
+            // applied before the gesture below, or the flick's deltas park on the still-loading read and
+            // the assertion right after it races the install instead of observing it.
+            await model.awaitLocalScrollbackLoadForTesting()
 
             model.noteScrollGestureBegan()
             model.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil)
@@ -10254,6 +10258,11 @@
                 settings: settings(), session: session(), recorder: recorder, transcript: transcript)
             defer { model.stop() }
             await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+            // The count above only proves the prefetch's request went out; `noteScrollGestureBegan` below
+            // only starts a continuation read from `.ready`, so the prefetch's verdict has to be applied
+            // first or the gesture finds the load still in flight, returns without starting one, and the
+            // wait below times out instead of observing the continuation it is named for.
+            await model.awaitLocalScrollbackLoadForTesting()
 
             await transcript.append(Self.numberedTranscript(lineCount: 20, startingAt: 400))
             _ = await model.applyLatestState(
