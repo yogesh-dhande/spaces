@@ -21,6 +21,7 @@
 
 ## Coding Guidelines
 - When planning a new feature (whether or not in plan mode), ask me lots of questions until we align on intent, design, UX, and implementation. Ask me questions to help me figure out my unknowns and better think through the feature, its intent, scope, and desired outcome. Don't present a plan until I explicitly ask you to.
+- Always put open questions for me in the Spaces agent brief (`spaces_agent_brief_write`) as well as asking them in the conversation, and keep each one there until I answer it. When the material a question depends on is too large for the brief (a draft, a mockup, a diff, a review triage table), write it to a file and link the file's path or URL from the question.
 - For all coding tasks use your judgement to decide an appropriate lower power model and run that in a subagent.
 - Subagents write code; `scripts/verify.sh`, E2E runs, and codex reviews run from the main agent, since a background subagent gets killed partway through a long run.
 - When user instruction contradicts previous instructions or documentation, explicitly ask for clarification before proceeding.
@@ -45,8 +46,8 @@
 - The established gate before committing is `scripts/verify.sh` (build, lint, and tests). Either run `scripts/verify.sh` yourself and let it pass, or let the pre-commit hook run it. Do not `git commit --no-verify` unless `scripts/verify.sh` has already passed for the same change; `--no-verify` only skips the redundant re-run, it does not skip the gate. You can skip the gate if making only documentation or website changes.
 
 - Long runs (`scripts/verify.sh`, the pre-commit hook under `git commit`, codex reviews) can outlast a foreground tool call. Run them as a detached background job and watch its log until it finishes.
-- Before each commit, use codex cli with gpt-5.6-sol model (high effort) to run a review of the uncommitted changes.
-- Before finalizing a PR, run the affected e2e tests, commit, then use codex cli with gpt-5.6-sol model (high effort) to run a review against the target branch (e.g. main if branched off from main). This against-target review is needed only when finalizing a PR, not after every commit.
+- Before each commit, use codex cli with the latest gpt sol model at high effort (`gpt-6.1-sol` as of October 2026; switch when a newer sol model is released) to run a review of the uncommitted changes.
+- Before finalizing a PR, run the affected e2e tests, commit, then use codex cli with the same latest gpt sol model at high effort to run a review against the target branch (e.g. main if branched off from main). This against-target review is needed only when finalizing a PR, not after every commit.
 - When presented with review findings, create a table with estimates for probability of each bug occurring (1:10, 1:1000 etc), impact (scale of 1 to 10, 10 be worst), effort to write a failing test (high, medium, low) with reason (architecture vs narrow/rare edge case hard to codify), and recommendation for whether it is worth addressing the review based on the probability, impact, and complexity of the fix. 
     - Automatically fix any issues that are expected at reasonable frequency and have medium/high impact or anything that is a trivial correctness fix. 
     - Any issues that do not need to be fixed as they are irrelevant for the product UX (if unclear, ask me questions and wait for my input) can be documented as accepted behavior/risk to avoid surfacing the issue again. Once fixed and committed, rerun the review cycle and loop until no high impact issues remain.
