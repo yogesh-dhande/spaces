@@ -33,7 +33,13 @@ npm run lint
 
 ## Rules
 
-- The site stays fully static: no server routes and no runtime data fetching. Use a client component only where a page needs interaction, such as a copy button.
+- The site stays a fully static export: no server routes, and no runtime data fetching for page content. The only client-side network traffic is analytics (see below). Use a client component only where a page needs interaction, such as a copy button.
 - Copy is user-facing: describe what people can do, not how Spaces is built.
+
+## Analytics
+
+`app/components/site-analytics.tsx` runs PostHog in cookieless mode, rendered once from the root layout. It records pageviews and a `download_clicked` event; autocapture, session recording and everything else are off. Browsers that send Do Not Track or Global Privacy Control are not tracked at all.
+
+Every Download link carries `data-download-placement="<placement>"`, which is what `download_clicked` reads. New Download links need the attribute. The privacy page at `app/privacy/page.tsx` describes what is recorded and must change with it.
 
 Deploys and previews run from GitHub Actions; see "Website" and "Website Deploy" in [`docs/dev.md`](../../docs/dev.md).

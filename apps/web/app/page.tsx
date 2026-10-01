@@ -71,6 +71,7 @@ export default function HomePage() {
             <div className="mt-8 flex flex-wrap items-center gap-3">
               <PrimaryButton
                 href={githubReleasesURL}
+                data-download-placement="hero"
                 target="_blank"
                 rel="noopener noreferrer"
               >
@@ -523,6 +524,7 @@ export default function HomePage() {
           <div className="mt-8 flex flex-wrap gap-3">
             <PrimaryButton
               href={githubReleasesURL}
+              data-download-placement="bottom_cta"
               target="_blank"
               rel="noopener noreferrer"
             >

@@ -1,10 +1,10 @@
 import Image from "next/image";
 import Link from "next/link";
 import SpacesLogo from "../spaces.svg";
+import { githubReleasesURL } from "../content";
 import { PrimaryButton } from "./primary-button";
 
 const githubRepoURL = "https://github.com/yogesh-dhande/spaces";
-const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
 
 const navItems = [
   { href: "/#features", label: "Features" },
@@ -49,6 +49,7 @@ export function SiteHeader() {
           </a>
           <PrimaryButton
             href={githubReleasesURL}
+            data-download-placement="header"
             target="_blank"
             rel="noopener noreferrer"
             size="sm"
