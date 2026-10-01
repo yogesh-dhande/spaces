@@ -92,18 +92,17 @@ export default function PrivacyPolicyPage() {
               usespaces.dev uses PostHog, a product analytics service, to count visits, so the
               developer can see which pages and links bring people to Spaces. It records the pages
               you view, the site that sent you, campaign tags and ad click IDs in the link (such as
-              utm_source or gclid), which Download link you clicked, your browser and device type,
-              and an approximate location derived from your IP address. PostHog does not store the
-              IP address itself.
+              utm_source or gclid), which Download link you clicked, and your browser and device
+              type. It does not record your IP address or your location.
             </p>
             <p className="mt-3 text-sm leading-7 text-foreground-soft">
               The site sets no cookies and stores nothing in your browser. PostHog tells visits
-              apart with a hash that changes every day, so visits on different days cannot be
-              linked to each other. There is no session recording, no click tracking beyond the
-              Download links, and nothing you type is recorded. If your browser sends Do Not Track
-              or Global Privacy Control, the site does not load PostHog at all, and blocking it
-              with a content blocker does not change how the site works. PostHog processes this
-              data in the United States.
+              apart with a hash of your IP address and browser that changes every day, so visits
+              on different days cannot be linked to each other. There is no session recording, no
+              click tracking beyond the Download links, and nothing you type is recorded. If your
+              browser sends Do Not Track or Global Privacy Control, the site does not load PostHog
+              at all, and blocking it with a content blocker does not change how the site works.
+              PostHog processes this data in the United States.
             </p>
             <p className="mt-3 text-sm leading-7 text-foreground-soft">
               None of this applies to the Spaces apps or the daemon.
