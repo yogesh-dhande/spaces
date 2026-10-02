@@ -94,6 +94,50 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(branch, "remote-feature")
     }
 
+    /// A remote that accepts the connection but never answers must fail the create with a timeout error
+    /// rather than hold it (and the daemon request carrying it) forever.
+    func testCreateWorktreeFailsWithTimeoutWhenFetchFromRemoteNeverAnswers() throws {
+        let fixture = try makeRemoteFixture()
+        // Only on the remote, with no remote-tracking ref in the clone, so the create has to fetch.
+        try runGit(["checkout", "-b", "new-remote-only"], cwd: fixture.source.path)
+        try "new remote".write(to: fixture.source.appending(path: "NEW_REMOTE.md"), atomically: true, encoding: .utf8)
+        try runGit(["add", "NEW_REMOTE.md"], cwd: fixture.source.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "new remote"], cwd: fixture.source.path)
+        try runGit(["push", fixture.remote.path, "new-remote-only"], cwd: fixture.source.path)
+        let script = try makeTempDirectory().appendingPathComponent("git")
+        try """
+        #!/bin/sh
+        case " $* " in *" fetch "*) exec sleep 30;; esac
+        exec /usr/bin/git "$@"
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        let client = GitClient(gitExecutable: script.path, metadataCommandTimeout: 30, networkCommandTimeout: 0.3)
+
+        let worktree = fixture.root.appendingPathComponent("hung-fetch-worktree", isDirectory: true)
+        XCTAssertThrowsError(try client.createWorktree(path: fixture.clone.path, worktreePath: worktree.path, branch: "new-remote-only")) { error in
+            guard case WorkspaceError.gitCommandTimedOut = error else { return XCTFail("Expected gitCommandTimedOut, got \(error)") }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktree.path))
+    }
+
+    /// A clone from a remote that never answers fails with a timeout so a hung project create frees its lane.
+    func testCloneFailsWithTimeoutWhenRemoteNeverAnswers() throws {
+        let script = try makeTempDirectory().appendingPathComponent("git")
+        try """
+        #!/bin/sh
+        exec sleep 30
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        let client = GitClient(gitExecutable: script.path, networkCommandTimeout: 0.3)
+
+        let destination = try makeTempDirectory().appendingPathComponent("clone")
+        for bare in [false, true] {
+            XCTAssertThrowsError(try client.clone(url: "https://example.invalid/repo.git", destination: destination.path, bare: bare)) { error in
+                guard case WorkspaceError.gitCommandTimedOut = error else { return XCTFail("Expected gitCommandTimedOut, got \(error)") }
+            }
+        }
+    }
+
     func testCreateWorktreeWhenBranchExistsOnlyOnRemoteWithoutLocalTrackingRef() throws {
         let fixture = try makeRemoteFixture()
         try runGit(["checkout", "-b", "new-remote-only"], cwd: fixture.source.path)
