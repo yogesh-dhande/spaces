@@ -5770,7 +5770,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// needs nothing from the daemon, so an unreachable device leaves it as it is.
     static func makeWorkspaceOverflowMenu(
         workspaceID: String, path: String, target: AnyObject?, isLocalDevice: Bool, daemonActionsEnabled: Bool, isHomeWorkspace: Bool,
-        briefToggle: AgentBriefToggleState
+        briefToggle: AgentBriefToggleState, briefShortcut: HotkeySpec?
     ) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -5789,9 +5789,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             menu.addItem(item)
         }
 
+        // The item shows the configured brief chord; a key with no single-character menu form (an arrow,
+        // say) is shown without one and still works through the key monitor.
+        let briefKeyEquivalent = briefShortcut?.menuKeyEquivalent
         addItem(
             title: briefToggle.toggleTitle, symbol: "doc.text", action: #selector(AppKitController.toggleWorkspaceFocusedPaneBrief(_:)),
-            keyEquivalent: "b", modifiers: [.command, .option], identifier: workspaceID, isEnabled: briefToggle != .unavailable)
+            keyEquivalent: briefKeyEquivalent?.key ?? "", modifiers: briefKeyEquivalent?.modifiers ?? [], identifier: workspaceID,
+            isEnabled: briefToggle != .unavailable)
         menu.addItem(.separator())
         addItem(
             title: "Copy path", symbol: "doc.on.doc", action: #selector(AppKitController.copyDirectoryPath(_:)), keyEquivalent: "", modifiers: [],
@@ -5819,7 +5823,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let menu = Self.makeWorkspaceOverflowMenu(
             workspaceID: workspaceID, path: workspace.dir, target: self, isLocalDevice: isLocalWorkspace(workspace),
             daemonActionsEnabled: deviceAcceptsDaemonActions(forWorkspaceID: workspaceID), isHomeWorkspace: workspace.projectKind == .home,
-            briefToggle: focusedPaneBriefToggleState(workspaceID: workspaceID))
+            briefToggle: focusedPaneBriefToggleState(workspaceID: workspaceID), briefShortcut: shortcuts.toggleBriefShortcutSpec)
         let origin = NSPoint(x: 0, y: sender.bounds.maxY + 4)
         menu.popUp(positioning: nil, at: origin, in: sender)
     }

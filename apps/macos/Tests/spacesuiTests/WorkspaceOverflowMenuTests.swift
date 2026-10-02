@@ -2,12 +2,15 @@ import AppKit
 import Testing
 
 @testable import spacesui
+@testable import workspacecore
 
 @MainActor @Suite struct WorkspaceOverflowMenuTests {
+    private static let defaultBriefShortcut = HotkeySpec(key: "b", modifiers: [.cmd, .alt])
+
     @Test func menuIncludesCopyPathAndRevealItems() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: .unavailable)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
         let titles = menu.items.map { $0.title }
         #expect(titles.contains("Copy path"))
         #expect(titles.contains("Reveal in Finder"))
@@ -16,7 +19,7 @@ import Testing
     @Test func remoteWorkspaceMenuOmitsRevealButKeepsCopyPath() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/remote/ws-1", target: nil, isLocalDevice: false, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: .unavailable)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
         let titles = menu.items.map { $0.title }
         #expect(titles.contains("Copy path"))
         #expect(!titles.contains("Reveal in Finder"))
@@ -25,7 +28,7 @@ import Testing
     @Test func copyPathItemCarriesPathWithoutShortcut() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: .unavailable)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
         guard let copy = menu.items.first(where: { $0.title == "Copy path" }) else {
             Issue.record("Copy path menu item missing")
             return
@@ -38,7 +41,7 @@ import Testing
     @Test func revealItemCarriesPathWorkspaceContextAndCmdShiftF() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: .unavailable)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
         guard let reveal = menu.items.first(where: { $0.title == "Reveal in Finder" }) else {
             Issue.record("Reveal in Finder menu item missing")
             return
@@ -60,7 +63,7 @@ import Testing
         // it is disabled rather than removed, which would reshuffle the menu mid-outage.
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: false, isHomeWorkspace: false,
-            briefToggle: .unavailable)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
         #expect(!menu.autoenablesItems)
         let titles = menu.items.map { $0.title }
         #expect(titles.contains("Copy path"))
@@ -74,7 +77,7 @@ import Testing
     @Test func reachableDeviceEnablesTheDaemonBackedItem() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: .unavailable)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
         #expect(menu.items.first { $0.title == "Delete…" }?.isEnabled == true)
     }
 
@@ -83,7 +86,7 @@ import Testing
     @Test func homeWorkspaceMenuKeepsPathActionsAndOmitsDelete() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-home", path: "/Users/someone", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: true,
-            briefToggle: .unavailable)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
         let titles = menu.items.map { $0.title }
         #expect(titles.contains("Copy path"))
         #expect(titles.contains("Reveal in Finder"))
@@ -94,14 +97,14 @@ import Testing
     @Test func menuItemsHaveSymbolImages() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: .unavailable)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
         for item in menu.items where !item.isSeparatorItem { #expect(item.image != nil) }
     }
 
     @Test func menuItemActionsTargetCopyAndReveal() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: .unavailable)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
         let copy = menu.items.first { $0.title == "Copy path" }
         let reveal = menu.items.first { $0.title == "Reveal in Finder" }
         #expect(copy?.action == #selector(AppKitController.copyDirectoryPath(_:)))
@@ -113,15 +116,15 @@ import Testing
     private func briefItem(_ state: AgentBriefToggleState) -> NSMenuItem? {
         AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: state
+            briefToggle: state, briefShortcut: Self.defaultBriefShortcut
         ).items.first
     }
 
-    /// The brief item leads the menu, above Copy path, and toggles the focused pane's brief with ⌥⌘B.
+    /// The brief item leads the menu, above Copy path, and toggles the focused pane's brief.
     @Test func briefItemLeadsTheMenuAboveCopyPath() throws {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: .shown)
+            briefToggle: .shown, briefShortcut: Self.defaultBriefShortcut)
         let titles = menu.items.map(\.title)
         let briefIndex = try #require(titles.firstIndex(of: "Hide Brief"))
         let copyIndex = try #require(titles.firstIndex(of: "Copy path"))
@@ -132,6 +135,17 @@ import Testing
         #expect(item.identifier?.rawValue == "ws-1")
         #expect(item.keyEquivalent == "b")
         #expect(item.keyEquivalentModifierMask == NSEvent.ModifierFlags([.command, .option]))
+    }
+
+    /// The item shows the configured brief chord, not a fixed one.
+    @Test func briefItemShowsTheConfiguredShortcut() throws {
+        let item = try #require(
+            AppKitController.makeWorkspaceOverflowMenu(
+                workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
+                briefToggle: .shown, briefShortcut: HotkeySpec(key: "j", modifiers: [.cmd, .ctrl])
+            ).items.first)
+        #expect(item.keyEquivalent == "j")
+        #expect(item.keyEquivalentModifierMask == NSEvent.ModifierFlags([.command, .control]))
     }
 
     @Test func briefItemIsTitledWithTheActionItPerforms() {

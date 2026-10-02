@@ -1,7 +1,7 @@
 import AppKit
 
 /// Where a pane's brief stands for the surfaces that toggle it (the workspace footer glyph, the ⋯ menu
-/// item, a global panel window's strip glyph, and ⌥⌘B).
+/// item, a global panel window's strip glyph, and the brief shortcut).
 enum AgentBriefToggleState: Equatable, Sendable {
     /// The pane's session belongs to no coding agent with a brief, so there is nothing to toggle.
     case unavailable

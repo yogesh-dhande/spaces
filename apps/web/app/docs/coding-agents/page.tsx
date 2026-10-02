@@ -93,7 +93,7 @@ export default function CodingAgentsDocsPage() {
         </Prose>
         <Prose>
           On the Mac it renders as a column at the trailing edge of the agent&apos;s pane. Show or hide
-          it with <InlineCode>⌥⌘B</InlineCode>, the footer&apos;s brief glyph, the pane&apos;s
+          it with <InlineCode>⌥⌘B</InlineCode> (configurable in Settings → Shortcuts), the footer&apos;s brief glyph, the pane&apos;s
           &quot;&#8943;&quot; menu (&quot;Hide Brief&quot; or &quot;Show Brief&quot;), or a global panel
           window&apos;s title strip. On iPhone and iPad, a brief button in the terminal&apos;s top bar
           opens a sheet, which also opens on its own for an agent whose brief you have not dismissed.

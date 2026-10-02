@@ -17,6 +17,7 @@ const rows: ReactNode[][] = [
   ["Previous window", "⌘⌥[", "Any app"],
   ["Open in Editor", "⌘⌥E", "Any app"],
   ["Show alerts", "⌘⌥A", "In Spaces"],
+  ["Show or hide an agent's brief", "⌘⌥B", "In Spaces"],
   ["Create workspace", "⌘N", "In Spaces"],
   ["Reload", "⌘⌥R", "In Spaces"],
   ["Open terminal", "⌘⌥T", "In Spaces"],
@@ -52,10 +53,6 @@ export default function ShortcutsDocsPage() {
           <li>
             • <code>⌘X</code> dismisses the highlighted alert in the command palette.
           </li>
-          <li>
-            • <code>⌥⌘B</code> hides or shows a coding agent&apos;s brief beside its terminal; see{" "}
-            <DocLink href="/docs/coding-agents#briefs">Agent status: Agent briefs</DocLink>.
-          </li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Keys inside a terminal pane (copy, paste, find, zoom) are their own set; see{" "}
@@ -69,8 +66,8 @@ export default function ShortcutsDocsPage() {
       <Section id="changing-shortcuts" title="Changing shortcuts">
         <Prose>
           Change a shortcut from Settings → Shortcuts. Spaces&apos; own shortcuts are
-          configurable, including the leader itself. Standard macOS keys, and the handful of
-          fixed Spaces keys above, are not. A shortcut another app already owns may do nothing;
+          configurable, including the leader itself. Standard macOS keys, such as the fixed keys
+          above, are not. A shortcut another app already owns may do nothing;
           see{" "}
           <DocLink href="/docs/troubleshooting#shortcuts">
             Troubleshooting: A shortcut does nothing

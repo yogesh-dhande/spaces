@@ -36,6 +36,9 @@ import workspacecore
     private var shortcutMonitor: Any?
     private var addWorkspaceShortcutSpec: HotkeySpec?
     private var reloadShortcutSpec: HotkeySpec?
+    // Not private: `AppKitController.handleToggleBriefShortcut` and the workspace overflow menu read this
+    // from a different file in the same module (cross-file `private` isn't visible).
+    var toggleBriefShortcutSpec: HotkeySpec?
     private var openEditorShortcutSpec: HotkeySpec?
     private var openTerminalShortcutSpec: HotkeySpec?
     // Not private: `AppKitController.handleNewTabSessionPickerShortcut` reads this from a different
@@ -162,7 +165,6 @@ import workspacecore
             if self.host.commandPalette.handleCommandPaletteShortcut(event: event) { return nil }
             if self.host.handleNewTabSessionPickerShortcut(event: event) { return nil }
             if self.host.handleClosePaneShortcut(event: event) { return nil }
-            if self.host.handleToggleBriefShortcut(event: event) { return nil }
             if self.host.handleFocusedTextInputShortcut(event: event) { return nil }
             if let cycleModeShortcutSpec, self.matches(event: event, spec: cycleModeShortcutSpec) {
                 // An in-app shortcut rather than a Carbon global hotkey like next/previous: the mode
@@ -178,6 +180,10 @@ import workspacecore
                 return nil
             }
             if self.host.isTextInputFocused() { return event }
+            // Behind the text-input return: the brief chord is configurable, and rebound to an editing or
+            // navigation chord (Cmd+C, Cmd+Left) it must leave a focused rename or search field alone. A
+            // focused terminal pane is not a text input, so the chord still reaches here from a pane.
+            if self.host.handleToggleBriefShortcut(event: event) { return nil }
             if self.handleSidebarNavigationShortcut(event: event) { return nil }
             if let openTerminalShortcutSpec, self.matches(event: event, spec: openTerminalShortcutSpec) {
                 // Global panel windows carry no tabs (and so no "new tab" of their own): this
@@ -443,6 +449,7 @@ import workspacecore
         cycleModeShortcutSpec = loadShortcutSpec(resolver, setting: .guiCycleModeShortcut)
         sidebarNextShortcutSpec = loadShortcutSpec(resolver, setting: .guiSidebarNextShortcut)
         sidebarPreviousShortcutSpec = loadShortcutSpec(resolver, setting: .guiSidebarPreviousShortcut)
+        toggleBriefShortcutSpec = loadShortcutSpec(resolver, setting: .guiToggleBriefShortcut)
         openEditorShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenEditorShortcut)
         openTerminalShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenTerminalShortcut)
         newTabShortcutSpec = loadShortcutSpec(resolver, setting: .guiNewTabShortcut)
@@ -511,6 +518,7 @@ import workspacecore
         case .guiCycleModeShortcut: return cycleModeShortcutSpec
         case .guiSidebarNextShortcut: return sidebarNextShortcutSpec
         case .guiSidebarPreviousShortcut: return sidebarPreviousShortcutSpec
+        case .guiToggleBriefShortcut: return toggleBriefShortcutSpec
         case .guiOpenEditorShortcut: return openEditorShortcutSpec
         case .guiOpenTerminalShortcut: return openTerminalShortcutSpec
         case .guiNewTabShortcut: return newTabShortcutSpec

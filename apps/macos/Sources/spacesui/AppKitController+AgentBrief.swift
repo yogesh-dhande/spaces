@@ -15,15 +15,13 @@ extension AppKitController {
         return panelCoordinator.agentBriefToggleState(scope: .workspace(deviceID: deviceID, workspaceID: workspaceID))
     }
 
-    /// ⌥⌘B: shows or hides the focused pane's brief. A global panel window acts on the pane its identity
-    /// strip shows; the main window acts on the selected workspace's focused pane. A pane with no brief
-    /// leaves the chord unclaimed.
+    /// The configured brief shortcut (default leader+B): shows or hides the focused pane's brief. A global
+    /// panel window acts on the pane its identity strip shows; the main window acts on the selected
+    /// workspace's focused pane. A pane with no brief leaves the chord unclaimed.
     func handleToggleBriefShortcut(event: NSEvent) -> Bool {
-        guard
-            Self.isToggleBriefShortcut(
-                charactersIgnoringModifiers: event.charactersIgnoringModifiers,
-                eventModifiers: event.modifierFlags.intersection(.deviceIndependentFlagsMask))
-        else { return false }
+        guard let toggleBriefShortcutSpec = shortcuts.toggleBriefShortcutSpec, shortcuts.matches(event: event, spec: toggleBriefShortcutSpec) else {
+            return false
+        }
         if let panelWindowID = panelCoordinator.panelWindowID(forWindow: NSApp.keyWindow) {
             return panelCoordinator.toggleAgentBrief(scope: .globalWindow(panelWindowID: panelWindowID))
         }
@@ -31,12 +29,6 @@ extension AppKitController {
             return false
         }
         return panelCoordinator.toggleAgentBrief(scope: .workspace(deviceID: deviceID, workspaceID: workspaceID))
-    }
-
-    /// ⌥⌘B exactly, so a chord that adds Shift or Control stays with the terminal.
-    nonisolated static func isToggleBriefShortcut(charactersIgnoringModifiers: String?, eventModifiers: NSEvent.ModifierFlags) -> Bool {
-        guard charactersIgnoringModifiers?.lowercased() == "b" else { return false }
-        return eventModifiers.intersection([.command, .option, .control, .shift]) == [.command, .option]
     }
 
     /// The workspace footer's brief glyph and the ⋯ menu's Hide/Show Brief item. Both carry the
