@@ -81,7 +81,7 @@ public struct SpacesClientMigrationStep: Sendable {
 
 public final class SpacesClientDatabase {
     public static let databasePathEnvironmentVariable = "SPACES_CLIENT_DB_PATH"
-    public static let currentVersion = 4
+    public static let currentVersion = 5
     private static let defaultDatabaseStorage = DefaultDatabaseStorage()
     private static let timestampFormatter = TimestampFormatterStorage()
 
@@ -924,6 +924,11 @@ public final class SpacesClientDatabase {
         },
         SpacesClientMigrationStep(fromVersion: 3, toVersion: 4, description: "Add client-local Editor workspace recovery state") { db in
             try executeClientBatch(database: db, sql: codePaneWorkspaceStateSchemaSQL)
+        },
+        // Dismissals live with the device that raised the alert, so the per-client set is dropped rather
+        // than carried over: its ids embedded the client's device ids and a different key shape.
+        SpacesClientMigrationStep(fromVersion: 4, toVersion: 5, description: "Drop client-local alert dismissals") { db in
+            try executeClientBatch(database: db, sql: "DELETE FROM client_settings WHERE key = 'alerts_dismissed_attention_items';")
         },
     ]
 

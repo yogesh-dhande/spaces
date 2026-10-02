@@ -541,29 +541,33 @@
             XCTAssertEqual(model.automationRunningRunCount, 0)
         }
 
-        func testUndismissedAlertCountAndClearIncludeAutomationAlerts() {
-            let model = makeModel()
-            model.overview = makeOverview(automationRuns: [makeRun(id: "run-failed", automationID: "a", automationName: "Deploy", status: "failed")])
+        func testUndismissedAlertCountAndClearIncludeAutomationAlerts() async {
+            let device = FakeAlertDevice(
+                overview: makeOverview(automationRuns: [makeRun(id: "run-failed", automationID: "a", automationName: "Deploy", status: "failed")]))
+            let model = makeModel(device: device)
 
             XCTAssertEqual(model.automationAlerts.count, 1)
             XCTAssertEqual(model.undismissedAlertCount, 1)
 
-            model.clearAlerts()
+            await model.clearAlerts()
 
+            XCTAssertEqual(device.commands, [.dismissAlerts(["automationrun:run-failed:failed"])])
             XCTAssertEqual(model.automationAlerts.count, 0)
             XCTAssertEqual(model.undismissedAlertCount, 0)
         }
 
-        func testDismissAutomationAlertRemovesOnlyThatRunAlert() {
-            let model = makeModel()
-            model.overview = makeOverview(automationRuns: [
-                makeRun(id: "run-a", automationID: "a", automationName: "Deploy", status: "failed"),
-                makeRun(id: "run-b", automationID: "b", automationName: "Backup", status: "timed_out"),
-            ])
+        func testDismissAutomationAlertRemovesOnlyThatRunAlert() async {
+            let device = FakeAlertDevice(
+                overview: makeOverview(automationRuns: [
+                    makeRun(id: "run-a", automationID: "a", automationName: "Deploy", status: "failed"),
+                    makeRun(id: "run-b", automationID: "b", automationName: "Backup", status: "timed_out"),
+                ]))
+            let model = makeModel(device: device)
             let dismissed = model.automationAlerts.first { $0.runID == "run-a" }!
 
-            model.dismissAutomationAlert(dismissed)
+            await model.dismissAutomationAlert(dismissed)
 
+            XCTAssertEqual(device.commands, [.dismissAlerts(["automationrun:run-a:failed"])])
             XCTAssertEqual(model.automationAlerts.map(\.runID), ["run-b"])
             XCTAssertEqual(model.undismissedAlertCount, 1)
         }
@@ -1044,15 +1048,17 @@
         // MARK: - Fixtures
 
         /// Fixture device id `automationAlerts`/`clearAlerts`/`dismissAutomationAlert` need below: those
-        /// derivations now read through `pairedDevices`/`activeDeviceID` (the Alerts tab spans every
-        /// paired device), so a lightweight model under test needs one paired, selected device even though
-        /// these tests only ever set a single overview. Never a real device's id, so a stray write under
-        /// it in the real `UserDefaults.standard` dismissed-alerts bucket is inert; cleaned up below.
+        /// derivations read through `pairedDevices`/`activeDeviceID` (the Alerts tab spans every paired
+        /// device), so a lightweight model under test needs one paired, selected device even though these
+        /// tests only ever set a single overview.
         private static let testDeviceID = "device-a"
 
-        private func makeModel() -> SpacesMobileAppModel {
+        /// A model whose selected device answers alert requests as `device` (or acknowledges everything
+        /// without an overview when there is none), holding `device`'s overview.
+        private func makeModel(device: FakeAlertDevice? = nil) -> SpacesMobileAppModel {
             let settings = SpacesMobileConnectionSettings()
-            let client = SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
+            let client =
+                device?.client(settings: settings) ?? SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             model.pairedDevices = [
                 SpacesMobilePairedDeviceRecord(
@@ -1060,7 +1066,7 @@
                     createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil)
             ]
             model.activeDeviceID = Self.testDeviceID
-            addTeardownBlock { SpacesMobileDismissedAlertsStore.save([], deviceID: Self.testDeviceID) }
+            model.overview = device?.currentOverview
             return model
         }
 

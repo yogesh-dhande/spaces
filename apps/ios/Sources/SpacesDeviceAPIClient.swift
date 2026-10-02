@@ -369,6 +369,33 @@ struct SpacesDeviceAPIClient: Sendable {
                 clientApp: clientAppIdentity), commandChannel: commandChannel)
     }
 
+    /// Dismisses alerts on the device by key; a `comebacklater:` key clears that row's flag.
+    func dismissAlerts(keys: [String], commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(command: .dismissAlerts(.init(keys: keys)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            commandChannel: commandChannel)
+    }
+
+    /// Reports that the user stayed on `sessionID` for `focusedForSeconds`, so the device clears what a
+    /// visit clears, among the named `keys` whose dwell completed.
+    func visitTerminalSession(sessionID: String, focusedForSeconds: Double, keys: [String], commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
+        -> SpacesDeviceAPIResponse
+    {
+        try await mutation(
+            .init(
+                command: .visitTerminalSession(.init(sessionID: sessionID, focusedForSeconds: focusedForSeconds, keys: keys)),
+                authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
+    }
+
+    func setComeBackLater(
+        rowKind: SpacesDeviceComeBackLaterRowKind, rowID: String, isOn: Bool, commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(
+                command: .setComeBackLater(.init(rowKind: rowKind, rowID: rowID, isOn: isOn)), authToken: settings.trimmedAuthToken,
+                clientApp: clientAppIdentity), commandChannel: commandChannel)
+    }
+
     /// Replaces the workspace's whole configuration. The daemon overwrites every configured field from the
     /// request, so a caller sends the workspace's current config with only its own edit applied.
     func updateWorkspaceConfig(workspaceID: String, config: SpacesDeviceWorkspaceConfig, commandChannel: SpacesDeviceAPICommandChannel? = nil)

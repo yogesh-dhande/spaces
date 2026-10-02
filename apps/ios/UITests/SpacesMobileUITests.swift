@@ -386,10 +386,10 @@ final class SpacesMobileUITests: XCTestCase {
         let seededAlertTitle = "e2e-tab-lists-alert"
         // The Alerts tab has no per-workspace band (it is one flat, cross-device list; see
         // `AlertsTabView`), so this matches the seeded exited terminal's own event row directly. Its
-        // identifier is `"alert.row.<deviceID>|terminal:<sourceID>|<kind>|<date>"`, but `sourceID` is
+        // identifier is `"alert.row.<deviceID>|terminal:<rowID>:<state>:<updatedAt>"`, but `rowID` is
         // `terminal-session:<sessionID>` or `terminal-window:<windowID>` depending on whether a Mac window
         // tracked the session, and this lane runs where one does, so only the device and the `terminal:`
-        // source kind are known ahead of time; the seeded title disambiguates the row instead of the id.
+        // alert kind are known ahead of time; the seeded title disambiguates the row instead of the id.
         let alertRow = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@ AND label BEGINSWITH %@", "alert.row.\(deviceID)|terminal:", seededAlertTitle)
         ).firstMatch

@@ -41,6 +41,27 @@
             XCTAssertFalse(model.isHoldingOpenScreenUpdatesForTesting, "the matching frame ends the hold")
         }
 
+        /// A visit counts from painted content: an owner mounts the surface while the hold still shows the
+        /// "Preparing terminal…" placeholder, which is not yet anything the user can see.
+        func testAnOwnerCountsAsShowingContentOnlyOnceAFrameHasPainted() async throws {
+            let model = makeModel()
+            defer { model.stop() }
+            model.start()
+            model.updateViewportSize(columns: 40, rows: 30)
+
+            await model.applyLatestState(
+                try Self.framedState(
+                    columns: 80, rows: 24, revision: 1, emittedAt: "2026-06-04T14:23:31Z", owner: model.remoteClientForTesting,
+                    reason: TerminalRemoteSessionStateReason.attachmentState.rawValue), isOutOfBand: false)
+            XCTAssertTrue(model.showsTerminalSurface, "the owner's surface is mounted")
+            XCTAssertFalse(model.showsRenderedContent, "but it still shows the placeholder")
+
+            await model.applyLatestState(
+                try Self.framedState(columns: 40, rows: 30, revision: 2, emittedAt: "2026-06-04T14:23:32Z", owner: model.remoteClientForTesting),
+                isOutOfBand: false)
+            XCTAssertTrue(model.showsRenderedContent, "the first painted frame is content")
+        }
+
         /// The surface reports its grid only after this client owns the session, so a session already
         /// running at that grid delivered the frame the hold waits for before there was anything to match
         /// it against, and nothing later produces another one on a quiet session. Reporting the viewport is

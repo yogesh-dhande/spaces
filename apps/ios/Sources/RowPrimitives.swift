@@ -22,6 +22,8 @@ struct StatusDot: View {
         case idle
         case exited
         case waiting
+        /// Accent bell-with-dot standing in for the dot on a row the user marked Come Back Later.
+        case comeBackLater
 
         init(_ state: TerminalSessionState) {
             switch state {
@@ -35,7 +37,9 @@ struct StatusDot: View {
 
     var body: some View {
         ZStack {
-            if kind == .running {
+            if kind == .comeBackLater {
+                Image(systemName: "bell.badge").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.accent)
+            } else if kind == .running {
                 Circle().fill(Theme.statusRunningHalo).frame(width: 14, height: 14)
                 Circle().fill(Theme.green).frame(width: 8, height: 8)
             } else if kind == .done {

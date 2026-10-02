@@ -16,6 +16,8 @@ public enum ClientSettingsKey {
     public static let defaultGUIReloadShortcut = "r"
     public static let guiToggleBriefShortcut = "gui_toggle_brief_shortcut"
     public static let defaultGUIToggleBriefShortcut = "b"
+    public static let guiToggleComeBackLaterShortcut = "gui_toggle_come_back_later_shortcut"
+    public static let defaultGUIToggleComeBackLaterShortcut = "l"
     public static let guiOpenEditorShortcut = "gui_open_editor_shortcut"
     public static let defaultGUIOpenEditorShortcut = "e"
     public static let guiOpenTerminalShortcut = "gui_open_terminal_shortcut"
@@ -38,7 +40,6 @@ public enum ClientSettingsKey {
     public static let defaultGUISidebarPreviousShortcut = "up"
     public static let guiWindowShortcut = "gui_window_shortcut"
     public static let defaultGUIWindowShortcut = "cmd+1"
-    public static let alertsDismissedAttentionItems = "alerts_dismissed_attention_items"
     public static let activeWorkspaceID = "active_workspace_id"
     /// Which set of windows the next/previous window shortcuts rotate over (a `WindowCycleMode` raw
     /// value). An unset or unparseable value resolves to the Workspace default.

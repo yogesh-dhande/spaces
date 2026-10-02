@@ -107,6 +107,25 @@ private func encoded(_ payload: SpacesDeviceOverviewPayload) throws -> Data { tr
         #expect(decision == .sendNow)
     }
 
+    @Test func aDismissalOrFlagChangeCountsAsState() throws {
+        let base = makePayload(codingAgentRows: [makeCodingAgentRow(activityState: .done)])
+        let dismissed = SpacesDeviceOverviewPayload(
+            workspaces: base.workspaces, sessions: base.sessions, daemonStatus: base.daemonStatus,
+            dismissedAlertKeys: ["agent:agent:1:done:2026-01-01T00:00:00Z"])
+        let flagged = SpacesDeviceOverviewPayload(
+            workspaces: base.workspaces, sessions: base.sessions, daemonStatus: base.daemonStatus,
+            comeBackLaterFlags: [SpacesDeviceComeBackLaterFlag(rowKind: .agent, rowID: "agent:1", flaggedAt: "2026-01-01T00:00:00Z")])
+        let now = Date()
+        for next in [dismissed, flagged] {
+            let decision = SpacesDeviceAPIServer.overviewBroadcastDecision(
+                previousBytes: try encoded(base), newBytes: try encoded(next),
+                previousProjection: SpacesDeviceAPIServer.overviewStateProjection(base),
+                newProjection: SpacesDeviceAPIServer.overviewStateProjection(next), lastBroadcastAt: now.addingTimeInterval(-0.1), now: now,
+                metadataCoalesceInterval: Self.interval)
+            #expect(decision == .sendNow)
+        }
+    }
+
     @Test func aBellCountsAsState() throws {
         let previous = makePayload(sessions: [makeSession(bellAt: nil)])
         let next = makePayload(sessions: [makeSession(bellAt: "2026-01-01T00:00:05Z")])

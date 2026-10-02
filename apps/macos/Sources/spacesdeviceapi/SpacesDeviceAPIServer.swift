@@ -2250,7 +2250,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             projects: payload.projects, workspaces: payload.workspaces.map(overviewWorkspaceStateProjection),
             sessions: payload.sessions.map(overviewSessionStateProjection), retainedTerminalSessionIDs: payload.retainedTerminalSessionIDs,
             workspaceIDsWithTeardownInFlight: payload.workspaceIDsWithTeardownInFlight, daemonStatus: payload.daemonStatus,
-            automations: payload.automations, automationRuns: payload.automationRuns)
+            automations: payload.automations, automationRuns: payload.automationRuns, dismissedAlertKeys: payload.dismissedAlertKeys,
+            comeBackLaterFlags: payload.comeBackLaterFlags)
     }
 
     private static func overviewSessionStateProjection(_ session: SpacesDeviceTerminalSessionSummary) -> SpacesDeviceTerminalSessionSummary {
@@ -3438,6 +3439,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .restartWorkspaceProcess(let payload): return try handleRestartWorkspaceProcessRequest(payload, context: context)
         case .stopCodingAgent(let payload): return try handleStopCodingAgentRequest(payload, context: context)
         case .renameAgentSession(let payload): return try handleRenameAgentSessionRequest(payload, context: context)
+        case .dismissAlerts(let payload): return try handleDismissAlertsRequest(payload, context: context)
+        case .visitTerminalSession(let payload): return try handleVisitTerminalSessionRequest(payload, context: context)
+        case .setComeBackLater(let payload): return try handleSetComeBackLaterRequest(payload, context: context)
         // Both transports divert engine-blocking terminal commands and review-comment mutations to a
         // terminal-control lane before they reach here (descriptor lane `.terminalControl`; see
         // `SpacesDeviceAPICommandDescriptor`), so this case only keeps the switch exhaustive.
@@ -4566,7 +4570,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return SpacesDeviceOverviewBuilder.build(
             projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions,
             workspaceIDsWithTeardownInFlight: workspaceTeardownRegistry.snapshot(), daemonStatus: daemonStatus, automations: automationSummaries,
-            automationRuns: automationRunSummaries, automationAttributedSessionIDs: try store.terminalSessionIDsAttributedToExistingAutomationRuns())
+            automationRuns: automationRunSummaries, automationAttributedSessionIDs: try store.terminalSessionIDsAttributedToExistingAutomationRuns(),
+            dismissedAlertKeys: Array(try store.alertDismissalKeys()), comeBackLaterFlags: try store.comeBackLaterFlags())
     }
 
     /// Builds the overview's automation section: every automation, plus the runs a client needs — all
@@ -6829,6 +6834,35 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         try context.orchestrator().renameAgentSession(workspaceID: workspaceID, agentID: agentID, title: title ?? "")
         return try refreshedMutationResponse(
             context: context, message: title == nil ? "Cleared coding agent name." : "Renamed coding agent.", workspaceID: workspaceID)
+    }
+
+    /// The alert mutations decide against a freshly built overview, hidden workspaces included, so what a
+    /// client last saw never decides what is dismissed or cleared.
+    private func handleDismissAlertsRequest(_ request: SpacesDeviceDismissAlertsRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse {
+        try context.orchestrator().dismissAlerts(keys: request.keys, in: try loadOverview(store: context.store()))
+        return try refreshedMutationResponse(context: context, message: "Dismissed alerts.")
+    }
+
+    private func handleVisitTerminalSessionRequest(_ request: SpacesDeviceVisitTerminalSessionRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        guard let sessionID = normalizedString(request.sessionID) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument)
+        }
+        try context.orchestrator().visitTerminalSession(
+            sessionID: sessionID, focusedForSeconds: request.focusedForSeconds, keys: request.keys, in: try loadOverview(store: context.store()))
+        return try refreshedMutationResponse(context: context, message: "Recorded visit.", sessionID: sessionID)
+    }
+
+    private func handleSetComeBackLaterRequest(_ request: SpacesDeviceSetComeBackLaterRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        guard let rowID = normalizedString(request.rowID) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Missing row ID.", errorCode: .invalidArgument)
+        }
+        try context.orchestrator().setComeBackLater(
+            rowKind: request.rowKind, rowID: rowID, isOn: request.isOn, in: try loadOverview(store: context.store()))
+        return try refreshedMutationResponse(context: context, message: request.isOn ? "Flagged to come back later." : "Cleared the flag.")
     }
 
     /// Spawns a coding-agent terminal session on the daemon host. Runs the same command gate as the

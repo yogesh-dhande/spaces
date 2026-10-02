@@ -163,6 +163,23 @@ final class SpacesClientDatabaseTests: XCTestCase {
         }
     }
 
+    // Alert dismissals moved to the device that raised the alert, so upgrading drops the per-client set
+    // and leaves every other setting alone.
+    func testUpgradeToVersionFiveDropsClientAlertDismissalsOnly() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("spaces-client.db").path
+
+        let legacy = try SpacesClientDatabase(path: path, currentVersion: 4, migrationSteps: [])
+        try legacy.setSetting(key: "alerts_dismissed_attention_items", value: "[\"alert:local:bell:s1:2026\"]")
+        try legacy.setSetting(key: ClientSettingsKey.guiToggleBriefShortcut, value: "j")
+
+        let upgraded = try SpacesClientDatabase(path: path)
+        XCTAssertNil(try upgraded.setting(key: "alerts_dismissed_attention_items"))
+        XCTAssertEqual(try upgraded.setting(key: ClientSettingsKey.guiToggleBriefShortcut), "j")
+    }
+
     func testDefaultPathUsesEnvironmentOverride() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

@@ -53,8 +53,13 @@ struct AgentsTabView: View {
             }
         }.buttonStyle(.plain).disabled(model.isMutating || row.sessionID == nil).opacity(entry.isDeviceOffline ? Theme.offlineRowOpacity : 1)
             .accessibilityIdentifier("agents.row.\(entry.id)")
-        if model.hasUndismissedAlerts(for: row, deviceID: entry.deviceID) {
-            button.contextMenu { DismissAlertMenuButton(model: model, row: row, deviceID: entry.deviceID) }
+        if model.hasDismissableAlerts(for: row, deviceID: entry.deviceID) || model.comeBackLaterTarget(for: row) != nil {
+            button.contextMenu {
+                if model.comeBackLaterTarget(for: row) != nil { ComeBackLaterMenuButton(model: model, row: row, deviceID: entry.deviceID) }
+                if model.hasDismissableAlerts(for: row, deviceID: entry.deviceID) {
+                    DismissAlertMenuButton(model: model, row: row, deviceID: entry.deviceID)
+                }
+            }
         } else {
             button
         }

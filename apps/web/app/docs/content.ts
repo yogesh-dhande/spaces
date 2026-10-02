@@ -68,7 +68,7 @@ export const docsNavGroups: DocsNavGroup[] = [
         href: "/docs/alerts",
         title: "Alerts",
         summary:
-          "One list of what needs you: blocked and finished agents, exited processes, bells, and failed automation runs.",
+          "One list of what needs you: blocked and finished agents, exited processes and terminals, bells, failed automation runs, and terminals you marked to come back to.",
       },
     ],
   },

@@ -508,6 +508,7 @@ import spacesterminalcore
         guard current != lastFocusedSessionIDForCycleRow else { return }
         lastFocusedSessionIDForCycleRow = current
         host.sidebar.refreshCycleModeRow()
+        host.refreshTerminalVisit()
     }
 
     /// The key-window change handler for the main window and every global panel window calls this:
@@ -1904,7 +1905,7 @@ import spacesterminalcore
     /// each column skips the markdown render when its text did not change.
     func refreshAgentBriefs() {
         for (sessionID, content) in contentControllers { content.applyAgentBrief(shownAgentBrief(forSessionID: sessionID)) }
-        host.refreshWorkspaceFooterBriefToggle()
+        host.refreshWorkspaceFooterPaneToggles()
     }
 
     /// The brief toggle state of the pane a toggle in `scope` acts on.
@@ -1931,9 +1932,10 @@ import spacesterminalcore
         return true
     }
 
-    /// The session of the pane the scope's chrome names, which is the one its brief toggles act on: the
-    /// focused pane the workspace footer shows, or the pane a global window's identity strip shows.
-    private func briefToggleSessionID(scope: PanelScope) -> String? {
+    /// The session of the pane the scope's chrome names, which is the one its brief and Come Back Later
+    /// toggles act on: the focused pane the workspace footer shows, or the pane a global window's identity
+    /// strip shows.
+    func briefToggleSessionID(scope: PanelScope) -> String? {
         let layout = layout(for: scope)
         switch scope {
         case .workspace:

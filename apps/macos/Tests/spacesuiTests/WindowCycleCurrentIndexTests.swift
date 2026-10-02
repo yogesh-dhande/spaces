@@ -55,7 +55,7 @@ import workspacecore
         return WindowCycleModeTargets.targets(
             mode: .openSessions, devices: [device], openTerminalSessionIDsByWorkspace: [:],
             openBrowserSessionsByWorkspace: ["w1": [session], "w2": [session]], trackedBrowserWindowIDsByWorkspace: ["w1": [11], "w2": [22]],
-            dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            recentCursors: [], retaining: [])
     }
 
     private func workspace(id: String) -> SpacesDeviceWorkspaceSummary {

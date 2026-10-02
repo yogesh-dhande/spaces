@@ -54,6 +54,18 @@ import spacesclientcore
         #expect(try resolver.rawValue(for: setting) == "cmd+alt+b")
     }
 
+    @Test func comeBackLaterShortcutIsLeaderBackedAndAppearsInSettingsPanel() throws {
+        let setting = ShortcutsController.ShortcutSetting.guiToggleComeBackLaterShortcut
+        #expect(ShortcutsController.ShortcutSetting(settingKey: ClientSettingsKey.guiToggleComeBackLaterShortcut) == setting)
+        #expect(setting.defaultSpec == "l")
+        #expect(setting.usesLeader)
+        #expect(ShortcutsController.ShortcutSetting.settingsPanelCases.contains(setting))
+        let resolver = ShortcutsController.ShortcutSettingResolver { _ in nil }
+        #expect(try resolver.rawValue(for: setting) == "cmd+alt+l")
+        let rebound = ShortcutsController.ShortcutSettingResolver { $0 == ClientSettingsKey.guiToggleComeBackLaterShortcut ? "j" : nil }
+        #expect(try rebound.rawValue(for: setting) == "cmd+alt+j")
+    }
+
     @Test func sidebarNavigationShortcutsAreConfigurableInSettingsPanel() {
         // Sidebar selection moves only via leader+up/down, so those shortcuts must be user-overridable
         // from the settings panel rather than hidden functional-only bindings.

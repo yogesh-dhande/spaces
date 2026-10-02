@@ -57,7 +57,9 @@ npm run dev | tee .logs/frontend.log`}</CodeBlock>
         <Prose>
           A Linux device has no notification center, so <InlineCode>notify</InlineCode> shows
           nothing there; the process still shows exited in the sidebar. An exited process shows red
-          and raises an alert, see <DocLink href="/docs/alerts">Alerts</DocLink>.
+          and raises an alert, see <DocLink href="/docs/alerts">Alerts</DocLink>. Once that alert is
+          dismissed, or you visit the process&apos;s terminal, the process shows as not started on
+          every device until it exits again.
         </Prose>
       </Section>
 

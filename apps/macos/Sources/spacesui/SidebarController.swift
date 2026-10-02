@@ -626,10 +626,6 @@ private struct DeviceSyncState {
                     Self.workspaceIDsTransitionedToNotRunning(
                         previous: previousLocalSection.workspaceRuntimeStatusByID, current: localSection.workspaceRuntimeStatusByID)))
         }
-        // Load the stored dismissals BEFORE installing the groups: installing them consumes the focused
-        // session's bell into that same set and writes it back, so a consume that ran against a not-yet
-        // loaded (empty) set would persist itself over everything the user had dismissed.
-        host.alerts.loadAlertsDismissedAttentionItemIDs()
         if localOutlineUnchanged {
             // The merge still has to run for its side effects — the focused pane's bell is consumed here,
             // and global panel titles are refreshed here — but an unchanged local overview cannot have
@@ -638,7 +634,6 @@ private struct DeviceSyncState {
         } else {
             applySidebarDataChange()
         }
-        host.alerts.pruneDismissedAlertsAttentionItemIDsIfNeeded()
         host.logStartupProfile("apply_snapshot_outline_ready")
         if !shouldPreserveDetailPane {
             host.refreshSelection()
@@ -1597,6 +1592,8 @@ private struct DeviceSyncState {
         // is typing in gets consumed, before anything reads the groups for the badge, the list, or the
         // cycling row's Alerts count, which `applySidebarDataChange` repaints right after this merge.
         host.alerts.consumeFocusedSessionBellAlerts()
+        // The same funnel tells the visit tracker a new alert may have arrived for the watched terminal.
+        host.refreshTerminalVisit()
         host.panelCoordinator.refreshGlobalPanelTitles()
         // A brief reaches this client only in a coding-agent row of an overview, so this is where every
         // open pane's brief column, and the footer glyph that toggles it, follows the installed rows.
@@ -2812,13 +2809,22 @@ private struct DeviceSyncState {
                 isEnabled: TerminalPaneService.canOpenOrFocusTerminalPane(
                     hasExistingPane: sessionIsOpenInAPane, deviceAcceptsDaemonActions: daemonActionsEnabled))
         }
+        // Come Back Later marks this row on its device. No glyph sits on the row itself: the mark shows
+        // as an Alerts entry.
+        if let comeBackLater = item.comeBackLater {
+            menu.addItem(.separator())
+            let menuItem = ComeBackLaterToggle.menuItem(
+                comeBackLater, shortcut: nil, isEnabled: daemonActionsEnabled, target: self,
+                action: #selector(toggleRuntimeTargetComeBackLaterMenuItem(_:)))
+            menuItem.representedObject = context
+            menu.addItem(menuItem)
+        }
         // Only offered while the row carries at least one undismissed alert (an exit, an agent
-        // waiting/done, or a bell); dismissing it has exactly the effect dismissing it from the Alerts
-        // pane does; it is not gated on daemon reachability because dismissal is a client-local
-        // acknowledgment, not a mutation the owning daemon has to apply.
+        // waiting/done, a bell, a mark); dismissing it has exactly the effect dismissing it from the Alerts
+        // pane does. The device records the dismissal, so it is a daemon action like the rest.
         if !item.undismissedAttentionIDs.isEmpty {
             menu.addItem(.separator())
-            addItem("Dismiss Alert", symbol: "checkmark.circle", action: #selector(dismissRuntimeTargetAlertMenuItem(_:)))
+            addItem("Dismiss Alert", symbol: "checkmark.circle", action: #selector(dismissRuntimeTargetAlertMenuItem(_:)), isEnabled: daemonActionsEnabled)
         }
         return menu
     }
@@ -2847,6 +2853,11 @@ private struct DeviceSyncState {
         guard let context = sender.representedObject as? RuntimeTargetMenuContext else { return }
         renamingRuntimeTarget = (context.workspaceID, context.item)
         reloadRuntimeTargetRow(workspaceID: context.workspaceID, key: context.item.key)
+    }
+
+    @objc private func toggleRuntimeTargetComeBackLaterMenuItem(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? RuntimeTargetMenuContext else { return }
+        host.toggleSidebarRuntimeTargetComeBackLater(workspaceID: context.workspaceID, item: context.item)
     }
 
     @objc private func dismissRuntimeTargetAlertMenuItem(_ sender: NSMenuItem) {

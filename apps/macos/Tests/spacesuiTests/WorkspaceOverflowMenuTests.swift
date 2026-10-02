@@ -6,11 +6,12 @@ import Testing
 
 @MainActor @Suite struct WorkspaceOverflowMenuTests {
     private static let defaultBriefShortcut = HotkeySpec(key: "b", modifiers: [.cmd, .alt])
+    private static let defaultComeBackLaterShortcut = HotkeySpec(key: "l", modifiers: [.cmd, .alt])
 
     @Test func menuIncludesCopyPathAndRevealItems() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut, comeBackLater: nil, comeBackLaterShortcut: Self.defaultComeBackLaterShortcut)
         let titles = menu.items.map { $0.title }
         #expect(titles.contains("Copy path"))
         #expect(titles.contains("Reveal in Finder"))
@@ -19,7 +20,7 @@ import Testing
     @Test func remoteWorkspaceMenuOmitsRevealButKeepsCopyPath() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/remote/ws-1", target: nil, isLocalDevice: false, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut, comeBackLater: nil, comeBackLaterShortcut: Self.defaultComeBackLaterShortcut)
         let titles = menu.items.map { $0.title }
         #expect(titles.contains("Copy path"))
         #expect(!titles.contains("Reveal in Finder"))
@@ -28,7 +29,7 @@ import Testing
     @Test func copyPathItemCarriesPathWithoutShortcut() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut, comeBackLater: nil, comeBackLaterShortcut: Self.defaultComeBackLaterShortcut)
         guard let copy = menu.items.first(where: { $0.title == "Copy path" }) else {
             Issue.record("Copy path menu item missing")
             return
@@ -41,7 +42,7 @@ import Testing
     @Test func revealItemCarriesPathWorkspaceContextAndCmdShiftF() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut, comeBackLater: nil, comeBackLaterShortcut: Self.defaultComeBackLaterShortcut)
         guard let reveal = menu.items.first(where: { $0.title == "Reveal in Finder" }) else {
             Issue.record("Reveal in Finder menu item missing")
             return
@@ -63,7 +64,7 @@ import Testing
         // it is disabled rather than removed, which would reshuffle the menu mid-outage.
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: false, isHomeWorkspace: false,
-            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut, comeBackLater: nil, comeBackLaterShortcut: Self.defaultComeBackLaterShortcut)
         #expect(!menu.autoenablesItems)
         let titles = menu.items.map { $0.title }
         #expect(titles.contains("Copy path"))
@@ -77,7 +78,7 @@ import Testing
     @Test func reachableDeviceEnablesTheDaemonBackedItem() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut, comeBackLater: nil, comeBackLaterShortcut: Self.defaultComeBackLaterShortcut)
         #expect(menu.items.first { $0.title == "Delete…" }?.isEnabled == true)
     }
 
@@ -86,7 +87,7 @@ import Testing
     @Test func homeWorkspaceMenuKeepsPathActionsAndOmitsDelete() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-home", path: "/Users/someone", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: true,
-            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut, comeBackLater: nil, comeBackLaterShortcut: Self.defaultComeBackLaterShortcut)
         let titles = menu.items.map { $0.title }
         #expect(titles.contains("Copy path"))
         #expect(titles.contains("Reveal in Finder"))
@@ -97,14 +98,14 @@ import Testing
     @Test func menuItemsHaveSymbolImages() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut, comeBackLater: nil, comeBackLaterShortcut: Self.defaultComeBackLaterShortcut)
         for item in menu.items where !item.isSeparatorItem { #expect(item.image != nil) }
     }
 
     @Test func menuItemActionsTargetCopyAndReveal() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut)
+            briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut, comeBackLater: nil, comeBackLaterShortcut: Self.defaultComeBackLaterShortcut)
         let copy = menu.items.first { $0.title == "Copy path" }
         let reveal = menu.items.first { $0.title == "Reveal in Finder" }
         #expect(copy?.action == #selector(AppKitController.copyDirectoryPath(_:)))
@@ -116,7 +117,7 @@ import Testing
     private func briefItem(_ state: AgentBriefToggleState) -> NSMenuItem? {
         AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: state, briefShortcut: Self.defaultBriefShortcut
+            briefToggle: state, briefShortcut: Self.defaultBriefShortcut, comeBackLater: nil, comeBackLaterShortcut: Self.defaultComeBackLaterShortcut
         ).items.first
     }
 
@@ -124,7 +125,7 @@ import Testing
     @Test func briefItemLeadsTheMenuAboveCopyPath() throws {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
-            briefToggle: .shown, briefShortcut: Self.defaultBriefShortcut)
+            briefToggle: .shown, briefShortcut: Self.defaultBriefShortcut, comeBackLater: nil, comeBackLaterShortcut: Self.defaultComeBackLaterShortcut)
         let titles = menu.items.map(\.title)
         let briefIndex = try #require(titles.firstIndex(of: "Hide Brief"))
         let copyIndex = try #require(titles.firstIndex(of: "Copy path"))
@@ -142,7 +143,8 @@ import Testing
         let item = try #require(
             AppKitController.makeWorkspaceOverflowMenu(
                 workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true, isHomeWorkspace: false,
-                briefToggle: .shown, briefShortcut: HotkeySpec(key: "j", modifiers: [.cmd, .ctrl])
+                briefToggle: .shown, briefShortcut: HotkeySpec(key: "j", modifiers: [.cmd, .ctrl]), comeBackLater: nil,
+                comeBackLaterShortcut: Self.defaultComeBackLaterShortcut
             ).items.first)
         #expect(item.keyEquivalent == "j")
         #expect(item.keyEquivalentModifierMask == NSEvent.ModifierFlags([.command, .control]))
@@ -187,5 +189,36 @@ import Testing
         let item = NSMenuItem(title: "x", action: nil, keyEquivalent: "")
         item.identifier = NSUserInterfaceItemIdentifier("/path/from-menu")
         #expect(AppKitController.senderWorkspacePathActionContext(item) == nil)
+    }
+
+    private func comeBackLaterItem(
+        _ toggle: ComeBackLaterToggle?, daemonActionsEnabled: Bool = true, shortcut: HotkeySpec? = Self.defaultComeBackLaterShortcut
+    ) -> NSMenuItem? {
+        AppKitController.makeWorkspaceOverflowMenu(
+            workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: daemonActionsEnabled,
+            isHomeWorkspace: false, briefToggle: .unavailable, briefShortcut: Self.defaultBriefShortcut, comeBackLater: toggle,
+            comeBackLaterShortcut: shortcut
+        ).items.first { $0.action == #selector(AppKitController.toggleWorkspaceFocusedPaneComeBackLater(_:)) }
+    }
+
+    /// The Come Back Later item follows the pane's row: titled with the action it performs, carrying the
+    /// configured chord, and enabled only while the row has started and the device can act.
+    @Test func comeBackLaterItemFlipsItsTitleAndShowsTheConfiguredShortcut() throws {
+        let off = ComeBackLaterToggle(rowKind: .agent, rowID: "a", isOn: false, hasStarted: true)
+        let on = ComeBackLaterToggle(rowKind: .agent, rowID: "a", isOn: true, hasStarted: true)
+        let item = try #require(comeBackLaterItem(off))
+        #expect(item.title == "Come Back Later")
+        #expect(item.keyEquivalent == "l")
+        #expect(item.keyEquivalentModifierMask == NSEvent.ModifierFlags([.command, .option]))
+        #expect(item.isEnabled)
+        #expect(comeBackLaterItem(on)?.title == "Remove from Alerts")
+        #expect(comeBackLaterItem(off, shortcut: HotkeySpec(key: "j", modifiers: [.cmd, .ctrl]))?.keyEquivalent == "j")
+    }
+
+    @Test func comeBackLaterItemIsDisabledWithoutARowAnOfflineDeviceOrAnUnstartedRow() {
+        let off = ComeBackLaterToggle(rowKind: .process, rowID: "p", isOn: false, hasStarted: true)
+        #expect(comeBackLaterItem(nil)?.isEnabled == false)
+        #expect(comeBackLaterItem(off, daemonActionsEnabled: false)?.isEnabled == false)
+        #expect(comeBackLaterItem(ComeBackLaterToggle(rowKind: .process, rowID: "p", isOn: false, hasStarted: false))?.isEnabled == false)
     }
 }

@@ -79,13 +79,6 @@ final class CommandPalettePanel: NSPanel {
 
     var sessionPickerContext: SessionPickerContext?
 
-    func filteredCommandPaletteItems(_ items: [CommandPaletteItem]) -> [CommandPaletteItem] {
-        items.filter { item in
-            guard let attentionID = item.alertsAttentionID else { return true }
-            return !host.alerts.dismissedAlertsAttentionItemIDs.contains(attentionID)
-        }
-    }
-
     func rememberRecentCommandPaletteFocusIdentity(_ identity: String) {
         recentCommandPaletteFocusIdentities.removeAll(where: { $0 == identity })
         recentCommandPaletteFocusIdentities.insert(identity, at: 0)
@@ -274,9 +267,12 @@ final class CommandPalettePanel: NSPanel {
             NSSound.beep()
             return
         }
+        // The row stays until the owning device answers; the reload that follows drops it.
+        guard host.alerts.canDismissAlert(attentionID: attentionID) else {
+            NSSound.beep()
+            return
+        }
         host.alerts.dismissAlertsAttentionItem(attentionID)
-        commandPaletteItems.removeAll { $0.alertsAttentionID == attentionID }
-        applyCommandPaletteFilter()
     }
 
     func toggleCommandPaletteFromHotkey() {
@@ -711,7 +707,7 @@ final class CommandPalettePanel: NSPanel {
             case .success(let items):
                 self.host.logHotkeyDebug("reload_palette_items success count=\(items.count)")
                 self.commandPaletteNeedsReload = false
-                self.commandPaletteItems = self.filteredCommandPaletteItems(items)
+                self.commandPaletteItems = items
                 self.applyCommandPaletteFilter()
             case .failure(let error):
                 self.host.logHotkeyDebug("reload_palette_items failure error=\(error)")

@@ -445,7 +445,7 @@ import workspacecore
                 mode: mode, devices: devices, openTerminalSessionIDsByWorkspace: openTerminalSessionIDsByWorkspace,
                 openBrowserSessionsByWorkspace: mode == .openSessions ? browserState.openBrowserSessionsByWorkspace : [:],
                 trackedBrowserWindowIDsByWorkspace: mode == .openSessions ? browserState.trackedWindowIDsByWorkspace : [:],
-                dismissedAlertIDs: host.alerts.dismissedAlertsAttentionItemIDs, recentCursors: windowCycleState.recentCursors(for: .mode(mode)),
+                recentCursors: windowCycleState.recentCursors(for: .mode(mode)),
                 retaining: windowCycleState.validCycleSession(for: .mode(mode))?.orderedCursors ?? [])
             return CycleModeRowModel(mode: mode, count: targets.count, deviceCount: Set(targets.map(\.deviceID)).count, workspaceName: nil)
         }
@@ -817,7 +817,7 @@ import workspacecore
             mode: mode, devices: devices, openTerminalSessionIDsByWorkspace: openTerminalSessionIDsByWorkspace,
             openBrowserSessionsByWorkspace: browserCycleState.openBrowserSessionsByWorkspace,
             trackedBrowserWindowIDsByWorkspace: browserCycleState.trackedWindowIDsByWorkspace,
-            dismissedAlertIDs: host.alerts.dismissedAlertsAttentionItemIDs, recentCursors: windowCycleState.recentCursors(for: .mode(mode)),
+            recentCursors: windowCycleState.recentCursors(for: .mode(mode)),
             retaining: retainedCursors)
         // A focused built-in terminal decides the current target before any browser state is read, so
         // the browser fields are dropped together when there is one.

@@ -39,6 +39,8 @@ import workspacecore
     // Not private: `AppKitController.handleToggleBriefShortcut` and the workspace overflow menu read this
     // from a different file in the same module (cross-file `private` isn't visible).
     var toggleBriefShortcutSpec: HotkeySpec?
+    // Not private for the same reason: the overflow and sidebar menus show it.
+    var toggleComeBackLaterShortcutSpec: HotkeySpec?
     private var openEditorShortcutSpec: HotkeySpec?
     private var openTerminalShortcutSpec: HotkeySpec?
     // Not private: `AppKitController.handleNewTabSessionPickerShortcut` reads this from a different
@@ -184,6 +186,7 @@ import workspacecore
             // navigation chord (Cmd+C, Cmd+Left) it must leave a focused rename or search field alone. A
             // focused terminal pane is not a text input, so the chord still reaches here from a pane.
             if self.host.handleToggleBriefShortcut(event: event) { return nil }
+            if self.host.handleToggleComeBackLaterShortcut(event: event) { return nil }
             if self.handleSidebarNavigationShortcut(event: event) { return nil }
             if let openTerminalShortcutSpec, self.matches(event: event, spec: openTerminalShortcutSpec) {
                 // Global panel windows carry no tabs (and so no "new tab" of their own): this
@@ -450,6 +453,7 @@ import workspacecore
         sidebarNextShortcutSpec = loadShortcutSpec(resolver, setting: .guiSidebarNextShortcut)
         sidebarPreviousShortcutSpec = loadShortcutSpec(resolver, setting: .guiSidebarPreviousShortcut)
         toggleBriefShortcutSpec = loadShortcutSpec(resolver, setting: .guiToggleBriefShortcut)
+        toggleComeBackLaterShortcutSpec = loadShortcutSpec(resolver, setting: .guiToggleComeBackLaterShortcut)
         openEditorShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenEditorShortcut)
         openTerminalShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenTerminalShortcut)
         newTabShortcutSpec = loadShortcutSpec(resolver, setting: .guiNewTabShortcut)
@@ -519,6 +523,7 @@ import workspacecore
         case .guiSidebarNextShortcut: return sidebarNextShortcutSpec
         case .guiSidebarPreviousShortcut: return sidebarPreviousShortcutSpec
         case .guiToggleBriefShortcut: return toggleBriefShortcutSpec
+        case .guiToggleComeBackLaterShortcut: return toggleComeBackLaterShortcutSpec
         case .guiOpenEditorShortcut: return openEditorShortcutSpec
         case .guiOpenTerminalShortcut: return openTerminalShortcutSpec
         case .guiNewTabShortcut: return newTabShortcutSpec

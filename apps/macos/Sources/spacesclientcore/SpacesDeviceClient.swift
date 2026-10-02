@@ -895,6 +895,23 @@ public enum SpacesDeviceClient {
         -> SpacesDeviceAPIResponse
     { try request(.init(command: .renameAgentSession(.init(workspaceID: workspaceID, agentID: agentID, title: title))), context: context) }
 
+    /// Dismisses alerts on the device, so the dismissal reaches every client through the overview.
+    public static func dismissAlerts(keys: [String], context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .dismissAlerts(.init(keys: keys))), context: context)
+    }
+
+    /// Reports that the user has stayed on a terminal session for `focusedForSeconds`; `keys` are the
+    /// alerts and flags whose dwell completed.
+    public static func visitTerminalSession(sessionID: String, focusedForSeconds: Double, keys: [String], context: DeviceRequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        try request(.init(command: .visitTerminalSession(.init(sessionID: sessionID, focusedForSeconds: focusedForSeconds, keys: keys))), context: context)
+    }
+
+    public static func setComeBackLater(rowKind: SpacesDeviceComeBackLaterRowKind, rowID: String, isOn: Bool, context: DeviceRequestContext) throws
+        -> SpacesDeviceAPIResponse
+    { try request(.init(command: .setComeBackLater(.init(rowKind: rowKind, rowID: rowID, isOn: isOn))), context: context) }
+
     public static func runWorkspaceProcess(workspaceID: String, processKey: String, processTemplateID: String?, context: DeviceRequestContext) throws
         -> SpacesDeviceAPIResponse
     {
