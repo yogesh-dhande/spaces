@@ -1185,7 +1185,7 @@
 
         func testRemoteTerminalHostViewKeepsPhoneSurfaceColumnsVisible() throws {
             let phoneBounds = CGRect(x: 0, y: 0, width: 393, height: 700)
-            let window = UIWindow(frame: phoneBounds)
+            let window = try Self.makeSceneWindow(frame: Self.screenBottomAlignedFrame(phoneBounds))
             let viewController = UIViewController()
             window.rootViewController = viewController
 
@@ -1219,7 +1219,7 @@
         /// the same test: it is permanent chrome, so it does change the reported grid.
         func testRemoteTerminalHostViewShiftsTheRenderedWindowForTheKeyboardWithoutResizingTheSession() throws {
             let phoneBounds = CGRect(x: 0, y: 0, width: 393, height: 640)
-            let window = UIWindow(frame: phoneBounds)
+            let window = try Self.makeSceneWindow(frame: Self.screenBottomAlignedFrame(phoneBounds))
             let viewController = UIViewController()
             window.rootViewController = viewController
 
@@ -1248,7 +1248,7 @@
             XCTAssertEqual(hostView.reportedViewportBoundsForTesting().height, phoneBounds.height - 46, accuracy: 0.5)
             reportedViewports.removeAll()
 
-            hostView.setKeyboardOccludedHeightForTesting(260)
+            hostView.setKeyboardOccludedHeightForTesting(Self.keyboardGuideHeight(keys: 260))
             viewController.view.layoutIfNeeded()
 
             XCTAssertEqual(hostView.visibleRenderBoundsForTesting().height, 334, accuracy: 0.5)
@@ -1307,13 +1307,133 @@
             window.isHidden = true
         }
 
+        /// The accessory toolbar parks at the bottom of the screen, so a window must reach the screen
+        /// bottom for the toolbar to overlap its content; this places a window of `size` there.
+        /// The toolbar's overlap is measured in screen coordinates, which a window converts into only
+        /// while it belongs to a window scene (as every window in the running app does).
+        private static func makeSceneWindow(frame: CGRect) throws -> UIWindow {
+            let scene = try XCTUnwrap(
+                UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first, "the test host has no window scene")
+            let window = UIWindow(windowScene: scene)
+            window.frame = frame
+            return window
+        }
+
+        private static func screenBottomAlignedFrame(_ size: CGRect) -> CGRect {
+            CGRect(x: 0, y: UIScreen.main.bounds.maxY - size.height, width: size.width, height: size.height)
+        }
+
+        /// The height of `keyboardLayoutGuide.layoutFrame`, which covers the keys and the input accessory
+        /// toolbar riding on top of them.
+        private static func keyboardGuideHeight(keys: CGFloat) -> CGFloat { keys + 46 }
+
+        /// While the keyboard is presented the toolbar's own view cannot be located, and the layout guide
+        /// frame already includes the toolbar, so the toolbar must not be counted a second time.
+        func testKeyboardGuideFrameIsNotExtendedByASecondToolbar() throws {
+            let phoneBounds = CGRect(x: 0, y: 0, width: 393, height: 640)
+            let hostView = GhosttyRemoteTerminalHostView(frame: phoneBounds)
+            hostView.userInterfaceIdiomOverrideForTesting = .phone
+            hostView.setAcceptsTerminalInput(true)
+            let guideHeight = Self.keyboardGuideHeight(keys: 260)
+            hostView.setKeyboardOccludedHeightForTesting(guideHeight)
+            hostView.setNeedsLayout()
+            hostView.layoutIfNeeded()
+            hostView.update(
+                snapshot: alternateScreen(promptAtBottomSnapshot(columns: 80, rows: 20)), renderStateKey: "viewer|snapshot=80x20|alt=true",
+                fallbackText: "Waiting for terminal state...")
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+            XCTAssertEqual(hostView.visibleRenderBoundsForTesting().height, phoneBounds.height - guideHeight, accuracy: 0.5)
+            XCTAssertEqual(hostView.reportedViewportBoundsForTesting().height, phoneBounds.height - guideHeight, accuracy: 0.5)
+        }
+
+        /// A pane that ends above the screen bottom (the home-indicator area below it) is overlapped by
+        /// the parked toolbar only in part, on the main and the alternate screen alike. Starting or
+        /// quitting a full-screen program with no keyboard showing therefore reports nothing.
+        func testAccessoryToolbarCountsOnlyItsOverlapWithAPaneAboveTheScreenBottom() throws {
+            let screenBounds = UIScreen.main.bounds
+            let homeIndicatorGap: CGFloat = 34
+            let paneFrame = CGRect(x: 0, y: 106, width: screenBounds.width, height: screenBounds.height - 106 - homeIndicatorGap)
+            let expectedOverlap = 46 - homeIndicatorGap
+            let window = try Self.makeSceneWindow(frame: screenBounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: paneFrame)
+            hostView.userInterfaceIdiomOverrideForTesting = .phone
+            var reportedViewports: [(columns: Int, rows: Int)] = []
+            hostView.onViewportSizeChanged = { columns, rows in reportedViewports.append((columns: columns, rows: rows)) }
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = paneFrame
+            hostView.setAcceptsTerminalInput(true)
+            XCTAssertTrue(hostView.becomeFirstResponder())
+            hostView.setNeedsLayout()
+            viewController.view.layoutIfNeeded()
+            defer { window.isHidden = true }
+
+            func apply(_ snapshot: GhosttyTerminalSnapshot) {
+                hostView.update(
+                    snapshot: snapshot, renderStateKey: "viewer|snapshot=\(snapshot.columns)x\(snapshot.rows)|alt=\(snapshot.alternateScreenActive)",
+                    fallbackText: "Waiting for terminal state...")
+                RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            }
+
+            let mainScreenViewport = hostView.reportedViewportSizeForTesting()
+            XCTAssertEqual(hostView.reportedViewportBoundsForTesting().height, paneFrame.height - expectedOverlap, accuracy: 0.5)
+
+            apply(promptAtBottomSnapshot(columns: mainScreenViewport.columns, rows: mainScreenViewport.rows))
+            reportedViewports.removeAll()
+            apply(alternateScreen(promptAtBottomSnapshot(columns: mainScreenViewport.columns, rows: mainScreenViewport.rows)))
+            XCTAssertEqual(hostView.reportedViewportBoundsForTesting().height, paneFrame.height - expectedOverlap, accuracy: 0.5)
+            XCTAssertEqual(hostView.reportedViewportSizeForTesting().rows, mainScreenViewport.rows)
+            XCTAssertTrue(
+                reportedViewports.isEmpty, "entering a full-screen program with no keyboard must not resize the session: \(reportedViewports)")
+
+            apply(promptAtBottomSnapshot(columns: mainScreenViewport.columns, rows: mainScreenViewport.rows))
+            XCTAssertEqual(hostView.reportedViewportSizeForTesting().rows, mainScreenViewport.rows)
+            XCTAssertTrue(
+                reportedViewports.isEmpty, "leaving a full-screen program with no keyboard must not resize the session: \(reportedViewports)")
+        }
+
+        /// Before any keyboard frame exists, the toolbar's frame is estimated; it must cover the same
+        /// overlap with the pane as the main screen's measure, not the toolbar's full height.
+        func testBeforeAnyKeyboardFrameTheToolbarEstimateCountsOnlyItsOverlapWithThePane() throws {
+            let screenBounds = UIScreen.main.bounds
+            let paneFrame = CGRect(x: 0, y: 106, width: screenBounds.width, height: screenBounds.height - 106 - 34)
+            let window = try Self.makeSceneWindow(frame: screenBounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            let hostView = GhosttyRemoteTerminalHostView(frame: paneFrame)
+            hostView.userInterfaceIdiomOverrideForTesting = .phone
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = paneFrame
+            hostView.setAcceptsTerminalInput(true)
+            XCTAssertTrue(hostView.becomeFirstResponder())
+            // A zero-height keyboard frame keeps neither the keyboard nor the toolbar view locatable.
+            hostView.setKeyboardOccludedHeightForTesting(0)
+            hostView.setNeedsLayout()
+            viewController.view.layoutIfNeeded()
+            defer { window.isHidden = true }
+
+            hostView.update(
+                snapshot: alternateScreen(promptAtBottomSnapshot(columns: 80, rows: 20)), renderStateKey: "viewer|snapshot=80x20|alt=true",
+                fallbackText: "Waiting for terminal state...")
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+            XCTAssertEqual(hostView.reportedViewportBoundsForTesting().height, paneFrame.height - 12, accuracy: 0.5)
+        }
+
         /// A full-screen application lays itself out to the grid height, so cropping it under the keyboard
         /// hides its header and it would never re-lay out. On the alternate screen the keyboard therefore
         /// resizes the session, and the screen switching on or off while the keyboard is up moves the
         /// reported grid with it.
         func testAlternateScreenFollowsTheKeyboardInTheReportedGridWhilePrimaryScreenDoesNot() throws {
             let phoneBounds = CGRect(x: 0, y: 0, width: 393, height: 640)
-            let window = UIWindow(frame: phoneBounds)
+            let window = try Self.makeSceneWindow(frame: Self.screenBottomAlignedFrame(phoneBounds))
             let viewController = UIViewController()
             window.rootViewController = viewController
 
@@ -1343,7 +1463,7 @@
             // Primary screen: the keyboard shifts the window and reports nothing.
             apply(promptAtBottomSnapshot(columns: 80, rows: toolbarViewport.rows))
             reportedViewports.removeAll()
-            hostView.setKeyboardOccludedHeightForTesting(260)
+            hostView.setKeyboardOccludedHeightForTesting(Self.keyboardGuideHeight(keys: 260))
             viewController.view.layoutIfNeeded()
             let keyboardUpRendered = hostView.renderedViewportSizeForTesting()
             XCTAssertLessThan(keyboardUpRendered.rows, toolbarViewport.rows)
@@ -1370,7 +1490,7 @@
             reportedViewports.removeAll()
 
             // Keyboard up again, then the application exits: the full grid returns.
-            hostView.setKeyboardOccludedHeightForTesting(260)
+            hostView.setKeyboardOccludedHeightForTesting(Self.keyboardGuideHeight(keys: 260))
             viewController.view.layoutIfNeeded()
             XCTAssertEqual(try XCTUnwrap(reportedViewports.last).rows, keyboardUpRendered.rows)
             apply(promptAtBottomSnapshot(columns: 80, rows: keyboardUpRendered.rows))
@@ -1386,7 +1506,7 @@
         /// the row that crop starts at, not as row zero.
         func testRemoteTerminalHostViewSendsScrollPointerPositionsInTheDaemonsGrid() throws {
             let phoneBounds = CGRect(x: 0, y: 0, width: 393, height: 640)
-            let window = UIWindow(frame: phoneBounds)
+            let window = try Self.makeSceneWindow(frame: Self.screenBottomAlignedFrame(phoneBounds))
             let viewController = UIViewController()
             window.rootViewController = viewController
 
@@ -1402,7 +1522,7 @@
 
             hostView.setAcceptsTerminalInput(true)
             XCTAssertTrue(hostView.becomeFirstResponder())
-            hostView.setKeyboardOccludedHeightForTesting(260)
+            hostView.setKeyboardOccludedHeightForTesting(Self.keyboardGuideHeight(keys: 260))
             viewController.view.layoutIfNeeded()
 
             let gridRows = hostView.reportedViewportSizeForTesting().rows
@@ -1463,7 +1583,7 @@
             reportedViewports.removeAll()
             let rendersBeforeTransition = hostView.renderLatestSnapshotCallCountForTesting
 
-            for occludedHeight in [80.0, 180.0, 260.0] as [CGFloat] {
+            for occludedHeight in [80.0, 180.0, Self.keyboardGuideHeight(keys: 260)] as [CGFloat] {
                 hostView.setKeyboardOccludedHeightForTesting(occludedHeight)
                 hostView.layoutIfNeeded()
             }
@@ -1490,7 +1610,7 @@
 
         func testRemoteTerminalHostViewUsesSurfaceRowsForKeyboardHiddenPrompt() throws {
             let phoneBounds = CGRect(x: 0, y: 0, width: 393, height: 700)
-            let window = UIWindow(frame: phoneBounds)
+            let window = try Self.makeSceneWindow(frame: Self.screenBottomAlignedFrame(phoneBounds))
             let viewController = UIViewController()
             window.rootViewController = viewController
 
@@ -1505,6 +1625,10 @@
             hostView.setAcceptsTerminalInput(true)
             XCTAssertTrue(hostView.becomeFirstResponder())
             hostView.setSoftwareKeyboardVisible(false)
+            // A unit-test window has no keyboard window, so its real `keyboardLayoutGuide` frame is only the
+            // safe-area inset; a zero-height frame leaves the toolbar to be located as on a device before any
+            // keyboard frame exists.
+            hostView.setKeyboardOccludedHeightForTesting(0)
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
 
             XCTAssertEqual(hostView.visibleRenderBoundsForTesting().height, phoneBounds.height - 46, accuracy: 0.5)

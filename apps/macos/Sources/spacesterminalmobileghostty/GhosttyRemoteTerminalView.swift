@@ -1873,12 +1873,31 @@ import Foundation
         }
 
         /// The height the input accessory toolbar takes off the bottom of this view, independent of where
-        /// the keyboard currently parks it: the toolbar rides on top of the keyboard while one is up, but
-        /// the reported grid measures it from the bottom of the pane, which is where it sits once the
-        /// keyboard is gone.
+        /// the keyboard currently parks it: the reported grid measures the toolbar where it sits once the
+        /// keyboard is gone, not where it rides while one is up.
+        ///
+        /// Only its overlap with the pane counts (``toolbarOverlapWhenParkedAtScreenBottom()``): parked at
+        /// the bottom of the screen, the toolbar covers the home-indicator area below the pane first.
+        /// Counting its full height cost two rows on home-indicator iPhones and made this measure
+        /// disagree with the alternate screen's (which reads the real frames) whenever no keyboard is
+        /// showing, so starting or quitting a full-screen program resized the session for nothing.
         private func accessoryOccludedHeight() -> CGFloat {
             guard bounds.width > 0, bounds.height > 0, isAccessoryToolbarPresent else { return 0 }
-            return min(Self.accessoryToolbarHeight, bounds.height)
+            return min(toolbarOverlapWhenParkedAtScreenBottom(), bounds.height)
+        }
+
+        /// How much of this pane the input accessory toolbar covers when it is parked at the bottom of
+        /// the screen: the toolbar height minus the gap between the pane's bottom edge and the screen's,
+        /// clamped to the toolbar height. Measured on an iPhone 17 Pro Max the pane ends 34pt above the
+        /// screen bottom (home-indicator area) and the toolbar parks at the very bottom, so it overlaps
+        /// the pane by 12pt of its 46pt. The pane's bottom is taken in screen coordinates so a window
+        /// that does not reach the bottom of the screen (an iPad window) gets 0. A view outside a window
+        /// has no toolbar on screen and gets 0.
+        private func toolbarOverlapWhenParkedAtScreenBottom() -> CGFloat {
+            guard let screen = window?.screen else { return 0 }
+            let paneBottom = convert(bounds, to: screen.coordinateSpace).maxY
+            let gapBelowPane = max(screen.bounds.maxY - paneBottom, 0)
+            return min(max(Self.accessoryToolbarHeight - gapBelowPane, 0), Self.accessoryToolbarHeight)
         }
 
         /// Whether the input accessory toolbar is on screen. It rides with first-responder status, not
@@ -1902,12 +1921,9 @@ import Foundation
         private func keyboardAndAccessoryOccludingFrames() -> [CGRect] {
             guard bounds.width > 0, bounds.height > 0 else { return [] }
             var frames: [CGRect] = []
-            let keyboardFrame = keyboardOccludingFrame()
-            if let keyboardFrame { frames.append(keyboardFrame) }
+            if let keyboardFrame = keyboardOccludingFrame() { frames.append(keyboardFrame) }
             if let accessoryFrame = accessoryOccludingFrame() { frames.append(accessoryFrame) }
-            if let fallbackAccessoryFrame = fallbackAccessoryOccludingFrame(keyboardFrame: keyboardFrame, existingFrames: frames) {
-                frames.append(fallbackAccessoryFrame)
-            }
+            if frames.isEmpty, let fallbackAccessoryFrame = fallbackAccessoryOccludingFrame() { frames.append(fallbackAccessoryFrame) }
             return frames
         }
 
@@ -1937,17 +1953,28 @@ import Foundation
             return nil
         }
 
-        private func fallbackAccessoryOccludingFrame(keyboardFrame: CGRect?, existingFrames: [CGRect]) -> CGRect? {
+        /// The input accessory toolbar's overlap with the pane, pinned to the bottom of the bounds, for
+        /// when neither the keyboard frame nor the toolbar's own frame can be located (first responder
+        /// before any keyboard exists). It is the same height ``accessoryOccludedHeight()`` reports, so
+        /// the toolbar parked at the bottom of the screen covers only the part of the pane above the
+        /// home-indicator area; reserving its full height overstated it by that area.
+        ///
+        /// It is never placed above a keyboard frame: UIKit's `keyboardLayoutGuide.layoutFrame` already
+        /// includes the toolbar (measured: 364pt = 318pt of keys + 46pt toolbar; with a hardware keyboard
+        /// the frame is the 46pt toolbar alone). While the keyboard is being presented, the toolbar's own
+        /// view sits in a keyboard window positioned off screen, so `accessoryOccludingFrame()` finds
+        /// nothing. Adding a toolbar above the keyboard frame at that moment counted it twice and shrank
+        /// the reported grid by the toolbar height, and the alternate screen keeps that size because its
+        /// report is not recomputed once the keyboard settles.
+        private func fallbackAccessoryOccludingFrame() -> CGRect? {
             guard acceptsTerminalInput else { return nil }
-            guard isFirstResponder || keyboardFrame != nil || keyboardOccludedHeightOverrideForTesting != nil else { return nil }
-            guard existingFrames.allSatisfy({ abs($0.height - Self.accessoryToolbarHeight) > 1 }) else { return nil }
-            let maxY = keyboardFrame?.minY ?? bounds.maxY
-            guard maxY > 0, maxY <= bounds.maxY else { return nil }
-            let height = min(Self.accessoryToolbarHeight, maxY)
+            guard isFirstResponder || keyboardOccludedHeightOverrideForTesting != nil else { return nil }
+            let height = min(toolbarOverlapWhenParkedAtScreenBottom(), bounds.height)
             guard height > 0 else { return nil }
-            return CGRect(x: 0, y: maxY - height, width: bounds.width, height: height)
+            return CGRect(x: 0, y: bounds.maxY - height, width: bounds.width, height: height)
         }
 
+        /// Models `keyboardLayoutGuide.layoutFrame`, so `height` includes the input accessory toolbar.
         func setKeyboardOccludedHeightForTesting(_ height: CGFloat?) {
             keyboardOccludedHeightOverrideForTesting = height
             setNeedsLayout()
