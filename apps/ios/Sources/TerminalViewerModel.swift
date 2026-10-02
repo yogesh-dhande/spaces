@@ -4827,7 +4827,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         ownerRecoveryGraceDeadline = now.addingTimeInterval(Self.ownerRecoveryGraceInterval)
     }
 
-    private func scheduleOwnershipSynchronization() {
+    private func scheduleOwnershipSynchronization(debounce: Duration? = nil) {
         guard !isEndedState else { return }
         guard isOwner else { return }
         guard !isBusy else { return }
@@ -4839,10 +4839,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         trace(
             "schedule_ownership_sync viewport=\(traceSize(columns: viewportSize?.columns, rows: viewportSize?.rows)) runtime=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows))"
         )
-        startOwnershipSynchronization()
+        startOwnershipSynchronization(debounce: debounce ?? Self.ownershipSyncDebounce)
     }
 
-    private func startOwnershipSynchronization() {
+    private func startOwnershipSynchronization(debounce: Duration) {
         guard isOwner else { return }
         // `isSynchronizingOwnership` is guaranteed false here: `scheduleOwnershipSynchronization` only
         // calls this when it is not already true.
@@ -4850,7 +4850,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         ownershipSynchronizationTask?.cancel()
         ownershipSynchronizationTask = Task { [weak self] in
             guard let self else { return }
-            try? await Task.sleep(for: Self.ownershipSyncDebounce)
+            try? await Task.sleep(for: debounce)
             guard !Task.isCancelled else { return }
             await self.runOwnershipSynchronization()
         }
@@ -4895,7 +4895,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             ownershipSyncState = .idle
             if shouldScheduleFollowUp {
                 needsOwnershipSynchronizationAfterCurrentRun = false
-                scheduleOwnershipSynchronization()
+                // A follow-up for a grid the surface has since moved away from is the restore of a transient
+                // size, and it goes out at once: the debounce exists to coalesce a burst of reports, and this
+                // run already absorbed the burst. Holding the restore back leaves the session reflowed to the
+                // transient grid, which costs an inline TUI its screen (#468).
+                let viewportMovedOn = viewportSize.map { $0.columns != lastSentResizeSize?.columns || $0.rows != lastSentResizeSize?.rows } ?? false
+                scheduleOwnershipSynchronization(debounce: viewportMovedOn ? .zero : Self.ownershipSyncDebounce)
             }
         }
         guard isOwner else { return }
@@ -5030,6 +5035,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     private func shouldResizeOwnerRuntime(to targetViewportSize: (columns: Int, rows: Int)) -> Bool {
         guard ownerRenderEpochState != nil else { return true }
+        // A request for a different grid may still be on its way to being applied: the daemon applies a
+        // resize after a short settle window, so the cached runtime size describes where the session was,
+        // not where it is heading. Judging the viewport against it would skip the restore of a transient
+        // size and leave the session at that size (#468).
+        if let lastSentResizeSize, lastSentResizeSize.columns != targetViewportSize.columns || lastSentResizeSize.rows != targetViewportSize.rows {
+            return true
+        }
         let runtimeColumns = latestState?.runtimeState?.columns
         let runtimeRows = latestState?.runtimeState?.rows
         return runtimeColumns != targetViewportSize.columns || runtimeRows != targetViewportSize.rows
@@ -5042,6 +5054,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard targetViewportSize != nil else { return latestState }
         for _ in 0..<Self.postResizeStateSettleIterations {
             guard isOwner else { return nil }
+            // The surface has already reported a different grid, so the frame this wait is for describes a
+            // size that is being replaced; waiting for it would delay the restore until the session has
+            // reflowed to that size (#468). The follow-up run owns the newer grid.
+            if let targetViewportSize, let viewportSize,
+                viewportSize.columns != targetViewportSize.columns || viewportSize.rows != targetViewportSize.rows
+            {
+                return nil
+            }
             if let latestState,
                 ownerStateLooksFresh(
                     latestState, targetViewportSize: targetViewportSize, previousEmittedAt: previousEmittedAt,
@@ -6250,7 +6270,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// a round trip per attach -- the mints that collide are the ones no round trip separates.
     func mintAttachmentConnectedAtForTesting() -> String { mintAttachmentConnectedAt() }
 
-    func configureOwnerInteractiveForTesting(ownerEpoch: UInt64) async {
+    func configureOwnerInteractiveForTesting(ownerEpoch: UInt64, runtimeSize: (columns: Int, rows: Int)? = nil) async {
         // The daemon names this client by the attachment it holds now, so a stand-in for its snapshot has
         // to carry the identity the attach established rather than the model's own base record: a snapshot
         // naming any other one is a snapshot about an attachment this client no longer holds, which is
@@ -6260,7 +6280,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let ownerClient = TerminalClient(id: remoteClient.id, kind: remoteClient.kind, identity: remoteClient.identity, connectedAt: connectedAt)
         let ownerAttachment = TerminalAttachment(sessionID: session.id, clientID: remoteClient.id, mode: .owner, attachedAt: "2026-01-01T00:00:00Z")
         let runtime = TerminalSessionRuntimeState(
-            sessionID: session.id, servicePID: 100, childPID: 200, state: .running, updatedAt: "2026-01-01T00:00:00Z")
+            sessionID: session.id, servicePID: 100, childPID: 200, state: .running, updatedAt: "2026-01-01T00:00:00Z", columns: runtimeSize?.columns,
+            rows: runtimeSize?.rows)
         let payload = GhosttyRemoteSessionStatePayload(
             sessionID: session.id, reason: TerminalRemoteSessionStateReason.initial.rawValue, emittedAt: "2026-01-01T00:00:00Z",
             sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: runtime,

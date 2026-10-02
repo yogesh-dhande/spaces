@@ -1238,6 +1238,29 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 runtimeSize: (columns: 60, rows: 20), force: true))
     }
 
+    /// A pane that measures a transient tiny grid and then its real one must send the restore at once. While
+    /// the tiny request is in flight the session still reports the real size and the last acknowledged
+    /// request is the real size too, which used to make the restore look redundant until the daemon
+    /// reported the tiny grid (#468).
+    func testRestoreIsSentWhileTheShrinkIsStillInFlight() {
+        XCTAssertTrue(
+            RemoteGhosttySessionHost.shouldSendViewportResize(
+                requestedSize: (columns: 132, rows: 59), lastRequestedSize: (columns: 132, rows: 59), pendingSize: (columns: 132, rows: 2),
+                runtimeSize: (columns: 132, rows: 59), force: false))
+        // The shrink has been acknowledged but the session still reports the restored size, because the
+        // daemon applies a resize after a short settle window: the restore is sent, not judged redundant
+        // against the cached runtime size.
+        XCTAssertTrue(
+            RemoteGhosttySessionHost.shouldSendViewportResize(
+                requestedSize: (columns: 132, rows: 59), lastRequestedSize: (columns: 132, rows: 2), pendingSize: nil,
+                runtimeSize: (columns: 132, rows: 59), force: false))
+        // The same size as the one in flight is still not sent twice.
+        XCTAssertFalse(
+            RemoteGhosttySessionHost.shouldSendViewportResize(
+                requestedSize: (columns: 132, rows: 2), lastRequestedSize: (columns: 132, rows: 59), pendingSize: (columns: 132, rows: 2),
+                runtimeSize: (columns: 132, rows: 59), force: false))
+    }
+
     /// Re-attaching as owner is not itself a reason to resize. An attach that finds the same surface at the
     /// size the session already runs at sends nothing — every refocus of an open pane re-attaches, and the
     /// daemon answers such a resize by early-outing as a no-op after a control hop onto the queue that

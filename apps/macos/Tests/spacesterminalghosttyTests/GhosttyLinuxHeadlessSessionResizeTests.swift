@@ -91,6 +91,17 @@
             #expect(TerminalEngineActor.runSynchronously { condition() }, "waitAsync timed out", sourceLocation: sourceLocation)
         }
 
+        /// A resize answers when it is accepted and reaches the grid once the core's settle window closes,
+        /// so a test reads the grid only after it has arrived.
+        private func waitForGrid(
+            _ core: GhosttyEmbeddedSessionCore, columns: Int, rows: Int, transcriptPath: String? = nil,
+            sourceLocation: SourceLocation = #_sourceLocation
+        ) async throws {
+            try await waitAsync(transcriptPath: transcriptPath, sourceLocation: sourceLocation) {
+                Self.renderedGrid(of: core).map { $0 == (columns, rows) } ?? false
+            }
+        }
+
         private static func screenText(of snapshot: GhosttyTerminalSnapshot) -> String {
             guard snapshot.columns > 0, snapshot.rows > 0 else { return "" }
             var lines: [String] = []
@@ -156,6 +167,10 @@
             return screenText(of: snapshot)
         }
 
+        @TerminalEngineActor private static func renderedGrid(of core: GhosttyEmbeddedSessionCore) -> (columns: Int, rows: Int)? {
+            renderedSnapshot(of: core).map { ($0.columns, $0.rows) }
+        }
+
         @TerminalEngineActor private static func renderedSnapshot(of core: GhosttyEmbeddedSessionCore) -> GhosttyTerminalSnapshot? {
             core.currentRemoteStatePayload(reason: TerminalRemoteSessionStateReason.initial)?.renderSnapshot
         }
@@ -197,6 +212,7 @@
 
             let response = TerminalEngineActor.runSynchronously { Self.resize(core, columns: 100, rows: 30) }
             #expect(response.ok, "resize must succeed without reading output.log: \(response.message)")
+            try await waitForGrid(core, columns: 100, rows: 30, transcriptPath: paths.outputPath)
 
             // The grid is the new size and the wide line re-wrapped for width 100 while keeping its
             // text — proving the live session reflowed rather than replaying the corrupted transcript.
@@ -233,6 +249,7 @@
 
             let response = TerminalEngineActor.runSynchronously { Self.resize(core, columns: 90, rows: 28) }
             #expect(response.ok, "resize must succeed even with no transcript file to replay: \(response.message)")
+            try await waitForGrid(core, columns: 90, rows: 28)
 
             let snapshot = try #require(TerminalEngineActor.runSynchronously { Self.renderedSnapshot(of: core) })
             #expect(snapshot.columns == 90)
@@ -274,6 +291,7 @@
             // deliberate resize to a size the session was told about rather than its starting state.
             let settled = TerminalEngineActor.runSynchronously { Self.resize(core, columns: 96, rows: 26) }
             #expect(settled.ok, "the first resize must succeed: \(settled.message)")
+            try await waitForGrid(core, columns: 96, rows: 26)
 
             let outcome = TerminalEngineActor.runSynchronously { () -> SameSizeResizeOutcome in
                 let revisionBefore = Self.screenStateRevision(of: core)
@@ -291,6 +309,93 @@
             #expect(snapshot.columns == 96)
             #expect(snapshot.rows == 26)
             #expect(Self.screenText(of: snapshot).contains(marker), "the screen content must survive a resize to the size it already had")
+        }
+
+        /// A pane that reports a transient tiny grid and then its real one inside one settle window must
+        /// never see the session reflowed: reflowing an inline TUI down to a few rows and back loses its
+        /// screen (#468).
+        @Test func aShrinkRestoredWithinTheSettleWindowNeverReflowsTheSession() async throws {
+            let paths = try makeTemporaryPaths()
+            defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+            let marker = "TRANSIENT_MARKER"
+            let configuration = makeConfiguration(
+                sessionID: "resize-transient-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(marker)'; cat")
+            let coreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                let core = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+                try core.startIfNeeded()
+                Self.attachRemoteOwner(to: core, id: "remote-owner")
+                return Box(core)
+            }
+            let core = coreBox.value
+            defer { TerminalEngineActor.runSynchronously { core.terminate() } }
+            try await waitAsync { Self.renderedScreenText(of: core)?.contains(marker) == true }
+
+            let revisionBefore = TerminalEngineActor.runSynchronously { Self.screenStateRevision(of: core) }
+            let responses = TerminalEngineActor.runSynchronously { () -> [TerminalControlResponse] in
+                [
+                    Self.resize(core, clientID: "remote-owner", columns: 80, rows: 2, serial: 1),
+                    Self.resize(core, clientID: "remote-owner", columns: 80, rows: 24, serial: 2),
+                ]
+            }
+            #expect(responses[0].ok && responses[1].ok, "both requests are acknowledged")
+            // Several settle windows: the window's timer has fired by now if it was going to apply anything.
+            try await Task.sleep(for: .milliseconds(250))
+            let after = TerminalEngineActor.runSynchronously { (Self.screenStateRevision(of: core), Self.renderedSnapshot(of: core)) }
+            #expect(after.0 == revisionBefore, "a shrink restored inside the window reflowed the session")
+            #expect(after.1?.rows == 24)
+            #expect(after.1.map(Self.screenText(of:))?.contains(marker) == true)
+        }
+
+        /// Starts a session owned by `owner-a`, has A ask for a shrink, then runs `changeOwnership` inside the
+        /// settle window and returns the screen revision and grid once several windows have passed. A size
+        /// the previous owner asked for belongs to its pane: applying it to the next owner's screen would
+        /// reflow content that a later restore cannot bring back (#468).
+        private func gridAfterOwnerChangeInsideSettleWindow(
+            changeOwnership: @escaping @TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void,
+            beforeReading: @escaping @TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void = { _ in }
+        ) async throws -> (before: UInt64?, after: UInt64?, grid: (columns: Int, rows: Int)?) {
+            let paths = try makeTemporaryPaths()
+            defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+            let marker = "OWNER_CHANGE_MARKER"
+            let configuration = makeConfiguration(
+                sessionID: "resize-owner-change-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(marker)'; cat")
+            let coreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                let core = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+                try core.startIfNeeded()
+                Self.attachRemoteOwner(to: core, id: "owner-a")
+                return Box(core)
+            }
+            let core = coreBox.value
+            defer { TerminalEngineActor.runSynchronously { core.terminate() } }
+            try await waitAsync { Self.renderedScreenText(of: core)?.contains(marker) == true }
+
+            let before = TerminalEngineActor.runSynchronously { Self.screenStateRevision(of: core) }
+            let requested = TerminalEngineActor.runSynchronously { () -> TerminalControlResponse in
+                let response = Self.resize(core, clientID: "owner-a", columns: 80, rows: 2, serial: 1)
+                changeOwnership(core)
+                return response
+            }
+            #expect(requested.ok, "the shrink is acknowledged: \(requested.message)")
+            try await Task.sleep(for: .milliseconds(250))
+            // The grid is exported only to an attached owner, so a case that leaves none attaches one here.
+            return TerminalEngineActor.runSynchronously {
+                beforeReading(core)
+                return (before, Self.screenStateRevision(of: core), Self.renderedGrid(of: core))
+            }
+        }
+
+        @Test func aPendingResizeIsDroppedWhenAnotherClientTakesOwnership() async throws {
+            let result = try await gridAfterOwnerChangeInsideSettleWindow { core in Self.attachRemoteOwner(to: core, id: "owner-b") }
+            #expect(result.grid?.rows == 24 && result.grid?.columns == 80, "the previous owner's pending size reflowed the new owner's screen")
+            #expect(result.before == result.after, "the previous owner's pending size was applied and broadcast")
+        }
+
+        @Test func aPendingResizeIsDroppedWhenItsOwnerDetaches() async throws {
+            let result = try await gridAfterOwnerChangeInsideSettleWindow(
+                changeOwnership: { core in _ = core.handleControlRequest(TerminalControlRequest(command: "detach", clientID: "owner-a")) },
+                beforeReading: { core in Self.attachRemoteOwner(to: core, id: "owner-a") })
+            #expect(result.grid?.rows == 24 && result.grid?.columns == 80, "a detached owner's pending size reflowed the session")
         }
 
         /// Carries an out-of-order resize pair's observations out of the one engine hop they are sent in.
@@ -321,12 +426,17 @@
             defer { TerminalEngineActor.runSynchronously { core.terminate() } }
             try await waitAsync { Self.renderedScreenText(of: core)?.contains(marker) == true }
 
-            let outcome = TerminalEngineActor.runSynchronously { () -> OutOfOrderResizeOutcome in
+            let responses = TerminalEngineActor.runSynchronously { () -> (newer: TerminalControlResponse, stale: TerminalControlResponse) in
                 let newer = Self.resize(core, clientID: "remote-owner", columns: 100, rows: 30, serial: 7)
                 // The grid the pane passed through before it settled, delivered late.
                 let stale = Self.resize(core, clientID: "remote-owner", columns: 16, rows: 5, serial: 6)
-                return OutOfOrderResizeOutcome(newer: newer, stale: stale, snapshot: Self.renderedSnapshot(of: core))
+                return (newer, stale)
             }
+            // Both requests landed inside one settle window, so a stale one that was wrongly accepted would
+            // be the size the window settles on and the grid below would never become 100x30.
+            try await waitForGrid(core, columns: 100, rows: 30)
+            let outcome = OutOfOrderResizeOutcome(
+                newer: responses.newer, stale: responses.stale, snapshot: TerminalEngineActor.runSynchronously { Self.renderedSnapshot(of: core) })
 
             #expect(outcome.newer.ok, "the newest resize must be applied: \(outcome.newer.message)")
             #expect(!outcome.stale.ok, "a resize older than the one already applied must be rejected")
@@ -367,16 +477,20 @@
 
             let settled = TerminalEngineActor.runSynchronously { Self.resize(core, clientID: "remote-owner", columns: 100, rows: 30, serial: 5) }
             #expect(settled.ok, "the first attachment's resize must be applied: \(settled.message)")
+            try await waitForGrid(core, columns: 100, rows: 30)
 
-            let outcome = TerminalEngineActor.runSynchronously { () -> ReattachedResizeOutcome in
+            let responses = TerminalEngineActor.runSynchronously { () -> (TerminalControlResponse, TerminalControlResponse) in
                 // The same client attaches again as owner: no ownership change, so no epoch advance.
                 let client = TerminalClient(
                     id: "remote-owner", kind: .remote, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
                     connectedAt: "2026-07-29T00:00:00Z")
                 let reattach = core.handleControlRequest(TerminalControlRequest(command: "attach", client: client, attachmentMode: .owner))
                 let restarted = Self.resize(core, clientID: "remote-owner", columns: 70, rows: 20, serial: 1)
-                return ReattachedResizeOutcome(reattach: reattach, restarted: restarted, snapshot: Self.renderedSnapshot(of: core))
+                return (reattach, restarted)
             }
+            try await waitForGrid(core, columns: 70, rows: 20)
+            let outcome = ReattachedResizeOutcome(
+                reattach: responses.0, restarted: responses.1, snapshot: TerminalEngineActor.runSynchronously { Self.renderedSnapshot(of: core) })
 
             #expect(outcome.reattach.ok, "the owner must be able to attach again: \(outcome.reattach.message)")
             #expect(outcome.restarted.ok, "a reconnected owner's restarted resize serial was rejected as stale: \(outcome.restarted.message)")

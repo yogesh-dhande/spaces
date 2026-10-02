@@ -5507,6 +5507,42 @@
                 resizedColumns, [80, 100], "the rerun must resize to the size reported while the first run was held, not the one already sent")
         }
 
+        /// A pane that reports a transient grid and then its real one must get the restore to the daemon
+        /// right after the transient resize is answered. Waiting out the 300 ms stream settle for a frame at
+        /// the transient grid, then the 120 ms debounce, leaves the session reflowed to that grid, which
+        /// costs an inline TUI its screen (#468).
+        func testARestoreReportedWhileTheTransientResizeIsInFlightIsSentRightAfterItIsAnswered() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let resize = HeldResizeResponder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let payload) = request.command, payload.action == .resize { await resize.waitForFirstResizeThenRelease() }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1, runtimeSize: (80, 40))
+            defer { model.stop() }
+
+            model.updateViewportSize(columns: 80, rows: 2)
+            await resize.waitForFirstResizeStart()
+            model.updateViewportSize(columns: 80, rows: 40)
+
+            let releasedAt = Date()
+            await resize.release()
+            let didRestore = try await waitForTerminalControlAction(.resize, count: 2, recorder: recorder)
+            XCTAssertTrue(didRestore, "the restore must follow the transient resize")
+            XCTAssertLessThan(Date().timeIntervalSince(releasedAt), 0.25, "the restore must not wait out the stream settle and the debounce first")
+            // The session's cached runtime is the restored 80x40 throughout, which must not make the restore
+            // look redundant while the shrink is still on its way to being applied.
+            let columnsAndRows = await recorder.snapshot().compactMap { request -> String? in
+                guard case .terminalControl(let payload) = request.command, payload.action == .resize else { return nil }
+                return "\(payload.columns ?? 0)x\(payload.rows ?? 0)"
+            }
+            XCTAssertEqual(columnsAndRows, ["80x2", "80x40"])
+        }
+
         /// A stream payload naming this client owner can land before the takeover request it raced ever
         /// gets an answer: that response is only the acknowledgment of a mutation this client already
         /// made, and `applyReducedState`'s `takeover_confirmed_by_stream` branch reads ownership from the

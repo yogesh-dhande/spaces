@@ -2146,12 +2146,14 @@
             let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
             let inputFailureHandler = self.inputFailureHandler
             let queue = inputQueue
-            let finishResizeRequest: @MainActor @Sendable (Bool) -> Void = { [weak self, requestedSize] success in
+            let finishResizeRequest: @MainActor @Sendable (Bool) -> Void = { [weak self, requestedSize, currentResizeSerial] success in
                 guard let self else { return }
                 if let pendingViewportResizeSize = self.pendingViewportResizeSize, pendingViewportResizeSize == requestedSize {
                     self.pendingViewportResizeSize = nil
                 }
-                if success { self.lastRequestedViewportSize = requestedSize }
+                // Only the newest request's acknowledgement describes what the session was last asked for; a
+                // superseded one that completes late must not overwrite it.
+                if success, self.resizeSerial == currentResizeSerial { self.lastRequestedViewportSize = requestedSize }
                 self.pendingViewportResizeTask = nil
             }
             pendingViewportResizeTask = Task.detached(priority: .utility) {
@@ -2229,6 +2231,11 @@
             let hasMatchingRuntimeSize = runtimeSize?.columns == requestedSize.columns && runtimeSize?.rows == requestedSize.rows
             let hasMatchingLastRequestedSize = lastRequestedSize?.columns == requestedSize.columns && lastRequestedSize?.rows == requestedSize.rows
             if hasMatchingPendingSize, !force { return false }
+            // A request for a different size is still in flight, so the session's reported size and the last
+            // acknowledged request describe where it was, not where it is heading. Treating the viewport as
+            // already satisfied by them would hold a restore back until the daemon reports the transient
+            // size, leaving it reflowed to that size for a round trip (#468).
+            if pendingSize != nil, !hasMatchingPendingSize { return true }
             if hasMatchingRuntimeSize, hasMatchingLastRequestedSize { return false }
             if hasMatchingLastRequestedSize, runtimeSize == nil, !force { return false }
             return true

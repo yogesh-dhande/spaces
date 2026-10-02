@@ -229,6 +229,10 @@
         /// tracks the mouse — the viewport itself never scrolls horizontally.
         private var pendingPreciseHorizontalDelta: Double = 0
         private var inputOutputResyncTask: Task<Void, Never>?
+        private var resizeCoalescer = TerminalResizeCoalescer()
+        private var resizeSettleTask: Task<Void, Never>?
+        /// The client behind the newest request in the open window, for the applied-resize log line.
+        private var pendingResizeClientID: String?
         private let onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)?
 
         public init(
@@ -343,6 +347,8 @@
             GhosttyRemoteSessionStateStreamServer.removeSocketFileIfPresent(at: paths.subscriptionSocketPath)
             inputOutputResyncTask?.cancel()
             inputOutputResyncTask = nil
+            resizeSettleTask?.cancel()
+            resizeSettleTask = nil
             localOwnerCommandInputOutputResyncPending = false
             ptyDriver.setOutputHandler(nil)
             ptyDriver.setSessionClosedHandler(nil)
@@ -482,6 +488,7 @@
         /// in which case the caller terminates the session normally.
         public func quiesceForHandoff() async throws -> DaemonHandoffSessionRecord? {
             handoffTranscriptReplayOffset = nil
+            flushPendingResize()
             suppressBroadcastsForHandoff = true
             inputOutputResyncTask?.cancel()
             inputOutputResyncTask = nil
@@ -1106,33 +1113,79 @@
             guard let columns = request.columns, let rows = request.rows, columns > 0, rows > 0 else {
                 return TerminalControlResponse(ok: false, message: "Missing terminal size.", errorCode: .invalidArgument)
             }
-            guard let vtSession else { return TerminalControlResponse(ok: false, message: "Terminal renderer is unavailable.") }
-            // Resizing to the grid the session already has is a no-op, not a reflow: reflowing would
-            // rewrite every row, bump the screen revision and push a full frame to every subscriber for
-            // a screen that did not change.
-            guard terminalSize.columns != columns || terminalSize.rows != rows else {
-                recordAcceptedResizeSerial(from: request)
-                return TerminalControlResponse(ok: true, message: "Terminal already matches the requested size.")
+            guard vtSession != nil else { return TerminalControlResponse(ok: false, message: "Terminal renderer is unavailable.") }
+            // A resize is applied once the requests around it settle, not when each arrives: an inline TUI
+            // loses its screen when the grid is reflowed down to a few rows and back, so a client that
+            // measures a transient tiny grid and restores the real one a moment later must not make the
+            // session reflow to the tiny grid at all (#468). The response acknowledges the request and the
+            // serial; the forced full frame, SIGWINCH and broadcast follow when the window settles, and a
+            // size that was superseded inside the window is never applied, so nothing waits on it.
+            let requested = TerminalResizeCoalescer.Size(columns: columns, rows: rows)
+            let current = TerminalResizeCoalescer.Size(columns: terminalSize.columns, rows: terminalSize.rows)
+            let outcome = resizeCoalescer.request(requested, current: current)
+            recordAcceptedResizeSerial(from: request)
+            switch outcome {
+            case .alreadyCurrent: return TerminalControlResponse(ok: true, message: "Terminal already matches the requested size.")
+            case .armTimer:
+                pendingResizeClientID = request.clientID
+                armResizeSettleTimer()
+            case .coalesced: pendingResizeClientID = request.clientID
             }
+            return TerminalControlResponse(ok: true, message: "Resize accepted.")
+        }
+
+        private func armResizeSettleTimer() {
+            resizeSettleTask?.cancel()
+            resizeSettleTask = Task { @TerminalEngineActor [weak self] in
+                do { try await Task.sleep(for: TerminalResizeCoalescer.window) } catch { return }
+                self?.settlePendingResize()
+            }
+        }
+
+        private func settlePendingResize() {
+            resizeSettleTask = nil
+            let current = TerminalResizeCoalescer.Size(columns: terminalSize.columns, rows: terminalSize.rows)
+            guard let settled = resizeCoalescer.settle(current: current) else { return }
+            applyResize(to: settled, requestedBy: pendingResizeClientID)
+        }
+
+        /// Applies a window still open when the session hands off, since the staged daemon adopts the grid
+        /// recorded here.
+        private func flushPendingResize() {
+            guard resizeCoalescer.hasOpenWindow else { return }
+            resizeSettleTask?.cancel()
+            settlePendingResize()
+        }
+
+        private func applyResize(to size: TerminalResizeCoalescer.Size, requestedBy clientID: String?) {
+            guard let vtSession else { return }
             // Resize transforms the LIVE renderer in place (libghostty reflow), never by
             // replaying output.log at the new size: the session already holds the accumulated
             // state, and the transcript's bytes (including any trim-time state preamble) are
             // laid out for the grid they were produced on, so a replay at another width
             // garbles the screen. Replay is reserved for the handoff paths, where renderer
             // memory genuinely did not survive the exec.
-            guard spaces_ghostty_vt_session_resize(vtSession, UInt16(clamping: columns), UInt16(clamping: rows)) else {
-                return TerminalControlResponse(ok: false, message: "Unable to resize the terminal renderer.")
+            guard spaces_ghostty_vt_session_resize(vtSession, UInt16(clamping: size.columns), UInt16(clamping: size.rows)) else {
+                FileHandle.standardError.write(
+                    Data(
+                        "spaces: terminal resize failed session=\(launchConfiguration.sessionID) client=\(clientID ?? "none") to=\(size.columns)x\(size.rows)\n"
+                            .utf8))
+                return
             }
+            // One line per applied resize, in release builds too: a pane that shows the wrong screen after
+            // a resize is diagnosed from the sequence of grids the session was actually reflowed to.
+            FileHandle.standardError.write(
+                Data(
+                    "spaces: terminal resize session=\(launchConfiguration.sessionID) client=\(clientID ?? "none") from=\(terminalSize.columns)x\(terminalSize.rows) to=\(size.columns)x\(size.rows)\n"
+                        .utf8))
             // The reflow rewrote every row: drop the diff baseline and force the next
             // broadcast to a self-contained full frame, the same way a renderer swap does.
             renderUpdateProducer.resetBaselineAndForceNextFull()
             screenStateRevision &+= 1
-            terminalSize = (columns, rows)
-            recordAcceptedResizeSerial(from: request)
-            _ = ptyDriver.resizeCellGrid(columns: columns, rows: rows)
+            terminalSize = (size.columns, size.rows)
+            _ = ptyDriver.resizeCellGrid(columns: size.columns, rows: size.rows)
             writeRuntimeState(state: .running)
             broadcastCurrentState(reason: .resize)
-            return TerminalControlResponse(ok: true, message: "Resized terminal.")
         }
 
         private func scroll(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -1477,6 +1530,13 @@
         private func advanceOwnerEpoch() {
             ownerEpoch &+= 1
             lastResizeSerialByClientID.removeAll(keepingCapacity: true)
+            // A size the previous owner asked for inside the settle window belongs to its pane. Applying it
+            // would reflow the new owner's screen, which cannot be undone for an inline TUI (#468); the new
+            // owner measures and sends its own size on attach.
+            resizeSettleTask?.cancel()
+            resizeSettleTask = nil
+            resizeCoalescer.discardPending()
+            pendingResizeClientID = nil
         }
 
         private func staleResizeSerialRejection(for request: TerminalControlRequest) -> TerminalControlResponse? {

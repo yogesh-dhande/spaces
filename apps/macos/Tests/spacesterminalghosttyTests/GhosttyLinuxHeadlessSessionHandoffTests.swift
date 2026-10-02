@@ -177,6 +177,10 @@
             return screenText(of: snapshot)
         }
 
+        @TerminalEngineActor private static func renderedGrid(of core: GhosttyEmbeddedSessionCore) -> (columns: Int, rows: Int)? {
+            core.currentRemoteStatePayload(reason: TerminalRemoteSessionStateReason.initial)?.renderSnapshot.map { ($0.columns, $0.rows) }
+        }
+
         // MARK: - Nonisolated helpers
 
         /// Nonisolated poller so its `Task.sleep` suspensions don't hold the engine's queue while the
@@ -473,14 +477,18 @@
             let sourceCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
                 let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
                 try sourceCore.startIfNeeded()
-                Self.resize(sourceCore, columns: 100, rows: 30)
+                // The owner attaches first: an ownership change discards a resize still waiting to settle.
                 Self.attachRemoteOwner(to: sourceCore, client: owner)
+                Self.resize(sourceCore, columns: 100, rows: 30)
                 return Box(sourceCore)
             }
             let sourceCore = sourceCoreBox.value
             // Keep the source alive so its owner attachment persists into the resumed core:
             // terminate() detaches clients, and the render-state export needs an owner.
             defer { TerminalEngineActor.runSynchronously { sourceCore.terminate() } }
+            // A resize is applied after a short settle window, so the grid the wrap below depends on is
+            // awaited rather than assumed.
+            try await waitAsync(transcriptPath: paths.outputPath) { Self.renderedGrid(of: sourceCore).map { $0 == (100, 30) } ?? false }
             try await waitAsync(transcriptPath: paths.outputPath) { Self.renderedScreenText(of: sourceCore)?.contains("DONE") == true }
             let preHandoffLines = nonEmptyTrimmedLines(TerminalEngineActor.runSynchronously { Self.renderedScreenText(of: sourceCore) })
             #expect(preHandoffLines.count >= 2, "a 154-column line must wrap at grid width 100")

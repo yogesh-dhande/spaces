@@ -2064,6 +2064,12 @@
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: resized, detail: "columns=\(columns) rows=\(rows)")
             if resized {
                 recordAcceptedResizeSerial(from: request)
+                // One line per applied resize, in release builds too, in the format the Linux core writes.
+                let from = currentSize.map { "\($0.columns)x\($0.rows)" } ?? "unknown"
+                FileHandle.standardError.write(
+                    Data(
+                        "spaces: terminal resize session=\(launchConfiguration.sessionID) client=\(request.clientID ?? "none") from=\(from) to=\(columns)x\(rows)\n"
+                            .utf8))
             } else {
                 // The surface never reached the requested grid, so no reflow will ever be reported for it.
                 // Leaving the arm in place would let an unrelated later reflow that happens to land on this
