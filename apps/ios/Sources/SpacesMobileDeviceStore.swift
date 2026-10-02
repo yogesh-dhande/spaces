@@ -313,6 +313,15 @@ struct SpacesMobileDeviceStoreState: Equatable, Sendable {
             .activeHost
     }
 
+    /// The stored candidate list for the device matching `certificateFingerprint`, if any. Read by
+    /// `SpacesDeviceEndpointResolver` before each dial. `nonisolated` for the same reason as
+    /// `activeHost(certificateFingerprint:)`.
+    nonisolated static func hosts(certificateFingerprint: String) -> [String]? {
+        let fingerprint = certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return loadDevices().first(where: { $0.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == fingerprint })?
+            .hosts
+    }
+
     /// Persists the candidate that most recently connected successfully, so the next resolver built
     /// for this device (via `activeHost(certificateFingerprint:)`) gets a warm start. Called by
     /// `SpacesDeviceEndpointResolver` once it learns which address answered. Keyed by certificate
@@ -361,8 +370,7 @@ struct SpacesMobileDeviceStoreState: Equatable, Sendable {
     /// (`TerminalServiceDaemonStatus.deviceAPIAddresses`). This is how a device paired before its Mac
     /// ever had Tailscale silently gains the tailnet fallback with no rescan required, since the daemon
     /// advertises its own live addresses in every overview. It lands with the first overview after the
-    /// Mac gains the address, not the moment it does: the daemon pushes on database and terminal changes
-    /// only, so an address change alone waits for the next push, stream reconnect, or foreground (#835).
+    /// Mac gains the address: the daemon pushes one when its advertised address set changes.
     ///
     /// No-ops when `hosts` is empty: an empty list means the daemon reported nothing (it predates this
     /// field, or this call raced a path that could not enumerate interfaces), never that the daemon has
@@ -478,7 +486,7 @@ struct SpacesMobileDeviceStoreState: Equatable, Sendable {
         // `hosts` always stays in the record's own order (daemon/pairing-link order, LAN first) — the
         // warm start lives in exactly one place, `SpacesDeviceEndpointResolver` seeding its cached
         // winner from `activeHost` at construction (see its `init`), not here too. Reordering here as
-        // well used to fight that: the resolver captures `hosts` immutably at construction, so once it
+        // well used to fight that: the resolver walks its list in the order it was given, so once it
         // reordered Tailscale-first, clearing `activeHost` and the resolver's cache on foreground could
         // not actually restore LAN-first racing — the resolver kept walking its already-reordered list.
         settings.hosts = device.hosts
