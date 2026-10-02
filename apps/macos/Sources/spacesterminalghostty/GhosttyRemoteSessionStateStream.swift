@@ -171,6 +171,9 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
         #else
+            // Linux has no per-socket option. Each write passes `MSG_NOSIGNAL` instead (`spacesWriteToSocket`), so a peer
+            // that has closed yields EPIPE rather than SIGPIPE, which would kill any host process that
+            // has not ignored the signal (`spacesd` does; a test runner does not).
             _ = fileDescriptor
         #endif
     }
@@ -194,7 +197,7 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
                 var bytesRemaining = rawBuffer.count
                 var offset = 0
                 while bytesRemaining > 0 {
-                    let written = write(fileDescriptor, baseAddress.advanced(by: offset), bytesRemaining)
+                    let written = spacesWriteToSocket(fileDescriptor, baseAddress.advanced(by: offset), bytesRemaining)
                     if written < 0 {
                         if errno == EWOULDBLOCK || errno == EAGAIN {
                             Thread.sleep(forTimeInterval: writeRetrySleepInterval)

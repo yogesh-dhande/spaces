@@ -80,6 +80,8 @@ for suite in \
   SpacesDeviceWorkspaceGitHashingKnownAnswerTests \
   FileSystemWatcherLinuxInotifyTests \
   SpacesDeviceWorkspaceWatchLinuxTests \
+  DeviceOverviewStreamServerSigpipeTests \
+  GhosttyRemoteSessionStateStreamServerSigpipeTests \
   GhosttyLinuxHeadlessSessionAttachmentAuthorityTests \
   GhosttyLinuxHeadlessKeyEncodingTests \
   GhosttyLinuxHeadlessMouseEncodingTests \

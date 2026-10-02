@@ -158,7 +158,7 @@ func spacesDeviceServiceTunnelWriteAll(fileDescriptor: Int32, data: Data) -> Boo
         var remaining = rawBuffer.count
         var offset = 0
         while remaining > 0 {
-            let written = write(fileDescriptor, baseAddress.advanced(by: offset), remaining)
+            let written = spacesWriteToSocket(fileDescriptor, baseAddress.advanced(by: offset), remaining)
             if written > 0 {
                 remaining -= written
                 offset += written
@@ -695,7 +695,7 @@ func spacesDeviceServiceTunnelClientSocketReadiness(revents: Int16) -> SpacesDev
 
                 // 2. toService → service.
                 if !toService.isEmpty, loopbackWritable {
-                    let written = toService.withUnsafeBytes { rawBuffer in write(loopbackFD, rawBuffer.baseAddress, toService.count) }
+                    let written = toService.withUnsafeBytes { rawBuffer in spacesWriteToSocket(loopbackFD, rawBuffer.baseAddress!, toService.count) }
                     if written > 0 {
                         toService.removeFirst(written)
                     } else if written < 0, errno != EAGAIN, errno != EWOULDBLOCK, errno != EINTR {

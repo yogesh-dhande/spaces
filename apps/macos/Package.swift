@@ -265,6 +265,7 @@ let executableTargets: [Target] = [
                 "GhosttyLinuxHeadlessSessionMetadataTests.swift",
                 "GhosttyLinuxHeadlessSessionQueryResponseTests.swift",
                 "GhosttyLinuxHeadlessSessionResizeTests.swift",
+                "GhosttyRemoteSessionStateStreamServerSigpipeTests.swift",
                 "GhosttyLinuxHeadlessSessionTranscriptTrimTests.swift",
                 "GhosttyLinuxHeadlessSpawnStressTests.swift",
                 "GhosttyLinuxHeadlessSubmitOrderingTests.swift",
@@ -278,6 +279,7 @@ let executableTargets: [Target] = [
             name: "spacesdeviceapiTests",
             dependencies: ["spacesdeviceapi", "spacesdevicecore", "spacesterminalcore", "workspacecore", "spacesruntimecore"],
             sources: [
+                "DeviceOverviewStreamServerSigpipeTests.swift",
                 "WorkspaceFileWriteModePreservationTests.swift",
                 "SpacesDeviceWorkspaceGitHashingKnownAnswerTests.swift",
                 "SpacesDeviceWorkspaceWatchLinuxTests.swift",
