@@ -694,8 +694,14 @@ import Foundation
                 } ?? endedRender.map(Self.renderFrame(forEndedRender:))
             let nextKey = ownerEpoch.map { "owner|\($0.id)" } ?? endedRender.map { "ended|\($0.id)" } ?? "status|\(fallbackText)"
             if nextKey != lastRenderKey { lastRenderKey = nextKey }
+            let alternateScreenChanged = (latestSnapshot?.alternateScreenActive == true) != (nextSnapshot?.alternateScreenActive == true)
             latestSnapshot = nextSnapshot
             renderLatestSnapshot()
+            // The screen an application runs on decides whether the keyboard is part of the reported grid
+            // (see `reportedViewportBounds()`), so an application starting or exiting while the keyboard
+            // is up moves the grid without any layout pass to notice it. Only the transition is
+            // re-evaluated: every other frame leaves the reported grid where it was.
+            if alternateScreenChanged { reportViewportSizeIfNeeded() }
             reportInputReadinessIfNeeded()
         }
 
@@ -710,10 +716,12 @@ import Foundation
         public override func layoutSubviews() {
             super.layoutSubviews()
             // A keyboard layout guide reports intermediate frames throughout its animation, and every one
-            // of them reaches here. None of them changes the reported grid, which the keyboard is not part
-            // of (see `reportedViewportBounds()`), so the report below is a no-op for the whole
-            // transition; the render that follows it is what tracks the keyboard, re-cropping the grid
-            // into whatever area is left so a newly exposed area is never left unpainted.
+            // of them reaches here. On the primary screen none of them changes the reported grid (see
+            // `reportedViewportBounds()`), so the report below is a no-op for the whole transition. On the
+            // alternate screen each one does, and the burst is collapsed downstream: the viewer model
+            // restarts its ownership-sync debounce on every report, so one resize follows the animation.
+            // The render that follows is what tracks the keyboard, re-cropping the grid into whatever
+            // area is left so a newly exposed area is never left unpainted.
             reportViewportSizeIfNeeded()
             renderLatestSnapshot()
         }
@@ -1672,7 +1680,7 @@ import Foundation
             // The surface is sized to `visibleRenderBounds()`, so its own row count only ever measures the
             // area above the keyboard. `measuredBounds` is re-measured with the cell size the surface just
             // reported, through the same formula the cache predicts a grid with, so the reported grid
-            // stays a function of the pane and the font alone and the keyboard cannot move it. A surface
+            // stays a function of the bounds `reportedViewportBounds()` names and the font alone. A surface
             // that reports no cell size has nothing to re-measure with, so its own grid stands.
             guard size.cell_width_px > 0, size.cell_height_px > 0 else { return (columns: columns, rows: rows) }
             recordCellMetricsIfNeeded(cellWidthPx: Int(size.cell_width_px), cellHeightPx: Int(size.cell_height_px))
@@ -1840,16 +1848,22 @@ import Foundation
         private func visibleRenderBounds() -> CGRect { boundsMinusOcclusion(keyboardAndAccessoryOccludedHeight()) }
 
         /// The bounds the grid reported to the daemon is measured against: this view minus the input
-        /// accessory toolbar, with the software keyboard deliberately left in.
+        /// accessory toolbar, plus the software keyboard when the session is on the alternate screen.
         ///
-        /// The toolbar and the keyboard are treated differently on purpose. The toolbar is permanent
-        /// chrome for as long as this pane takes input, so rows behind it are rows the session should
-        /// never have had. The keyboard comes and goes several times a minute, and resizing the session
-        /// for it would cost a daemon round trip, a full frame on every transition, and a reflow for every
-        /// other client attached to the same session. So the keyboard changes only what this client
-        /// renders: ``visibleRenderBounds()`` shrinks and the rendered window shifts up inside the grid
-        /// the session keeps.
-        private func reportedViewportBounds() -> CGRect { boundsMinusOcclusion(accessoryOccludedHeight()) }
+        /// The toolbar is permanent chrome for as long as this pane takes input, so rows behind it are
+        /// rows the session should never have had. The keyboard comes and goes several times a minute,
+        /// and on the primary screen resizing the session for it would cost a daemon round trip, a full
+        /// frame on every transition, and a reflow for every other client attached to the same session;
+        /// there the keyboard changes only what this client renders: ``visibleRenderBounds()`` shrinks
+        /// and the rendered window shifts up inside the grid the session keeps. That shift is right for a
+        /// shell, whose rows above the prompt are old output. It is wrong for a full-screen application,
+        /// which lays its whole screen out to the grid height: the shift would hide its header, and it
+        /// would never re-lay out because it never sees a smaller height. So while the latest frame is
+        /// on the alternate screen the keyboard is part of the reported grid and the session resizes.
+        private func reportedViewportBounds() -> CGRect {
+            let onAlternateScreen = latestSnapshot?.alternateScreenActive == true
+            return boundsMinusOcclusion(onAlternateScreen ? keyboardAndAccessoryOccludedHeight() : accessoryOccludedHeight())
+        }
 
         private func boundsMinusOcclusion(_ occludedHeight: CGFloat) -> CGRect {
             guard bounds.width > 0, bounds.height > 0 else { return bounds }

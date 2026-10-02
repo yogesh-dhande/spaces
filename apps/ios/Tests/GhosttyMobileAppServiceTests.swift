@@ -1307,6 +1307,79 @@
             window.isHidden = true
         }
 
+        /// A full-screen application lays itself out to the grid height, so cropping it under the keyboard
+        /// hides its header and it would never re-lay out. On the alternate screen the keyboard therefore
+        /// resizes the session, and the screen switching on or off while the keyboard is up moves the
+        /// reported grid with it.
+        func testAlternateScreenFollowsTheKeyboardInTheReportedGridWhilePrimaryScreenDoesNot() throws {
+            let phoneBounds = CGRect(x: 0, y: 0, width: 393, height: 640)
+            let window = UIWindow(frame: phoneBounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: phoneBounds)
+            hostView.userInterfaceIdiomOverrideForTesting = .phone
+            var reportedViewports: [(columns: Int, rows: Int)] = []
+            var renderedViewports: [GhosttyTerminalSnapshotViewport.Window] = []
+            hostView.onRenderedViewportChanged = { window in renderedViewports.append(window) }
+            hostView.onViewportSizeChanged = { columns, rows in reportedViewports.append((columns: columns, rows: rows)) }
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            hostView.setAcceptsTerminalInput(true)
+            XCTAssertTrue(hostView.becomeFirstResponder())
+            hostView.setNeedsLayout()
+            viewController.view.layoutIfNeeded()
+            let toolbarViewport = hostView.reportedViewportSizeForTesting()
+
+            func apply(_ snapshot: GhosttyTerminalSnapshot) {
+                hostView.update(
+                    snapshot: snapshot, renderStateKey: "viewer|snapshot=\(snapshot.columns)x\(snapshot.rows)|alt=\(snapshot.alternateScreenActive)",
+                    fallbackText: "Waiting for terminal state...")
+                RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            }
+
+            // Primary screen: the keyboard shifts the window and reports nothing.
+            apply(promptAtBottomSnapshot(columns: 80, rows: toolbarViewport.rows))
+            reportedViewports.removeAll()
+            hostView.setKeyboardOccludedHeightForTesting(260)
+            viewController.view.layoutIfNeeded()
+            let keyboardUpRendered = hostView.renderedViewportSizeForTesting()
+            XCTAssertLessThan(keyboardUpRendered.rows, toolbarViewport.rows)
+            XCTAssertEqual(hostView.reportedViewportSizeForTesting().rows, toolbarViewport.rows)
+            XCTAssertTrue(reportedViewports.isEmpty, "the primary screen keeps the session grid under the keyboard")
+
+            // An application takes the alternate screen while the keyboard is up: the session resizes.
+            apply(alternateScreen(promptAtBottomSnapshot(columns: 80, rows: toolbarViewport.rows)))
+            XCTAssertEqual(hostView.reportedViewportBoundsForTesting().height, 334, accuracy: 0.5)
+            XCTAssertEqual(hostView.reportedViewportSizeForTesting().rows, keyboardUpRendered.rows)
+            XCTAssertEqual(try XCTUnwrap(reportedViewports.last).rows, keyboardUpRendered.rows)
+            reportedViewports.removeAll()
+
+            // The application re-lays out at the smaller grid and nothing is cropped.
+            apply(alternateScreen(promptAtBottomSnapshot(columns: 80, rows: keyboardUpRendered.rows)))
+            XCTAssertEqual(try XCTUnwrap(hostView.capturedSnapshotForTesting()).rows, keyboardUpRendered.rows)
+            XCTAssertEqual(try XCTUnwrap(renderedViewports.last).rowOffset, 0, "the reported grid already fits, so nothing shifts")
+            XCTAssertTrue(reportedViewports.isEmpty)
+
+            // Keyboard down on the alternate screen reports the full grid again.
+            hostView.setKeyboardOccludedHeightForTesting(0)
+            viewController.view.layoutIfNeeded()
+            XCTAssertEqual(try XCTUnwrap(reportedViewports.last).rows, toolbarViewport.rows)
+            reportedViewports.removeAll()
+
+            // Keyboard up again, then the application exits: the full grid returns.
+            hostView.setKeyboardOccludedHeightForTesting(260)
+            viewController.view.layoutIfNeeded()
+            XCTAssertEqual(try XCTUnwrap(reportedViewports.last).rows, keyboardUpRendered.rows)
+            apply(promptAtBottomSnapshot(columns: 80, rows: keyboardUpRendered.rows))
+            XCTAssertEqual(try XCTUnwrap(reportedViewports.last).rows, toolbarViewport.rows)
+            XCTAssertEqual(hostView.reportedViewportSizeForTesting().rows, toolbarViewport.rows)
+
+            window.isHidden = true
+        }
+
         /// A scroll's pointer position is expressed in the grid the daemon holds, not in the area this
         /// client shows. The daemon expands the normalized pointer over the whole session surface, so
         /// while the keyboard crops rows off the top, a touch on the first visible row has to arrive as
@@ -3135,6 +3208,13 @@
         /// which proves a rendered-window report changed for the row offset alone rather than for its size.
         private func promptAtTopSnapshot(columns: Int, rows: Int) -> GhosttyTerminalSnapshot {
             snapshot(columns: columns, rows: rows, text: "shell %")
+        }
+
+        private func alternateScreen(_ snapshot: GhosttyTerminalSnapshot) -> GhosttyTerminalSnapshot {
+            GhosttyTerminalSnapshot(
+                columns: snapshot.columns, rows: snapshot.rows, cursorColumn: snapshot.cursorColumn, cursorRow: snapshot.cursorRow,
+                cursorVisible: snapshot.cursorVisible, defaultForegroundRGB: snapshot.defaultForegroundRGB,
+                defaultBackgroundRGB: snapshot.defaultBackgroundRGB, cells: snapshot.cells, alternateScreenActive: true)
         }
 
         private func snapshotSignature(_ snapshot: GhosttyTerminalSnapshot?) -> String {
