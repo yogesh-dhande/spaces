@@ -344,12 +344,12 @@
             ensureMirrorIfNeeded()
             let geometryChanged = updateSurfaceGeometry()
             reportViewportSizeIfNeeded()
-            if geometryChanged { scheduleSurfacePresentationRefresh() }
+            if geometryChanged { repaintHeldFrameAfterGeometryChange() }
         }
 
         override func viewDidChangeBackingProperties() {
             super.viewDidChangeBackingProperties()
-            if updateSurfaceGeometry() { scheduleSurfacePresentationRefresh() }
+            if updateSurfaceGeometry() { repaintHeldFrameAfterGeometryChange() }
         }
 
         override func viewDidChangeEffectiveAppearance() {
@@ -541,7 +541,7 @@
 
         func surfaceCellSize() -> (columns: Int, rows: Int)? {
             ensureMirrorIfNeeded()
-            if updateSurfaceGeometry() { scheduleSurfacePresentationRefresh() }
+            if updateSurfaceGeometry() { repaintHeldFrameAfterGeometryChange() }
             if let surface = mirrorSurface() {
                 let size = ghostty_surface_size(surface)
                 if size.columns > 0, size.rows > 0 { return (Int(size.columns), Int(size.rows)) }
@@ -1078,6 +1078,7 @@
                 width: backingSize.width, height: backingSize.height, scale: scale, displayID: displayID, windowNumber: window?.windowNumber)
             guard geometry != lastGeometry else { return false }
 
+            let gridBefore = ghostty_surface_size(surface)
             var host = makeSurfaceHost()
             _ = ghostty_mirror_set_host(mirror, &host)
             ghostty_surface_set_content_scale(surface, scale, scale)
@@ -1085,7 +1086,32 @@
             ghostty_surface_set_size(surface, geometry.width, geometry.height)
             ghostty_surface_refresh(surface)
             lastGeometry = geometry
+            // A new cell grid makes Ghostty reflow the mirror's local grid, which damages what the held
+            // frame had filled, so the frame must be applied again. A pixel-only change keeps the grid and
+            // is left alone: re-applying would erase surface-local state such as the selection.
+            let gridAfter = ghostty_surface_size(surface)
+            if gridAfter.columns != gridBefore.columns || gridAfter.rows != gridBefore.rows { lastAppliedRenderFrameIdentity = nil }
             return true
+        }
+
+        /// Repaints the held frame after a local surface geometry change.
+        ///
+        /// A transient layout size (a pane re-shown at a few cells before it is laid out) reflows the
+        /// local grid, and the settled size usually equals what the daemon already has, so no resize is
+        /// sent and no fresh frame follows. Without this the reflowed grid stays on screen, blank except
+        /// its last rows. `updateSurfaceGeometry` drops the applied identity when the cell grid changed;
+        /// re-applying the frame resizes the terminal back to the frame's grid and rewrites every cell.
+        /// The re-apply lands before Ghostty's own resize, which its IO thread coalesces and runs about
+        /// 25 ms later. That resize leaves the grid alone when the settled size equals the frame's grid,
+        /// which is the transient case; an intermediate size that outlives the coalescing window gets its
+        /// own re-apply when the settled size arrives. When the settled size differs from the frame's
+        /// grid, the size change is real: it reflows the restored cells, the pane reports the new size,
+        /// and the daemon's next frame repaints.
+        /// Callers inside the apply path and `applyDisplayState` already apply right after
+        /// `updateSurfaceGeometry`, so they do not use this.
+        private func repaintHeldFrameAfterGeometryChange() {
+            applyLatestFrameIfPossible()
+            scheduleSurfacePresentationRefresh()
         }
 
         /// Tells the surface whether its window is on screen, and presents once it comes back.

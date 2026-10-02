@@ -1614,7 +1614,7 @@
             XCTAssertGreaterThan(hostView.renderFrameApplyCountForTesting, appliesAfterMount, "changed content must reach the surface")
         }
 
-        func testTheMirrorRefreshesGeometryWithoutReapplyingAnUnchangedFrame() throws {
+        func testTheMirrorReappliesTheHeldFrameAfterAGeometryChange() throws {
             GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
             let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 640))
             let viewController = UIViewController()
@@ -1627,14 +1627,45 @@
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
             let appliesAtOriginalGeometry = hostView.renderFrameApplyCountForTesting
 
-            // A pane resize grows the view without changing the daemon snapshot. The surface refreshes its
-            // retained state at the new geometry without resetting it from that frame.
+            // A pane resize grows the view without changing the daemon snapshot. Ghostty reflows the
+            // surface's local grid to the new size and no fresh frame follows, so the held frame has to be
+            // written back or the reflowed grid stays on screen.
             hostView.frame.size.height += 120
             hostView.setNeedsLayout()
             hostView.layoutIfNeeded()
 
+            XCTAssertGreaterThan(
+                hostView.renderFrameApplyCountForTesting, appliesAtOriginalGeometry,
+                "a geometry change must re-apply the held frame when the cell grid changes")
+        }
+
+        /// The other half of the rule: a size change that keeps the cell grid does not reflow anything, and
+        /// re-applying the frame would erase surface-local state such as the selection.
+        func testTheMirrorKeepsTheHeldFrameAfterAPixelOnlyGeometryChange() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 640))
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let hostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "pixel-only-geometry")
+            defer { hostView.removeFromSuperview() }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+            let appliesAtOriginalGeometry = hostView.renderFrameApplyCountForTesting
+            let gridBefore = hostView.renderedViewportSizeForTesting()
+
+            // One point is a small fraction of a terminal cell at any supported font size.
+            hostView.frame.size.height += 1
+            hostView.setNeedsLayout()
+            hostView.layoutIfNeeded()
+
+            let gridAfter = hostView.renderedViewportSizeForTesting()
+            XCTAssertTrue(
+                gridBefore.columns == gridAfter.columns && gridBefore.rows == gridAfter.rows,
+                "the test's size change crossed a cell boundary, so it does not exercise a pixel-only change")
             XCTAssertEqual(
-                hostView.renderFrameApplyCountForTesting, appliesAtOriginalGeometry, "a geometry change must not re-apply an unchanged frame")
+                hostView.renderFrameApplyCountForTesting, appliesAtOriginalGeometry, "a pixel-only geometry change must not re-apply the held frame")
         }
 
         /// `TerminalViewerModel.updateOwnerRenderSnapshot` is the steady-streaming path: it keeps the

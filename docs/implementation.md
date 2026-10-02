@@ -396,7 +396,7 @@ Selection is session state owned by the session host, not by any client surface.
 
 - A mounting view takes the mirror; the surrendered view goes black until it re-enters a window or the mirror parks with no holder (covering a terminal presented over another). The hand-back completes synchronously inside the release.
 - A rebind hides the surface host until the new holder applies its own frame (apply is a full terminal reset) and re-registers per-surface state.
-- The host view skips an apply whose identity (render key, version, revision, owner epoch, input acceptance, cropped snapshot) matches the last, since the apply copies the grid and blocks on the GPU. A geometry change refreshes rather than reapplies, which would erase surface-local selection (macOS `GhosttyMirrorTerminalView` too).
+- The host view skips an apply whose identity (render key, version, revision, owner epoch, input acceptance, cropped snapshot) matches the last, since the apply copies the grid and blocks on the GPU. A geometry change that alters the surface's cell grid forgets that identity, so the held frame is applied again: Ghostty reflows the local grid (a transient layout size damages it) and the settled size often equals the daemon's grid, so no fresh frame would repair it. A pixel-only change keeps the grid and only refreshes, since a re-apply would erase surface-local selection (macOS `GhosttyMirrorTerminalView` too).
 
 **Reduction and ordering.** `TerminalViewerModel` feeds one `TerminalRemoteStateReductionPipeline` (`spacesterminalcore`), shared with the Mac ([Render path](#render-path)): ordered off-main reduction across every route, latest-frame-wins application. Direct reads carry their viewer lifecycle and never publish into a replacement.
 

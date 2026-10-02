@@ -1379,6 +1379,7 @@ import Foundation
             let height = UInt32(max(Int(floor(renderBounds.height * CGFloat(scale))), 1))
             let geometry = SurfaceGeometry(width: width, height: height, scale: scale)
             guard geometry != lastSurfaceGeometry else { return }
+            let gridBefore = ghostty_surface_size(surface)
             var host = makeSurfaceHost()
             let geometryKey = "\(lastRenderKey)|\(geometry.width)x\(geometry.height)@\(geometry.scale)"
             emitHostRenderEvent("host_view_geometry_set_host_begin", dedupeKey: geometryKey)
@@ -1389,6 +1390,14 @@ import Foundation
             ghostty_surface_set_occlusion(surface, isTerminalVisible && window != nil)
             ghostty_surface_refresh(surface)
             lastSurfaceGeometry = geometry
+            // A new cell grid makes Ghostty reflow the surface's local grid, damaging cells the held
+            // frame had filled. A transient layout size followed by the settled one leaves the daemon's
+            // grid unchanged, so no fresh frame arrives to repair it; forgetting the applied identity
+            // makes the next `applyLatestRenderFrameIfPossible` rewrite the grid from the held frame. A
+            // pixel-only change keeps the grid and is left alone: re-applying would erase surface-local
+            // state such as the selection.
+            let gridAfter = ghostty_surface_size(surface)
+            if gridAfter.columns != gridBefore.columns || gridAfter.rows != gridBefore.rows { lastAppliedRenderFrameIdentity = nil }
             emitHostRenderEvent("host_view_geometry_end", dedupeKey: geometryKey)
         }
 
