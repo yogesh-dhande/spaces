@@ -95,6 +95,30 @@ import spacesterminalcore
         waitForCondition("retained text after geometry growth") { pane.view.debugMirrorSurfaceText?.contains("geometry-growth") == true }
     }
 
+    /// A transient layout size reflows the surface's local grid, and the frame the pane holds is
+    /// unchanged, so the frame dedupe would skip repainting it. No daemon frame follows either: the
+    /// settled size equals what the daemon already has. The pane has to re-apply the held frame itself or
+    /// it shows the reflow-damaged grid indefinitely.
+    func testTransientResizeRepaintsTheHeldFrame() {
+        let lines = (0..<8).map { "held-line-\($0)" }
+        let pane = makePane(label: lines.joined(separator: "\n"))
+        defer { pane.view.releaseSurface() }
+        show(pane)
+        waitForCondition("initial text") { pane.view.debugMirrorSurfaceText?.contains("held-line-0") == true }
+
+        pane.container.frame.size = NSSize(width: 60, height: 40)
+        pane.container.layoutSubtreeIfNeeded()
+        settle()
+        pane.container.frame.size = NSSize(width: 320, height: 180)
+        pane.container.layoutSubtreeIfNeeded()
+        settle()
+
+        waitForCondition("held frame repainted after the resize round trip") {
+            let text = pane.view.debugMirrorSurfaceText ?? ""
+            return lines.allSatisfy { text.contains($0) }
+        }
+    }
+
     /// Same rule across a surface rebuild, which is what a pane row being re-keyed under a live session
     /// produces: the view and its frame survive, the surface does not.
     func testRebuiltSurfacePresentsTheRetainedFrameWithoutANewFrame() {
