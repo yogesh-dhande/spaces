@@ -1,5 +1,6 @@
 import AppKit
 import Testing
+import spacesclientcore
 import spacesdevicecore
 import spacesterminalcore
 import spacesterminalui
@@ -161,12 +162,35 @@ extension ProcessProfileEnvironmentSuites {
             #expect(!controller.panelCoordinator.toggleAgentBrief(forSessionID: "session-unclaimed"))
         }
 
-        @Test func theToggleShortcutIsOptionCommandBAlone() {
-            #expect(AppKitController.isToggleBriefShortcut(charactersIgnoringModifiers: "b", eventModifiers: [.command, .option]))
-            #expect(!AppKitController.isToggleBriefShortcut(charactersIgnoringModifiers: "b", eventModifiers: [.command]))
-            #expect(!AppKitController.isToggleBriefShortcut(charactersIgnoringModifiers: "B", eventModifiers: [.command, .option, .shift]))
-            #expect(!AppKitController.isToggleBriefShortcut(charactersIgnoringModifiers: "b", eventModifiers: [.command, .option, .control]))
-            #expect(!AppKitController.isToggleBriefShortcut(charactersIgnoringModifiers: "n", eventModifiers: [.command, .option]))
+        private func keyDown(_ key: String, keyCode: UInt16, modifiers: NSEvent.ModifierFlags) throws -> NSEvent {
+            try #require(
+                NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0, windowNumber: 0, context: nil, characters: key,
+                    charactersIgnoringModifiers: key, isARepeat: false, keyCode: keyCode))
+        }
+
+        private func briefChordMatches(_ controller: AppKitController, stored: [String: String], event: NSEvent) throws -> Bool {
+            let resolver = ShortcutsController.ShortcutSettingResolver { stored[$0] }
+            let spec = try #require(
+                ShortcutsController.resolvedShortcutSpec(resolver, setting: .guiToggleBriefShortcut, current: nil, leaderModifiers: [.cmd, .alt]))
+            return controller.shortcuts.matches(event: event, spec: spec)
+        }
+
+        @Test func theToggleShortcutDefaultsToTheLeaderPlusBAlone() throws {
+            let controller = makeController()
+            let bKey: UInt16 = 11
+            #expect(try briefChordMatches(controller, stored: [:], event: keyDown("b", keyCode: bKey, modifiers: [.command, .option])))
+            #expect(!(try briefChordMatches(controller, stored: [:], event: keyDown("b", keyCode: bKey, modifiers: [.command]))))
+            #expect(!(try briefChordMatches(controller, stored: [:], event: keyDown("b", keyCode: bKey, modifiers: [.command, .option, .shift]))))
+            #expect(!(try briefChordMatches(controller, stored: [:], event: keyDown("b", keyCode: bKey, modifiers: [.command, .option, .control]))))
+            #expect(!(try briefChordMatches(controller, stored: [:], event: keyDown("n", keyCode: 45, modifiers: [.command, .option]))))
+        }
+
+        @Test func aConfiguredToggleKeyReplacesTheDefaultKey() throws {
+            let controller = makeController()
+            let stored = [ClientSettingsKey.guiToggleBriefShortcut: "j"]
+            #expect(try briefChordMatches(controller, stored: stored, event: keyDown("j", keyCode: 38, modifiers: [.command, .option])))
+            #expect(!(try briefChordMatches(controller, stored: stored, event: keyDown("b", keyCode: 11, modifiers: [.command, .option]))))
         }
     }
 }

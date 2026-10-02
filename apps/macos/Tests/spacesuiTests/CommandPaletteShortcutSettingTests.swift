@@ -44,6 +44,16 @@ import spacesclientcore
         #expect(try resolver.rawValue(for: .guiCycleModeShortcut) == "cmd+alt+\\")
     }
 
+    @Test func toggleBriefShortcutIsLeaderBackedAndAppearsInSettingsPanel() throws {
+        let setting = ShortcutsController.ShortcutSetting.guiToggleBriefShortcut
+        #expect(ShortcutsController.ShortcutSetting(settingKey: ClientSettingsKey.guiToggleBriefShortcut) == setting)
+        #expect(setting.defaultSpec == "b")
+        #expect(setting.usesLeader)
+        #expect(ShortcutsController.ShortcutSetting.settingsPanelCases.contains(setting))
+        let resolver = ShortcutsController.ShortcutSettingResolver { _ in nil }
+        #expect(try resolver.rawValue(for: setting) == "cmd+alt+b")
+    }
+
     @Test func sidebarNavigationShortcutsAreConfigurableInSettingsPanel() {
         // Sidebar selection moves only via leader+up/down, so those shortcuts must be user-overridable
         // from the settings panel rather than hidden functional-only bindings.
