@@ -24,10 +24,20 @@ public final class GitClient {
     /// `Orchestrator.worktreeDiscoverability`) can bound it with the same timeout this client uses internally.
     public let metadataCommandTimeout: TimeInterval
 
-    public init(gitExecutable: String? = nil, environmentOverrides: [String: String] = [:], metadataCommandTimeout: TimeInterval = 2) {
+    /// Budget for every git operation that talks to the remote (fetch, clone). It only has to catch a remote
+    /// that hangs, since a slow but working transfer no longer blocks other requests, and it matches the
+    /// 10-minute CLI deadline for a project create (`SpacesDeviceAPICommand.projectCreateTimeoutSeconds`) so
+    /// the daemon stops a hung clone, and frees its lane, when the CLI gives up on it.
+    private let networkCommandTimeout: TimeInterval
+
+    public init(
+        gitExecutable: String? = nil, environmentOverrides: [String: String] = [:], metadataCommandTimeout: TimeInterval = 2,
+        networkCommandTimeout: TimeInterval = 600
+    ) {
         self.gitExecutable = gitExecutable ?? ExecutableLocator.resolve(.git) ?? "git"
         self.environmentOverrides = environmentOverrides
         self.metadataCommandTimeout = metadataCommandTimeout
+        self.networkCommandTimeout = networkCommandTimeout
     }
 
     public func isRepo(path: String) -> Bool {
@@ -237,10 +247,10 @@ public final class GitClient {
 
     public func clone(url: String, destination: String, bare: Bool = false) throws {
         if bare {
-            try runGitOrThrow(["clone", "--bare", url, destination])
+            try runGitOrThrow(["clone", "--bare", url, destination], timeout: networkCommandTimeout)
             return
         }
-        try runGitOrThrow(["clone", url, destination])
+        try runGitOrThrow(["clone", url, destination], timeout: networkCommandTimeout)
     }
 
     /// Resolves the repository's declared default branch from its symbolic HEAD.
@@ -270,7 +280,8 @@ public final class GitClient {
         let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "spaces-remote-file-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: tempDirectory) }
-        try runGitOrThrow(["clone", "--filter=blob:none", "--no-checkout", "--depth", "1", gitURL, tempDirectory.path])
+        try runGitOrThrow(
+            ["clone", "--filter=blob:none", "--no-checkout", "--depth", "1", gitURL, tempDirectory.path], timeout: networkCommandTimeout)
         let defaultBranch = try repositoryDefaultBranch(path: tempDirectory.path)
         // `ls-tree` reads local tree objects (already fetched by the blobless clone), so it tells
         // us whether the file exists on the default branch without a second network round trip.
@@ -412,7 +423,7 @@ public final class GitClient {
         return (process.terminationStatus, String(data: outputData, encoding: .utf8) ?? "", errorMessage)
     }
 
-    private func runGitOrThrow(_ arguments: [String]) throws {
+    private func runGitOrThrow(_ arguments: [String], timeout: TimeInterval? = nil) throws {
         let process = makeGitProcess(arguments)
         let out = Pipe()
         let err = Pipe()
@@ -421,7 +432,7 @@ public final class GitClient {
         process.standardError = err
 
         try process.run()
-        try waitForProcess(process, timeout: nil, arguments: arguments)
+        try waitForProcess(process, timeout: timeout, arguments: arguments)
 
         if process.terminationStatus != 0 {
             let errData = err.fileHandleForReading.readDataToEndOfFile()
@@ -446,7 +457,7 @@ public final class GitClient {
     }
 
     private func fetchRemoteBranch(path: String, branch: String) throws {
-        try runGitOrThrow(["-C", path, "fetch", "origin", "refs/heads/\(branch):refs/remotes/origin/\(branch)"])
+        try runGitOrThrow(["-C", path, "fetch", "origin", "refs/heads/\(branch):refs/remotes/origin/\(branch)"], timeout: networkCommandTimeout)
     }
 
     private func blockIfDirtyWorktree(path: String, branch: String, hostName: String) throws {

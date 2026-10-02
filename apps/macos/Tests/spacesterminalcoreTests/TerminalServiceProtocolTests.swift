@@ -523,52 +523,55 @@ final class TerminalServiceProtocolTests: XCTestCase {
         XCTAssertLessThan(elapsed, 1.5, "A ping must not be head-of-line-blocked behind an in-flight slow request")
     }
 
-    /// A project create cloning a large repository must not hold every other request behind it: agent
-    /// hook signals, other CLI and MCP calls, and the Mac app's park before Stop All and Quit all share
-    /// the server's work queue.
-    func testRequestIsAnsweredWhileProjectCreateIsInFlight() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+    /// A long-running command (a git clone, a workspace create running git and a setup script, a workspace
+    /// start) must not hold every other request behind it: agent hook signals, other CLI and MCP calls, and
+    /// the Mac app's park before Stop All and Quit all share the server's work queue.
+    func testRequestIsAnsweredWhileEachLongRunningCommandIsInFlight() throws {
+        let longCommands: [TerminalServiceCommand] = [
+            .profileCommand(.projectCreate(.gitURL("https://example.com/repo.git"))),
+            .profileCommand(.workspaceCreate(TerminalServiceWorkspaceCreatePayload(projectID: "p", branch: "feature"))),
+            .profileCommand(.workspaceStart(TerminalServiceWorkspaceLifecyclePayload(cwd: "/tmp/w"))),
+            .profileCommand(.workspaceStop(TerminalServiceWorkspaceLifecyclePayload(cwd: "/tmp/w"))),
+            .profileCommand(.workspaceRestart(TerminalServiceWorkspaceLifecyclePayload(cwd: "/tmp/w"))),
+        ]
+        for longCommand in longCommands {
+            let harness = try LongCommandServerHarness()
+            defer { harness.tearDown() }
 
-        let socketPath = root.appendingPathComponent("service.sock").path
-        let queue = DispatchQueue(label: "terminal-service-project-create-test")
+            let longAnswered = harness.sendInBackground(longCommand)
+            XCTAssertEqual(harness.started.wait(timeout: .now() + 2), .success, "\(longCommand.name) never reached the server")
 
-        // Released unconditionally via defer so the create handler, and the client waiting on it, never
-        // outlive the test when an assertion fails first.
-        let createStarted = DispatchSemaphore(value: 0)
-        let releaseCreate = DispatchSemaphore(value: 0)
-        defer { releaseCreate.signal() }
-        let server = TerminalServiceServer(socketPath: socketPath, queue: queue) { request in
-            if case .profileCommand(.projectCreate) = request.command {
-                createStarted.signal()
-                releaseCreate.wait()
-                return TerminalServiceResponse(ok: true, message: "created")
-            }
-            return TerminalServiceResponse(ok: true, message: "listed")
+            // Bounded by the client timeout: routed behind the blocked command, this throws instead of hanging.
+            let listed = try TerminalServiceClient.send(
+                request: TerminalServiceRequest(command: .profileCommand(.projectList)), socketPath: harness.socketPath, timeout: 2)
+            XCTAssertEqual(listed.message, "listed")
+
+            harness.release.signal()
+            XCTAssertEqual(longAnswered.wait(timeout: .now() + 5), .success, "\(longCommand.name) was never answered after it was released")
         }
-        try server.start()
-        defer { server.stop() }
+    }
 
-        let createAnswered = DispatchSemaphore(value: 0)
-        let createSucceeded = LockedFlag()
-        DispatchQueue.global().async {
-            let response = try? TerminalServiceClient.send(
-                request: TerminalServiceRequest(command: .profileCommand(.projectCreate(.gitURL("https://example.com/repo.git")))),
-                socketPath: socketPath, timeout: 10)
-            if response?.ok == true, response?.message == "created" { createSucceeded.set() }
-            createAnswered.signal()
-        }
-        XCTAssertEqual(createStarted.wait(timeout: .now() + 2), .success, "Project create never reached the server")
+    /// Workspace lifecycle commands queue behind one another, so two requests touching the same workspace
+    /// (or the same project's git repository) never run at once; a project clone is not part of that line.
+    func testWorkspaceLifecycleCommandsRunOneAtATimeAndProjectCreateRunsBesideThem() throws {
+        let harness = try LongCommandServerHarness()
+        defer { harness.tearDown() }
 
-        // Bounded by the client timeout: routed behind the blocked create, this throws instead of hanging.
-        let listed = try TerminalServiceClient.send(
-            request: TerminalServiceRequest(command: .profileCommand(.projectList)), socketPath: socketPath, timeout: 2)
-        XCTAssertEqual(listed.message, "listed")
+        let createAnswered = harness.sendInBackground(
+            .profileCommand(.workspaceCreate(TerminalServiceWorkspaceCreatePayload(projectID: "p", branch: "feature"))))
+        XCTAssertEqual(harness.started.wait(timeout: .now() + 2), .success)
 
-        releaseCreate.signal()
-        XCTAssertEqual(createAnswered.wait(timeout: .now() + 5), .success, "Project create was never answered after it was released")
-        XCTAssertTrue(createSucceeded.value)
+        let startAnswered = harness.sendInBackground(.profileCommand(.workspaceStart(TerminalServiceWorkspaceLifecyclePayload(cwd: "/tmp/w"))))
+        XCTAssertEqual(harness.started.wait(timeout: .now() + 0.5), .timedOut, "A second workspace command ran while the first was in flight")
+
+        let cloneAnswered = harness.sendInBackground(.profileCommand(.projectCreate(.gitURL("https://example.com/repo.git"))))
+        XCTAssertEqual(harness.started.wait(timeout: .now() + 2), .success, "A project create waited behind a workspace command")
+
+        harness.release.signal()
+        harness.release.signal()
+        XCTAssertEqual(harness.started.wait(timeout: .now() + 2), .success, "The queued workspace command never started after the first finished")
+        harness.release.signal()
+        for answered in [createAnswered, startAnswered, cloneAnswered] { XCTAssertEqual(answered.wait(timeout: .now() + 5), .success) }
     }
 
     func testRelaunchIfIdleLeavesBusyDaemonRunningWhenItRefuses() throws {
@@ -1036,3 +1039,53 @@ private final class ThreadSafeCounter: @unchecked Sendable {
         }
     }
 #endif
+
+/// A server whose long-running handlers (`.projectCreate` and the workspace commands) signal `started` and
+/// block until `release` is signalled once per command; every other request answers "listed" at once.
+private final class LongCommandServerHarness {
+    let socketPath: String
+    let started = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    private let root: URL
+    private let server: TerminalServiceServer
+
+    init() throws {
+        // A request that times out leaves its handler to answer a closed socket; like the daemon, the test
+        // process must survive that write instead of dying on SIGPIPE, so a failure reads as an assertion.
+        signal(SIGPIPE, SIG_IGN)
+        root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        socketPath = root.appendingPathComponent("service.sock").path
+        let started = started
+        let release = release
+        server = TerminalServiceServer(socketPath: socketPath, queue: DispatchQueue(label: "terminal-service-long-command-test")) { request in
+            guard case .profileCommand(let command) = request.command else { return TerminalServiceResponse(ok: true, message: "listed") }
+            switch command {
+            case .projectCreate, .workspaceCreate, .workspaceStart, .workspaceStop, .workspaceRestart:
+                started.signal()
+                release.wait()
+                return TerminalServiceResponse(ok: true, message: "done")
+            default: return TerminalServiceResponse(ok: true, message: "listed")
+            }
+        }
+        try server.start()
+    }
+
+    /// Sends `command` from a background thread; the returned semaphore is signalled once it is answered.
+    func sendInBackground(_ command: TerminalServiceCommand) -> DispatchSemaphore {
+        let answered = DispatchSemaphore(value: 0)
+        let socketPath = socketPath
+        DispatchQueue.global().async {
+            _ = try? TerminalServiceClient.send(request: TerminalServiceRequest(command: command), socketPath: socketPath, timeout: 10)
+            answered.signal()
+        }
+        return answered
+    }
+
+    /// Releases any handler still blocked so no client thread outlives the test when an assertion fails first.
+    func tearDown() {
+        server.stop()
+        for _ in 0..<8 { release.signal() }
+        try? FileManager.default.removeItem(at: root)
+    }
+}

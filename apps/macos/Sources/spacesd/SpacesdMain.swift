@@ -214,12 +214,13 @@ enum SpacesDaemonProfileCommandRouting {
         case .automationCreate, .automationUpdate, .automationSetNextRun, .automationDelete, .automationList, .automationRunsList, .automationTrigger,
             .automationRunCancel, .automationEndAgents:
             true
-        // Engine-free, but a git URL create clones the whole repository before it answers, which can take
-        // minutes; on the main actor that would stall the daemon's terminal work for as long.
-        case .projectCreate: true
+        // Engine-free, but a git URL create clones the whole repository before it answers, and a workspace
+        // create runs git (including a network fetch) and the setup script; both can take minutes, and on
+        // the main actor that would stall the daemon's terminal work and every request that hops to main.
+        case .projectCreate, .workspaceCreate: true
         // Engine-free: pure store/disk reads and metadata writes with no launcher/terminator reach.
-        case .terminalTail, .projectList, .workspaceList, .workspaceCreate, .agentList, .agentBriefWrite, .agentBriefRead, .agentBriefClear,
-            .agentSubscribe, .agentUnsubscribe, .agentConsumePendingEvents:
+        case .terminalTail, .projectList, .workspaceList, .agentList, .agentBriefWrite, .agentBriefRead, .agentBriefClear, .agentSubscribe,
+            .agentUnsubscribe, .agentConsumePendingEvents:
             false
         }
     }
@@ -1092,8 +1093,8 @@ enum SpacesDaemonErrorClassification {
     /// `sessionCores`/Ghostty. Every other command funnels through `handle` wholly on the main actor,
     /// exactly as before. Keeping the blocking classes off the main actor is what lets embedded terminals
     /// keep ticking (the main actor pumps `ghostty_app_tick`) while a slow RPC is in flight. The transport
-    /// processes one RPC at a time, except that a project create runs on its own queue beside the others
-    /// (see `projectCreateOffMain`); this only moves where each blocks.
+    /// runs requests on serial lanes (`TerminalServiceRequestLane`): long-running commands have lanes of
+    /// their own beside the shared one; this only moves where each blocks.
     private nonisolated func dispatch(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
         switch request.command {
         case .runWorkspaceCommand(let payload): return runWorkspaceCommandOffMain(payload)
@@ -1155,6 +1156,7 @@ enum SpacesDaemonErrorClassification {
         case .profileCommand(.automationRunCancel(let runID)): return automationCommandOffMain(.automationRunCancel(runID: runID))
         case .profileCommand(.automationEndAgents(let runID)): return automationCommandOffMain(.automationEndAgents(runID: runID))
         case .profileCommand(.projectCreate(let source)): return projectCreateOffMain(source)
+        case .profileCommand(.workspaceCreate(let payload)): return workspaceCreateOffMain(payload)
         // Every remaining profile command (listings, workspace/agent metadata, subscriptions) touches no
         // engine state, so it keeps running the *bulk* of its work on the main actor (through
         // `handleProfileCommand`/`runProfileCommand`, unchanged main-actor methods) — only the calling
@@ -2011,15 +2013,7 @@ enum SpacesDaemonErrorClassification {
                 return profileWorkspaceRecord(workspace, projectKind: kind)
             }
             return TerminalServiceProfileCommandResponse(message: "Listed workspaces.", workspaces: records)
-        case .workspaceCreate(let payload):
-            let orchestrator = try makeProfileOrchestrator()
-            guard let project = try orchestrator.store.project(id: payload.projectID) else {
-                throw SpacesRuntimeError.invalidArgument(message: "Project not found for id \(payload.projectID).")
-            }
-            let workspace = try orchestrator.createWorkspaceOnDevice(
-                projectID: project.id, branch: payload.branch, baseBranch: payload.baseBranch, allowExistingBranchReuse: payload.existingBranch)
-            return TerminalServiceProfileCommandResponse(
-                message: "Created workspace.", workspace: profileWorkspaceRecord(workspace, projectKind: project.kind))
+        case .workspaceCreate: preconditionFailure("`.workspaceCreate` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         // Workspace start/stop/restart and agent kill/signal are peeled off main by `dispatch(_:)` into their
         // dedicated synchronous off-main handlers (`workspaceStartOffMain`, `workspaceStopOffMain`, `agentKillOffMain`,
         // `agentSignalOffMain`) because their call graph reaches the launcher/terminator, whose engine hop
@@ -2313,7 +2307,7 @@ enum SpacesDaemonErrorClassification {
     /// first, sends a create that may.
     ///
     /// The transport runs this on its own queue beside every other request (see
-    /// `TerminalServiceServer.projectCreateQueue`), which is safe because it shares no state with them:
+    /// `TerminalServiceRequestLane.projectCreate`), which is safe because it shares no state with them:
     /// `makeProfileOrchestrator()` opens a store connection for this call alone, SQLite's busy timeout
     /// serializes its writes against theirs, and the clone holds no transaction. The Device API runs the
     /// same orchestrator create on its own clone lane beside its other lanes in the same way.
@@ -2334,6 +2328,24 @@ enum SpacesDaemonErrorClassification {
                     id: project.id, name: project.name, dir: project.dir, isGitRepo: project.isGitRepo, defaultBranch: project.defaultBranch),
                 defaultWorkspaceID: defaultWorkspaceID, spacesYAMLImported: created.spacesYAMLImported)
             return TerminalServiceResponse(ok: true, message: profile.message, profile: profile)
+        } catch { return Self.failureResponse(error) }
+    }
+
+    /// RPC `.profileCommand(.workspaceCreate)` handler. Runs off the main actor on the workspace lifecycle
+    /// lane (`TerminalServiceRequestLane`): the create can fetch from the remote and run the project's setup
+    /// script, so it must hold neither the main actor nor the shared request queue while it does.
+    private nonisolated func workspaceCreateOffMain(_ payload: TerminalServiceWorkspaceCreatePayload) -> TerminalServiceResponse {
+        if let rejection = livenessState.teardownRejection() { return rejection }
+        do {
+            let orchestrator = try makeProfileOrchestrator()
+            guard let project = try orchestrator.store.project(id: payload.projectID) else {
+                throw SpacesRuntimeError.invalidArgument(message: "Project not found for id \(payload.projectID).")
+            }
+            let workspace = try orchestrator.createWorkspaceOnDevice(
+                projectID: project.id, branch: payload.branch, baseBranch: payload.baseBranch, allowExistingBranchReuse: payload.existingBranch)
+            let profile = TerminalServiceProfileCommandResponse(
+                message: "Created workspace.", workspace: profileWorkspaceRecord(workspace, projectKind: project.kind))
+            return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
         } catch { return Self.failureResponse(error) }
     }
 

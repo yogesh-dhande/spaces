@@ -39,6 +39,14 @@ import XCTest
             }
         }
 
+        /// A workspace create touches no engine state, but it runs git (including a network fetch) and the
+        /// project's setup script before it answers, so it runs off the main actor rather than holding it.
+        func testWorkspaceCreateRunsOffMain() {
+            XCTAssertTrue(
+                SpacesDaemonProfileCommandRouting.requiresOffMainExecution(
+                    .workspaceCreate(TerminalServiceWorkspaceCreatePayload(projectID: "p", branch: "b"))))
+        }
+
         /// A project create touches no engine state, but a git URL create clones the repository before it
         /// answers, so both sources run off the main actor rather than holding it for the clone.
         func testProjectCreateRunsOffMain() {
@@ -51,8 +59,7 @@ import XCTest
         func testEngineFreeCommandsRunOnMain() {
             let onMain: [TerminalServiceProfileCommand] = [
                 .projectList, .terminalTail(TerminalServiceTerminalTailPayload(sessionID: "s")),
-                .workspaceList(TerminalServiceWorkspaceListPayload()),
-                .workspaceCreate(TerminalServiceWorkspaceCreatePayload(projectID: "p", branch: "b")), .agentList(TerminalServiceAgentListPayload()),
+                .workspaceList(TerminalServiceWorkspaceListPayload()), .agentList(TerminalServiceAgentListPayload()),
                 .agentBriefWrite(TerminalServiceAgentBriefWritePayload(sessionID: "s", markdown: "m")), .agentBriefRead(sessionID: "s"),
                 .agentBriefClear(sessionID: "s"),
                 .agentSubscribe(TerminalServiceAgentSubscriptionPayload(subscriberTerminalSessionID: "a", agentSessionID: "b")),
