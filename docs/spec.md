@@ -138,6 +138,7 @@ The product rules Spaces follows, from the user's point of view: what happens, w
 - A non-git project's template and its single workspace's settings are one: every save or import applies to that workspace, so the edits are what runs, and the choice is never offered.
 
 ### Deleting a project
+- Deleting a project stops each of its workspaces the same way deleting a workspace does: their processes, terminals, coding agents, and CLI-created shells end and each stop script runs, before the project, its workspaces, or their worktrees are removed.
 - Deleting a project removes it and every workspace in it, the default workspace included, with their records and Spaces-managed worktrees; a project Spaces cloned also has its clone deleted, while a folder the user added stays on disk.
 - The project's automations are deleted first, then its workspaces are torn down. If the teardown fails, the automations stay deleted; this is accepted.
 

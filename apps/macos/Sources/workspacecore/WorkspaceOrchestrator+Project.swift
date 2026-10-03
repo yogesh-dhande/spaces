@@ -289,18 +289,16 @@ extension WorkspaceOrchestrator {
     }
 
     private func removeProjectUnlocked(_ project: ProjectRecord, workspaces: [WorkspaceRecord]) throws {
-        // Finalize every coding-agent row in the project through the termination chokepoint BEFORE the
-        // bulk store delete. `agent_subscriptions.agent_session_id` is `ON DELETE RESTRICT`, so
-        // `deleteProject`'s raw `DELETE FROM agent_sessions` throws if the scope still holds any agent
-        // row with inbound watch edges — including an `.exited`-kept row whose watcher (possibly in
-        // another, surviving project) has not unsubscribed. Routing each row through `.destroyed`
-        // delivers the exited notice those outside watchers are owed, drops the inbound edges (so the
-        // delete succeeds), terminates the agent's backing terminal, and tears down each terminal's own
-        // outgoing watch state.
+        // Deleting a project stops each of its workspaces exactly as deleting that one workspace does
+        // (`archiveWorkspaceUnlocked` makes the same call with the same `waitForTerminalExit: false`).
+        // The stop runs BEFORE the bulk store delete because `agent_subscriptions.agent_session_id` is
+        // `ON DELETE RESTRICT`: it finalizes every agent row through the termination chokepoint, which
+        // delivers the exited notice outside watchers are owed and drops their inbound edges, so
+        // `deleteProject`'s raw delete cannot hit a remaining agent row. A refused stop (a daemon
+        // handoff in progress, a failing stop script) aborts the delete while the project, its
+        // workspaces, and their worktrees still exist.
         for workspace in workspaces {
-            for agent in try store.agentWindows(workspaceID: workspace.id) {
-                try finalizeAgentRow(agent, reason: .destroyed(terminateTerminalSession: true))
-            }
+            _ = try stopWorkspaceUnlocked(workspaceID: workspace.id, waitForTerminalExit: false)
         }
         // Mutate the database BEFORE any irreversible filesystem work: a RESTRICT/consistency failure
         // then surfaces while the worktrees still exist, instead of after they were already removed from

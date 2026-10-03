@@ -565,6 +565,63 @@ extension OrchestratorTests {
         XCTAssertNil(try store.project(id: project.id))
     }
 
+    /// Deleting a project stops everything it is running (#859): every workspace's configured process
+    /// sessions, its CLI-created shells (known only through launch metadata, with no window or process
+    /// row), and its stop script. Two workspaces prove the teardown covers each one, not just the first.
+    func testRemoveProjectTerminatesSessionsAndRunsStopScriptOfEveryWorkspace() throws {
+        // A git project, because a non-git project owns exactly one workspace.
+        let fixture = try makeTempGitRepo(name: "project-delete-stops-workspaces")
+        let root = try makeTempDirectory()
+        let projectsRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let terminateCapture = TerminalTerminateCapture()
+        let orchestrator = makeTestOrchestrator(
+            store: store, projectsRootDirectory: projectsRoot, workspacesRootDirectory: workspacesRoot,
+            builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+        let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
+        let branchWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature", runSetupScript: false)
+        XCTAssertNotEqual(defaultWorkspace.id, branchWorkspace.id)
+        let workspaces = [defaultWorkspace, branchWorkspace]
+
+        var processSessionIDs: [String] = []
+        var shellSessionIDs: [String] = []
+        var stopMarkers: [URL] = []
+        for (index, workspace) in workspaces.enumerated() {
+            let processSessionID = "project-delete-process-\(index)"
+            let shellSessionID = "project-delete-shell-\(index)"
+            let stopMarker = root.appendingPathComponent("stop-marker-\(index).txt")
+            processSessionIDs.append(processSessionID)
+            shellSessionIDs.append(shellSessionID)
+            stopMarkers.append(stopMarker)
+
+            try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+            try store.upsert(
+                runningProcess: RunningProcessRecord(
+                    id: "project-delete-running-process-\(index)", workspaceID: workspace.id, templateName: "api", command: "npm run api",
+                    terminalApp: TerminalHost.spaces.appName, terminalTrackingID: processSessionID, pid: nil, status: .running, logPath: nil,
+                    lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+            try writeTerminalSessionFixture(
+                sessionID: shellSessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: shellSessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier),
+                    childPID: 456, state: .running, updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir))
+            try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+            try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: "touch \(stopMarker.path)")
+        }
+
+        try orchestrator.removeProject(id: project.id)
+
+        XCTAssertNil(try store.project(id: project.id))
+        XCTAssertEqual(
+            Set(terminateCapture.sessionIDs), Set(processSessionIDs + shellSessionIDs),
+            "every configured process session and CLI-created shell in every workspace is terminated")
+        for stopMarker in stopMarkers {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: stopMarker.path), "each workspace's stop script runs: \(stopMarker.lastPathComponent)")
+        }
+    }
+
     // MARK: - listProjects
 
     func testListProjectsReturnsSummariesForAllProjects() throws {
