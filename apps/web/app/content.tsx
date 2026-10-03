@@ -2,123 +2,54 @@
 // and section data arrays. Kept separate from the page component so
 // page.tsx holds rendering logic only, mirroring app/docs/content.ts.
 import Link from "next/link";
-import { Key } from "./components/key";
 
 export const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
 
-// Scope strip under the hero headline: the surfaces Spaces puts under one roof.
-export const heroScope = [
-  "projects",
-  "worktrees",
-  "agents",
-  "ports",
-  "processes",
-  "windows",
-  "remote machines",
-];
-
-export type Pillar = {
-  title: string;
-  description: string;
-  icon: React.ReactNode;
-  href?: string;
-  hrefLabel?: string;
+// Sample devices in the hero visual, grouped like the Mac sidebar: machine, then
+// workspace, then the agents running in it. They mirror the Mac screenshot beside them.
+// waiting = needs the user (amber), working = teal, done = muted.
+export type HeroAgent = {
+  agent: string;
+  status: "waiting" | "working" | "done";
+  statusLabel: string;
+  elapsed?: string;
 };
 
-// The six things Spaces manages for you, the centerpiece of the page.
-export const pillars: Pillar[] = [
+export type HeroWorkspace = {
+  name: string;
+  agents: HeroAgent[];
+};
+
+export type HeroDevice = {
+  name: string;
+  kind: string;
+  workspaces: HeroWorkspace[];
+};
+
+export const heroDevices: HeroDevice[] = [
   {
-    title: "Agents",
-    description:
-      "Claude Code, Codex, and opencode each report working, blocked, or done. Alerts shows which one needs you next; jump to its terminal with a shortcut.",
-    icon: (
-      <svg viewBox="0 0 20 20" fill="none" aria-hidden className="h-5 w-5">
-        <path
-          d="M2 10h3.5l2-5.5L11 15l2-5h3"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    ),
+    name: "Local",
+    kind: "Mac",
+    workspaces: [
+      {
+        name: "harbor-web / checkout-copy",
+        agents: [{ agent: "claude", status: "waiting", statusLabel: "waiting on you" }],
+      },
+    ],
   },
   {
-    title: "Worktrees",
-    description:
-      "Every feature, branch, or experiment gets its own git worktree on its own branch, with its own directory, env, ports, and processes. Parallel work never collides.",
-    icon: (
-      <svg viewBox="0 0 20 20" fill="none" aria-hidden className="h-5 w-5">
-        <circle cx="5" cy="4.5" r="2" stroke="currentColor" strokeWidth="1.5" />
-        <circle cx="5" cy="15.5" r="2" stroke="currentColor" strokeWidth="1.5" />
-        <circle cx="15" cy="7.5" r="2" stroke="currentColor" strokeWidth="1.5" />
-        <path
-          d="M5 6.5v7M5 11h5a3 3 0 0 0 3-3V9.5"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    ),
-  },
-  {
-    title: "Ports & processes",
-    description:
-      "Name your services and each workspace gets its own port and a stable URL like web.my-branch.localhost:7391. Dev servers and workers run as tracked processes that restart on demand.",
-    icon: (
-      <svg viewBox="0 0 20 20" fill="none" aria-hidden className="h-5 w-5">
-        <rect x="5" y="5" width="10" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.5" />
-        <rect x="8" y="8" width="4" height="4" rx="0.5" stroke="currentColor" strokeWidth="1.5" />
-        <path
-          d="M8.5 2.5V5M11.5 2.5V5M8.5 15v2.5M11.5 15v2.5M2.5 8.5H5M2.5 11.5H5M15 8.5h2.5M15 11.5h2.5"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-        />
-      </svg>
-    ),
-  },
-  {
-    title: "Windows & focus",
-    description:
-      "Spaces tracks every window a workspace opens and jumps you back with a keystroke. Cycle through one workspace, your alerts, or your agents, and keep your attention on one task at a time.",
-    icon: (
-      <svg viewBox="0 0 20 20" fill="none" aria-hidden className="h-5 w-5">
-        <rect x="2.5" y="4" width="10" height="8" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
-        <rect x="7.5" y="8" width="10" height="8" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
-      </svg>
-    ),
-  },
-  {
-    title: "Remote machines",
-    description:
-      "Pair a remote Mac or a cloud Linux box and drive them all from one Mac. Each device gets its own sidebar section, with its projects and sessions in reach.",
-    href: "#remote",
-    hrefLabel: "See how it works",
-    icon: (
-      <svg viewBox="0 0 20 20" fill="none" aria-hidden className="h-5 w-5">
-        <rect x="3" y="3.5" width="14" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
-        <rect x="3" y="11.5" width="14" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
-        <path d="M6 6h.01M6 14h.01" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-      </svg>
-    ),
-  },
-  {
-    title: "Mac & iPhone",
-    description:
-      "Two full clients, not an app and an accessory. Each one pairs straight to the machines it drives: your iPhone talks directly to a Mac or a cloud Linux box, with nothing in the middle to leave running.",
-    href: "#mobile",
-    hrefLabel: "See both clients",
-    icon: (
-      <svg viewBox="0 0 20 20" fill="none" aria-hidden className="h-5 w-5">
-        <rect x="1.5" y="4" width="11" height="8" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
-        <path d="M4.5 15h5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-        <path d="M7 12v3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-        <rect x="13.5" y="8" width="5" height="9.5" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
-        <path d="M15.6 15.6h1.3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      </svg>
-    ),
+    name: "build-server",
+    kind: "Linux server",
+    workspaces: [
+      {
+        name: "atlas-api / retry-backoff",
+        agents: [{ agent: "codex", status: "working", statusLabel: "working" }],
+      },
+      {
+        name: "atlas-api / rate-limit-tests",
+        agents: [{ agent: "opencode", status: "done", statusLabel: "done" }],
+      },
+    ],
   },
 ];
 
@@ -128,11 +59,6 @@ export type Feature = {
 };
 
 export const keyFeatures: Feature[] = [
-  {
-    title: "Track agents across workspaces",
-    description:
-      "Every coding agent reports its state (working, waiting on you, or done) in one Alerts view. See at a glance which ones need input next, and jump to any of them with a keyboard shortcut.",
-  },
   {
     title: "A worktree per branch",
     description:
@@ -149,21 +75,6 @@ export const keyFeatures: Feature[] = [
       "Declare named services and reach each one at a stable, predictable URL like http://web.my-branch.localhost:7391, served by a bundled reverse proxy. Run three instances of your app side by side, isolated, no port conflicts, no `.env` edits.",
   },
   {
-    title: "Run on remote machines",
-    description:
-      "Pair a remote Mac or a cloud Linux box over SSH. Manage its projects, workspaces, terminals, and agents from the Mac in front of you, each device in its own sidebar section.",
-  },
-  {
-    title: "Sessions that outlive your laptop",
-    description:
-      "Terminals and agents run on the Spaces service on that machine, not your SSH connection. Kick off a build on a remote box, close your laptop, and it keeps running. Reattach later exactly where it left off.",
-  },
-  {
-    title: "Automations",
-    description:
-      "Run a shell command on your Mac or a paired device manually or on a schedule, even while Spaces is closed. Watch a run live, replay it later, or have it spawn a coding agent that keeps working after the run finishes.",
-  },
-  {
     title: "Jump to any workspace",
     description:
       "A global command palette pulls up any window instantly: choose a window and it snaps into focus right where you left it.",
@@ -177,11 +88,6 @@ export const keyFeatures: Feature[] = [
     title: "Agent briefs",
     description:
       "A coding agent can keep a short brief beside its terminal: what it is doing, questions for you, and its task list. Read it on your Mac or iPhone without scrolling back through the transcript.",
-  },
-  {
-    title: "Take any session to your iPhone",
-    description:
-      "The iOS app is a full client, not a remote for your Mac. It pairs directly with any device running Spaces (your Mac, or a cloud Linux box with no Mac involved), so you can pick up the same live session, watch a build, check a coding agent, or send a command, then step back to your desk without losing your place.",
   },
   {
     title: "Launch and teardown on demand",
@@ -234,19 +140,20 @@ export const faqItems: FaqItem[] = [
       <ul className="ml-4 list-disc space-y-1">
         <li>macOS 14 Sonoma or later</li>
         <li>Google Chrome, used for browser sessions</li>
+        <li>Ubuntu 24.04 for a Linux server</li>
+        <li>iOS 17 or later for the iPhone beta</li>
       </ul>
     ),
   },
   {
-    question: "Can I use it with CLI coding agents like Claude Code, Codex, or opencode?",
+    question: "How does Spaces know what each agent is doing?",
     answer: (
       <>
-        Yes. Open a terminal in any workspace with <Key>⌘⌥T</Key> and start
-        your agent as usual. It opens as a pane in that workspace, so you can
-        jump back to it with a keystroke. Spaces installs status hooks for
-        Claude Code, Codex, and opencode, so the sidebar shows whether each
-        agent is working, waiting for you, or done. Each agent can also keep
-        a brief, a short status page shown beside its terminal. See{" "}
+        Spaces installs status hooks for Claude Code, Codex, and opencode, so
+        the sidebar shows whether each agent is working, waiting on you, or
+        done. An agent you start in a Spaces terminal is also recognized
+        without hooks. Each agent can also keep a brief, a short status page
+        shown beside its terminal. See{" "}
         <Link href="/docs/coding-agents" className="text-accent hover:underline">
           Agent status
         </Link>{" "}
@@ -259,11 +166,10 @@ export const faqItems: FaqItem[] = [
     ),
   },
   {
-    question: "Can I use it with a Mac Mini or cloud VM?",
+    question: "Can I run agents on another Mac or a Linux server?",
     answer: (
       <>
-        Yes. Pair another Mac or an Ubuntu box, including a cloud
-        VM, over SSH. Each machine runs the Spaces service and shows up as
+        Yes. Pair another Mac or a Linux server (Ubuntu 24.04) over SSH. Each machine runs the Spaces service and shows up as
         its own section in the sidebar, so you manage its projects,
         workspaces, terminals, and agents from the Mac in front of you.
         Sessions run on that service, so a remote build or agent keeps
@@ -280,8 +186,9 @@ export const faqItems: FaqItem[] = [
     question: "I only work on one project at a time. Will Spaces help me?",
     answer: (
       <>
-        You will still benefit from the ability to manage agents, processes, and windows, and to control
-        them from your Mac or iPhone.
+        Yes. Alerts, automations, remote machines, and the iPhone app all work
+        with one workspace; extra workspaces only matter once you run a second
+        branch.
       </>
     ),
   },
@@ -296,17 +203,12 @@ export const faqItems: FaqItem[] = [
         >
           Ask for an invite on GitHub
         </a>
-        . The Spaces iOS app is a full client in its own right, not a
-        remote for the desktop app. Your Mac&apos;s Devices settings shows a
-        pairing QR code for any machine it&apos;s connected to (itself, or a
-        Linux box) and scanning one pairs your phone with that machine
-        directly. From then on the phone talks to it on its own: browse its live
-        terminal sessions, watch a coding agent&apos;s output, or start new
-        sessions, with no Mac in the path. See the{" "}
+        . It pairs with your Mac or a Linux server from a QR code and talks to
+        that machine directly. See the{" "}
         <Link href="/docs/ios" className="text-accent hover:underline">
-          iOS app
-        </Link>{" "}
-        docs.
+          iOS app docs
+        </Link>
+        .
       </>
     ),
   },
@@ -356,20 +258,12 @@ export const workflow: WorkflowStepData[] = [
   },
   {
     n: "03",
-    label: "Runtime",
-    body: "With one click, start every process for a workspace; its browser sessions open when you focus them. Spaces manages the windows and monitors coding agents. Jump to any window, or cycle through a workspace, your alerts, or your agents, with keyboard shortcuts.",
+    label: "Run",
+    body: "Start the workspace and every configured process comes up. Browser sessions open when you focus them. Stop it and everything shuts down together.",
   },
 ];
 
-export type RemoteNode = {
-  name: string;
-};
-
-export const remoteNodes: RemoteNode[] = [
-  { name: "Local Mac" },
-  { name: "Remote Mac" },
-  { name: "Cloud Linux" },
-];
+export const remoteNodes: string[] = ["This Mac", "Another Mac", "Linux server"];
 
 // A row in the Alerts panel mock. Only blocked and done states raise Alerts,
 // so every sample row is one of those two.
@@ -382,7 +276,7 @@ export type AgentAlert = {
 export const agentAlerts: AgentAlert[] = [
   {
     workspace: "auth-refactor",
-    agent: "claude-fable",
+    agent: "claude",
     status: "blocked",
   },
   {
@@ -397,7 +291,7 @@ export const agentAlerts: AgentAlert[] = [
   },
   {
     workspace: "landing-copy",
-    agent: "claude-sonnet",
+    agent: "codex",
     status: "done",
   },
 ];
@@ -429,5 +323,80 @@ export const spacesFixes: ComparisonItem[] = [
   {
     title: "Isolated sessions by design",
     body: "Different hostnames mean different cookie jars and local storage. Stay logged into three branches at once, side by side, with no incognito tabs.",
+  },
+];
+
+export type AutomationPoint = {
+  title: string;
+  description: string;
+};
+
+export const automationPoints: AutomationPoint[] = [
+  {
+    title: "Agents or scripts",
+    description: "Give an agent a standing task, like a nightly dependency check, or run a shell script at the workspace root.",
+  },
+  {
+    title: "Runs you can replay",
+    description: "Watch a run live, or replay its terminal later. A finished agent's session stays open for you to review.",
+  },
+  {
+    title: "Overlaps and missed runs",
+    description:
+      "Decide whether a run that fires while the last one is still going is skipped, queued, or started anyway, and whether runs missed while the machine was off catch up.",
+  },
+  {
+    title: "From your iPhone",
+    description: "Run one now, cancel a run, open its terminal, or pick the time of its next run from the iPhone app.",
+  },
+];
+
+// A row in the Automations list mock. running = teal, done = muted, skipped = amber.
+export type AutomationRow = {
+  name: string;
+  kind: string;
+  device: string;
+  schedule: string;
+  status: "running" | "done" | "skipped";
+  statusLabel: string;
+  elapsed?: string;
+  note?: string;
+};
+
+export const automationRows: AutomationRow[] = [
+  {
+    name: "Nightly dependency check",
+    kind: "claude",
+    device: "Local",
+    schedule: "daily at 03:00",
+    status: "done",
+    statusLabel: "done",
+    elapsed: "6h ago",
+  },
+  {
+    name: "Triage new issues",
+    kind: "codex",
+    device: "Remote VM",
+    schedule: "every hour",
+    status: "running",
+    statusLabel: "running",
+  },
+  {
+    name: "Rebuild docs site",
+    kind: "script",
+    device: "Remote VM",
+    schedule: "on demand",
+    status: "done",
+    statusLabel: "done",
+    elapsed: "2d ago",
+  },
+  {
+    name: "Weekly cleanup",
+    kind: "opencode",
+    device: "Local",
+    schedule: "Mondays at 09:00",
+    status: "skipped",
+    statusLabel: "skipped",
+    note: "previous run still open",
   },
 ];

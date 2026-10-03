@@ -9,6 +9,27 @@ export type DocsNavGroup = {
   pages: DocsPageLink[];
 };
 
+export const articles: DocsPageLink[] = [
+  {
+    href: "/articles/run-coding-agents-from-your-iphone",
+    title: "Run coding agents from your iPhone",
+    summary:
+      "See which agent is waiting for you and answer it in the same terminal, from your iPhone.",
+  },
+  {
+    href: "/articles/run-coding-agents-on-a-remote-server",
+    title: "Run coding agents on a remote server and keep them running",
+    summary:
+      "Keep agents running on a Linux server after you disconnect, and bring them back with one Restore after a reboot.",
+  },
+  {
+    href: "/articles/coding-agents-working-together",
+    title: "Let Claude Code, Codex, and opencode work together",
+    summary:
+      "Let any agent start another in its own worktree, hear back when it is done, and read what it found.",
+  },
+];
+
 export const docsNavGroups: DocsNavGroup[] = [
   {
     label: "Get started",
@@ -196,6 +217,10 @@ export const docsNavGroups: DocsNavGroup[] = [
           "Worked setups for common stacks, as a `spaces.yaml` and in project settings.",
       },
     ],
+  },
+  {
+    label: "Articles",
+    pages: articles,
   },
 ];
 

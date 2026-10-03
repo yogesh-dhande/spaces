@@ -14,7 +14,7 @@ export function SiteFooter() {
             <Image src={SpacesLogo} alt="" width={20} height={20} />
             <span className="text-sm font-semibold tracking-tight">Spaces</span>
             <span className="ml-2 text-xs text-foreground-soft">
-              Your command center for parallel development.
+              Your coding agents, reachable from anywhere.
             </span>
           </div>
           <p className="text-xs text-foreground-soft">Made by Yogesh Dhande</p>
@@ -29,6 +29,9 @@ export function SiteFooter() {
           </Link>
           <Link href="/docs" className="transition-colors hover:text-foreground">
             Docs
+          </Link>
+          <Link href="/articles" className="transition-colors hover:text-foreground">
+            Articles
           </Link>
           <Link
             href="/docs/cli"
