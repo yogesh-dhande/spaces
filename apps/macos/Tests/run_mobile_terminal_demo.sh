@@ -254,12 +254,12 @@ delete_remote_demo_project() {
   [[ -n "$remote_project_id" && -n "$remote_forward_port" && -n "$iphone_remote_token" ]] || return 0
   if ! run_demo_env \
     HOME="$demo_home" \
-    python3 - "$spacese2e" "$bundle_id" "$remote_forward_host" "$remote_forward_port" "$remote_certificate_fingerprint" "$iphone_remote_token" "$iphone_installation_id" "$remote_project_id" "$remote_workspace_id" <<'PY'
+    python3 - "$spacese2e" "$bundle_id" "$remote_forward_host" "$remote_forward_port" "$remote_certificate_fingerprint" "$iphone_remote_token" "$iphone_installation_id" "$remote_project_id" <<'PY'
 import json
 import subprocess
 import sys
 
-spacese2e, bundle_id, host, port, certificate_fingerprint, auth_token, installation_id, project_id, workspace_id = sys.argv[1:]
+spacese2e, bundle_id, host, port, certificate_fingerprint, auth_token, installation_id, project_id = sys.argv[1:]
 client_app = {
     "installationID": installation_id,
     "bundleID": bundle_id,
@@ -284,19 +284,6 @@ def send(command):
         raise SystemExit(json.dumps(payload))
     return payload
 
-
-# deleteProject's removeProjectUnlocked only terminates agent-backed terminals, so a persistent
-# demo shell would otherwise outlive its deleted workspace on the remote host. Stop the workspace
-# first, over the same transport, and warn but continue to the delete if the stop fails -- teardown
-# must always attempt the delete.
-if workspace_id:
-    try:
-        send({"stopWorkspace": {"workspaceID": workspace_id}})
-    except (SystemExit, Exception) as exc:
-        # SystemExit covers send()'s own failure reports; Exception covers the transport-level
-        # failures send() can raise (subprocess timeout, malformed JSON, OSError). Every stop
-        # failure must fall through to deleteProject, never abort the teardown.
-        print(f"Failed to stop remote demo workspace {workspace_id} before delete: {exc}", file=sys.stderr)
 
 try:
     send({"deleteProject": {"projectID": project_id}})
