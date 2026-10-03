@@ -8,6 +8,8 @@ type DocsShellProps = {
   title: string;
   description: string;
   pagePath: string;
+  // The first breadcrumb. Docs pages use the default; articles pass their own index.
+  breadcrumbRoot?: { label: string; href: string };
   children: ReactNode;
 };
 
@@ -22,8 +24,10 @@ export function DocsShell({
   title,
   description,
   pagePath,
+  breadcrumbRoot = { label: "Docs", href: "/docs" },
   children,
 }: DocsShellProps) {
+  const isArticle = breadcrumbRoot.href === "/articles";
   const isOnGuideSubpage =
     pagePath.startsWith("/docs/guides/") && pagePath !== "/docs/guides";
 
@@ -41,10 +45,13 @@ export function DocsShell({
         {/* Breadcrumb + hero */}
         <section className="border-b border-line/70 pb-10 pt-10 md:pt-14">
           <nav className="flex items-center gap-1.5 font-mono text-[0.68rem] uppercase tracking-[0.18em] text-foreground-soft">
-            <Link href="/docs" className="transition-colors hover:text-foreground">
-              Docs
+            <Link
+              href={breadcrumbRoot.href}
+              className="transition-colors hover:text-foreground"
+            >
+              {breadcrumbRoot.label}
             </Link>
-            {ownerGroup ? (
+            {ownerGroup && !isArticle ? (
               <>
                 <span aria-hidden>/</span>
                 <span>{ownerGroup.label}</span>
@@ -61,8 +68,12 @@ export function DocsShell({
                 </Link>
               </>
             ) : null}
-            <span aria-hidden>/</span>
-            <span className="text-foreground">{title}</span>
+            {title !== breadcrumbRoot.label ? (
+              <>
+                <span aria-hidden>/</span>
+                <span className="text-foreground">{title}</span>
+              </>
+            ) : null}
           </nav>
           <h1 className="mt-4 max-w-4xl text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
             {title}
@@ -73,7 +84,10 @@ export function DocsShell({
         </section>
 
         <div className="grid gap-10 pt-10 lg:grid-cols-[16rem_minmax(0,1fr)]">
-          <aside className="min-w-0 lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:self-start lg:overflow-y-auto lg:pb-6">
+          {/* On a phone the reader came for the article, so its nav goes after it. */}
+          <aside
+            className={`${isArticle ? "order-last lg:order-none " : ""}min-w-0 lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:self-start lg:overflow-y-auto lg:pb-6`}
+          >
             <nav className="flex flex-col gap-0.5">
               {docsNavGroups.map((group, groupIndex) => (
                 <div key={group.label}>

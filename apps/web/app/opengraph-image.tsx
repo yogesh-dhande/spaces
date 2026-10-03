@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { ImageResponse } from "next/og";
 
 export const dynamic = "force-static";
-export const alt = "Spaces: manage parallel coding sessions, from anywhere, on any machine.";
+export const alt = "Spaces: your coding agents, reachable from anywhere, on your Mac, a Linux server, or your iPhone.";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -53,30 +53,26 @@ export default function Image() {
             position: "absolute",
             left: 66,
             top: 192,
-            width: 480,
+            width: 540,
             display: "flex",
             flexWrap: "wrap",
-            fontSize: 58,
+            fontSize: 40,
             fontWeight: 600,
             lineHeight: 1.04,
           }}
         >
-          <span style={{ marginRight: 16 }}>Manage</span>
-          {["parallel", "coding", "sessions"].map((word) => (
-            <span key={word} style={{ color: colors.accent, marginRight: 16 }}>
-              {word}
-            </span>
-          ))}
+          <span style={{ width: "100%" }}>Your coding agents,</span>
+          <span style={{ width: "100%", color: colors.accent }}>reachable from anywhere</span>
         </div>
 
         <div
           style={{
             position: "absolute",
             left: 66,
-            top: 420,
+            top: 300,
             display: "flex",
             alignItems: "center",
-            fontSize: 28,
+            fontSize: 22,
             color: colors.accent2,
           }}
         >
@@ -91,7 +87,7 @@ export default function Image() {
               strokeLinejoin="round"
             />
           </svg>
-          <span>from anywhere, on any machine</span>
+          <span>on your Mac, a Linux server, or your iPhone</span>
         </div>
 
         <div

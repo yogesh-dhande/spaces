@@ -100,42 +100,6 @@ body {
   background-repeat: no-repeat, no-repeat, repeat;
 }
 
-/* Hero scope marquee — the track holds two identical copies of the word list, so
-   translating it left by half its width loops seamlessly. Edges fade via a mask. */
-.marquee {
-  -webkit-mask-image: linear-gradient(
-    to right,
-    transparent,
-    black 8%,
-    black 92%,
-    transparent
-  );
-  mask-image: linear-gradient(
-    to right,
-    transparent,
-    black 8%,
-    black 92%,
-    transparent
-  );
-}
-
-.marquee-track {
-  animation: marqueeScroll 26s linear infinite;
-}
-
-@keyframes marqueeScroll {
-  to {
-    transform: translateX(-50%);
-  }
-}
-
-/* Respect reduced motion: hold the list still. */
-@media (prefers-reduced-motion: reduce) {
-  .marquee-track {
-    animation: none;
-  }
-}
-
 /* Blinking block caret closing the hero subhead's terminal prompt line. */
 .hero-caret {
   display: inline-block;
