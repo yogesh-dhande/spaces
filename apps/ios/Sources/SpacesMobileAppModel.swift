@@ -685,18 +685,6 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// from a *different* client — no client can exclude another from its daemon's one queue either — just
     /// reachable here from this client's own queued successor instead of a stranger's.
     @ObservationIgnored private var pendingDeleteChains: [Int: Task<Void, Never>] = [:]
-    /// Attention events and automation-run alerts the user dismissed, one at a time or with Clear, keyed
-    /// by deviceID to that device's bucket of unprefixed event/run identities (see
-    /// `SpacesMobileAttentionEvent.eventKey`). Kept for every paired device at once, not only the selected
-    /// one, since the Alerts tab lists every paired device's rows together and dismissing or clearing a
-    /// non-selected (including offline) device's rows has to take effect immediately.
-    ///
-    /// Each bucket is exactly what `SpacesMobileDismissedAlertsStore` persists on disk per device; loading
-    /// every paired device's bucket into memory here does not change that persisted shape. Reloaded
-    /// whenever the paired set can change (init, a device switch, pairing, removal, Demo Mode toggle: see
-    /// `loadDismissedAlertIDsForPairedDevices`), and each device's bucket is pruned against its own
-    /// freshly delivered overview independently (see `pruneDismissedAlertIDs`).
-    private var dismissedAlertIDsByDevice: [String: Set<String>] = [:]
     /// The session whose terminal detail is on screen, or nil when no terminal detail is open. Set by
     /// the terminal navigation flow as its selected session changes. Having the route open is not the
     /// same as watching it — see `watchedTerminalSessionID`.
@@ -710,7 +698,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// The user's recent watches of each recently watched session's terminal detail, oldest first. A
     /// bell for the focused session is excluded live (see `SpacesMobileAttention.events`); once a
     /// session stops being focused, these windows keep excluding a bell that rang while it still was.
-    /// In-memory only, like `dismissedAlertIDsByDevice`.
+    /// In-memory only.
     ///
     /// A list rather than one window per session because a single visit to a terminal produces several:
     /// backgrounding the app ends one and returning starts the next, and the bell rung before the app
@@ -726,6 +714,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Upper bound on sessions with remembered watches, dropping the one whose watching ended longest
     /// ago, so rapid session hopping cannot grow the map without bound.
     private static let maxRememberedWatchedSessions = 16
+    /// Decides when the open terminal has been looked at long enough to report the visit to its device.
+    @ObservationIgnored private let visitTracker: SpacesMobileTerminalVisitTracker
+    /// Watched-bell dismissals already sent and not yet confirmed, as `deviceID|key`: the overview that
+    /// confirms one is itself a trigger, and the next push must not send it again.
+    @ObservationIgnored private var watchedBellDismissalsInFlight: Set<String> = []
     @ObservationIgnored private var bridgeClient: SpacesDeviceAPIClient
     @ObservationIgnored private var commandChannel: SpacesDeviceAPICommandChannel
     /// The real device-store state (records, active id, settings) parked in memory when Demo Mode is
@@ -961,6 +954,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         now = { ContinuousClock.now }
         wallClock = { Date() }
         relativeTimeReference = wallClock()
+        visitTracker = SpacesMobileTerminalVisitTracker(now: wallClock)
+        Self.discardLegacyDismissedAlerts()
         // The real settings are persisted regardless of Demo Mode; the demo device is never written to
         // disk, so a launch that lands in Demo Mode still keeps the real records and settings intact.
         SpacesMobileSettingsStore.save(deviceState.settings)
@@ -980,7 +975,6 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // initialization); `makeOverviewStreamCoordinator()`'s captured closure is the one call that
             // legitimately needs `self` fully valid, so it alone stays last.
             overviewStreamClientsForTesting = [:]
-            loadDismissedAlertIDsForPairedDevices()
             overviewStreamSubscriptions = makeOverviewStreamCoordinator()
             return
         }
@@ -995,8 +989,6 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // See the Demo Mode branch above: every stored property must be set before the `self` method
         // calls below.
         overviewStreamClientsForTesting = [:]
-        loadDismissedAlertIDsForPairedDevices()
-        pruneDismissedAlertsForUnknownDevices()
         overviewStreamSubscriptions = makeOverviewStreamCoordinator()
     }
 
@@ -1005,6 +997,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         daemonUpdatePollInterval: Duration = .seconds(3), daemonUpdateTimeout: Duration = .seconds(30),
         refreshFailureAlertDelay: Duration = .seconds(5), workspaceDeletionReconciliationInterval: Duration = .seconds(2),
         now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }, wallClock: @escaping @Sendable () -> Date = { Date() },
+        visitSchedule: @escaping SpacesMobileTerminalVisitTracker.Schedule = SpacesMobileTerminalVisitTracker.sleepingSchedule,
         overviewStreamClientsForTesting: [String: SpacesDeviceAPIClient] = [:]
     ) {
         self.settings = settings
@@ -1021,6 +1014,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         self.now = now
         self.wallClock = wallClock
         relativeTimeReference = wallClock()
+        visitTracker = SpacesMobileTerminalVisitTracker(now: wallClock, schedule: visitSchedule)
         // Test-only construction path (every test in this suite goes through it): a real
         // `thermal_state_change` subscription is pointless here and would leak a `NotificationCenter`
         // observer per test instance across the whole run, so this carries an inert token instead.
@@ -1165,37 +1159,43 @@ private enum SpacesMobileMutationTimeoutRecovery {
             pairedDeviceCount: pairedDevices.count, hasOfflineDevice: pairedDevices.contains { offlineDeviceIDs.contains($0.id) })
     }
 
-    /// Attention events across every paired device with a cached overview, newest first, with the user's
-    /// cleared events filtered out. Flat, not grouped by workspace: the Alerts tab shows one cross-device
-    /// list (see `AlertsTabView`), and each event carries its own project/workspace/device text instead of
-    /// a band header naming it.
+    /// Attention events across every paired device with a cached overview, newest first. Flat, not
+    /// grouped by workspace: the Alerts tab shows one cross-device list (see `AlertsTabView`), and each
+    /// event carries its own project/workspace/device text instead of a band header naming it. What is
+    /// dismissed is each device's own call, read from its overview.
     var attentionEvents: [SpacesMobileAttentionEvent] {
         let showsDeviceSegment = showsDeviceSegment
         return deviceOverviewContexts.flatMap { device -> [SpacesMobileAttentionEvent] in
             let deviceText = showsDeviceSegment ? SpacesMobileDeviceDisplay.text(name: device.deviceName, isOffline: device.isOffline) : nil
-            let dismissed = dismissedAlertIDsByDevice[device.deviceID] ?? []
             return SpacesMobileAttention.events(
                 deviceID: device.deviceID, deviceText: deviceText, in: device.overview, focusedSessionID: watchedTerminalSessionID,
-                watchWindowsBySessionID: terminalWatchWindowsBySessionID, isDeviceOffline: device.isOffline
-            ).filter { !dismissed.contains($0.eventKey) }
+                watchWindowsBySessionID: terminalWatchWindowsBySessionID, isDeviceOffline: device.isOffline)
         }.sorted { $0.date > $1.date }
     }
 
-    /// Points bell suppression at the terminal detail now on screen, or nil once none is. Leaving a
-    /// detail (closing it, or switching straight to another session) closes the outgoing session's watch
-    /// window, so the bell it rang while the user was watching does not alert when a later overview
-    /// delivery reports it.
+    /// Points bell suppression and the visit clock at the terminal detail now on screen, or nil once none
+    /// is. Leaving a detail (closing it, or switching straight to another session) closes the outgoing
+    /// session's watch window, so the bell it rang while the user was watching does not alert when a later
+    /// overview delivery reports it, and ends the visit.
     func setActiveTerminalSession(_ sessionID: String?) {
         guard sessionID != activeTerminalSessionID else { return }
         endActiveTerminalWatch()
         activeTerminalSessionID = sessionID
-        if sessionID != nil { activeTerminalWatchStartedAt = wallClock() }
+        if let sessionID {
+            activeTerminalWatchStartedAt = wallClock()
+            visitTracker.openSession(sessionID, host: self)
+        } else {
+            visitTracker.closeSession()
+        }
     }
 
     /// Ends the watch when the app leaves the foreground. The detail route survives backgrounding
     /// untouched, so without this the app would keep counting a session the user cannot see as watched
     /// and swallow the bells it rang while away.
-    func suspendTerminalWatch() { endActiveTerminalWatch() }
+    func suspendTerminalWatch() {
+        endActiveTerminalWatch()
+        visitTracker.setForeground(false)
+    }
 
     /// Ends the watch on `sessionID` because its terminal detail left the screen — including the ways that
     /// never route through `setActiveTerminalSession`, such as a device switch tearing the whole
@@ -1212,9 +1212,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// now, so the stretch spent in the background stays outside every recorded window and a bell rung
     /// in it alerts.
     func resumeTerminalWatch() {
+        visitTracker.setForeground(true)
         guard activeTerminalSessionID != nil, activeTerminalWatchStartedAt == nil else { return }
         activeTerminalWatchStartedAt = wallClock()
     }
+
+    /// The open terminal detail has painted `sessionID`'s content, which is when a visit to it begins.
+    func noteTerminalContentShown(sessionID: String) { visitTracker.contentDidShow(sessionID: sessionID) }
 
     private func endActiveTerminalWatch() {
         guard let sessionID = activeTerminalSessionID, let startedAt = activeTerminalWatchStartedAt else { return }
@@ -1232,18 +1236,47 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
+    /// The remembered watch windows plus the watch still open, which a bell rung during it belongs to.
+    private var watchWindowsIncludingOpenWatch: [String: [SpacesMobileTerminalWatchWindow]] {
+        var windows = terminalWatchWindowsBySessionID
+        if let sessionID = activeTerminalSessionID, let startedAt = activeTerminalWatchStartedAt {
+            windows[sessionID, default: []].append(SpacesMobileTerminalWatchWindow(startedAt: startedAt, endedAt: wallClock()))
+        }
+        return windows
+    }
+
+    /// Runs on every overview a device delivers: dismisses the bells that rang while the user was
+    /// watching their session (so every client drops them), and lets the visit tracker see alerts that
+    /// arrived on the watched terminal.
+    private func deviceOverviewDidChange(deviceID: String, overview: SpacesDeviceOverviewPayload) {
+        let keys = SpacesMobileAttention.watchedBellKeys(in: overview, watchWindowsBySessionID: watchWindowsIncludingOpenWatch).filter {
+            !watchedBellDismissalsInFlight.contains(Self.watchedBellDismissalID(deviceID: deviceID, key: $0))
+        }
+        if !keys.isEmpty, !offlineDeviceIDs.contains(deviceID) {
+            let ids = keys.map { Self.watchedBellDismissalID(deviceID: deviceID, key: $0) }
+            watchedBellDismissalsInFlight.formUnion(ids)
+            Task {
+                await dismissAlerts(keys: keys, deviceID: deviceID)
+                watchedBellDismissalsInFlight.subtract(ids)
+            }
+        }
+        visitTracker.overviewChanged()
+    }
+
+    private static func watchedBellDismissalID(deviceID: String, key: String) -> String { "\(deviceID)|\(key)" }
+
     /// Failed/timed-out automation-run alert entries across every paired device with a cached overview,
-    /// newest first, with cleared entries filtered out. Automation runs are workspace-less, so these join
+    /// newest first, with dismissed entries filtered out. Automation runs are workspace-less, so these join
     /// `attentionEvents` in one flat Alerts list with "Automation" standing in for a project/workspace;
     /// see `SpacesMobileAutomationAlerts`.
     var automationAlerts: [SpacesMobileAutomationAlertEntry] {
         let showsDeviceSegment = showsDeviceSegment
         return deviceOverviewContexts.flatMap { device -> [SpacesMobileAutomationAlertEntry] in
             let deviceText = showsDeviceSegment ? SpacesMobileDeviceDisplay.text(name: device.deviceName, isOffline: device.isOffline) : nil
-            let dismissed = dismissedAlertIDsByDevice[device.deviceID] ?? []
+            let dismissed = Set(device.overview.dismissedAlertKeys)
             return SpacesMobileAutomationAlerts.entries(
                 deviceID: device.deviceID, deviceText: deviceText, runs: device.overview.automationRuns, isDeviceOffline: device.isOffline
-            ).filter { !dismissed.contains($0.eventKey) }
+            ).filter { !dismissed.contains($0.key) }
         }.sorted { lhs, rhs in
             switch (lhs.date, rhs.date) {
             case (let a?, let b?): return a > b
@@ -1262,134 +1295,161 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// always equals the number of rows the Alerts tab actually shows.
     var undismissedAlertCount: Int { attentionEvents.count + automationAlerts.count }
 
-    /// Marks every currently derived attention event and automation alert dismissed, across every paired
-    /// device with a cached overview.
-    func clearAlerts() {
-        for device in deviceOverviewContexts {
-            var dismissed = dismissedAlertIDsByDevice[device.deviceID] ?? []
-            dismissed.formUnion(
-                SpacesMobileAttention.events(
-                    deviceID: device.deviceID, deviceText: nil, in: device.overview, focusedSessionID: watchedTerminalSessionID,
-                    watchWindowsBySessionID: terminalWatchWindowsBySessionID
-                ).map(\.eventKey))
-            dismissed.formUnion(
-                SpacesMobileAutomationAlerts.entries(deviceID: device.deviceID, deviceText: nil, runs: device.overview.automationRuns).map(\.eventKey)
-            )
-            dismissedAlertIDsByDevice[device.deviceID] = dismissed
-            saveDismissedAlertIDs(deviceID: device.deviceID)
+    // MARK: - Dismissing alerts and Come Back Later
+
+    // Every change below is a request to the owning device; the list changes when that device's overview
+    // comes back, never before. A device that is offline cannot confirm, so it is not asked.
+
+    /// Whether `deviceID` can take an alert change (dismissal or Come Back Later) right now.
+    func canChangeAlerts(onDeviceID deviceID: String) -> Bool { !offlineDeviceIDs.contains(deviceID) }
+
+    /// Whether Clear would dismiss anything: only online devices' items count.
+    var canClearAlerts: Bool {
+        attentionEvents.contains { !$0.isDeviceOffline } || automationAlerts.contains { !$0.isDeviceOffline }
+    }
+
+    /// Dismisses every listed attention event and automation alert of every online device.
+    func clearAlerts() async {
+        for device in deviceOverviewContexts where !device.isOffline {
+            let dismissed = Set(device.overview.dismissedAlertKeys)
+            let eventKeys = SpacesMobileAttention.events(
+                deviceID: device.deviceID, deviceText: nil, in: device.overview, focusedSessionID: watchedTerminalSessionID,
+                watchWindowsBySessionID: terminalWatchWindowsBySessionID
+            ).map(\.key)
+            let automationKeys = SpacesMobileAutomationAlerts.entries(deviceID: device.deviceID, deviceText: nil, runs: device.overview.automationRuns)
+                .map(\.key).filter { !dismissed.contains($0) }
+            await dismissAlerts(keys: eventKeys + automationKeys, deviceID: device.deviceID)
         }
     }
 
-    /// Dismisses one attention event, on whichever device it came from.
-    func dismissAlert(_ event: SpacesMobileAttentionEvent) {
-        dismissedAlertIDsByDevice[event.deviceID, default: []].insert(event.eventKey)
-        saveDismissedAlertIDs(deviceID: event.deviceID)
+    /// Dismisses one attention event on its device. A Come Back Later event's key clears the row's flag.
+    func dismissAlert(_ event: SpacesMobileAttentionEvent) async { await dismissAlerts(keys: [event.key], deviceID: event.deviceID) }
+
+    /// Dismisses one failed/timed-out automation run on its device.
+    func dismissAutomationAlert(_ entry: SpacesMobileAutomationAlertEntry) async {
+        await dismissAlerts(keys: [entry.key], deviceID: entry.deviceID)
     }
 
     /// `row`'s own currently undismissed attention events on `deviceID`: its exited/waiting/finished
-    /// event (if any) plus any bell on its session, derived via the same focus/watch-window bell
+    /// event (if any), a bell on its session, and its Come Back Later flag, derived with the same bell
     /// suppression the Alerts tab uses (`SpacesMobileAttention.events`), so a bell rung while its terminal
-    /// viewer was open or inside a watch window never offers "Dismiss Alert" for something the user
-    /// already saw live. Hidden workspaces stay included: that filter only serves the Alerts tab, not
-    /// row-level dismissal. Backs both the row's "Dismiss Alert" menu item's visibility and what it
-    /// dismisses.
+    /// viewer was open never offers "Dismiss Alert" for something the user already saw live. Hidden
+    /// workspaces stay included: that filter only serves the Alerts tab, not row-level dismissal.
     ///
     /// `deviceID` is explicit rather than always the selected device: the Spaces tab's own row menu only
     /// ever shows the selected device's rows and passes `activeDeviceID`, but the Agents tab lists every
     /// paired device's rows in one list and passes each row's own device.
     func undismissedAlerts(for row: SpacesMobileWorkspaceRuntimeRow, deviceID: String) -> [SpacesMobileAttentionEvent] {
         guard let overview = overview(forDeviceID: deviceID) else { return [] }
-        let dismissed = dismissedAlertIDsByDevice[deviceID] ?? []
-        // Same focus/watch-window inputs as `attentionEvents`, for every device: a watched session id is
-        // unique across devices, so passing them regardless of `deviceID` costs nothing and a terminal
-        // open on another device suppresses its own bell correctly instead of only the selected device's.
+        // A watched session id is unique across devices, so passing the focus and watch windows regardless
+        // of `deviceID` costs nothing and a terminal open on another device suppresses its own bell
+        // correctly instead of only the selected device's.
         return SpacesMobileAttention.events(
             deviceID: deviceID, deviceText: nil, in: overview, focusedSessionID: watchedTerminalSessionID,
             watchWindowsBySessionID: terminalWatchWindowsBySessionID, includingHiddenWorkspaces: true
-        ).filter { row.matches($0) && !dismissed.contains($0.eventKey) }
+        ).filter { row.matches($0) }
     }
 
-    /// Whether `row` has anything its long-press "Dismiss Alert" menu item could dismiss.
-    func hasUndismissedAlerts(for row: SpacesMobileWorkspaceRuntimeRow, deviceID: String) -> Bool {
-        !undismissedAlerts(for: row, deviceID: deviceID).isEmpty
+    /// Whether `row` has an alert its long-press "Dismiss Alert" item could dismiss. A Come Back Later flag
+    /// alone does not count: the flag has its own "Remove from Alerts" item, which would only repeat it.
+    func hasDismissableAlerts(for row: SpacesMobileWorkspaceRuntimeRow, deviceID: String) -> Bool {
+        undismissedAlerts(for: row, deviceID: deviceID).contains { $0.kind != .comeBackLater }
     }
 
-    /// Dismisses every one of `row`'s currently undismissed attention events in one action — identical in
-    /// effect to dismissing each individually from the Alerts tab: same dismissal bucket, same badge.
-    func dismissAlerts(for row: SpacesMobileWorkspaceRuntimeRow, deviceID: String) {
-        let events = undismissedAlerts(for: row, deviceID: deviceID)
-        guard !events.isEmpty else { return }
-        dismissedAlertIDsByDevice[deviceID, default: []].formUnion(events.map(\.eventKey))
-        saveDismissedAlertIDs(deviceID: deviceID)
+    /// Dismisses every one of `row`'s undismissed alerts in one request, its flag included.
+    func dismissAlerts(for row: SpacesMobileWorkspaceRuntimeRow, deviceID: String) async {
+        await dismissAlerts(keys: undismissedAlerts(for: row, deviceID: deviceID).map(\.key), deviceID: deviceID)
     }
 
-    /// Whether `row`'s own exited-process event, if it has one right now, is already dismissed: the
+    /// Whether `row`'s own exited-process alert, if it has one right now, is dismissed on its device: the
     /// signal that turns its dot from failed red to the unstarted stroke (see
     /// `SpacesMobileWorkspaceRuntimeRow.statusDotKind(exitAcknowledged:)`). Only a `.process` row can have
     /// one: every other row family's dot keeps tracking live state regardless of dismissal. Scoped to the
     /// selected device only, unlike `undismissedAlerts(for:deviceID:)`.
     func isExitAcknowledged(_ row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
-        guard case .process = row.source, let activeDeviceID, let overview else { return false }
+        guard case .process(let process) = row.source, process.runState == .exited, let overview else { return false }
         guard
-            let event = SpacesMobileAttention.allEvents(deviceID: activeDeviceID, in: overview).first(where: { row.matches($0) && $0.kind == .exited }
-            )
+            let candidate = overview.alertCandidates().first(where: {
+                $0.kind == .processExited && $0.workspaceID == row.workspaceID && $0.subjectID == process.id
+            })
         else { return false }
-        return (dismissedAlertIDsByDevice[activeDeviceID] ?? []).contains(event.eventKey)
+        return overview.dismissedAlertKeys.contains(candidate.key)
     }
 
-    /// Dismisses one failed/timed-out automation run, on whichever device it came from.
-    func dismissAutomationAlert(_ entry: SpacesMobileAutomationAlertEntry) {
-        dismissedAlertIDsByDevice[entry.deviceID, default: []].insert(entry.eventKey)
-        saveDismissedAlertIDs(deviceID: entry.deviceID)
+    private func dismissAlerts(keys: [String], deviceID: String) async {
+        guard !keys.isEmpty else { return }
+        await performAlertMutation(deviceID: deviceID) { client, channel in try await client.dismissAlerts(keys: keys, commandChannel: channel) }
     }
 
-    /// Drops `deviceID`'s stored dismissals whose event/run its overview no longer produces, so its
-    /// persisted bucket stays bounded by what the device currently reports rather than growing for the
-    /// life of the install.
-    private func pruneDismissedAlertIDs(deviceID: String, against overview: SpacesDeviceOverviewPayload) {
-        let bucket = dismissedAlertIDsByDevice[deviceID] ?? []
-        // Automation-run alerts share the dismissal bucket but derive from `automationRuns`, not
-        // attention events, so retain their dismissals separately or a prune would resurface dismissed run
-        // alerts.
-        let retained = SpacesMobileAttention.retainedDismissedEventIDs(bucket, deviceID: deviceID, in: overview).union(
-            bucket.intersection(
-                Set(SpacesMobileAutomationAlerts.entries(deviceID: deviceID, deviceText: nil, runs: overview.automationRuns).map(\.eventKey))))
-        guard retained != bucket else { return }
-        dismissedAlertIDsByDevice[deviceID] = retained
-        saveDismissedAlertIDs(deviceID: deviceID)
+    /// The flag target of a row, or nil for a row that cannot be flagged: a browser session, or a row that
+    /// has never started (nothing to come back to).
+    func comeBackLaterTarget(for row: SpacesMobileWorkspaceRuntimeRow) -> (rowKind: SpacesDeviceComeBackLaterRowKind, rowID: String)? {
+        guard !(row.runState == .notStarted && row.sessionID == nil) else { return nil }
+        switch row.source {
+        case .process(let process): return (.process, process.id)
+        case .codingAgent(let agent): return (.agent, agent.id)
+        case .terminal(let terminal): return (.terminal, terminal.id)
+        case .browserSession: return nil
+        }
     }
 
-    /// Loads every paired device's persisted dismissal bucket into memory, discarding whatever was there
-    /// before. Called at every chokepoint that can change the paired set (init, a device switch, pairing,
-    /// removal, Demo Mode enable/disable) so `dismissedAlertIDsByDevice` always matches the devices whose
-    /// overviews are about to be published, never a leftover from before the change. Each device's own
-    /// bucket is still what is loaded and saved individually, so this changes nothing about what is on disk.
-    private func loadDismissedAlertIDsForPairedDevices() {
-        dismissedAlertIDsByDevice = Dictionary(
-            uniqueKeysWithValues: pairedDevices.map { ($0.id, SpacesMobileDismissedAlertsStore.load(deviceID: $0.id)) })
-        // Unconfirmed deletes belong to the connection they were issued against: another device's overview
-        // cannot answer whether this one's workspace was deleted, and leaving an entry behind would let the
-        // next published overview resolve it against the wrong device. Dropped with the marking, silently —
-        // the delete may well have landed, and there is no longer anyone to report a verdict to.
+    func isComeBackLaterOn(for row: SpacesMobileWorkspaceRuntimeRow, deviceID: String) -> Bool {
+        guard let target = comeBackLaterTarget(for: row), let overview = overview(forDeviceID: deviceID) else { return false }
+        return overview.comeBackLaterFlags.contains { $0.rowKind == target.rowKind && $0.rowID == target.rowID }
+    }
+
+    /// The menu item's title: the item removes the row from Alerts once it is flagged.
+    func comeBackLaterMenuTitle(for row: SpacesMobileWorkspaceRuntimeRow, deviceID: String) -> String {
+        isComeBackLaterOn(for: row, deviceID: deviceID) ? "Remove from Alerts" : "Come Back Later"
+    }
+
+    /// Flips `row`'s flag on `deviceID`.
+    func toggleComeBackLater(for row: SpacesMobileWorkspaceRuntimeRow, deviceID: String) async {
+        guard let target = comeBackLaterTarget(for: row) else { return }
+        let isOn = !isComeBackLaterOn(for: row, deviceID: deviceID)
+        await performAlertMutation(deviceID: deviceID) { client, channel in
+            try await client.setComeBackLater(rowKind: target.rowKind, rowID: target.rowID, isOn: isOn, commandChannel: channel)
+        }
+    }
+
+    /// Sends one alert request to `deviceID` and applies the overview it returns. Deliberately outside
+    /// `isMutating`: a dismissal, a bell consumed in the background, or a visit report must not grey out
+    /// the row actions the user is working with.
+    private func performAlertMutation(
+        deviceID: String, _ request: (SpacesDeviceAPIClient, SpacesDeviceAPICommandChannel) async throws -> SpacesDeviceAPIResponse
+    ) async {
+        guard canChangeAlerts(onDeviceID: deviceID), let connection = mutationConnection(forDeviceID: deviceID) else { return }
+        do {
+            let response = try await request(connection.client, connection.channel)
+            await applyMutationResponse(response, token: connection.token)
+        } catch {
+            guard isCurrent(connection.token) else { return }
+            handleBridgeError(error, deviceID: deviceID)
+        }
+    }
+
+    /// Clears the unfinished work of a half-started device switch, pairing, or Demo Mode toggle: an
+    /// unconfirmed delete belongs to the connection it was issued against, and another device's overview
+    /// cannot answer whether this one's workspace was deleted. Leaving an entry behind would let the next
+    /// published overview resolve it against the wrong device. Dropped with the marking, silently: the
+    /// delete may well have landed, and there is no longer anyone to report a verdict to.
+    private func discardUnresolvedWorkspaceDeletions() {
         workspaceDeletionsAwaitingOverview.removeAll()
         workspaceIDsPendingDeletion.removeAll()
     }
 
-    /// Persists `deviceID`'s in-memory bucket back into its own slot in the store.
-    private func saveDismissedAlertIDs(deviceID: String) {
-        SpacesMobileDismissedAlertsStore.save(dismissedAlertIDsByDevice[deviceID] ?? [], deviceID: deviceID)
+    private func deviceID(forSessionID sessionID: String) -> String? {
+        pairedDevices.first { overview(forDeviceID: $0.id)?.sessions.contains { $0.id == sessionID } == true }?.id
     }
 
-    /// Drops persisted dismissal buckets for devices no longer known: the paired devices plus the demo
-    /// device, which always keeps its own bucket since Demo Mode is available regardless of pairing
-    /// state. Skipped while Demo Mode is on, because `pairedDevices` is swapped down to just the
-    /// synthetic Demo Mac then — running this against that narrowed list would read as every real device
-    /// having been unpaired and wipe their dismissals. That leaves the real buckets untouched by a Demo
-    /// Mode round trip and prunes only when `pairedDevices` genuinely reflects the paired list.
-    private func pruneDismissedAlertsForUnknownDevices() {
-        guard !isDemoModeEnabled else { return }
-        SpacesMobileDismissedAlertsStore.retainDevices(Set(pairedDevices.map(\.id)).union([SpacesMobileDemoDevice.id]))
+    /// Removes the per-phone dismissal sets earlier versions kept. Dismissals now live on each device, and
+    /// the old sets keyed alerts by an identity that does not map onto the device's, so the upgrade
+    /// starts with nothing dismissed rather than carrying them over.
+    static func discardLegacyDismissedAlerts(defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: legacyDismissedAlertsDefaultsKey)
     }
+
+    static let legacyDismissedAlertsDefaultsKey = "spaces.mobile.dismissed-alert-ids-by-device"
 
     /// Coding-agent rows across every paired device with a cached overview, grouped by activity for the
     /// Agents tab.
@@ -1871,12 +1931,6 @@ private enum SpacesMobileMutationTimeoutRecovery {
         if isOffline { offlineDeviceIDs.insert(deviceID) } else { offlineDeviceIDs.remove(deviceID) }
     }
 
-    /// Test-only: `dismissedAlertIDsByDevice[deviceID]`, so a test can read or seed a device's in-memory
-    /// dismissed set directly (e.g. simulating a dismissal already on file before a `refresh()` that
-    /// should prune it) without going through the real paired-device store's persisted-load path.
-    func dismissedAlertIDsForTesting(deviceID: String) -> Set<String> { dismissedAlertIDsByDevice[deviceID] ?? [] }
-    func setDismissedAlertIDsForTesting(_ ids: Set<String>, deviceID: String) { dismissedAlertIDsByDevice[deviceID] = ids }
-
     /// Reconciles the coordinator's tracked devices to the current paired set and opens whatever it asks
     /// for. Called on every event that can change which devices should have a stream (foreground resume,
     /// pairing, device removal, device switch, Demo Mode toggle, and by the coordinator itself once an
@@ -2206,12 +2260,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // check just below the mark it reads), so this never briefly "unblocks" a device this same payload
         // still shows as incompatible.
         if SpacesWireCompatibility.evaluate(daemonStatus: overview.daemonStatus).isCompatible { blockedNonSelectedDeviceIDs.remove(deviceID) }
-        // Pruned here for the same reason `publishOverview` prunes the selected device's own bucket and
-        // retained screens: a non-selected device's overview is just as authoritative about what it still
-        // lists, and the Agents/Alerts tabs read its dismissals and the terminal detail reads its retained
-        // screens regardless of which device is selected.
-        pruneDismissedAlertIDs(deviceID: deviceID, against: overview)
+        // Pruned here for the same reason `publishOverview` prunes the selected device's retained screens:
+        // a non-selected device's overview is just as authoritative about what it still lists, and the
+        // terminal detail reads its retained screens regardless of which device is selected.
         pruneRetainedTerminalScreens()
+        deviceOverviewDidChange(deviceID: deviceID, overview: overview)
         guard let record = pairedDevices.first(where: { $0.id == deviceID }) else { return }
         // Every paired device's stream pushes its daemon's reachable addresses on every connection, the
         // same way the Mac sidebar merges hosts for every device's subscription unconditionally
@@ -3193,8 +3246,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         workspaceCreateOptions = nil
         connectionNotice = nil
         pendingPairingLink = nil
-        loadDismissedAlertIDsForPairedDevices()
-        pruneDismissedAlertsForUnknownDevices()
+        discardUnresolvedWorkspaceDeletions()
         if let deviceID = activeDeviceID {
             // This call rebuilds `bridgeClient` above unconditionally, so a re-pair of the device already
             // selected (same id, new token) reuses that id with a subscription still tracked under the
@@ -3518,7 +3570,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         workspaceCreateOptions = nil
         connectionNotice = nil
         errorMessage = nil
-        loadDismissedAlertIDsForPairedDevices()
+        discardUnresolvedWorkspaceDeletions()
         reconcileDeviceStreamsAfterIdentityChange()
         Task { await previousCommandChannel.close() }
     }
@@ -3566,8 +3618,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         forgetStagedApplyState(deviceID: id)
         workspaceCreateOptions = nil
         connectionNotice = nil
-        loadDismissedAlertIDsForPairedDevices()
-        pruneDismissedAlertsForUnknownDevices()
+        discardUnresolvedWorkspaceDeletions()
         browserRoutingTable.removeDevice(deviceID: id)
         let table = browserRoutingTable
         Task { await browserProxy.updateRoutes(table) }
@@ -3623,7 +3674,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         if let previousDeviceID { invalidateNonSelectedDeviceConnection(deviceID: previousDeviceID) }
         invalidateNonSelectedDeviceConnection(deviceID: SpacesMobileDemoDevice.id)
         DemoModeStore.save(true)
-        loadDismissedAlertIDsForPairedDevices()
+        discardUnresolvedWorkspaceDeletions()
         reconcileDeviceStreamsAfterIdentityChange()
         Task { await previousCommandChannel.close() }
     }
@@ -3649,8 +3700,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         if let previousDeviceID { invalidateNonSelectedDeviceConnection(deviceID: previousDeviceID) }
         if let activeDeviceID { invalidateNonSelectedDeviceConnection(deviceID: activeDeviceID) }
         DemoModeStore.save(false)
-        loadDismissedAlertIDsForPairedDevices()
-        pruneDismissedAlertsForUnknownDevices()
+        discardUnresolvedWorkspaceDeletions()
         reconcileDeviceStreamsAfterIdentityChange()
         Task { await previousCommandChannel.close() }
     }
@@ -4709,7 +4759,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     private func publishOverview(_ payload: SpacesDeviceOverviewPayload?) {
         if payload != overview { overview = payload }
         if let payload {
-            if let activeDeviceID { pruneDismissedAlertIDs(deviceID: activeDeviceID, against: payload) }
+            if let activeDeviceID { deviceOverviewDidChange(deviceID: activeDeviceID, overview: payload) }
             resolveDeferredWorkspaceDeletions(against: payload)
             // A session the device no longer lists cannot be reopened, an ended one is never painted from
             // memory (its final transcript is what it shows, and it stays listed for days), and one that
@@ -4805,6 +4855,26 @@ private enum SpacesMobileMutationTimeoutRecovery {
         case SpacesDeviceAPIClientError.requestFailed(let message, _), SpacesDeviceAPIClientError.streamFailed(let message, _):
             return message.localizedStandardContains("timed out")
         default: return false
+        }
+    }
+}
+
+extension SpacesMobileAppModel: SpacesMobileTerminalVisitHost {
+    func visitClearableKeys(forSessionID sessionID: String) -> Set<String> {
+        guard !isDemoModeEnabled, let deviceID = deviceID(forSessionID: sessionID), canChangeAlerts(onDeviceID: deviceID),
+            let overview = overview(forDeviceID: deviceID)
+        else { return [] }
+        let dismissed = Set(overview.dismissedAlertKeys)
+        return Set(
+            overview.alertCandidates().filter {
+                $0.sessionID == sessionID && !dismissed.contains($0.key) && ($0.clearsOnVisit || $0.kind == .comeBackLater)
+            }.map(\.key))
+    }
+
+    func sendVisit(sessionID: String, focusedForSeconds: Double, keys: Set<String>) async {
+        guard let deviceID = deviceID(forSessionID: sessionID) else { return }
+        await performAlertMutation(deviceID: deviceID) { client, channel in
+            try await client.visitTerminalSession(sessionID: sessionID, focusedForSeconds: focusedForSeconds, keys: keys.sorted(), commandChannel: channel)
         }
     }
 }

@@ -47,6 +47,7 @@ struct TerminalDetailView: View {
     /// The row awaiting Stop confirmation from the toolbar menu. A separate state from `SpacesTabView`'s
     /// `pendingStop` because this is a different view with no shared owner to hold it.
     @State private var pendingStopRow: SpacesMobileWorkspaceRuntimeRow?
+    @State private var comeBackLaterToastID: UUID?
     @State private var renderedText = ""
     @State private var model: TerminalViewerModel
     /// The process row this viewer opened on, latched the first time the overview resolves `session.id`
@@ -112,6 +113,28 @@ struct TerminalDetailView: View {
     /// reasonable time".
     var body: some View {
         detailContent.onChange(of: appModel.overview(forDeviceID: deviceContext.deviceID)) { _, _ in followReplacementSessionIfNeeded() }
+            .onChange(of: model.showsRenderedContent, initial: true) { _, shows in
+                if shows { appModel.noteTerminalContentShown(sessionID: session.id) }
+            }.overlay(alignment: .bottom) { comeBackLaterToast }.task(id: comeBackLaterToastID) {
+                guard comeBackLaterToastID != nil else { return }
+                try? await Task.sleep(for: .seconds(2.5))
+                guard !Task.isCancelled else { return }
+                withAnimation { comeBackLaterToastID = nil }
+            }
+    }
+
+    /// Confirms a Come Back Later mark, so a user who marks the terminal they are watching knows the
+    /// mark stays until they leave and return.
+    @ViewBuilder private var comeBackLaterToast: some View {
+        if comeBackLaterToastID != nil {
+            HStack(spacing: 8) {
+                Image(systemName: "bell.badge").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.accent)
+                Text("In Alerts until you come back").font(.footnote.weight(.medium)).foregroundStyle(.white)
+            }.padding(.horizontal, 14).padding(.vertical, 10).background(Capsule().fill(Color.black.opacity(0.82))).overlay(
+                Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 1)
+            ).padding(.bottom, 12).transition(.move(edge: .bottom).combined(with: .opacity)).allowsHitTesting(false).accessibilityIdentifier(
+                "terminal.comeBackLaterToast")
+        }
     }
 
     private var detailContent: some View {
@@ -500,12 +523,17 @@ struct TerminalDetailView: View {
         return HStack(spacing: 6) {
             ownerChromeStateMarker
             if let row, row.brief != nil { briefPill(row) }
-            if let row, row.hasTerminalDetailActions { runtimeActionsMenu(row) }
+            if let row, row.hasTerminalDetailActions || appModel.comeBackLaterTarget(for: row) != nil { runtimeActionsMenu(row) }
         }
     }
 
     private func runtimeActionsMenu(_ row: SpacesMobileWorkspaceRuntimeRow) -> some View {
         Menu {
+            if appModel.comeBackLaterTarget(for: row) != nil {
+                ComeBackLaterMenuButton(model: appModel, row: row, deviceID: deviceContext.deviceID) {
+                    withAnimation { comeBackLaterToastID = UUID() }
+                }
+            }
             if row.canRun {
                 Button {
                     Task { await runRuntime(row) }

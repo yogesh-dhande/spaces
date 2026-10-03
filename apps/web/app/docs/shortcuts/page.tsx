@@ -18,6 +18,7 @@ const rows: ReactNode[][] = [
   ["Open in Editor", "⌘⌥E", "Any app"],
   ["Show alerts", "⌘⌥A", "In Spaces"],
   ["Show or hide an agent's brief", "⌘⌥B", "In Spaces"],
+  ["Come Back Later on the focused terminal", "⌘⌥L", "In Spaces"],
   ["Create workspace", "⌘N", "In Spaces"],
   ["Reload", "⌘⌥R", "In Spaces"],
   ["Open terminal", "⌘⌥T", "In Spaces"],

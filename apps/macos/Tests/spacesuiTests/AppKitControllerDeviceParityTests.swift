@@ -9,6 +9,20 @@ import workspacecore
 @testable import spacesui
 
 @Suite struct AppKitControllerDeviceParityTests {
+    @Test func aVisitFollowsTheWorkspaceTheMainWindowShowsOrAGlobalPanelWindow() {
+        let workspace = DetailPane.workspace(id: "w1", deviceID: "d1")
+        #expect(
+            AppKitController.visitedPanelScope(keyWindowPanelWindowID: nil, keyWindowIsMain: true, detailPane: workspace)
+                == .workspace(deviceID: "d1", workspaceID: "w1"))
+        #expect(
+            AppKitController.visitedPanelScope(keyWindowPanelWindowID: "p1", keyWindowIsMain: false, detailPane: workspace)
+                == .globalWindow(panelWindowID: "p1"))
+        for pane in [DetailPane.alerts, .automations, .none, .compatibilityBlock(deviceID: "d1")] {
+            #expect(AppKitController.visitedPanelScope(keyWindowPanelWindowID: nil, keyWindowIsMain: true, detailPane: pane) == nil)
+        }
+        #expect(AppKitController.visitedPanelScope(keyWindowPanelWindowID: nil, keyWindowIsMain: false, detailPane: workspace) == nil)
+    }
+
     @Test func sidebarProjectActionsDoNotDependOnDeviceLocation() {
         let gitProjectActions = AppKitController.sidebarProjectActions(isGitRepo: true, kind: .standard)
         #expect(gitProjectActions.showsSettings)
@@ -529,7 +543,7 @@ import workspacecore
                 isFromHiddenWorkspace: isFromHiddenWorkspace,
                 items: [
                     AppKitController.AlertsAttentionEntry(
-                        attentionID: "alert:\(workspaceID)", icon: "terminal", iconTint: .terminal, label: "shell-1", detail: nil, shortcut: "",
+                        attentionID: "alert:\(workspaceID)", kind: .bell, icon: "terminal", iconTint: .terminal, label: "shell-1", detail: nil, shortcut: "",
                         processStatus: nil, agentStatus: nil, countsTowardBadge: true, eventDate: nil,
                         focusRequest: .terminalSession(workspaceID: workspaceID, sessionID: "session-1"))
                 ])
@@ -667,7 +681,7 @@ import workspacecore
                     ])
             ], sessions: [])
         let alerts = AlertsController.buildOverviewAlertsGroups(from: overview, deviceID: "local")
-        let exitAlertID = try #require(alerts.first?.items.first { $0.processStatus == .exited }?.attentionID)
+        let exitKey = try #require(alerts.first?.items.first { $0.processStatus == .exited }?.alertKey)
 
         let undismissedRow = try #require(
             CommandPaletteController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts).first {
@@ -678,8 +692,12 @@ import workspacecore
             return
         }
 
+        // The device reports the key dismissed in its next overview, so the groups are derived again from it.
+        let dismissedOverview = SpacesDeviceOverviewPayload(
+            projects: overview.projects, workspaces: overview.workspaces, sessions: [], dismissedAlertKeys: [exitKey])
+        let dismissedAlerts = AlertsController.buildOverviewAlertsGroups(from: dismissedOverview, deviceID: "local")
         let dismissedRow = try #require(
-            CommandPaletteController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts, dismissedAttentionItemIDs: [exitAlertID])
+            CommandPaletteController.buildCommandPaletteItems(overview: dismissedOverview, alertsGroups: dismissedAlerts)
                 .first { $0.source == .workspaceTarget && $0.kind == .process })
         guard case .idle = dismissedRow.status else {
             Issue.record("expected an acknowledged exit to read as idle")
@@ -728,7 +746,7 @@ import workspacecore
                 isFromHiddenWorkspace: false,
                 items: [
                     AppKitController.AlertsAttentionEntry(
-                        attentionID: "remote-agent-alert", icon: "cpu.fill", iconTint: .warning, label: "Remote Codex",
+                        attentionID: "remote-agent-alert", kind: .bell, icon: "cpu.fill", iconTint: .warning, label: "Remote Codex",
                         detail: "  waiting for review  ", shortcut: "", processStatus: nil, agentStatus: .waiting, countsTowardBadge: true,
                         eventDate: nil, focusRequest: focusRequest)
                 ])
@@ -749,7 +767,7 @@ import workspacecore
                 isFromHiddenWorkspace: false,
                 items: [
                     AppKitController.AlertsAttentionEntry(
-                        attentionID: "remote-bell-alert", icon: "terminal", iconTint: .terminal, label: "shell-1", detail: "  vim remote.swift  ",
+                        attentionID: "remote-bell-alert", kind: .bell, icon: "terminal", iconTint: .terminal, label: "shell-1", detail: "  vim remote.swift  ",
                         shortcut: "", processStatus: nil, agentStatus: nil, countsTowardBadge: true, eventDate: nil, focusRequest: focusRequest)
                 ])
         ]

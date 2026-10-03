@@ -175,148 +175,7 @@
             XCTAssertEqual(events.first?.detail, "Project / new")
         }
 
-        func testClearDismissesCurrentEventsAndNewStateChangeReappears() {
-            let model = makeModel()
-            model.overview = makeOverview(codingAgentRows: [
-                makeAgentRow(id: "agent-waiting", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
-            ])
-
-            XCTAssertEqual(model.undismissedAlertCount, 1)
-
-            model.clearAlerts()
-
-            XCTAssertEqual(model.undismissedAlertCount, 0)
-            XCTAssertTrue(model.attentionEvents.isEmpty)
-
-            // The same source in a new state (later timestamp) mints a new identity and reappears.
-            model.overview = makeOverview(codingAgentRows: [
-                makeAgentRow(id: "agent-waiting", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:15:00Z")
-            ])
-
-            XCTAssertEqual(model.undismissedAlertCount, 1)
-        }
-
-        func testDismissAlertRemovesOnlyThatEvent() {
-            let model = makeModel()
-            model.overview = makeOverview(codingAgentRows: [
-                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z"),
-                makeAgentRow(id: "agent-b", name: "codex", activityState: .done, updatedAt: "2026-01-01T00:20:00Z"),
-            ])
-            guard let dismissed = model.attentionEvents.first(where: { $0.sourceID == "agent:agent-a" }) else {
-                XCTFail("Expected a derived event for agent-a.")
-                return
-            }
-
-            model.dismissAlert(dismissed)
-
-            XCTAssertEqual(model.undismissedAlertCount, 1)
-            XCTAssertEqual(model.attentionEvents.map(\.sourceID), ["agent:agent-b"])
-
-            // The same source in a new state mints a new identity, so it alerts again.
-            model.overview = makeOverview(codingAgentRows: [
-                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:30:00Z")
-            ])
-
-            XCTAssertEqual(model.undismissedAlertCount, 1)
-        }
-
         // MARK: - Row acknowledgment (dismissed-exit-alert-inactive)
-
-        /// An exited process row reads failed red until its exited event is dismissed, then reads the
-        /// unstarted stroke; a later exit mints a new event identity, so a fresh failure reddens it again.
-        func testIsExitAcknowledgedFollowsDismissalAndResetsOnNewExit() {
-            let model = makeModel()
-            model.overview = makeOverview(processRows: [
-                makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")
-            ])
-            let row = SpacesMobileWorkspaceRuntimeRow(source: .process(model.overview!.workspaces[0].processRows[0]))
-
-            XCTAssertFalse(model.isExitAcknowledged(row))
-            XCTAssertEqual(row.statusDotKind(exitAcknowledged: model.isExitAcknowledged(row)), .exited)
-
-            guard let exitEvent = model.undismissedAlerts(for: row, deviceID: "device-a").first(where: { $0.kind == .exited }) else {
-                XCTFail("Expected an exited event for the process row.")
-                return
-            }
-            model.dismissAlert(exitEvent)
-
-            XCTAssertTrue(model.isExitAcknowledged(row))
-            XCTAssertEqual(row.statusDotKind(exitAcknowledged: model.isExitAcknowledged(row)), .idle)
-
-            // A later exit mints a new event identity (a later `exitedAt`), so the row reddens again even
-            // though the earlier exit's dismissal is still on file.
-            model.overview = makeOverview(processRows: [
-                makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: "2026-01-01T00:10:00Z")
-            ])
-            let reExitedRow = SpacesMobileWorkspaceRuntimeRow(source: .process(model.overview!.workspaces[0].processRows[0]))
-
-            XCTAssertFalse(model.isExitAcknowledged(reExitedRow))
-            XCTAssertEqual(reExitedRow.statusDotKind(exitAcknowledged: model.isExitAcknowledged(reExitedRow)), .exited)
-        }
-
-        /// A configured process row's id comes from its project template, not its workspace
-        /// (`SpacesDeviceOverviewBuilder` mints it as `template.id`), so two sibling workspaces of the same
-        /// project can carry rows with the identical id. `isExitAcknowledged` must key off the row's own
-        /// workspace, not just that shared id, or dismissing one workspace's exit would silently
-        /// acknowledge the sibling's still-undismissed one.
-        func testIsExitAcknowledgedDoesNotBleedAcrossWorkspacesSharingATemplateRowID() {
-            let model = makeModel()
-            let processA = SpacesDeviceWorkspaceProcessRow(
-                id: "process-web", workspaceID: "workspace-a", name: "web", command: "npm run web", processID: "runtime-a", sessionID: nil,
-                runState: .exited, exitedAt: "2026-01-01T00:05:00Z", canRun: true, canStop: false, canRestart: false)
-            let processB = SpacesDeviceWorkspaceProcessRow(
-                id: "process-web", workspaceID: "workspace-b", name: "web", command: "npm run web", processID: "runtime-b", sessionID: nil,
-                runState: .exited, exitedAt: "2026-01-01T00:06:00Z", canRun: true, canStop: false, canRestart: false)
-            model.overview = makeOverview(workspaces: [
-                makeWorkspace(id: "workspace-a", branch: "a", processRows: [processA]),
-                makeWorkspace(id: "workspace-b", branch: "b", processRows: [processB]),
-            ])
-            let rowA = SpacesMobileWorkspaceRuntimeRow(source: .process(processA))
-            let rowB = SpacesMobileWorkspaceRuntimeRow(source: .process(processB))
-            XCTAssertEqual(rowA.id, rowB.id, "both rows share the project template's id")
-
-            guard let exitEventA = model.undismissedAlerts(for: rowA, deviceID: "device-a").first(where: { $0.kind == .exited }) else {
-                XCTFail("Expected an exited event for workspace A's row.")
-                return
-            }
-            model.dismissAlert(exitEventA)
-
-            XCTAssertTrue(model.isExitAcknowledged(rowA))
-            XCTAssertFalse(model.isExitAcknowledged(rowB), "dismissing A's exit must not acknowledge B's identically-id'd row")
-
-            guard let exitEventB = model.undismissedAlerts(for: rowB, deviceID: "device-a").first(where: { $0.kind == .exited }) else {
-                XCTFail("Expected an exited event for workspace B's row.")
-                return
-            }
-            model.dismissAlert(exitEventB)
-
-            XCTAssertTrue(model.isExitAcknowledged(rowB))
-        }
-
-        /// Dismissing a process's exit turns its own dot from failed red to the unstarted stroke, but
-        /// leaves a separate, still-undismissed bell on the same row's session alone: acknowledgment and
-        /// menu visibility answer different questions about the same row.
-        func testDismissingExitDoesNotClearASeparateBellOnTheSameRow() {
-            let model = makeModel()
-            model.overview = makeOverview(
-                processRows: [
-                    makeProcessRow(id: "process-web", name: "web", sessionID: "session-a", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")
-                ],
-                sessions: [
-                    makeSession(id: "session-a", title: "web", state: .exited, updatedAt: "2026-01-01T00:05:00Z", bellAt: "2026-01-01T00:07:00Z")
-                ])
-            let row = SpacesMobileWorkspaceRuntimeRow(source: .process(model.overview!.workspaces[0].processRows[0]))
-            guard let exitEvent = model.undismissedAlerts(for: row, deviceID: "device-a").first(where: { $0.kind == .exited }) else {
-                XCTFail("Expected an exited event for the process row.")
-                return
-            }
-
-            model.dismissAlert(exitEvent)
-
-            XCTAssertTrue(model.isExitAcknowledged(row))
-            XCTAssertEqual(row.statusDotKind(exitAcknowledged: model.isExitAcknowledged(row)), .idle)
-            XCTAssertTrue(model.hasUndismissedAlerts(for: row, deviceID: "device-a"), "the bell on the same session is still undismissed")
-        }
 
         /// Agent activity and terminal exits never read `exitAcknowledged`: only a `.process` row's dot
         /// changes with dismissal (an agent keeps tracking live activity; a terminal exit stays red).
@@ -342,23 +201,23 @@
                     makeProcessRow(id: "process-web", name: "web", sessionID: "session-a", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")))
             let now = Date()
             let ownExit = SpacesMobileAttentionEvent(
-                sourceID: "process:process-web", kind: .exited, date: now, title: "web", rowType: .processes, sessionID: "session-a",
+                key: "k", sourceID: "process:process-web", kind: .exited, date: now, title: "web", rowType: .processes, sessionID: "session-a",
                 workspaceID: "workspace-feature", deviceID: "device-a", projectName: "Project", workspaceDisplayName: "feature", deviceText: nil,
                 isDeviceOffline: false)
             let ownBell = SpacesMobileAttentionEvent(
-                sourceID: "session:session-a", kind: .bell, date: now, title: "web", rowType: .processes, sessionID: "session-a",
+                key: "k", sourceID: "session:session-a", kind: .bell, date: now, title: "web", rowType: .processes, sessionID: "session-a",
                 workspaceID: "workspace-feature", deviceID: "device-a", projectName: "Project", workspaceDisplayName: "feature", deviceText: nil,
                 isDeviceOffline: false)
             let otherProcessSameWorkspace = SpacesMobileAttentionEvent(
-                sourceID: "process:process-other", kind: .exited, date: now, title: "other", rowType: .processes, sessionID: "session-b",
+                key: "k", sourceID: "process:process-other", kind: .exited, date: now, title: "other", rowType: .processes, sessionID: "session-b",
                 workspaceID: "workspace-feature", deviceID: "device-a", projectName: "Project", workspaceDisplayName: "feature", deviceText: nil,
                 isDeviceOffline: false)
             let sameSourceIDOtherWorkspace = SpacesMobileAttentionEvent(
-                sourceID: "process:process-web", kind: .exited, date: now, title: "web", rowType: .processes, sessionID: "session-a",
+                key: "k", sourceID: "process:process-web", kind: .exited, date: now, title: "web", rowType: .processes, sessionID: "session-a",
                 workspaceID: "workspace-other", deviceID: "device-a", projectName: "Project", workspaceDisplayName: "other", deviceText: nil,
                 isDeviceOffline: false)
             let bellOnAnotherSession = SpacesMobileAttentionEvent(
-                sourceID: "session:session-b", kind: .bell, date: now, title: "other", rowType: .processes, sessionID: "session-b",
+                key: "k", sourceID: "session:session-b", kind: .bell, date: now, title: "other", rowType: .processes, sessionID: "session-b",
                 workspaceID: "workspace-feature", deviceID: "device-a", projectName: "Project", workspaceDisplayName: "feature", deviceText: nil,
                 isDeviceOffline: false)
 
@@ -394,9 +253,9 @@
                 ["process:process-web", "session:session-a"])
             XCTAssertEqual(model.undismissedAlerts(for: agentRuntimeRow, deviceID: "device-a").map(\.sourceID), ["agent:agent-a"])
             XCTAssertEqual(model.undismissedAlerts(for: terminalRuntimeRow, deviceID: "device-a").map(\.sourceID), ["terminal:terminal-a"])
-            XCTAssertTrue(model.hasUndismissedAlerts(for: processRuntimeRow, deviceID: "device-a"))
-            XCTAssertTrue(model.hasUndismissedAlerts(for: agentRuntimeRow, deviceID: "device-a"))
-            XCTAssertTrue(model.hasUndismissedAlerts(for: terminalRuntimeRow, deviceID: "device-a"))
+            XCTAssertTrue(model.hasDismissableAlerts(for: processRuntimeRow, deviceID: "device-a"))
+            XCTAssertTrue(model.hasDismissableAlerts(for: agentRuntimeRow, deviceID: "device-a"))
+            XCTAssertTrue(model.hasDismissableAlerts(for: terminalRuntimeRow, deviceID: "device-a"))
         }
 
         /// `undismissedAlerts` must apply the same focus/watch-window bell suppression the Alerts tab
@@ -420,7 +279,7 @@
                 ])
 
             XCTAssertTrue(model.undismissedAlerts(for: row, deviceID: "device-a").isEmpty)
-            XCTAssertFalse(model.hasUndismissedAlerts(for: row, deviceID: "device-a"))
+            XCTAssertFalse(model.hasDismissableAlerts(for: row, deviceID: "device-a"))
 
             // The same bell, rung outside any watch window, is one the user has not seen yet.
             let bellOutsideAnyWatch = clock.advance(60)
@@ -432,7 +291,7 @@
                 ])
 
             XCTAssertFalse(model.undismissedAlerts(for: row, deviceID: "device-a").isEmpty)
-            XCTAssertTrue(model.hasUndismissedAlerts(for: row, deviceID: "device-a"))
+            XCTAssertTrue(model.hasDismissableAlerts(for: row, deviceID: "device-a"))
         }
 
         /// The same suppression has to hold for a non-selected device's row too: `watchedTerminalSessionID`
@@ -459,359 +318,6 @@
                     ]), deviceID: "device-b")
 
             XCTAssertTrue(model.undismissedAlerts(for: row, deviceID: "device-b").isEmpty, "a watch window applies to a non-selected device too")
-        }
-
-        /// The row-level "Dismiss Alert" action dismisses every one of the row's own undismissed events at
-        /// once (its exit plus a bell on the same session here), identical in effect to dismissing each
-        /// individually from the Alerts tab: same dismissed set, badge follows.
-        func testDismissAlertsForRowDismissesAllOfItsEventsAndUpdatesTheBadge() {
-            let model = makeModel()
-            model.overview = makeOverview(
-                processRows: [
-                    makeProcessRow(id: "process-web", name: "web", sessionID: "session-a", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")
-                ],
-                sessions: [
-                    makeSession(id: "session-a", title: "web", state: .exited, updatedAt: "2026-01-01T00:05:00Z", bellAt: "2026-01-01T00:07:00Z")
-                ])
-            let row = SpacesMobileWorkspaceRuntimeRow(source: .process(model.overview!.workspaces[0].processRows[0]))
-
-            XCTAssertTrue(model.hasUndismissedAlerts(for: row, deviceID: "device-a"))
-            XCTAssertEqual(model.undismissedAlertCount, 2)
-
-            model.dismissAlerts(for: row, deviceID: "device-a")
-
-            XCTAssertFalse(model.hasUndismissedAlerts(for: row, deviceID: "device-a"))
-            XCTAssertEqual(model.undismissedAlertCount, 0)
-            XCTAssertTrue(model.isExitAcknowledged(row))
-        }
-
-        func testDismissedAlertIDsRoundTripThroughStorage() {
-            let defaults = UserDefaults(suiteName: "spaces.mobile.tests.dismissed-alerts")!
-            defaults.removePersistentDomain(forName: "spaces.mobile.tests.dismissed-alerts")
-            defer { defaults.removePersistentDomain(forName: "spaces.mobile.tests.dismissed-alerts") }
-
-            XCTAssertTrue(SpacesMobileDismissedAlertsStore.load(deviceID: "device-a", defaults: defaults).isEmpty)
-
-            SpacesMobileDismissedAlertsStore.save(["agent:a|waitingForInput|1", "agent:b|finished|2"], deviceID: "device-a", defaults: defaults)
-
-            XCTAssertEqual(
-                SpacesMobileDismissedAlertsStore.load(deviceID: "device-a", defaults: defaults), ["agent:a|waitingForInput|1", "agent:b|finished|2"])
-        }
-
-        /// Each device's dismissals live in their own bucket: saving under one device id must not leak
-        /// into, or be visible from, another. Without this a global set gets pruned against whichever
-        /// device's overview last published, resurfacing another device's dismissed alerts the moment the
-        /// active device changes back.
-        func testDismissedAlertIDsAreScopedPerDevice() {
-            let defaults = UserDefaults(suiteName: "spaces.mobile.tests.dismissed-alerts-scoped")!
-            defaults.removePersistentDomain(forName: "spaces.mobile.tests.dismissed-alerts-scoped")
-            defer { defaults.removePersistentDomain(forName: "spaces.mobile.tests.dismissed-alerts-scoped") }
-
-            SpacesMobileDismissedAlertsStore.save(["agent:a|waitingForInput|1"], deviceID: "device-a", defaults: defaults)
-            SpacesMobileDismissedAlertsStore.save(["agent:b|finished|2"], deviceID: "device-b", defaults: defaults)
-
-            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: "device-a", defaults: defaults), ["agent:a|waitingForInput|1"])
-            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: "device-b", defaults: defaults), ["agent:b|finished|2"])
-
-            // Saving an empty set for one device clears only its own bucket.
-            SpacesMobileDismissedAlertsStore.save([], deviceID: "device-a", defaults: defaults)
-            XCTAssertTrue(SpacesMobileDismissedAlertsStore.load(deviceID: "device-a", defaults: defaults).isEmpty)
-            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: "device-b", defaults: defaults), ["agent:b|finished|2"])
-        }
-
-        /// `retainDevices` bounds the store to devices the app still knows about, dropping the rest —
-        /// otherwise every unpaired device's bucket would sit in `UserDefaults` for the life of the install.
-        func testRetainDevicesDropsBucketsForUnknownDevices() {
-            let defaults = UserDefaults(suiteName: "spaces.mobile.tests.dismissed-alerts-retain")!
-            defaults.removePersistentDomain(forName: "spaces.mobile.tests.dismissed-alerts-retain")
-            defer { defaults.removePersistentDomain(forName: "spaces.mobile.tests.dismissed-alerts-retain") }
-
-            SpacesMobileDismissedAlertsStore.save(["agent:a|waitingForInput|1"], deviceID: "device-a", defaults: defaults)
-            SpacesMobileDismissedAlertsStore.save(["agent:b|finished|2"], deviceID: "device-b", defaults: defaults)
-
-            SpacesMobileDismissedAlertsStore.retainDevices(["device-a"], defaults: defaults)
-
-            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: "device-a", defaults: defaults), ["agent:a|waitingForInput|1"])
-            XCTAssertTrue(SpacesMobileDismissedAlertsStore.load(deviceID: "device-b", defaults: defaults).isEmpty)
-        }
-
-        /// Dismissals only mean something while their event is still derivable, so a refreshed overview
-        /// that no longer produces an event drops its dismissal instead of storing it forever.
-        func testRetainedDismissalsDropIdentitiesTheOverviewNoLongerProduces() {
-            let overview = makeOverview(codingAgentRows: [
-                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
-            ])
-            let events = SpacesMobileAttention.events(
-                deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
-            guard let liveID = events.first?.eventKey else {
-                XCTFail("Expected a derived event.")
-                return
-            }
-
-            let retained = SpacesMobileAttention.retainedDismissedEventIDs(
-                [liveID, "agent:agent-gone|finished|1"], deviceID: "device-a", in: overview)
-
-            XCTAssertEqual(retained, [liveID])
-        }
-
-        /// Hiding a workspace is a reversible suppression, the same as a focused session or a watch
-        /// window: `retainedDismissedEventIDs` must keep deriving a hidden workspace's events (it opts
-        /// into `includingHiddenWorkspaces`), or hiding it would prune the dismissal and unhiding it would
-        /// resurface an alert the user already dismissed even though nothing about the source changed.
-        /// This covers an agent-derived event.
-        func testRetainedDismissalsSurviveWhenAnAgentsWorkspaceIsHidden() {
-            let visibleOverview = makeOverview(codingAgentRows: [
-                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
-            ])
-            guard
-                let liveID = SpacesMobileAttention.events(
-                    deviceID: "device-a", deviceText: nil, in: visibleOverview, focusedSessionID: nil, watchWindowsBySessionID: [:]
-                ).first?.eventKey
-            else {
-                XCTFail("Expected a derived event.")
-                return
-            }
-            let hiddenOverview = makeOverview(workspaces: [
-                makeWorkspace(
-                    id: "workspace-feature", branch: "feature", isHidden: true,
-                    codingAgentRows: [makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")])
-            ])
-
-            let retained = SpacesMobileAttention.retainedDismissedEventIDs([liveID], deviceID: "device-a", in: hiddenOverview)
-
-            XCTAssertEqual(retained, [liveID])
-        }
-
-        /// The same guarantee when the suppression is project-level rather than the workspace's own flag:
-        /// hiding the project must not resurface an alert the user already dismissed once it is unhidden.
-        func testRetainedDismissalsSurviveWhenAnAgentsWorkspaceProjectIsHidden() {
-            let visibleOverview = makeOverview(codingAgentRows: [
-                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
-            ])
-            guard
-                let liveID = SpacesMobileAttention.events(
-                    deviceID: "device-a", deviceText: nil, in: visibleOverview, focusedSessionID: nil, watchWindowsBySessionID: [:]
-                ).first?.eventKey
-            else {
-                XCTFail("Expected a derived event.")
-                return
-            }
-            let hiddenOverview = makeOverview(
-                workspaces: [
-                    makeWorkspace(
-                        id: "workspace-feature", branch: "feature",
-                        codingAgentRows: [makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")])
-                ], projectIsHidden: true)
-
-            let retained = SpacesMobileAttention.retainedDismissedEventIDs([liveID], deviceID: "device-a", in: hiddenOverview)
-
-            XCTAssertEqual(retained, [liveID])
-        }
-
-        /// The same guarantee for a session-derived event: an exited loose terminal whose identity comes
-        /// from the loose-session branch of `events(...)`, not a workspace row.
-        func testRetainedDismissalsSurviveWhenASessionsWorkspaceIsHidden() {
-            let session = makeSession(id: "session-loose", title: "zsh", state: .exited, updatedAt: "2026-01-01T00:04:00Z")
-            let visibleOverview = makeOverview(sessions: [session])
-            guard
-                let liveID = SpacesMobileAttention.events(
-                    deviceID: "device-a", deviceText: nil, in: visibleOverview, focusedSessionID: nil, watchWindowsBySessionID: [:]
-                ).first?.eventKey
-            else {
-                XCTFail("Expected a derived event.")
-                return
-            }
-            let hiddenOverview = makeOverview(
-                workspaces: [makeWorkspace(id: "workspace-feature", branch: "feature", isHidden: true)], sessions: [session])
-
-            let retained = SpacesMobileAttention.retainedDismissedEventIDs([liveID], deviceID: "device-a", in: hiddenOverview)
-
-            XCTAssertEqual(retained, [liveID])
-        }
-
-        /// A dismissal for an event the overview still produces survives a refresh, and one for an event
-        /// the device stopped reporting is pruned out of the model's set.
-        func testRefreshPrunesStaleDismissalsAndKeepsLiveOnes() async {
-            let overview = makeOverview(codingAgentRows: [
-                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
-            ])
-            let settings = SpacesMobileConnectionSettings()
-            let client = SpacesDeviceAPIClient(settings: settings) { _ in
-                SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
-            }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
-            model.pairedDevices = [makeDeviceRecord(id: Self.testDeviceID)]
-            model.activeDeviceID = Self.testDeviceID
-            let liveID = SpacesMobileAttention.events(
-                deviceID: Self.testDeviceID, deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]
-            ).first?.eventKey
-            model.setDismissedAlertIDsForTesting([liveID ?? "", "agent:agent-gone|finished|1"], deviceID: Self.testDeviceID)
-
-            await model.refresh()
-
-            XCTAssertEqual(model.dismissedAlertIDsForTesting(deviceID: Self.testDeviceID), [liveID ?? ""])
-            XCTAssertEqual(model.undismissedAlertCount, 0)
-        }
-
-        /// End-to-end through the model: a dismissal must survive a refresh that reports its workspace
-        /// hidden and a later refresh that reports it visible again. Only a genuinely new state change (a
-        /// later timestamp, minting a new event identity) may bring the alert back.
-        func testDismissalSurvivesHidingAndUnhidingItsWorkspaceAcrossRefreshes() async {
-            let overviewBox = OverviewBox(
-                makeOverview(codingAgentRows: [
-                    makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
-                ]))
-            let settings = SpacesMobileConnectionSettings()
-            let client = SpacesDeviceAPIClient(settings: settings) { _ in
-                SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewBox.get()))
-            }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
-            model.pairedDevices = [makeDeviceRecord(id: Self.testDeviceID)]
-            model.activeDeviceID = Self.testDeviceID
-            let liveID = SpacesMobileAttention.events(
-                deviceID: Self.testDeviceID, deviceText: nil, in: overviewBox.get(), focusedSessionID: nil, watchWindowsBySessionID: [:]
-            ).first?.eventKey
-            model.setDismissedAlertIDsForTesting([liveID ?? ""], deviceID: Self.testDeviceID)
-
-            overviewBox.set(
-                makeOverview(workspaces: [
-                    makeWorkspace(
-                        id: "workspace-feature", branch: "feature", isHidden: true,
-                        codingAgentRows: [makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")])
-                ]))
-            await model.refresh()
-
-            XCTAssertEqual(model.dismissedAlertIDsForTesting(deviceID: Self.testDeviceID), [liveID ?? ""])
-            XCTAssertEqual(model.undismissedAlertCount, 0)
-
-            overviewBox.set(
-                makeOverview(codingAgentRows: [
-                    makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
-                ]))
-            await model.refresh()
-
-            XCTAssertEqual(model.dismissedAlertIDsForTesting(deviceID: Self.testDeviceID), [liveID ?? ""])
-            XCTAssertEqual(model.undismissedAlertCount, 0)
-        }
-
-        // MARK: - Per-device dismissal persistence (device switches, Demo Mode, unpairing)
-
-        /// These exercise the real `SpacesMobileDeviceStore`/`SpacesMobileDismissedAlertsStore`
-        /// persistence — `UserDefaults.standard` and the Keychain — so each test resets that state before
-        /// and after running.
-
-        /// Dismissing an event while device A is active must not leak into device B: switching to B starts
-        /// from an empty bucket, its own overview is undisturbed by A's dismissal, and switching back to A
-        /// restores exactly the dismissal it had.
-        func testDismissalsAreScopedPerActiveDeviceAcrossASwitch() {
-            resetDeviceScopedAlertsState()
-            defer { resetDeviceScopedAlertsState() }
-            let (deviceA, deviceB) = seedTwoRealDevices()
-
-            let model = SpacesMobileAppModel()
-            model.selectDevice(id: deviceA)
-            model.overview = makeOverview(codingAgentRows: [
-                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
-            ])
-            guard let eventA = model.attentionEvents.first else {
-                XCTFail("Expected a derived event for device A.")
-                return
-            }
-            model.dismissAlert(eventA)
-            XCTAssertEqual(model.undismissedAlertCount, 0)
-            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: deviceA), [eventA.eventKey])
-
-            // Device B's own overview derives none of A's events; switching to it starts from an empty
-            // bucket rather than inheriting A's dismissal.
-            model.selectDevice(id: deviceB)
-            XCTAssertTrue(model.dismissedAlertIDsForTesting(deviceID: deviceB).isEmpty)
-            model.overview = makeOverview(codingAgentRows: [
-                makeAgentRow(id: "agent-b", name: "codex", activityState: .waiting, updatedAt: "2026-01-01T00:20:00Z")
-            ])
-            XCTAssertEqual(model.undismissedAlertCount, 1)
-
-            // A's persisted bucket is untouched by the time spent on B.
-            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: deviceA), [eventA.eventKey])
-
-            // Switching back to A reloads its dismissal from storage.
-            model.selectDevice(id: deviceA)
-            XCTAssertEqual(model.dismissedAlertIDsForTesting(deviceID: deviceA), [eventA.eventKey])
-        }
-
-        /// Turning Demo Mode on swaps the active device to the synthetic Demo Mac, which gets its own,
-        /// initially empty bucket; turning it off restores the real device's dismissal exactly as it was,
-        /// since the round trip parks (and never rewrites) the real device-store state.
-        func testDemoModeSwapKeepsRealDeviceDismissalsIntact() {
-            resetDeviceScopedAlertsState()
-            defer { resetDeviceScopedAlertsState() }
-            let (deviceA, _) = seedTwoRealDevices()
-
-            let model = SpacesMobileAppModel()
-            model.selectDevice(id: deviceA)
-            model.overview = makeOverview(codingAgentRows: [
-                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
-            ])
-            guard let eventA = model.attentionEvents.first else {
-                XCTFail("Expected a derived event for device A.")
-                return
-            }
-            model.dismissAlert(eventA)
-            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: deviceA), [eventA.eventKey])
-
-            model.setDemoMode(true)
-            XCTAssertTrue(
-                model.dismissedAlertIDsForTesting(deviceID: model.activeDeviceID ?? "").isEmpty, "the demo device starts with its own, empty bucket")
-
-            model.setDemoMode(false)
-
-            XCTAssertEqual(model.activeDeviceID, deviceA)
-            XCTAssertEqual(
-                model.dismissedAlertIDsForTesting(deviceID: deviceA), [eventA.eventKey], "the real device's dismissal survives a Demo Mode round trip"
-            )
-            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: deviceA), [eventA.eventKey])
-        }
-
-        /// Unpairing a device drops its persisted dismissal bucket along with it, so the store stays
-        /// bounded to devices the app can still show instead of accumulating forever.
-        func testRemovingADeviceDropsItsDismissedAlertsBucket() {
-            resetDeviceScopedAlertsState()
-            defer { resetDeviceScopedAlertsState() }
-            let (deviceA, deviceB) = seedTwoRealDevices()
-
-            let model = SpacesMobileAppModel()
-            model.selectDevice(id: deviceA)
-            model.overview = makeOverview(codingAgentRows: [
-                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
-            ])
-            guard let eventA = model.attentionEvents.first else {
-                XCTFail("Expected a derived event for device A.")
-                return
-            }
-            model.dismissAlert(eventA)
-            model.selectDevice(id: deviceB)
-            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(deviceID: deviceA), [eventA.eventKey])
-
-            model.removeDevice(id: deviceA)
-
-            XCTAssertTrue(SpacesMobileDismissedAlertsStore.load(deviceID: deviceA).isEmpty, "an unpaired device's bucket is dropped")
-        }
-
-        func testDismissedEventFilteringLeavesOtherEvents() {
-            let model = makeModel()
-            model.overview = makeOverview(codingAgentRows: [
-                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z"),
-                makeAgentRow(id: "agent-b", name: "codex", activityState: .done, updatedAt: "2026-01-01T00:20:00Z"),
-            ])
-            guard let dismissed = model.attentionEvents.last else {
-                XCTFail("Expected derived events.")
-                return
-            }
-
-            model.setDismissedAlertIDsForTesting(
-                model.dismissedAlertIDsForTesting(deviceID: Self.testDeviceID).union([dismissed.eventKey]), deviceID: Self.testDeviceID)
-
-            XCTAssertEqual(model.undismissedAlertCount, 1)
-            XCTAssertEqual(model.attentionEvents.map(\.sourceID), ["agent:agent-b"])
         }
 
         // MARK: - Cross-device Alerts (Agents and Alerts tabs list every paired device)
@@ -925,27 +431,6 @@
             model.setOfflineForTesting(true, deviceID: Self.testDeviceID)
             XCTAssertEqual(model.attentionEvents.count, 1, "the row should still show while offline")
             XCTAssertTrue(model.attentionEvents.first?.isDeviceOffline ?? false, "the surviving row should be marked offline for dimming")
-        }
-
-        /// `clearAlerts()` dismisses every paired device's alerts in one action, including an offline
-        /// device's, and each device's dismissal lands in its own persisted bucket.
-        func testClearAlertsDismissesEveryPairedDeviceIncludingAnOfflineOne() {
-            let model = makeModel()
-            model.pairedDevices = [makeDeviceRecord(id: Self.testDeviceID), makeDeviceRecord(id: "device-b")]
-            model.overview = makeOverview(codingAgentRows: [
-                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
-            ])
-            model.setDeviceOverviewForTesting(
-                makeOverview(codingAgentRows: [makeAgentRow(id: "agent-b", name: "codex", activityState: .waiting, updatedAt: "2026-01-01T00:20:00Z")]
-                ), deviceID: "device-b")
-            model.setOfflineForTesting(true, deviceID: "device-b")
-            addTeardownBlock { SpacesMobileDismissedAlertsStore.save([], deviceID: "device-b") }
-
-            model.clearAlerts()
-
-            XCTAssertEqual(model.undismissedAlertCount, 0)
-            XCTAssertFalse(model.dismissedAlertIDsForTesting(deviceID: Self.testDeviceID).isEmpty)
-            XCTAssertFalse(model.dismissedAlertIDsForTesting(deviceID: "device-b").isEmpty)
         }
 
         // MARK: - Bell events
@@ -1306,6 +791,474 @@
             XCTAssertNil(model.watchedTerminalSessionID)
         }
 
+        // MARK: - Dismissal is the device's call
+
+        /// A model whose selected device is `device`: every request goes to it and its answers become the
+        /// model's overview, the way a real device's mutation responses do.
+        private func makeDeviceModel(_ device: FakeAlertDevice, clock: ManualVisitClock? = nil) -> SpacesMobileAppModel {
+            let settings = SpacesMobileConnectionSettings()
+            let client = device.client(settings: settings)
+            let model =
+                clock.map { clock in
+                    SpacesMobileAppModel(settings: settings, bridgeClient: client, wallClock: { clock.now }, visitSchedule: clock.schedule)
+                } ?? SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.pairedDevices = [makeDeviceRecord(id: Self.testDeviceID)]
+            model.activeDeviceID = Self.testDeviceID
+            model.overview = device.currentOverview
+            return model
+        }
+
+        /// Adds `device` to `model` as a second, non-selected paired device.
+        private func addSecondDevice(_ device: FakeAlertDevice, to model: SpacesMobileAppModel, id: String = "device-b") {
+            let record = makeDeviceRecord(id: id)
+            // The model reuses a cached client only while its settings equal the paired record's.
+            let settings = SpacesMobileDeviceStore.settings(from: record, installationID: model.settings.installationID)
+            model.pairedDevices.append(record)
+            model.setNonActiveDeviceStreamClientForTesting(device.client(settings: settings), settings: settings, deviceID: id)
+            model.setDeviceOverviewForTesting(device.currentOverview, deviceID: id)
+        }
+
+        private func waitingAgentOverview(updatedAt: String = "2026-01-01T00:10:00Z") -> SpacesDeviceOverviewPayload {
+            makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: updatedAt),
+                makeAgentRow(id: "agent-b", name: "codex", activityState: .done, updatedAt: "2026-01-01T00:20:00Z"),
+            ])
+        }
+
+        func testDismissAlertAsksItsDeviceAndTheListChangesWhenTheOverviewReturns() async throws {
+            let device = FakeAlertDevice(overview: waitingAgentOverview())
+            let model = makeDeviceModel(device)
+            let event = try XCTUnwrap(model.attentionEvents.first { $0.sourceID == "agent:agent-a" })
+
+            await model.dismissAlert(event)
+
+            XCTAssertEqual(device.commands, [.dismissAlerts([event.key])])
+            XCTAssertEqual(model.attentionEvents.map(\.sourceID), ["agent:agent-b"])
+            XCTAssertEqual(model.undismissedAlertCount, 1)
+        }
+
+        func testNothingIsHiddenBeforeTheDeviceConfirms() async throws {
+            let device = FakeAlertDevice(overview: waitingAgentOverview())
+            device.appliesRequests = false
+            let model = makeDeviceModel(device)
+            let event = try XCTUnwrap(model.attentionEvents.first)
+
+            await model.dismissAlert(event)
+
+            XCTAssertEqual(device.commands.count, 1)
+            XCTAssertEqual(model.undismissedAlertCount, 2, "the list changes when the device's overview says so, not on the tap")
+        }
+
+        func testANewStateChangeOfADismissedSourceAlertsAgain() async throws {
+            let device = FakeAlertDevice(overview: waitingAgentOverview())
+            let model = makeDeviceModel(device)
+            let event = try XCTUnwrap(model.attentionEvents.first { $0.sourceID == "agent:agent-a" })
+            await model.dismissAlert(event)
+            let dismissedKeys = device.currentOverview.dismissedAlertKeys
+
+            model.overview = waitingAgentOverview(updatedAt: "2026-01-01T00:30:00Z").replacingAlertState(
+                dismissedAlertKeys: dismissedKeys, comeBackLaterFlags: [])
+
+            XCTAssertEqual(Set(model.attentionEvents.map(\.sourceID)), ["agent:agent-a", "agent:agent-b"])
+        }
+
+        func testWhatIsDismissedIsEachDevicesOwn() {
+            let overview = waitingAgentOverview()
+            let dismissingDevice = FakeAlertDevice(
+                overview: overview.replacingAlertState(
+                    dismissedAlertKeys: overview.alertCandidates().filter { $0.subjectID == "agent-a" }.map(\.key), comeBackLaterFlags: []))
+            let model = makeDeviceModel(dismissingDevice)
+            addSecondDevice(FakeAlertDevice(overview: overview), to: model)
+
+            let remaining = model.attentionEvents.filter { $0.sourceID == "agent:agent-a" }
+
+            XCTAssertEqual(remaining.map(\.deviceID), ["device-b"], "the same alert, dismissed on one device, still shows for the other")
+        }
+
+        func testDismissalGoesToTheDeviceThatOwnsTheAlert() async throws {
+            let deviceA = FakeAlertDevice(overview: waitingAgentOverview())
+            let deviceB = FakeAlertDevice(overview: waitingAgentOverview())
+            let model = makeDeviceModel(deviceA)
+            addSecondDevice(deviceB, to: model)
+            let eventOnB = try XCTUnwrap(model.attentionEvents.first { $0.deviceID == "device-b" && $0.sourceID == "agent:agent-a" })
+
+            await model.dismissAlert(eventOnB)
+
+            XCTAssertTrue(deviceA.commands.isEmpty)
+            XCTAssertEqual(deviceB.commands, [.dismissAlerts([eventOnB.key])])
+            XCTAssertEqual(model.attentionEvents.filter { $0.deviceID == "device-b" }.map(\.sourceID), ["agent:agent-b"])
+        }
+
+        func testClearDismissesOnlyOnlineDevicesAndLeavesAnOfflineDevicesItemsListed() async {
+            let deviceA = FakeAlertDevice(overview: waitingAgentOverview())
+            let deviceB = FakeAlertDevice(overview: waitingAgentOverview())
+            let model = makeDeviceModel(deviceA)
+            addSecondDevice(deviceB, to: model)
+            model.setOfflineForTesting(true, deviceID: "device-b")
+            XCTAssertTrue(model.canClearAlerts)
+
+            await model.clearAlerts()
+
+            XCTAssertEqual(deviceA.commands.count, 1)
+            XCTAssertTrue(deviceB.commands.isEmpty, "an offline device cannot confirm, so it is not asked")
+            XCTAssertEqual(model.attentionEvents.map(\.deviceID), ["device-b", "device-b"], "its items stay listed")
+            XCTAssertFalse(model.canClearAlerts, "only an offline device's items are left, so Clear has nothing to do")
+        }
+
+        func testDismissingForAnOfflineDeviceSendsNothing() async throws {
+            let device = FakeAlertDevice(overview: waitingAgentOverview())
+            let model = makeDeviceModel(device)
+            let event = try XCTUnwrap(model.attentionEvents.first)
+            model.setOfflineForTesting(true, deviceID: Self.testDeviceID)
+
+            XCTAssertFalse(model.canChangeAlerts(onDeviceID: Self.testDeviceID))
+            await model.dismissAlert(event)
+
+            XCTAssertTrue(device.commands.isEmpty)
+        }
+
+        func testRowDismissSendsEveryAlertOfTheRowInOneRequest() async throws {
+            let overview = makeOverview(
+                processRows: [
+                    makeProcessRow(id: "process-web", name: "web", sessionID: "session-a", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")
+                ],
+                sessions: [
+                    makeSession(id: "session-a", title: "web", state: .exited, updatedAt: "2026-01-01T00:05:00Z", bellAt: "2026-01-01T00:07:00Z")
+                ]
+            ).replacingAlertState(
+                dismissedAlertKeys: [],
+                comeBackLaterFlags: [SpacesDeviceComeBackLaterFlag(rowKind: .process, rowID: "process-web", flaggedAt: "2026-01-01T00:08:00Z")])
+            let device = FakeAlertDevice(overview: overview)
+            let model = makeDeviceModel(device)
+            let row = SpacesMobileWorkspaceRuntimeRow(source: .process(overview.workspaces[0].processRows[0]))
+            XCTAssertEqual(model.undismissedAlerts(for: row, deviceID: Self.testDeviceID).count, 3)
+            XCTAssertTrue(model.hasDismissableAlerts(for: row, deviceID: Self.testDeviceID))
+
+            await model.dismissAlerts(for: row, deviceID: Self.testDeviceID)
+
+            XCTAssertEqual(device.commands.count, 1)
+            XCTAssertEqual(model.undismissedAlertCount, 0)
+            XCTAssertFalse(model.hasDismissableAlerts(for: row, deviceID: Self.testDeviceID))
+            XCTAssertTrue(device.currentOverview.comeBackLaterFlags.isEmpty, "Dismiss Alert clears the row's Come Back Later mark too")
+        }
+
+        func testARowWhoseOnlyAlertIsItsFlagOffersNoDismissAlert() {
+            let overview = makeOverview(codingAgentRows: [makeAgentRow(id: "agent-a", name: "claude", activityState: .idle)]).replacingAlertState(
+                dismissedAlertKeys: [],
+                comeBackLaterFlags: [SpacesDeviceComeBackLaterFlag(rowKind: .agent, rowID: "agent-a", flaggedAt: "2026-01-01T00:08:00Z")])
+            let model = makeDeviceModel(FakeAlertDevice(overview: overview))
+            let row = SpacesMobileWorkspaceRuntimeRow(source: .codingAgent(overview.workspaces[0].codingAgentRows[0]))
+
+            XCTAssertFalse(model.hasDismissableAlerts(for: row, deviceID: Self.testDeviceID), "the flag has its own Remove from Alerts item")
+            XCTAssertEqual(model.undismissedAlerts(for: row, deviceID: Self.testDeviceID).count, 1)
+        }
+
+        // MARK: - Exited process acknowledgement from synced dismissals
+
+        func testIsExitAcknowledgedReadsTheDevicesDismissedKeys() {
+            let overview = makeOverview(processRows: [
+                makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")
+            ])
+            let exitKey = overview.alertCandidates().first { $0.kind == .processExited }?.key ?? ""
+            let row = SpacesMobileWorkspaceRuntimeRow(source: .process(overview.workspaces[0].processRows[0]))
+
+            let undismissed = makeDeviceModel(FakeAlertDevice(overview: overview))
+            XCTAssertFalse(undismissed.isExitAcknowledged(row))
+            XCTAssertEqual(row.statusDotKind(exitAcknowledged: undismissed.isExitAcknowledged(row)), .exited)
+
+            let dismissedOnDevice = makeDeviceModel(
+                FakeAlertDevice(overview: overview.replacingAlertState(dismissedAlertKeys: [exitKey], comeBackLaterFlags: [])))
+            XCTAssertTrue(dismissedOnDevice.isExitAcknowledged(row), "a dismissal made on another client reads as not started here")
+            XCTAssertEqual(row.statusDotKind(exitAcknowledged: dismissedOnDevice.isExitAcknowledged(row)), .idle)
+
+            let reExited = makeOverview(processRows: [
+                makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: "2026-01-01T00:10:00Z")
+            ]).replacingAlertState(dismissedAlertKeys: [exitKey], comeBackLaterFlags: [])
+            dismissedOnDevice.overview = reExited
+            XCTAssertFalse(dismissedOnDevice.isExitAcknowledged(row), "a later exit alerts again")
+        }
+
+        /// A configured process row's id comes from its project template, so two sibling workspaces can
+        /// carry rows with the identical id; dismissing one workspace's exit must not acknowledge the other's.
+        func testIsExitAcknowledgedDoesNotBleedAcrossWorkspacesSharingATemplateRowID() {
+            func process(in workspaceID: String, exitedAt: String) -> SpacesDeviceWorkspaceProcessRow {
+                SpacesDeviceWorkspaceProcessRow(
+                    id: "process-web", workspaceID: workspaceID, name: "web", command: "npm run web", processID: "runtime-\(workspaceID)",
+                    sessionID: nil, runState: .exited, exitedAt: exitedAt, canRun: true, canStop: false, canRestart: false)
+            }
+            let processA = process(in: "workspace-a", exitedAt: "2026-01-01T00:05:00Z")
+            let processB = process(in: "workspace-b", exitedAt: "2026-01-01T00:06:00Z")
+            let overview = makeOverview(workspaces: [
+                makeWorkspace(id: "workspace-a", branch: "a", processRows: [processA]),
+                makeWorkspace(id: "workspace-b", branch: "b", processRows: [processB]),
+            ])
+            let keyA = overview.alertCandidates().first { $0.workspaceID == "workspace-a" }?.key ?? ""
+            let model = makeDeviceModel(FakeAlertDevice(overview: overview.replacingAlertState(dismissedAlertKeys: [keyA], comeBackLaterFlags: [])))
+
+            XCTAssertTrue(model.isExitAcknowledged(SpacesMobileWorkspaceRuntimeRow(source: .process(processA))))
+            XCTAssertFalse(model.isExitAcknowledged(SpacesMobileWorkspaceRuntimeRow(source: .process(processB))))
+        }
+
+        // MARK: - Come Back Later
+
+        private func comeBackLaterOverview(flag: SpacesDeviceComeBackLaterFlag? = nil) -> SpacesDeviceOverviewPayload {
+            makeOverview(
+                codingAgentRows: [makeAgentRow(id: "agent-a", name: "claude", activityState: .idle)],
+                processRows: [makeProcessRow(id: "process-web", name: "web", sessionID: "session-web", runState: .running, exitedAt: nil)]
+            ).replacingAlertState(dismissedAlertKeys: [], comeBackLaterFlags: flag.map { [$0] } ?? [])
+        }
+
+        func testAComeBackLaterRowIsAnAlertDatedByWhenItWasFlagged() throws {
+            let flag = SpacesDeviceComeBackLaterFlag(rowKind: .agent, rowID: "agent-a", flaggedAt: "2026-01-01T00:08:00Z")
+            let model = makeDeviceModel(FakeAlertDevice(overview: comeBackLaterOverview(flag: flag)))
+
+            let event = try XCTUnwrap(model.attentionEvents.first)
+
+            XCTAssertEqual(model.attentionEvents.count, 1)
+            XCTAssertEqual(event.kind, .comeBackLater)
+            XCTAssertEqual(event.title, "claude")
+            XCTAssertEqual(event.key, flag.alertKey)
+            XCTAssertEqual(event.date, SpacesMobileAttention.date(fromISO8601: "2026-01-01T00:08:00Z"))
+            XCTAssertEqual(event.detail, "Project / feature")
+            XCTAssertEqual(model.undismissedAlertCount, 1, "it counts in the Alerts badge")
+            XCTAssertEqual(StatusDot.Kind(attentionKind: event.kind), .comeBackLater)
+        }
+
+        func testAComeBackLaterRowSortsAmongOtherAlertsByItsFlagTime() {
+            let overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-a", name: "claude", activityState: .idle),
+                makeAgentRow(id: "agent-b", name: "codex", activityState: .waiting, updatedAt: "2026-01-01T00:20:00Z"),
+            ]).replacingAlertState(
+                dismissedAlertKeys: [],
+                comeBackLaterFlags: [SpacesDeviceComeBackLaterFlag(rowKind: .agent, rowID: "agent-a", flaggedAt: "2026-01-01T00:30:00Z")])
+            let model = makeDeviceModel(FakeAlertDevice(overview: overview))
+
+            XCTAssertEqual(model.attentionEvents.map(\.kind), [.comeBackLater, .waitingForInput])
+        }
+
+        func testDismissingAComeBackLaterEventSendsItsFlagKey() async throws {
+            let flag = SpacesDeviceComeBackLaterFlag(rowKind: .agent, rowID: "agent-a", flaggedAt: "2026-01-01T00:08:00Z")
+            let device = FakeAlertDevice(overview: comeBackLaterOverview(flag: flag))
+            let model = makeDeviceModel(device)
+
+            await model.dismissAlert(try XCTUnwrap(model.attentionEvents.first))
+
+            XCTAssertEqual(device.commands, [.dismissAlerts(["comebacklater:agent:agent-a"])])
+            XCTAssertTrue(model.attentionEvents.isEmpty)
+        }
+
+        func testAFlagOnAHiddenWorkspaceIsNotListed() {
+            let workspace = makeWorkspace(
+                id: "workspace-feature", branch: "feature", isHidden: true,
+                codingAgentRows: [makeAgentRow(id: "agent-a", name: "claude", activityState: .idle)])
+            let overview = makeOverview(workspaces: [workspace]).replacingAlertState(
+                dismissedAlertKeys: [],
+                comeBackLaterFlags: [SpacesDeviceComeBackLaterFlag(rowKind: .agent, rowID: "agent-a", flaggedAt: "2026-01-01T00:08:00Z")])
+
+            XCTAssertTrue(makeDeviceModel(FakeAlertDevice(overview: overview)).attentionEvents.isEmpty)
+        }
+
+        func testTheMenuItemFlipsBetweenComeBackLaterAndRemoveFromAlerts() async {
+            let device = FakeAlertDevice(overview: comeBackLaterOverview())
+            let model = makeDeviceModel(device)
+            let row = SpacesMobileWorkspaceRuntimeRow(source: .codingAgent(device.currentOverview.workspaces[0].codingAgentRows[0]))
+            XCTAssertEqual(model.comeBackLaterMenuTitle(for: row, deviceID: Self.testDeviceID), "Come Back Later")
+
+            await model.toggleComeBackLater(for: row, deviceID: Self.testDeviceID)
+
+            XCTAssertEqual(device.commands, [.setComeBackLater(rowKind: .agent, rowID: "agent-a", isOn: true)])
+            XCTAssertEqual(model.comeBackLaterMenuTitle(for: row, deviceID: Self.testDeviceID), "Remove from Alerts")
+            XCTAssertEqual(model.attentionEvents.map(\.kind), [.comeBackLater])
+
+            await model.toggleComeBackLater(for: row, deviceID: Self.testDeviceID)
+
+            XCTAssertEqual(device.commands.last, .setComeBackLater(rowKind: .agent, rowID: "agent-a", isOn: false))
+            XCTAssertEqual(model.comeBackLaterMenuTitle(for: row, deviceID: Self.testDeviceID), "Come Back Later")
+            XCTAssertTrue(model.attentionEvents.isEmpty)
+        }
+
+        func testTheFlagStateComesBackFromTheDeviceNotTheTap() async {
+            let device = FakeAlertDevice(overview: comeBackLaterOverview())
+            device.appliesRequests = false
+            let model = makeDeviceModel(device)
+            let row = SpacesMobileWorkspaceRuntimeRow(source: .codingAgent(device.currentOverview.workspaces[0].codingAgentRows[0]))
+
+            await model.toggleComeBackLater(for: row, deviceID: Self.testDeviceID)
+
+            XCTAssertEqual(model.comeBackLaterMenuTitle(for: row, deviceID: Self.testDeviceID), "Come Back Later")
+            XCTAssertTrue(model.attentionEvents.isEmpty)
+        }
+
+        func testComeBackLaterIsNotOfferedOnARowThatNeverStarted() {
+            let model = makeModel()
+            let neverStarted = SpacesMobileWorkspaceRuntimeRow(
+                source: .process(makeProcessRow(id: "process-web", name: "web", runState: .notStarted, exitedAt: nil)))
+            let exitedWithoutSession = SpacesMobileWorkspaceRuntimeRow(
+                source: .process(makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")))
+            let running = SpacesMobileWorkspaceRuntimeRow(
+                source: .process(makeProcessRow(id: "process-web", name: "web", sessionID: "session-web", runState: .running, exitedAt: nil)))
+            let agent = SpacesMobileWorkspaceRuntimeRow(source: .codingAgent(makeAgentRow(id: "agent-a", activityState: .idle)))
+            let terminal = SpacesMobileWorkspaceRuntimeRow(
+                source: .terminal(makeTerminalRow(id: "terminal-a", title: "zsh", sessionID: "session-t", runState: .running)))
+
+            XCTAssertNil(model.comeBackLaterTarget(for: neverStarted))
+            XCTAssertNotNil(model.comeBackLaterTarget(for: exitedWithoutSession), "a process that ran and exited has something to come back to")
+            XCTAssertEqual(model.comeBackLaterTarget(for: running)?.rowKind, .process)
+            XCTAssertEqual(model.comeBackLaterTarget(for: agent)?.rowKind, .agent)
+            XCTAssertEqual(model.comeBackLaterTarget(for: terminal)?.rowKind, .terminal)
+        }
+
+        func testComeBackLaterNeedsTheDeviceOnlineAndSendsToTheRowsOwnDevice() async {
+            let deviceA = FakeAlertDevice(overview: comeBackLaterOverview())
+            let deviceB = FakeAlertDevice(overview: comeBackLaterOverview())
+            let model = makeDeviceModel(deviceA)
+            addSecondDevice(deviceB, to: model)
+            let row = SpacesMobileWorkspaceRuntimeRow(source: .codingAgent(deviceB.currentOverview.workspaces[0].codingAgentRows[0]))
+
+            model.setOfflineForTesting(true, deviceID: "device-b")
+            XCTAssertFalse(model.canChangeAlerts(onDeviceID: "device-b"))
+            await model.toggleComeBackLater(for: row, deviceID: "device-b")
+            XCTAssertTrue(deviceB.commands.isEmpty)
+
+            model.setOfflineForTesting(false, deviceID: "device-b")
+            await model.toggleComeBackLater(for: row, deviceID: "device-b")
+            XCTAssertTrue(deviceA.commands.isEmpty)
+            XCTAssertEqual(deviceB.commands, [.setComeBackLater(rowKind: .agent, rowID: "agent-a", isOn: true)])
+        }
+
+        // MARK: - Bells rung while watched are consumed through the device
+
+        private func bellKey(in overview: SpacesDeviceOverviewPayload) -> String? { overview.alertCandidates().first { $0.kind == .bell }?.key }
+
+        func testABellRungWhileWatchedIsDismissedOnTheDevice() async {
+            let clock = ManualVisitClock()
+            let device = FakeAlertDevice(
+                overview: makeOverview(sessions: [makeSession(id: "session-bell", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z")]))
+            let model = makeDeviceModel(device, clock: clock)
+            model.setActiveTerminalSession("session-bell")
+            clock.advance(60)
+            device.setOverview(bellOverview(at: clock.now))
+
+            await model.refresh()
+
+            let key = bellKey(in: device.currentOverview) ?? ""
+            await waitUntilAsync("the watched bell's dismissal reaches the device") { device.commands.contains(.dismissAlerts([key])) }
+            XCTAssertEqual(model.undismissedAlertCount, 0)
+        }
+
+        func testABellRungBeforeTheWatchBeganIsLeftAlone() async {
+            let clock = ManualVisitClock()
+            let device = FakeAlertDevice(overview: bellOverview(at: clock.now))
+            let model = makeDeviceModel(device, clock: clock)
+            let bellRungEarlier = clock.now
+            clock.advance(60)
+            model.setActiveTerminalSession("session-bell")
+            device.setOverview(bellOverview(at: bellRungEarlier))
+
+            await model.refresh()
+            for _ in 0..<50 { await Task.yield() }
+
+            XCTAssertTrue(device.commands.isEmpty, "focusing a session does not clear an alert from a bell it rang earlier")
+        }
+
+        func testABellRungAfterLeavingTheTerminalStillAlerts() async {
+            let clock = ManualVisitClock()
+            let device = FakeAlertDevice(overview: bellOverview(at: clock.now))
+            let model = makeDeviceModel(device, clock: clock)
+            model.setActiveTerminalSession("session-bell")
+            clock.advance(60)
+            model.setActiveTerminalSession(nil)
+            clock.advance(60)
+            device.setOverview(bellOverview(at: clock.now))
+
+            await model.refresh()
+            for _ in 0..<50 { await Task.yield() }
+
+            XCTAssertTrue(device.commands.isEmpty)
+            XCTAssertEqual(model.attentionEvents.map(\.kind), [.bell])
+        }
+
+        // MARK: - Visits reach the session's device
+
+        private func visitOverview() -> SpacesDeviceOverviewPayload {
+            makeOverview(
+                codingAgentRows: [makeAgentRow(id: "agent-a", name: "claude", activityState: .done, updatedAt: "2026-01-01T00:10:00Z")],
+                sessions: [makeSession(id: "session-agent-a", title: "claude", state: .running, updatedAt: "2026-01-01T00:10:00Z")])
+        }
+
+        func testVisitingATerminalWithAFinishedAgentReportsTheVisitToItsDevice() async {
+            let clock = ManualVisitClock()
+            let device = FakeAlertDevice(overview: visitOverview())
+            let model = makeDeviceModel(device, clock: clock)
+
+            model.setActiveTerminalSession("session-agent-a")
+            model.noteTerminalContentShown(sessionID: "session-agent-a")
+            clock.advance(2)
+
+            await waitUntilAsync("the visit reaches the device") { !device.commands.isEmpty }
+            guard case .visit(let sessionID, let seconds, _)? = device.commands.first else { return XCTFail("Expected a visit, got \(device.commands)") }
+            XCTAssertEqual(sessionID, "session-agent-a")
+            XCTAssertEqual(seconds, 2, accuracy: 0.01)
+        }
+
+        func testVisitingATerminalWithNothingToClearSendsNothing() async {
+            let clock = ManualVisitClock()
+            let device = FakeAlertDevice(overview: makeOverview(sessions: [makeSession(id: "session-quiet", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z")]))
+            let model = makeDeviceModel(device, clock: clock)
+
+            model.setActiveTerminalSession("session-quiet")
+            model.noteTerminalContentShown(sessionID: "session-quiet")
+            clock.advance(30)
+            for _ in 0..<50 { await Task.yield() }
+
+            XCTAssertTrue(device.commands.isEmpty)
+        }
+
+        func testVisitingATerminalOnAnOfflineDeviceSendsNothing() async {
+            let clock = ManualVisitClock()
+            let device = FakeAlertDevice(overview: visitOverview())
+            let model = makeDeviceModel(device, clock: clock)
+            model.setOfflineForTesting(true, deviceID: Self.testDeviceID)
+
+            model.setActiveTerminalSession("session-agent-a")
+            model.noteTerminalContentShown(sessionID: "session-agent-a")
+            clock.advance(30)
+            for _ in 0..<50 { await Task.yield() }
+
+            XCTAssertTrue(device.commands.isEmpty)
+        }
+
+        func testABlockedAgentsAlertDoesNotStartAVisit() async {
+            let clock = ManualVisitClock()
+            let device = FakeAlertDevice(
+                overview: makeOverview(
+                    codingAgentRows: [makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")]))
+            let model = makeDeviceModel(device, clock: clock)
+
+            model.setActiveTerminalSession("session-agent-a")
+            model.noteTerminalContentShown(sessionID: "session-agent-a")
+            clock.advance(30)
+            for _ in 0..<50 { await Task.yield() }
+
+            XCTAssertTrue(device.commands.isEmpty, "a visit does not answer a waiting agent")
+        }
+
+        // MARK: - Upgrading from per-phone dismissals
+
+        func testStartupRemovesThePerPhoneDismissalStore() {
+            let suite = "spaces.mobile.tests.legacy-dismissed-alerts"
+            let defaults = UserDefaults(suiteName: suite)!
+            defaults.removePersistentDomain(forName: suite)
+            defer { defaults.removePersistentDomain(forName: suite) }
+            defaults.set(["device-a": ["agent:a|waitingForInput|1"]], forKey: SpacesMobileAppModel.legacyDismissedAlertsDefaultsKey)
+            defaults.set(true, forKey: "unrelated")
+
+            SpacesMobileAppModel.discardLegacyDismissedAlerts(defaults: defaults)
+
+            XCTAssertNil(defaults.object(forKey: SpacesMobileAppModel.legacyDismissedAlertsDefaultsKey))
+            XCTAssertTrue(defaults.bool(forKey: "unrelated"))
+        }
+
         // MARK: - Fixtures
 
         /// An overview whose one session rang its bell at `date`, stamped the way a daemon stamps it.
@@ -1335,32 +1288,7 @@
             }
         }
 
-        /// Lock-guarded overview box so a fake bridge client's `@Sendable` closure can hand back whatever
-        /// overview the test most recently set, letting successive `model.refresh()` calls see different
-        /// payloads (e.g. a workspace going hidden, then visible again).
-        private final class OverviewBox: @unchecked Sendable {
-            private let lock = NSLock()
-            private var overview: SpacesDeviceOverviewPayload
-
-            init(_ overview: SpacesDeviceOverviewPayload) { self.overview = overview }
-
-            func set(_ overview: SpacesDeviceOverviewPayload) {
-                lock.lock()
-                self.overview = overview
-                lock.unlock()
-            }
-
-            func get() -> SpacesDeviceOverviewPayload {
-                lock.lock()
-                defer { lock.unlock() }
-                return overview
-            }
-        }
-
-        /// The fixture device id every `makeModel()` test below runs as the selected device. Never a real
-        /// device's id, so a stray write under it in the real `UserDefaults.standard` dismissed-alerts
-        /// bucket (from `dismissAlert`/`clearAlerts` exercised against this model) is inert; cleaned up by
-        /// `makeModel`'s teardown block regardless.
+        /// The fixture device id every `makeModel()` test below runs as the selected device.
         private static let testDeviceID = "device-a"
 
         private func makeDeviceRecord(id: String) -> SpacesMobilePairedDeviceRecord {
@@ -1380,42 +1308,7 @@
                 ?? SpacesMobileAppModel(settings: settings, bridgeClient: client)
             model.pairedDevices = [makeDeviceRecord(id: Self.testDeviceID)]
             model.activeDeviceID = Self.testDeviceID
-            addTeardownBlock { SpacesMobileDismissedAlertsStore.save([], deviceID: Self.testDeviceID) }
             return model
-        }
-
-        /// Clears the real, on-disk paired-device and dismissed-alerts state the per-device persistence
-        /// tests exercise.
-        private func resetDeviceScopedAlertsState() {
-            for device in SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings()).devices {
-                _ = SpacesMobileDeviceStore.remove(deviceID: device.id, fallbackSettings: SpacesMobileConnectionSettings())
-            }
-            let defaults = UserDefaults.standard
-            for key in [
-                "spaces.mobile.paired-devices", "spaces.mobile.active-device-id", "spaces.mobile.connection-settings",
-                "spaces.mobile.demo-mode-enabled", SpacesMobileDismissedAlertsStore.dismissedIDsKey,
-            ] { defaults.removeObject(forKey: key) }
-        }
-
-        /// Pairs two real devices in the on-disk store and returns their assigned ids.
-        private func seedTwoRealDevices() -> (deviceA: String, deviceB: String) {
-            let stateA = SpacesMobileDeviceStore.upsert(
-                settings: realDeviceSettings(host: "10.0.0.10", fingerprint: "SHA256:device-a", token: "token-a"), name: "Device A")
-            let stateB = SpacesMobileDeviceStore.upsert(
-                settings: realDeviceSettings(host: "10.0.0.11", fingerprint: "SHA256:device-b", token: "token-b"), name: "Device B")
-            guard let deviceA = stateA.devices.first(where: { $0.name == "Device A" })?.id,
-                let deviceB = stateB.devices.first(where: { $0.name == "Device B" })?.id
-            else { fatalError("Expected both seeded devices to be present in the store.") }
-            return (deviceA, deviceB)
-        }
-
-        private func realDeviceSettings(host: String, fingerprint: String, token: String) -> SpacesMobileConnectionSettings {
-            var settings = SpacesMobileConnectionSettings()
-            settings.hosts = [host]
-            settings.port = 47_900
-            settings.certificateFingerprint = fingerprint
-            settings.authToken = token
-            return settings
         }
 
         // `makeOverview`/`makeWorkspace`/`makeAgentRow` live in `SpacesMobileOverviewFixtures.swift`.

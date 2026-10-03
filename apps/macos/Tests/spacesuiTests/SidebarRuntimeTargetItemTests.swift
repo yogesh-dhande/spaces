@@ -215,63 +215,72 @@ import workspacecore
     }
 
     /// One alert entry of each kind a row can own: the exited process, the waiting agent, and a bell on
-    /// the ad hoc terminal's session — mirroring the identities `buildOverviewAlertsGroups` derives.
-    private func alertsGroup(processExitedAt: String, bellSessionID: String = "sess-term") -> AppKitController.AlertsGroup {
-        AppKitController.AlertsGroup(
+    /// the ad hoc terminal's session. The process exit can be marked dismissed the way a device's
+    /// dismissed key marks it, and a Come Back Later mark can be added on the terminal row.
+    private func alertsGroup(
+        processExitedAt: String, bellSessionID: String = "sess-term", dismissProcessExit: Bool = false, terminalMarked: Bool = false
+    ) -> AppKitController.AlertsGroup {
+        var items = [
+            AppKitController.AlertsAttentionEntry(
+                attentionID: "alert:local:process:row-web:\(processExitedAt)", kind: .processExited, alertKey: "process:row-web:\(processExitedAt)",
+                isDismissed: dismissProcessExit, icon: "terminal", iconTint: .terminal, label: "web", detail: "npm run dev", shortcut: "",
+                processStatus: .exited, countsTowardBadge: true, eventDate: nil,
+                focusRequest: .workspaceProcess(workspaceID: "workspace", processID: "proc-web")),
+            AppKitController.AlertsAttentionEntry(
+                attentionID: "alert:local:agent:agent-1:waiting:t1", kind: .agentWaiting, icon: "cpu.fill", iconTint: .warning, label: "claude",
+                detail: nil, shortcut: "", agentStatus: .waiting, countsTowardBadge: true, eventDate: nil,
+                focusRequest: .agentWindow(
+                    AgentWindowRecord(
+                        id: "agent-1", workspaceID: "workspace", provider: .spaces, label: "claude", terminalTrackingID: "sess-agent",
+                        sessionKey: nil, status: .waiting, createdAt: "t1", updatedAt: "t1"))),
+            AppKitController.AlertsAttentionEntry(
+                attentionID: "alert:local:bell:\(bellSessionID):t1", kind: .bell, icon: "terminal", iconTint: .terminal, label: "zsh", detail: nil,
+                shortcut: "", countsTowardBadge: true, eventDate: nil, focusRequest: .terminalSession(workspaceID: "workspace", sessionID: bellSessionID)),
+        ]
+        if terminalMarked {
+            items.append(
+                AppKitController.AlertsAttentionEntry(
+                    attentionID: "alert:local:comebacklater:terminal:term-1", kind: .comeBackLater, alertKey: "comebacklater:terminal:term-1",
+                    icon: "terminal", iconTint: .terminal, label: "zsh", detail: nil, shortcut: "", countsTowardBadge: true, eventDate: nil,
+                    focusRequest: .terminalSession(workspaceID: "workspace", sessionID: "sess-term")))
+        }
+        return AppKitController.AlertsGroup(
             projectName: "project", workspaceID: "workspace", workspaceName: "workspace", workspaceBranch: "main", isFromHiddenWorkspace: false,
-            items: [
-                AppKitController.AlertsAttentionEntry(
-                    attentionID: "alert:local:process:proc-web:\(processExitedAt)", icon: "terminal", iconTint: .terminal, label: "web",
-                    detail: "npm run dev", shortcut: "", processStatus: .exited, countsTowardBadge: true, eventDate: nil,
-                    focusRequest: .workspaceProcess(workspaceID: "workspace", processID: "proc-web")),
-                AppKitController.AlertsAttentionEntry(
-                    attentionID: "alert:local:agent:agent-1:waiting:t1", icon: "cpu.fill", iconTint: .warning, label: "claude", detail: nil,
-                    shortcut: "", agentStatus: .waiting, countsTowardBadge: true, eventDate: nil,
-                    focusRequest: .agentWindow(
-                        AgentWindowRecord(
-                            id: "agent-1", workspaceID: "workspace", provider: .spaces, label: "claude", terminalTrackingID: "sess-agent",
-                            sessionKey: nil, status: .waiting, createdAt: "t1", updatedAt: "t1"))),
-                AppKitController.AlertsAttentionEntry(
-                    attentionID: "alert:local:session:\(bellSessionID):bell:t1", icon: "terminal", iconTint: .terminal, label: "zsh", detail: nil,
-                    shortcut: "", countsTowardBadge: true, eventDate: nil,
-                    focusRequest: .terminalSession(workspaceID: "workspace", sessionID: bellSessionID)),
-            ])
+            items: items)
     }
 
     /// Each row's `undismissedAttentionIDs` carries exactly the alert entries that match its own focus
-    /// identity: the process row gets its exit (and would get a bell on its own session, which this
-    /// fixture has none of), the agent row gets its waiting alert and its own session's bell (none
-    /// here), and the ad hoc terminal row gets only the bell on its session — never another row's.
+    /// identity: the process row gets its exit, the agent row its waiting alert, and the ad hoc terminal
+    /// row only the bell on its session (plus its mark, when it has one), never another row's.
     @Test func rowsCarryOnlyTheirOwnUndismissedAttentionIDs() {
         let items = AppKitController.sidebarRuntimeTargetItems(
             detail: fixtureDetailWithExitedProcess(exitedAt: "2026-08-18T10:00:00Z"), browserSessions: [],
-            alertsGroups: [alertsGroup(processExitedAt: "2026-08-18T10:00:00Z")])
+            alertsGroups: [alertsGroup(processExitedAt: "2026-08-18T10:00:00Z", terminalMarked: true)])
         let byKey = Dictionary(uniqueKeysWithValues: items.map { ($0.key, $0) })
 
-        #expect(byKey["process:proc-web"]?.undismissedAttentionIDs == ["alert:local:process:proc-web:2026-08-18T10:00:00Z"])
+        #expect(byKey["process:proc-web"]?.undismissedAttentionIDs == ["alert:local:process:row-web:2026-08-18T10:00:00Z"])
         #expect(byKey["agent:agent-1"]?.undismissedAttentionIDs == ["alert:local:agent:agent-1:waiting:t1"])
-        #expect(byKey["terminal:sess-term"]?.undismissedAttentionIDs == ["alert:local:session:sess-term:bell:t1"])
+        #expect(
+            byKey["terminal:sess-term"]?.undismissedAttentionIDs == ["alert:local:bell:sess-term:t1", "alert:local:comebacklater:terminal:term-1"])
     }
 
-    /// An undismissed exit alert keeps the process row failed (red); dismissing it — the exact id the
-    /// row reported as undismissed — drops the row to inactive without touching the agent or terminal
-    /// rows' colors, which dismissal never affects.
+    /// An undismissed exit alert keeps the process row failed (red); once the device has dismissed it the
+    /// row drops to inactive without touching the agent or terminal rows' colors, which dismissal never
+    /// affects.
     @Test func dismissingAnExitedProcessAlertDowngradesOnlyThatRowToInactive() {
         let exitedAt = "2026-08-18T10:00:00Z"
         let detail = fixtureDetailWithExitedProcess(exitedAt: exitedAt)
-        let groups = [alertsGroup(processExitedAt: exitedAt)]
 
         let undismissed = Dictionary(
-            uniqueKeysWithValues: AppKitController.sidebarRuntimeTargetItems(detail: detail, browserSessions: [], alertsGroups: groups).map {
-                ($0.key, $0)
-            })
+            uniqueKeysWithValues: AppKitController.sidebarRuntimeTargetItems(
+                detail: detail, browserSessions: [], alertsGroups: [alertsGroup(processExitedAt: exitedAt)]
+            ).map { ($0.key, $0) })
         #expect(undismissed["process:proc-web"]?.attentionStatus == .failed)
         #expect(undismissed["agent:agent-1"]?.attentionStatus == .blocked)
 
-        let dismissedIDs: Set<String> = ["alert:local:process:proc-web:\(exitedAt)"]
         let dismissed = Dictionary(
             uniqueKeysWithValues: AppKitController.sidebarRuntimeTargetItems(
-                detail: detail, browserSessions: [], alertsGroups: groups, dismissedAttentionItemIDs: dismissedIDs
+                detail: detail, browserSessions: [], alertsGroups: [alertsGroup(processExitedAt: exitedAt, dismissProcessExit: true)]
             ).map { ($0.key, $0) })
         #expect(dismissed["process:proc-web"]?.attentionStatus == .inactive)
         #expect(dismissed["process:proc-web"]?.undismissedAttentionIDs == [])
@@ -280,20 +289,16 @@ import workspacecore
         #expect(dismissed["agent:agent-1"]?.undismissedAttentionIDs == ["alert:local:agent:agent-1:waiting:t1"])
     }
 
-    /// A later exit of the same process carries a new `exitedAt`, hence a new alert identity: dismissing
-    /// the earlier exit's alert does not carry forward to it, so the row reads as failed again.
-    @Test func aNewExitCarriesANewAlertIdentityAndReadsFailedAgain() {
-        let firstExitedAt = "2026-08-18T10:00:00Z"
-        let secondExitedAt = "2026-08-18T11:00:00Z"
-        let dismissedIDs: Set<String> = ["alert:local:process:proc-web:\(firstExitedAt)"]
-
+    /// A later exit of the same process carries a new key: the earlier dismissal does not apply to it, so
+    /// the row reads as failed again.
+    @Test func aNewExitCarriesANewAlertKeyAndReadsFailedAgain() {
         let afterSecondExit = Dictionary(
             uniqueKeysWithValues: AppKitController.sidebarRuntimeTargetItems(
-                detail: fixtureDetailWithExitedProcess(exitedAt: secondExitedAt), browserSessions: [],
-                alertsGroups: [alertsGroup(processExitedAt: secondExitedAt)], dismissedAttentionItemIDs: dismissedIDs
+                detail: fixtureDetailWithExitedProcess(exitedAt: "2026-08-18T11:00:00Z"), browserSessions: [],
+                alertsGroups: [alertsGroup(processExitedAt: "2026-08-18T11:00:00Z")]
             ).map { ($0.key, $0) })
         #expect(afterSecondExit["process:proc-web"]?.attentionStatus == .failed)
-        #expect(afterSecondExit["process:proc-web"]?.undismissedAttentionIDs == ["alert:local:process:proc-web:\(secondExitedAt)"])
+        #expect(afterSecondExit["process:proc-web"]?.undismissedAttentionIDs == ["alert:local:process:row-web:2026-08-18T11:00:00Z"])
     }
 
     /// The workspace header rolls up the highest of its rows' colors (`SidebarAttentionStatus.highest`).
@@ -302,16 +307,53 @@ import workspacecore
     @Test func workspaceRollUpDropsToNextHighestOnceTheOnlyFailureIsAcknowledged() {
         let exitedAt = "2026-08-18T10:00:00Z"
         let detail = fixtureDetailWithExitedProcess(exitedAt: exitedAt)
-        let groups = [alertsGroup(processExitedAt: exitedAt)]
 
-        let beforeDismissal = AppKitController.sidebarRuntimeTargetItems(detail: detail, browserSessions: [], alertsGroups: groups)
+        let beforeDismissal = AppKitController.sidebarRuntimeTargetItems(
+            detail: detail, browserSessions: [], alertsGroups: [alertsGroup(processExitedAt: exitedAt)])
         #expect(SidebarAttentionStatus.highest(beforeDismissal.compactMap(\.attentionStatus)) == .failed)
 
         let afterDismissal = AppKitController.sidebarRuntimeTargetItems(
-            detail: detail, browserSessions: [], alertsGroups: groups, dismissedAttentionItemIDs: ["alert:local:process:proc-web:\(exitedAt)"])
-        // The agent's waiting alert (blocked) is the next-highest remaining row once the exit is
-        // acknowledged; nothing else in the fixture outranks it.
+            detail: detail, browserSessions: [], alertsGroups: [alertsGroup(processExitedAt: exitedAt, dismissProcessExit: true)])
         #expect(SidebarAttentionStatus.highest(afterDismissal.compactMap(\.attentionStatus)) == .blocked)
+    }
+
+    /// A row's Come Back Later toggle names the device row it marks and flips with the mark; a row that
+    /// has never started cannot be marked, and a browser session has no row to mark at all.
+    @Test func rowsCarryTheirComeBackLaterToggle() {
+        let detail = fixtureDetailWithExitedProcess(exitedAt: "2026-08-18T10:00:00Z")
+        let marked = Dictionary(
+            uniqueKeysWithValues: AppKitController.sidebarRuntimeTargetItems(
+                detail: detail, browserSessions: [], alertsGroups: [alertsGroup(processExitedAt: "t", terminalMarked: true)]
+            ).map { ($0.key, $0) })
+        #expect(marked["terminal:sess-term"]?.comeBackLater == ComeBackLaterToggle(rowKind: .terminal, rowID: "term-1", isOn: true, hasStarted: true))
+        #expect(marked["terminal:sess-term"]?.comeBackLater?.menuTitle == "Remove from Alerts")
+        #expect(marked["process:proc-web"]?.comeBackLater == ComeBackLaterToggle(rowKind: .process, rowID: "row-web", isOn: false, hasStarted: true))
+        #expect(marked["process:proc-web"]?.comeBackLater?.menuTitle == "Come Back Later")
+        #expect(marked["agent:agent-1"]?.comeBackLater?.rowKind == .agent)
+    }
+
+    @Test func aProcessThatNeverStartedAndABrowserSessionOfferNoToggle() {
+        let byKey = Dictionary(
+            uniqueKeysWithValues: AppKitController.sidebarRuntimeTargetItems(detail: fixtureDetail(), browserSessions: []).map { ($0.key, $0) })
+        #expect(byKey["missing:api"]?.comeBackLater == nil)
+        #expect(byKey["browser:http://localhost:3000"]?.comeBackLater == nil)
+        #expect(byKey["process:proc-web"]?.comeBackLater?.hasStarted == true)
+    }
+
+    /// The menu item flips its title with the mark and is enabled only when the device can act and the row
+    /// has started.
+    @MainActor @Test func theMenuItemFlipsWithTheMarkAndFollowsEnablement() {
+        let off = ComeBackLaterToggle(rowKind: .agent, rowID: "a", isOn: false, hasStarted: true)
+        let on = ComeBackLaterToggle(rowKind: .agent, rowID: "a", isOn: true, hasStarted: true)
+        let notStarted = ComeBackLaterToggle(rowKind: .process, rowID: "p", isOn: false, hasStarted: false)
+        let action = #selector(AppKitController.toggleWorkspaceFocusedPaneComeBackLater(_:))
+
+        #expect(ComeBackLaterToggle.menuItem(off, shortcut: nil, isEnabled: true, target: nil, action: action).title == "Come Back Later")
+        #expect(ComeBackLaterToggle.menuItem(on, shortcut: nil, isEnabled: true, target: nil, action: action).title == "Remove from Alerts")
+        #expect(ComeBackLaterToggle.menuItem(off, shortcut: nil, isEnabled: true, target: nil, action: action).isEnabled)
+        #expect(!ComeBackLaterToggle.menuItem(off, shortcut: nil, isEnabled: false, target: nil, action: action).isEnabled)
+        #expect(!ComeBackLaterToggle.menuItem(notStarted, shortcut: nil, isEnabled: true, target: nil, action: action).isEnabled)
+        #expect(!ComeBackLaterToggle.menuItem(nil, shortcut: nil, isEnabled: true, target: nil, action: action).isEnabled)
     }
 
     @Test func shortcutIndexStopsAfterTen() {

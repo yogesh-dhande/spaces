@@ -155,13 +155,12 @@ extension SpacesMobileWorkspaceRuntimeRow {
     }
 }
 
-// MARK: - Alert dismissal
+// MARK: - Alert dismissal and Come Back Later
 
 /// The long-press "Dismiss Alert" menu item shared by every row family that can carry undismissed
 /// attention events. Dismisses all of the row's undismissed events at once through
-/// `SpacesMobileAppModel.dismissAlerts(for:)` — the same persisted `dismissedAlertIDs` path individual
-/// dismissal from the Alerts tab uses — so the badge and every other surface showing the same source
-/// follow.
+/// `SpacesMobileAppModel.dismissAlerts(for:)`, a single request to the row's device, so the badge and
+/// every other client showing the same source follow.
 struct DismissAlertMenuButton: View {
     let model: SpacesMobileAppModel
     let row: SpacesMobileWorkspaceRuntimeRow
@@ -169,10 +168,31 @@ struct DismissAlertMenuButton: View {
 
     var body: some View {
         Button {
-            model.dismissAlerts(for: row, deviceID: deviceID)
+            Task { await model.dismissAlerts(for: row, deviceID: deviceID) }
         } label: {
             Label("Dismiss Alert", systemImage: "bell.slash")
-        }
+        }.disabled(!model.canChangeAlerts(onDeviceID: deviceID))
+    }
+}
+
+/// The menu item that puts a row in Alerts until the user comes back to it, and takes it out again.
+/// Callers show it only for a row `SpacesMobileAppModel.comeBackLaterTarget(for:)` accepts.
+struct ComeBackLaterMenuButton: View {
+    let model: SpacesMobileAppModel
+    let row: SpacesMobileWorkspaceRuntimeRow
+    let deviceID: String
+    /// Runs after the device confirmed the row is now flagged.
+    var onFlagged: (() -> Void)?
+
+    var body: some View {
+        Button {
+            Task {
+                await model.toggleComeBackLater(for: row, deviceID: deviceID)
+                if model.isComeBackLaterOn(for: row, deviceID: deviceID) { onFlagged?() }
+            }
+        } label: {
+            Label(model.comeBackLaterMenuTitle(for: row, deviceID: deviceID), systemImage: "bell.badge")
+        }.disabled(!model.canChangeAlerts(onDeviceID: deviceID)).accessibilityIdentifier("row.comeBackLater")
     }
 }
 
@@ -204,6 +224,7 @@ extension StatusDot.Kind {
         case .waitingForInput, .bell: self = .waiting
         case .finished: self = .done
         case .exited, .failed: self = .exited
+        case .comeBackLater: self = .comeBackLater
         }
     }
 }

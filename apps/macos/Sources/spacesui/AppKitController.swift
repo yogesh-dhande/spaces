@@ -34,6 +34,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case warning
         /// A coding agent that finished its turn.
         case done
+        /// A coding agent marked Come Back Later: an agent's icon takes its alert's status color.
+        case accent
     }
 
     /// Transitional aliases: the alerts model types are owned by `AlertsController`, but a wide set of
@@ -97,6 +99,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private weak var workspaceFooterPaneLabel: NSTextField?
     /// The footer's brief glyph, which follows the focused pane the same way the label above does.
     private weak var workspaceFooterBriefButton: NSButton?
+    /// The footer's Come Back Later glyph, beside the brief glyph and following the focused pane the same way.
+    private weak var workspaceFooterComeBackLaterButton: NSButton?
     private var workspaceFooterWorkspaceID: String?
     /// What the footer strip currently shows. Non-nil exactly while the strip holds that workspace's
     /// controls: `clearWorkspaceDetailFooter` is the only path that empties the strip, and it clears this.
@@ -191,7 +195,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// read). A row stays pending until every device its panes reference has a loaded
     /// overview, so an offline remote's windows return when the device does.
     var pendingPanelWindowRestores: [SpacesClientDatabase.PanelWindowRecord]?
-    lazy var alerts = AlertsController(host: self) { [unowned self] in try self.clientDatabase() }
+    lazy var alerts = AlertsController(host: self)
+    lazy var terminalVisits = makeTerminalVisitTracker()
     lazy var shortcuts = ShortcutsController(host: self) { [unowned self] in try self.clientDatabase() }
     lazy var automations = AutomationsController(host: self)
     lazy var automationEditor = AutomationEditorController(host: self)
@@ -1280,6 +1285,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 self.attemptDesktopControlRecoveryIfNeeded()
                 self.logHotkeyDebug("app_did_become_active \(self.hotkeyWindowStateSummary())")
                 self.windowFocus.noteAppDidBecomeActive()
+                self.refreshTerminalVisit()
                 // Workspace mode's focused-terminal count only counts while the app is active, so
                 // becoming active can change it with no key-window or content-focus event of its own.
                 self.sidebar.refreshCycleModeRow()
@@ -1299,6 +1305,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 self.logHotkeyDebug("app_did_resign_active \(self.hotkeyWindowStateSummary())")
                 if self.commandPalette.commandPalettePanel?.isVisible == true { self.commandPalette.dismissCommandPalette() }
                 self.windowFocus.noteAppDidResignActive()
+                self.refreshTerminalVisit()
                 // `focusedSessionID()` can still return the same session while inactive (the key
                 // window's first responder does not change), so a bare `noteKeyWindowChanged()` here
                 // would see no change and skip the repaint the row actually needs.
@@ -1676,6 +1683,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .terminal: .systemGreen
         case .warning: SidebarAttentionStatus.blocked.indicatorColor
         case .done: SidebarAttentionStatus.done.indicatorColor
+        case .accent: Theme.accent
         }
     }
 
@@ -3853,6 +3861,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // pane was rendered from stops describing anything on screen and must not be reused to skip a
         // later render.
         if !pane.isAlerts { alerts.invalidateRenderedAlertsDetail() }
+        // A visit follows the workspace the main window shows, so a pane change can start or end one.
+        refreshTerminalVisit()
     }
 
     /// Whether this presentation dismisses the open New Project / New Workspace / project settings
@@ -4678,6 +4688,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         briefButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         briefButton.setAccessibilityIdentifier("workspace-detail-brief-toggle")
         workspaceFooterBriefButton = briefButton
+        let comeBackLaterButton = footerActionButton(
+            symbol: "bell.badge", tooltip: "Come back later", action: #selector(toggleWorkspaceFocusedPaneComeBackLater(_:)))
+        comeBackLaterButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+        comeBackLaterButton.setAccessibilityIdentifier("workspace-detail-come-back-later-toggle")
+        workspaceFooterComeBackLaterButton = comeBackLaterButton
         refreshWorkspaceFooterFocusedPane(workspaceID: workspace.id)
 
         // Everything below writes through the owning daemon, so an unreachable device's footer reads
@@ -4723,6 +4738,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
         }
 
+        footer.addArrangedSubview(comeBackLaterButton)
         footer.addArrangedSubview(briefButton)
         let overflowButton = footerActionButton(symbol: "ellipsis.circle", tooltip: "More actions", action: #selector(showWorkspaceOverflowMenu(_:)))
         overflowButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
@@ -4787,15 +4803,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let info = deviceID(forWorkspaceID: workspaceID).flatMap { panelCoordinator.focusedPaneInfo(deviceID: $0, workspaceID: workspaceID) }
         paneLabel.stringValue = info?.title ?? ""
         paneLabel.isHidden = info == nil
-        refreshWorkspaceFooterBriefToggle()
+        refreshWorkspaceFooterPaneToggles()
     }
 
-    /// Syncs the footer's brief glyph with the focused pane's agent brief. Called with the focused-pane
-    /// label above, and by the panel coordinator on every overview install, which is how a brief
-    /// appearing, changing, or going away reaches the glyph.
-    func refreshWorkspaceFooterBriefToggle() {
-        guard let briefButton = workspaceFooterBriefButton, let workspaceID = workspaceFooterWorkspaceID else { return }
-        briefButton.applyAgentBriefToggleState(focusedPaneBriefToggleState(workspaceID: workspaceID))
+    /// Syncs the footer's brief and Come Back Later glyphs with the focused pane. Called with the
+    /// focused-pane label above, and by the panel coordinator on every overview install, which is how a
+    /// brief or a mark appearing, changing, or going away reaches the glyphs.
+    func refreshWorkspaceFooterPaneToggles() {
+        guard let workspaceID = workspaceFooterWorkspaceID else { return }
+        workspaceFooterBriefButton?.applyAgentBriefToggleState(focusedPaneBriefToggleState(workspaceID: workspaceID))
+        workspaceFooterComeBackLaterButton?.applyComeBackLaterToggle(
+            focusedPaneComeBackLaterToggle(workspaceID: workspaceID), deviceAcceptsActions: deviceAcceptsDaemonActions(forWorkspaceID: workspaceID))
     }
 
     /// Opens the notes editor in a popover anchored to the footer's notes button.
@@ -5770,7 +5788,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// needs nothing from the daemon, so an unreachable device leaves it as it is.
     static func makeWorkspaceOverflowMenu(
         workspaceID: String, path: String, target: AnyObject?, isLocalDevice: Bool, daemonActionsEnabled: Bool, isHomeWorkspace: Bool,
-        briefToggle: AgentBriefToggleState, briefShortcut: HotkeySpec?
+        briefToggle: AgentBriefToggleState, briefShortcut: HotkeySpec?, comeBackLater: ComeBackLaterToggle?, comeBackLaterShortcut: HotkeySpec?
     ) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -5796,6 +5814,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             title: briefToggle.toggleTitle, symbol: "doc.text", action: #selector(AppKitController.toggleWorkspaceFocusedPaneBrief(_:)),
             keyEquivalent: briefKeyEquivalent?.key ?? "", modifiers: briefKeyEquivalent?.modifiers ?? [], identifier: workspaceID,
             isEnabled: briefToggle != .unavailable)
+        // Listed like the brief item so the menu keeps one shape; the mark is a request to the owning
+        // device, so it is also disabled while that device cannot act.
+        menu.addItem(
+            ComeBackLaterToggle.menuItem(
+                comeBackLater, shortcut: comeBackLaterShortcut, isEnabled: daemonActionsEnabled, target: target,
+                action: #selector(AppKitController.toggleWorkspaceFocusedPaneComeBackLater(_:)), identifier: workspaceID))
         menu.addItem(.separator())
         addItem(
             title: "Copy path", symbol: "doc.on.doc", action: #selector(AppKitController.copyDirectoryPath(_:)), keyEquivalent: "", modifiers: [],
@@ -5823,7 +5847,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let menu = Self.makeWorkspaceOverflowMenu(
             workspaceID: workspaceID, path: workspace.dir, target: self, isLocalDevice: isLocalWorkspace(workspace),
             daemonActionsEnabled: deviceAcceptsDaemonActions(forWorkspaceID: workspaceID), isHomeWorkspace: workspace.projectKind == .home,
-            briefToggle: focusedPaneBriefToggleState(workspaceID: workspaceID), briefShortcut: shortcuts.toggleBriefShortcutSpec)
+            briefToggle: focusedPaneBriefToggleState(workspaceID: workspaceID), briefShortcut: shortcuts.toggleBriefShortcutSpec,
+            comeBackLater: focusedPaneComeBackLaterToggle(workspaceID: workspaceID), comeBackLaterShortcut: shortcuts.toggleComeBackLaterShortcutSpec)
         let origin = NSPoint(x: 0, y: sender.bounds.maxY + 4)
         menu.popUp(positioning: nil, at: origin, in: sender)
     }

@@ -39,8 +39,8 @@ struct SidebarRuntimeTargetItem: Hashable, Sendable {
     /// actively working, blocked on input, or finished. Non-agent rows leave this nil.
     let agentActivityState: SpacesDeviceCodingAgentActivityState?
 
-    /// This row's undismissed alert entries (a process exit, an agent waiting/done, a session bell), by
-    /// attention id — empty when the row carries no live alert. Computed once at build time from
+    /// This row's undismissed alert entries (a process exit, an agent waiting/done, a session bell, an
+    /// ended terminal, a Come Back Later mark), by attention id; empty when the row carries no live alert. Computed once at build time from
     /// `AlertsController.rowAlertsAttentionEntries` so the sidebar menu's Dismiss Alert visibility/action
     /// and the color downgrade below share one derivation instead of two.
     let undismissedAttentionIDs: [String]
@@ -51,12 +51,16 @@ struct SidebarRuntimeTargetItem: Hashable, Sendable {
     /// Whether a coding-agent row's agent keeps a brief, which the row marks with a trailing glyph. False
     /// for every other kind.
     let hasBrief: Bool
+    /// The row's Come Back Later toggle, for the context menu. Nil for a row that has no device row to
+    /// mark (a browser session, a configured process that has no row yet).
+    let comeBackLater: ComeBackLaterToggle?
 
     init(
         key: String, title: String, detail: String?, kind: AppKitController.WorkspaceRunShortcutTarget.Kind, runState: SpacesDeviceRunState?,
         shortcutIndex: Int?, sessionID: String?, canRun: Bool, canStop: Bool, canRestart: Bool, processID: String?, processKey: String?,
         processTemplateID: String?, agentID: String?, browserTargetURL: String?, agentActivityState: SpacesDeviceCodingAgentActivityState? = nil,
-        undismissedAttentionIDs: [String] = [], isExitAcknowledged: Bool = false, hasBrief: Bool = false
+        undismissedAttentionIDs: [String] = [], isExitAcknowledged: Bool = false, hasBrief: Bool = false,
+        comeBackLater: ComeBackLaterToggle? = nil
     ) {
         self.key = key
         self.title = title
@@ -77,6 +81,7 @@ struct SidebarRuntimeTargetItem: Hashable, Sendable {
         self.undismissedAttentionIDs = undismissedAttentionIDs
         self.isExitAcknowledged = isExitAcknowledged
         self.hasBrief = hasBrief
+        self.comeBackLater = comeBackLater
     }
 }
 
@@ -109,7 +114,7 @@ enum SidebarAttentionStatus: Int, Hashable, Sendable, Comparable {
             case .running: return .working
             // Dismissing the exit's alert is a per-client acknowledgment of that failure, not a change
             // to what happened, so it drops the row to the same color an unstarted process shows rather
-            // than a distinct "acknowledged failure" color. A later exit carries a new alert identity
+            // than a distinct "acknowledged failure" color. A later exit carries a new alert key
             // (see `isProcessExitAcknowledged`), so it is unacknowledged, and red, again.
             case .exited: return isExitAcknowledged ? .inactive : .failed
             case .notStarted, nil: return .inactive
@@ -148,24 +153,23 @@ enum SidebarRuntimeTargetRenameDestination: Equatable, Sendable {
 
 extension AppKitController {
     /// Builds the sidebar's runtime-target rows for a workspace from its overview detail. `alertsGroups`
-    /// and `dismissedAttentionItemIDs` default to empty for callers that don't need alert-aware rows
-    /// (e.g. building the numbered-shortcut target order); the sidebar's own build threads its live
-    /// alerts groups and the persisted dismissal set through (see `sidebarRuntimeTargetItems(workspaceID:)`).
+    /// defaults to empty for callers that don't need alert-aware rows (e.g. building the numbered-shortcut
+    /// target order); the sidebar's own build threads its live alerts groups through (see
+    /// `sidebarRuntimeTargetItems(workspaceID:)`).
     nonisolated static func sidebarRuntimeTargetItems(
-        detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession], alertsGroups: [AppKitController.AlertsGroup] = [],
-        dismissedAttentionItemIDs: Set<String> = []
+        detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession], alertsGroups: [AppKitController.AlertsGroup] = []
     ) -> [SidebarRuntimeTargetItem] {
         let targets = workspaceShortcutTargets(detail: detail, browserSessions: browserSessions)
         return targets.enumerated().compactMap { offset, target in
             sidebarRuntimeTargetItem(
                 target: target, shortcutIndex: offset + 1 <= 10 ? offset + 1 : nil, detail: detail, browserSessions: browserSessions,
-                alertsGroups: alertsGroups, dismissedAttentionItemIDs: dismissedAttentionItemIDs)
+                alertsGroups: alertsGroups)
         }
     }
 
     nonisolated private static func sidebarRuntimeTargetItem(
         target: WorkspaceRunShortcutTarget, shortcutIndex: Int?, detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession],
-        alertsGroups: [AppKitController.AlertsGroup], dismissedAttentionItemIDs: Set<String>
+        alertsGroups: [AppKitController.AlertsGroup]
     ) -> SidebarRuntimeTargetItem? {
         let key = WindowFocusController.cycleCursorKey(for: target, detail: detail)
         let title = WindowFocusController.focusableWindowName(for: target, detail: detail, browserSessions: browserSessions)
@@ -174,7 +178,14 @@ extension AppKitController {
         func undismissedAttentionIDs(processID: String? = nil, agentID: String? = nil, sessionID: String? = nil) -> [String] {
             AlertsController.rowAlertsAttentionEntries(
                 in: alertsGroups, workspaceID: detail.id, processID: processID, agentID: agentID, sessionID: sessionID
-            ).filter { !dismissedAttentionItemIDs.contains($0.attentionID) }.map(\.attentionID)
+            ).filter { !$0.isDismissed }.map(\.attentionID)
+        }
+        // The row's mark, read from the Come Back Later alert it raises. `hasStarted` follows the row's
+        // run state: a row that has never started has no terminal to come back to.
+        func comeBackLater(rowKind: SpacesDeviceComeBackLaterRowKind, rowID: String, runState: SpacesDeviceRunState) -> ComeBackLaterToggle {
+            let key = SpacesDeviceComeBackLaterFlag.alertKey(rowKind: rowKind, rowID: rowID)
+            let isOn = alertsGroups.first(where: { $0.workspaceID == detail.id })?.items.contains { $0.kind == .comeBackLater && $0.alertKey == key } == true
+            return ComeBackLaterToggle(rowKind: rowKind, rowID: rowID, isOn: isOn, hasStarted: runState != .notStarted)
         }
         switch target.kind {
         case .browser:
@@ -190,13 +201,13 @@ extension AppKitController {
             let isExitAcknowledged =
                 row.runState == .exited
                 && AlertsController.isProcessExitAcknowledged(
-                    processID: processID, workspaceID: detail.id, alertsGroups: alertsGroups, dismissedAttentionItemIDs: dismissedAttentionItemIDs)
+                    processID: processID, workspaceID: detail.id, alertsGroups: alertsGroups)
             return SidebarRuntimeTargetItem(
                 key: key, title: title ?? row.name, detail: nil, kind: .process, runState: row.runState, shortcutIndex: shortcutIndex,
                 sessionID: row.sessionID, canRun: row.canRun, canStop: row.canStop, canRestart: row.canRestart, processID: processID,
                 processKey: row.name, processTemplateID: row.templateID, agentID: nil, browserTargetURL: nil,
                 undismissedAttentionIDs: undismissedAttentionIDs(processID: processID, sessionID: row.sessionID),
-                isExitAcknowledged: isExitAcknowledged)
+                isExitAcknowledged: isExitAcknowledged, comeBackLater: comeBackLater(rowKind: .process, rowID: row.id, runState: row.runState))
         case .window:
             guard let index = target.windowListIndex, detail.terminalRows.indices.contains(index) else { return nil }
             let row = detail.terminalRows[index]
@@ -204,7 +215,8 @@ extension AppKitController {
                 key: key, title: title ?? row.title, detail: row.liveTitle, kind: .window, runState: row.runState, shortcutIndex: shortcutIndex,
                 sessionID: row.sessionID, canRun: false, canStop: row.canStop, canRestart: false, processID: nil, processKey: nil,
                 processTemplateID: nil, agentID: nil, browserTargetURL: nil,
-                undismissedAttentionIDs: undismissedAttentionIDs(sessionID: row.sessionID))
+                undismissedAttentionIDs: undismissedAttentionIDs(sessionID: row.sessionID),
+                comeBackLater: comeBackLater(rowKind: .terminal, rowID: row.id, runState: row.runState))
         case .agent:
             guard let agentWindow = target.agentWindow, let row = detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == agentWindow.id })
             else { return nil }
@@ -212,7 +224,8 @@ extension AppKitController {
                 key: key, title: title ?? row.name, detail: row.liveTitle, kind: .agent, runState: row.runState, shortcutIndex: shortcutIndex,
                 sessionID: row.sessionID, canRun: false, canStop: row.canStop, canRestart: false, processID: nil, processKey: nil,
                 processTemplateID: nil, agentID: agentWindow.id, browserTargetURL: nil, agentActivityState: row.activityState,
-                undismissedAttentionIDs: undismissedAttentionIDs(agentID: agentWindow.id, sessionID: row.sessionID), hasBrief: row.brief != nil)
+                undismissedAttentionIDs: undismissedAttentionIDs(agentID: agentWindow.id, sessionID: row.sessionID), hasBrief: row.brief != nil,
+                comeBackLater: comeBackLater(rowKind: .agent, rowID: row.id, runState: row.runState))
         case .missingConfiguredProcess:
             guard let processKey = target.processKey else { return nil }
             let templateID = detail.config.processes.first {
@@ -231,8 +244,7 @@ extension AppKitController {
     func sidebarRuntimeTargetItems(workspaceID: String) -> [SidebarRuntimeTargetItem] {
         guard let context = windowFocus.focusableWindowContext(workspaceID: workspaceID) else { return [] }
         return Self.sidebarRuntimeTargetItems(
-            detail: context.detail, browserSessions: context.browserSessions, alertsGroups: deviceModel.alertsGroups,
-            dismissedAttentionItemIDs: alerts.dismissedAlertsAttentionItemIDs)
+            detail: context.detail, browserSessions: context.browserSessions, alertsGroups: deviceModel.alertsGroups)
     }
 
     /// The runtime targets' names (what the sidebar rows show) for a workspace's terminal sessions, so
@@ -327,11 +339,10 @@ extension AppKitController {
         }
     }
 
-    /// Dismisses every undismissed alert the row currently owns, one call per id through the same
-    /// entry point the Alerts pane uses, so a sidebar-menu dismissal has exactly the same persisted
-    /// effect (dismissed set, badge, alerts pane refresh) as dismissing from the pane.
+    /// Dismisses every undismissed alert the row currently owns, through the same entry point the Alerts
+    /// pane uses, so the owning device records them and the list follows its answer.
     func dismissSidebarRuntimeTargetAlerts(item: SidebarRuntimeTargetItem) {
-        for attentionID in item.undismissedAttentionIDs { alerts.dismissAlertsAttentionItem(attentionID) }
+        alerts.dismissAlertsAttentionItems(item.undismissedAttentionIDs)
     }
 
     private func runSidebarDeviceMutation(

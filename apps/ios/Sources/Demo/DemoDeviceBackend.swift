@@ -150,6 +150,9 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
         case .stopWorkspaceTerminal(let request):
             return serveStopAgent(workspaceID: request.workspaceID, matches: { $0.sessionID == request.sessionID })
 
+        case .dismissAlerts(let request): return serveDismissAlerts(keys: request.keys)
+        case .setComeBackLater(let request): return serveSetComeBackLater(request)
+
         case .createWorkspace, .createProject, .importProject, .exportProject, .deleteProject, .pair, .requestDaemonRestart, .resolveTerminalLink,
             .readTerminalLinkChunk:
             return reject(Self.unavailableInDemo)
@@ -263,6 +266,37 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
         guard didMatch else { return notFound("agent") }
         commitMutation(workspaceID: workspaceID, processRows: workspace.processRows, codingAgentRows: agentRows, syntheses: [])
         return mutationResponse(message: "Stopped agent.", workspaceID: workspaceID)
+    }
+
+    /// Dismissal and Come Back Later flip in-memory alert state like every other demo mutation, so the
+    /// Alerts tab behaves as it does against a real device. Visits are never sent in Demo Mode.
+    private func serveDismissAlerts(keys: [String]) -> SpacesDeviceAPIResponse {
+        let candidateKeys = Set(overview.alertCandidates().map(\.key))
+        var dismissed = overview.dismissedAlertKeys
+        var flags = overview.comeBackLaterFlags
+        for key in keys {
+            if let reference = SpacesDeviceComeBackLaterFlag.rowReference(fromAlertKey: key) {
+                flags.removeAll { $0.rowKind == reference.rowKind && $0.rowID == reference.rowID }
+            } else if candidateKeys.contains(key), !dismissed.contains(key) {
+                dismissed.append(key)
+            }
+        }
+        commitAlertState(dismissedAlertKeys: dismissed, comeBackLaterFlags: flags)
+        return mutationResponse(message: "Dismissed alerts.", workspaceID: nil)
+    }
+
+    private func serveSetComeBackLater(_ request: SpacesDeviceSetComeBackLaterRequest) -> SpacesDeviceAPIResponse {
+        var flags = overview.comeBackLaterFlags.filter { !($0.rowKind == request.rowKind && $0.rowID == request.rowID) }
+        if request.isOn {
+            flags.append(SpacesDeviceComeBackLaterFlag(rowKind: request.rowKind, rowID: request.rowID, flaggedAt: Self.nowTimestamp()))
+        }
+        commitAlertState(dismissedAlertKeys: overview.dismissedAlertKeys, comeBackLaterFlags: flags)
+        return mutationResponse(message: request.isOn ? "Marked Come Back Later." : "Removed from Alerts.", workspaceID: nil)
+    }
+
+    private func commitAlertState(dismissedAlertKeys: [String], comeBackLaterFlags: [SpacesDeviceComeBackLaterFlag]) {
+        overview = overview.demoReplacingAlertState(dismissedAlertKeys: dismissedAlertKeys, comeBackLaterFlags: comeBackLaterFlags)
+        for subscriber in overviewStreamSubscribers.values { subscriber(overview) }
     }
 
     // MARK: - Session synthesis
@@ -422,7 +456,16 @@ extension SpacesDeviceOverviewPayload {
         // recorded replay or a synthesized row-backed session, so the keep-set is the session ids.
         return SpacesDeviceOverviewPayload(
             projects: projects, workspaces: workspaces, sessions: sessions, retainedTerminalSessionIDs: sessions.map(\.id).sorted(),
-            daemonStatus: daemonStatus)
+            daemonStatus: daemonStatus, dismissedAlertKeys: dismissedAlertKeys, comeBackLaterFlags: comeBackLaterFlags)
+    }
+
+    fileprivate func demoReplacingAlertState(dismissedAlertKeys: [String], comeBackLaterFlags: [SpacesDeviceComeBackLaterFlag])
+        -> SpacesDeviceOverviewPayload
+    {
+        SpacesDeviceOverviewPayload(
+            projects: projects, workspaces: workspaces, sessions: sessions, retainedTerminalSessionIDs: retainedTerminalSessionIDs,
+            workspaceIDsWithTeardownInFlight: workspaceIDsWithTeardownInFlight, daemonStatus: daemonStatus, automations: automations,
+            automationRuns: automationRuns, dismissedAlertKeys: dismissedAlertKeys, comeBackLaterFlags: comeBackLaterFlags)
     }
 }
 

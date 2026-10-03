@@ -25,10 +25,9 @@ struct SpacesMobileAutomationRunRow: Identifiable, Equatable, Sendable {
 /// cross-device, newest-first list (mirroring the Mac's synthetic "Automations" alerts group:
 /// `AutomationsViewModel.alertEntries` / `AppKitController.alertsGroups`) rather than a band of its own.
 struct SpacesMobileAutomationAlertEntry: Identifiable, Equatable, Sendable {
-    /// Stable dismissal identity within this entry's own device: the same string
-    /// `SpacesMobileDismissedAlertsStore` has always persisted in a device's bucket, unprefixed, so a
-    /// dismissal made before entries carried a device id still suppresses its entry.
-    let eventKey: String
+    /// The device's own alert key for this run (`SpacesDeviceAlertCandidate.key`), the identity its
+    /// dismissal is recorded under.
+    let key: String
     let deviceID: String
     let automationName: String
     let runID: String
@@ -42,9 +41,8 @@ struct SpacesMobileAutomationAlertEntry: Identifiable, Equatable, Sendable {
     /// Whether this entry's device is currently offline; see `SpacesMobileAttentionEvent.isDeviceOffline`.
     let isDeviceOffline: Bool
 
-    /// `Identifiable` conformance, qualified by device; see `SpacesMobileAttentionEvent.id`'s doc
-    /// comment for why `eventKey` alone is not enough once the list spans every paired device.
-    var id: String { "\(deviceID)|\(eventKey)" }
+    /// `Identifiable` conformance, qualified by device; see `SpacesMobileAttentionEvent.id`.
+    var id: String { "\(deviceID)|\(key)" }
 
     /// "Automation" or "Automation · device": automation runs are workspace-less, so this stands in for
     /// the project/workspace text every other Alerts row shows, mirroring the Mac's synthetic
@@ -341,7 +339,7 @@ enum SpacesMobileAutomationAlerts {
             return status == .failed || status == .timedOut
         }.map { run in
             SpacesMobileAutomationAlertEntry(
-                eventKey: "alert:automationrun:\(run.id):\(run.status)", deviceID: deviceID, automationName: run.automationName ?? "Automation",
+                key: "automationrun:\(run.id):\(run.status)", deviceID: deviceID, automationName: run.automationName ?? "Automation",
                 runID: run.id, status: run.status, date: TerminalSessionTimestamp.date(from: run.endedAt ?? run.createdAt), deviceText: deviceText,
                 isDeviceOffline: isDeviceOffline)
         }.sorted { lhs, rhs in

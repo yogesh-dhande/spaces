@@ -78,7 +78,7 @@ const concepts: { name: string; description: string; href: string }[] = [
   },
   {
     name: "Alert",
-    description: "A row for something that needs you: a blocked or finished agent, an exited process, a bell, or a failed automation run.",
+    description: "A row for something that needs you: a blocked or finished agent, an exited process or terminal, a bell, a failed automation run, or a terminal you marked to come back to.",
     href: "/docs/alerts",
   },
   {

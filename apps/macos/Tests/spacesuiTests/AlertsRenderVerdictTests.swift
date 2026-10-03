@@ -13,12 +13,12 @@ import workspacecore
         attentionID: String = "alert:local:session:s1:bell:t", icon: String = "terminal", iconTint: AppKitController.AlertsIconTint = .terminal,
         shortcutIndex: Int? = 1, processStatus: RunningProcessState? = nil, agentStatus: AgentWindowStatus? = nil,
         focusRequestKey: String? = "session:ws:s1", hasTitle: Bool = true, projectName: String = "Project", isAutomationsRow: Bool = false,
-        workspaceName: String = "feature", deviceText: String? = nil, isOffline: Bool = false
+        workspaceName: String = "feature", deviceText: String? = nil, isOffline: Bool = false, canDismiss: Bool = true
     ) -> Signature.Row {
         Signature.Row(
             attentionID: attentionID, icon: icon, iconTint: iconTint, shortcutIndex: shortcutIndex, processStatus: processStatus,
             agentStatus: agentStatus, focusRequestKey: focusRequestKey, hasTitle: hasTitle, projectName: projectName,
-            isAutomationsRow: isAutomationsRow, workspaceName: workspaceName, deviceText: deviceText, isOffline: isOffline)
+            isAutomationsRow: isAutomationsRow, workspaceName: workspaceName, deviceText: deviceText, isOffline: isOffline, canDismiss: canDismiss)
     }
 
     private func signature(rows: [Signature.Row], text: [Signature.RowText], showsDeviceColumn: Bool = false) -> Signature {
@@ -107,6 +107,9 @@ import workspacecore
                 rendered: rendered, refreshed: signature(rows: [row(focusRequestKey: "session:ws:s2")], text: unchangedText)) == .structural)
         #expect(
             AlertsController.alertsRenderVerdict(rendered: rendered, refreshed: signature(rows: [row(isOffline: true)], text: unchangedText))
+                == .structural)
+        #expect(
+            AlertsController.alertsRenderVerdict(rendered: rendered, refreshed: signature(rows: [row(canDismiss: false)], text: unchangedText))
                 == .structural)
         #expect(
             AlertsController.alertsRenderVerdict(rendered: rendered, refreshed: signature(rows: [row(workspaceName: "renamed")], text: unchangedText))

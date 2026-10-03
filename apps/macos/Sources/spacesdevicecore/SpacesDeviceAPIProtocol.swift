@@ -704,11 +704,18 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
     /// terminal runs (see `SpacesDeviceOverviewBuilder` for the window size), newest first. Recent
     /// failed/timed-out runs are identifiable here so clients can derive alert entries.
     public let automationRuns: [TerminalServiceAutomationRunSummary]
+    /// Keys of the alerts the user dismissed on this device (see `SpacesDeviceAlertCandidate.key`), so a
+    /// dismissal made on one client hides the alert on every client. Only keys that are still alert
+    /// candidates of this overview are published.
+    public let dismissedAlertKeys: [String]
+    /// Come Back Later flags on rows this overview still lists.
+    public let comeBackLaterFlags: [SpacesDeviceComeBackLaterFlag]
 
     public init(
         projects: [SpacesDeviceProjectSummary] = [], workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary],
         retainedTerminalSessionIDs: [String] = [], workspaceIDsWithTeardownInFlight: [String] = [], daemonStatus: TerminalServiceDaemonStatus,
-        automations: [TerminalServiceAutomationSummary] = [], automationRuns: [TerminalServiceAutomationRunSummary] = []
+        automations: [TerminalServiceAutomationSummary] = [], automationRuns: [TerminalServiceAutomationRunSummary] = [],
+        dismissedAlertKeys: [String] = [], comeBackLaterFlags: [SpacesDeviceComeBackLaterFlag] = []
     ) {
         self.projects = projects
         self.workspaces = workspaces
@@ -718,6 +725,8 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
         self.daemonStatus = daemonStatus
         self.automations = automations
         self.automationRuns = automationRuns
+        self.dismissedAlertKeys = dismissedAlertKeys
+        self.comeBackLaterFlags = comeBackLaterFlags
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -729,6 +738,8 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
         case daemonStatus
         case automations
         case automationRuns
+        case dismissedAlertKeys
+        case comeBackLaterFlags
     }
 
     /// Custom decode so an overview from a daemon that predates a given field (projects predates
@@ -746,6 +757,8 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
         daemonStatus = try container.decode(TerminalServiceDaemonStatus.self, forKey: .daemonStatus)
         automations = try container.decodeIfPresent([TerminalServiceAutomationSummary].self, forKey: .automations) ?? []
         automationRuns = try container.decodeIfPresent([TerminalServiceAutomationRunSummary].self, forKey: .automationRuns) ?? []
+        dismissedAlertKeys = try container.decodeIfPresent([String].self, forKey: .dismissedAlertKeys) ?? []
+        comeBackLaterFlags = try container.decodeIfPresent([SpacesDeviceComeBackLaterFlag].self, forKey: .comeBackLaterFlags) ?? []
     }
 }
 
@@ -2643,6 +2656,11 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case stopCodingAgent(SpacesDeviceCodingAgentMutationRequest)
     /// Renames a coding-agent row whose name lives on its session rather than in the workspace config.
     case renameAgentSession(SpacesDeviceAgentSessionRenameRequest)
+    /// Dismisses alerts on the device so the dismissal reaches every client; see `SpacesDeviceDismissAlertsRequest`.
+    case dismissAlerts(SpacesDeviceDismissAlertsRequest)
+    /// Reports that the user stayed on a terminal; see `SpacesDeviceVisitTerminalSessionRequest`.
+    case visitTerminalSession(SpacesDeviceVisitTerminalSessionRequest)
+    case setComeBackLater(SpacesDeviceSetComeBackLaterRequest)
     case state(SpacesDeviceTerminalSessionRequest)
     case terminalControl(SpacesDeviceTerminalControlRequest)
     case terminalPasteImage(SpacesDeviceTerminalPasteImageRequest)
@@ -2787,6 +2805,9 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .restartWorkspaceProcess: "restartWorkspaceProcess"
         case .stopCodingAgent: "stopCodingAgent"
         case .renameAgentSession: "renameAgentSession"
+        case .dismissAlerts: "dismissAlerts"
+        case .visitTerminalSession: "visitTerminalSession"
+        case .setComeBackLater: "setComeBackLater"
         case .state: "state"
         case .terminalControl(let payload): payload.action.rawValue
         case .terminalPasteImage: "terminalPasteImage"
@@ -2989,6 +3010,9 @@ extension SpacesDeviceAPICommand: Codable {
         case restartWorkspaceProcess
         case stopCodingAgent
         case renameAgentSession
+        case dismissAlerts
+        case visitTerminalSession
+        case setComeBackLater
         case state
         case terminalControl
         case terminalPasteImage
@@ -3093,6 +3117,9 @@ extension SpacesDeviceAPICommand: Codable {
             self = .restartWorkspaceProcess(try container.decode(SpacesDeviceWorkspaceProcessMutationRequest.self, forKey: key))
         case .stopCodingAgent: self = .stopCodingAgent(try container.decode(SpacesDeviceCodingAgentMutationRequest.self, forKey: key))
         case .renameAgentSession: self = .renameAgentSession(try container.decode(SpacesDeviceAgentSessionRenameRequest.self, forKey: key))
+        case .dismissAlerts: self = .dismissAlerts(try container.decode(SpacesDeviceDismissAlertsRequest.self, forKey: key))
+        case .visitTerminalSession: self = .visitTerminalSession(try container.decode(SpacesDeviceVisitTerminalSessionRequest.self, forKey: key))
+        case .setComeBackLater: self = .setComeBackLater(try container.decode(SpacesDeviceSetComeBackLaterRequest.self, forKey: key))
         case .state: self = .state(try container.decode(SpacesDeviceTerminalSessionRequest.self, forKey: key))
         case .terminalControl: self = .terminalControl(try container.decode(SpacesDeviceTerminalControlRequest.self, forKey: key))
         case .terminalPasteImage: self = .terminalPasteImage(try container.decode(SpacesDeviceTerminalPasteImageRequest.self, forKey: key))
@@ -3200,6 +3227,9 @@ extension SpacesDeviceAPICommand: Codable {
         case .restartWorkspaceProcess(let payload): try container.encode(payload, forKey: .restartWorkspaceProcess)
         case .stopCodingAgent(let payload): try container.encode(payload, forKey: .stopCodingAgent)
         case .renameAgentSession(let payload): try container.encode(payload, forKey: .renameAgentSession)
+        case .dismissAlerts(let payload): try container.encode(payload, forKey: .dismissAlerts)
+        case .visitTerminalSession(let payload): try container.encode(payload, forKey: .visitTerminalSession)
+        case .setComeBackLater(let payload): try container.encode(payload, forKey: .setComeBackLater)
         case .state(let payload): try container.encode(payload, forKey: .state)
         case .terminalControl(let payload): try container.encode(payload, forKey: .terminalControl)
         case .terminalPasteImage(let payload): try container.encode(payload, forKey: .terminalPasteImage)

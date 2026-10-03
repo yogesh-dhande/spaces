@@ -245,7 +245,7 @@ extension CommandPaletteController {
     nonisolated private static func buildCommandPaletteAlertsItems(alertsGroups: [AppKitController.AlertsGroup]) -> [CommandPaletteItem] {
         alertsGroups.filter { !$0.isFromHiddenWorkspace }.flatMap { group in
             group.items.compactMap { entry in
-                guard let focusRequest = entry.focusRequest else { return nil }
+                guard !entry.isDismissed, let focusRequest = entry.focusRequest else { return nil }
                 let kind = commandPaletteKind(
                     focusRequest: focusRequest, fallbackIcon: entry.icon, processStatus: entry.processStatus, agentStatus: entry.agentStatus)
                 let status: CommandPaletteItem.Status =
@@ -264,21 +264,19 @@ extension CommandPaletteController {
     }
 
     nonisolated static func buildCommandPaletteItems(
-        overview: SpacesDeviceOverviewPayload, alertsGroups: [AppKitController.AlertsGroup] = [], dismissedAttentionItemIDs: Set<String> = []
+        overview: SpacesDeviceOverviewPayload, alertsGroups: [AppKitController.AlertsGroup] = []
     ) -> [CommandPaletteItem] {
         var items: [CommandPaletteItem] = buildCommandPaletteAlertsItems(alertsGroups: alertsGroups)
-        items.append(
-            contentsOf: deviceCommandPaletteWorkspaceItems(
-                from: overview, alertsGroups: alertsGroups, dismissedAttentionItemIDs: dismissedAttentionItemIDs))
+        items.append(contentsOf: deviceCommandPaletteWorkspaceItems(from: overview, alertsGroups: alertsGroups))
         return items
     }
 
-    /// `alertsGroups`/`dismissedAttentionItemIDs` default to empty for callers (tests, session-picker
-    /// item construction) that don't need alert-aware status; production palette loads always pass the
-    /// live values so an acknowledged process exit reads as idle here the same way it does in the sidebar.
+    /// `alertsGroups` defaults to empty for callers (tests, session-picker item construction) that don't
+    /// need alert-aware status; production palette loads always pass the live groups so an acknowledged
+    /// process exit reads as idle here the same way it does in the sidebar.
     nonisolated static func deviceCommandPaletteWorkspaceItems(
         from overview: SpacesDeviceOverviewPayload, deviceID: String = SpacesDeviceRecord.localDeviceID,
-        alertsGroups: [AppKitController.AlertsGroup] = [], dismissedAttentionItemIDs: Set<String> = []
+        alertsGroups: [AppKitController.AlertsGroup] = []
     ) -> [CommandPaletteItem] {
         let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: deviceID)
         var items: [CommandPaletteItem] = []
@@ -320,8 +318,7 @@ extension CommandPaletteController {
                         // Same downgrade the sidebar row applies: an acknowledged exit reads as idle here
                         // rather than exited, until the process exits again with a new alert identity.
                         let isAcknowledged = AlertsController.isProcessExitAcknowledged(
-                            processID: processID, workspaceID: workspace.id, alertsGroups: alertsGroups,
-                            dismissedAttentionItemIDs: dismissedAttentionItemIDs)
+                            processID: processID, workspaceID: workspace.id, alertsGroups: alertsGroups)
                         let status: CommandPaletteItem.Status = isAcknowledged ? .idle : .process(process.status)
                         items.append(
                             CommandPaletteItem(
@@ -397,20 +394,18 @@ extension CommandPaletteController {
     }
 
     func loadCommandPaletteItemsSnapshot() async -> Result<[CommandPaletteItem], Error> {
-        await Self.commandPaletteItemsSnapshot(
-            alertsGroups: deviceModel.alertsGroups, dismissedAttentionItemIDs: alerts.dismissedAlertsAttentionItemIDs)
+        await Self.commandPaletteItemsSnapshot(alertsGroups: deviceModel.alertsGroups)
     }
 
-    nonisolated private static func commandPaletteItemsSnapshot(alertsGroups: [AppKitController.AlertsGroup], dismissedAttentionItemIDs: Set<String>)
-        async -> Result<[CommandPaletteItem], Error>
-    {
+    nonisolated private static func commandPaletteItemsSnapshot(alertsGroups: [AppKitController.AlertsGroup]) async -> Result<
+        [CommandPaletteItem], Error
+    > {
         await Task.detached(priority: .userInitiated) {
             do {
                 let localOverview = try SpacesDeviceClient.localOverview(
                     database: SpacesClientDatabase.defaultDatabase(), clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
                 return .success(
-                    buildCommandPaletteItems(
-                        overview: localOverview.overview, alertsGroups: alertsGroups, dismissedAttentionItemIDs: dismissedAttentionItemIDs))
+                    buildCommandPaletteItems(overview: localOverview.overview, alertsGroups: alertsGroups))
             } catch { return .failure(error) }
         }.value
     }

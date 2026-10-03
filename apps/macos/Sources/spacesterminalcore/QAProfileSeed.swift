@@ -80,7 +80,7 @@ public enum QAProfileSeed {
     /// `SpacesClientDatabase.currentVersion`, mirrored because `spacesclientcore` depends on this module
     /// rather than the other way around. `QAProfileSeedTests` asserts the two are equal, so a bump there
     /// fails a test here instead of drifting.
-    static let supportedClientSchemaVersion = 4
+    static let supportedClientSchemaVersion = 5
 
     /// Refuses a snapshot whose schema is newer than this checkout knows.
     ///

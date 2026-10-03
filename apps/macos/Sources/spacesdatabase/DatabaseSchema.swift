@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 25
+    public static let currentVersion = 26
 
     /// The coding-agent orchestration watch graph, `agent_subscriptions`. The subscriber key is a terminal
     /// session id (a subscriber may be a plain terminal with no agent row), and the target is the agent
@@ -902,6 +902,28 @@ public enum DatabaseSchema {
                         """)
             }
         },
+        // Adds the device-held alert state: the alerts the user dismissed and the rows they flagged to come
+        // back to, so both reach every client through the overview instead of living on one client. Both
+        // tables are new, so existing data is untouched; the IF NOT EXISTS guards make a retry after a
+        // half-applied step land on the same schema.
+        DatabaseMigrationStep(fromVersion: 25, toVersion: 26, description: "Hold alert dismissals and Come Back Later flags", requiresBackup: true) {
+            handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS alert_dismissals (
+                      alert_key TEXT PRIMARY KEY NOT NULL,
+                      dismissed_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS come_back_later_flags (
+                      row_kind TEXT NOT NULL,
+                      row_id TEXT NOT NULL,
+                      flagged_at TEXT NOT NULL,
+                      PRIMARY KEY (row_kind, row_id)
+                    );
+                    """)
+        },
     ]
 
     /// The persisted final-render state of a session, one row per session. `has_final_render` stores
@@ -962,6 +984,24 @@ public enum DatabaseSchema {
               captured_at TEXT NOT NULL,
               automation_id TEXT,
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+            );
+        """
+
+    /// Alert state the device's daemon holds for every client: `alert_dismissals` records the alert keys
+    /// the user dismissed, and `come_back_later_flags` the rows the user marked to return to. Neither
+    /// references a workspace or row table: a dismissal names a derived alert key, and a flag outlives
+    /// the row's session, so the daemon decides what is still meaningful when it builds the overview.
+    static let alertStateSQL = """
+            CREATE TABLE IF NOT EXISTS alert_dismissals (
+              alert_key TEXT PRIMARY KEY NOT NULL,
+              dismissed_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS come_back_later_flags (
+              row_kind TEXT NOT NULL,
+              row_id TEXT NOT NULL,
+              flagged_at TEXT NOT NULL,
+              PRIMARY KEY (row_kind, row_id)
             );
         """
 
@@ -1289,6 +1329,8 @@ public enum DatabaseSchema {
             \(automationRunsSQL)
 
             \(restorableSessionsSQL)
+
+            \(alertStateSQL)
 
             CREATE TABLE IF NOT EXISTS migration_state (
               current_version INTEGER NOT NULL

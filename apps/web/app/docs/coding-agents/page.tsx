@@ -63,7 +63,8 @@ export default function CodingAgentsDocsPage() {
           </li>
           <li>
             • <strong>Done</strong> (blue): the agent finished a turn. Stays in Alerts and the Dock
-            badge until you dismiss it.
+            badge until you dismiss it or{" "}
+            <DocLink href="/docs/alerts#visiting">visit its terminal</DocLink>.
           </li>
           <li>
             • <strong>Idle</strong> (gray): not doing anything at the moment, whether it is sitting at

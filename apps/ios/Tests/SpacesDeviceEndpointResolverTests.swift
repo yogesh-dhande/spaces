@@ -151,7 +151,7 @@
 
             let start = ContinuousClock.now
             do {
-                _ = try await resolver.connect(timeout: .seconds(3), queue: .main)
+                _ = try await resolver.connect(timeout: .seconds(20), queue: .main)
                 XCTFail("expected transportAuthenticationFailed")
             } catch SpacesDeviceAPIClientError.transportAuthenticationFailed {
                 // Expected.
@@ -160,7 +160,10 @@
             // A certificate rejection must surface without waiting out the per-candidate timeout budget:
             // Network.framework parks a rejected pin in `.waiting` and keeps redialing, so `waitUntilReady`
             // has to end the wait on the verify block's recorded verdict rather than idle out the budget.
-            XCTAssertLessThan(elapsed, .seconds(2))
+            // The budget is wide because the handshake alone can take seconds while verify.sh's coverage
+            // run saturates the machine; a 3 s budget timed out first and read as unreachable. The bound
+            // stays at half the budget, so idling it out still fails.
+            XCTAssertLessThan(elapsed, .seconds(10))
         }
 
         /// `SpacesDeviceAPIClient.resetEndpointResolution()` — the foreground LAN re-preference — must

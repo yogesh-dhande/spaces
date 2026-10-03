@@ -639,6 +639,63 @@
 
         /// The names the seeded workspace's coding-agent rows carry in a response's overview — what every
         /// client renders for those rows.
+        /// A dismissal made through one client request is part of the overview any other client reads, and a
+        /// Come Back Later flag on a row is too; clearing the flag by dismissing its alert key removes it.
+        func testDismissalsAndFlagsReachEveryClientsOverview() throws {
+            try withTemporaryProfile { _ in
+                let agent = try seedAgentSession(
+                    terminalSessionID: "agent-session", label: "Claude Code CLI", status: .done, brief: nil, signalAt: nil)
+                let (server, client, clientApp, token) = try startServerAndClient()
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+                func overview() throws -> SpacesDeviceOverviewPayload {
+                    try XCTUnwrap(
+                        try client.send(SpacesDeviceAPIRequest(command: .overview, authToken: token, clientApp: clientApp)).overview)
+                }
+                let doneKey = "agent:agent:\(agent.id):done:\(agent.updatedAt)"
+                XCTAssertEqual(try overview().alertCandidates().map(\.key), [doneKey])
+                XCTAssertTrue(try overview().dismissedAlertKeys.isEmpty)
+
+                let dismissed = try client.send(
+                    SpacesDeviceAPIRequest(command: .dismissAlerts(.init(keys: [doneKey])), authToken: token, clientApp: clientApp))
+                XCTAssertTrue(dismissed.ok, dismissed.message)
+                XCTAssertEqual(dismissed.overview?.dismissedAlertKeys, [doneKey])
+                XCTAssertEqual(try overview().dismissedAlertKeys, [doneKey])
+
+                let rowID = "agent:\(agent.id)"
+                let flagged = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .setComeBackLater(.init(rowKind: .agent, rowID: rowID, isOn: true)), authToken: token, clientApp: clientApp))
+                XCTAssertTrue(flagged.ok, flagged.message)
+                XCTAssertEqual(try overview().comeBackLaterFlags.map(\.rowID), [rowID])
+
+                let cleared = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .dismissAlerts(.init(keys: ["comebacklater:agent:\(rowID)"])), authToken: token, clientApp: clientApp))
+                XCTAssertTrue(cleared.ok, cleared.message)
+                XCTAssertTrue(try overview().comeBackLaterFlags.isEmpty)
+            }
+        }
+
+        func testFlaggingAnUnknownRowFailsLoudly() throws {
+            try withTemporaryProfile { _ in
+                try seedAgentSession(terminalSessionID: "agent-session", label: "Claude Code CLI", status: .idle, brief: nil, signalAt: nil)
+                let (server, client, clientApp, token) = try startServerAndClient()
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+                let response = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .setComeBackLater(.init(rowKind: .agent, rowID: "agent:ghost", isOn: true)), authToken: token,
+                        clientApp: clientApp))
+                XCTAssertFalse(response.ok)
+                XCTAssertTrue(response.message.contains("agent:ghost"), response.message)
+            }
+        }
+
         private func codingAgentRowNames(_ response: SpacesDeviceAPIResponse) -> [String] {
             response.overview?.workspaces.first(where: { $0.id == "workspace-1" })?.codingAgentRows.map(\.name) ?? []
         }

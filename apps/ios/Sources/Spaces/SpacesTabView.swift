@@ -447,7 +447,7 @@ struct SpacesTabView: View {
     private func hasContextMenu(_ row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
         guard row.canRun || row.canStop || row.canRestart || model.canRename(row: row) else {
             guard let activeDeviceID = model.activeDeviceID else { return false }
-            return model.hasUndismissedAlerts(for: row, deviceID: activeDeviceID)
+            return model.hasDismissableAlerts(for: row, deviceID: activeDeviceID) || model.comeBackLaterTarget(for: row) != nil
         }
         return true
     }
@@ -520,6 +520,9 @@ struct SpacesTabView: View {
     }
 
     @ViewBuilder private func runtimeContextMenu(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
+        if let activeDeviceID = model.activeDeviceID, model.comeBackLaterTarget(for: row) != nil {
+            ComeBackLaterMenuButton(model: model, row: row, deviceID: activeDeviceID)
+        }
         if row.canRun {
             Button {
                 pendingTerminalLaunch = PendingTerminalLaunch(row: row, action: .run)
@@ -548,7 +551,7 @@ struct SpacesTabView: View {
                 Label("Rename", systemImage: "pencil")
             }.disabled(model.isMutating)
         }
-        if let activeDeviceID = model.activeDeviceID, model.hasUndismissedAlerts(for: row, deviceID: activeDeviceID) {
+        if let activeDeviceID = model.activeDeviceID, model.hasDismissableAlerts(for: row, deviceID: activeDeviceID) {
             DismissAlertMenuButton(model: model, row: row, deviceID: activeDeviceID)
         }
     }

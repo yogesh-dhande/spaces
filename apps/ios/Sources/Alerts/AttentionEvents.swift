@@ -3,7 +3,8 @@ import spacesdevicecore
 import spacesterminalcore
 
 /// One attention-worthy state change derived from the overview payload: an agent waiting for
-/// input, an agent that finished, or an exited/failed process or terminal.
+/// input, an agent that finished, an exited/failed process or terminal, a bell, or a row marked Come Back
+/// Later.
 struct SpacesMobileAttentionEvent: Identifiable, Equatable, Sendable {
     enum Kind: String, Sendable {
         case waitingForInput
@@ -11,8 +12,14 @@ struct SpacesMobileAttentionEvent: Identifiable, Equatable, Sendable {
         case exited
         case failed
         case bell
+        case comeBackLater
     }
 
+    /// The device's own alert key (`SpacesDeviceAlertCandidate.key`): the identity its dismissal is
+    /// recorded under, shared by every client of that device.
+    let key: String
+    /// The row-family id (`agent:`, `process:`, `terminal:`) or `session:` id of the thing this event is
+    /// about; see `SpacesMobileWorkspaceRuntimeRow.matches`.
     let sourceID: String
     let kind: Kind
     let date: Date
@@ -30,18 +37,10 @@ struct SpacesMobileAttentionEvent: Identifiable, Equatable, Sendable {
     /// re-deriving it from `deviceText`, which is nil whenever the device segment itself is hidden.
     let isDeviceOffline: Bool
 
-    /// Stable dismissal identity within this event's own device: the same source in the same state at
-    /// the same time stays dismissed across refreshes; a new state change mints a new identity. This is
-    /// exactly what `SpacesMobileDismissedAlertsStore` persists in a device's own bucket, unprefixed: the
-    /// same string this type has always used, so a dismissal made before events carried a device id still
-    /// suppresses its event.
-    var eventKey: String { "\(sourceID)|\(kind.rawValue)|\(date.timeIntervalSinceReferenceDate)" }
-
     /// `Identifiable` conformance for SwiftUI (`ForEach`, the dismiss button's accessibility id, the
-    /// terminal navigation route): qualified by device, unlike `eventKey`, because the Alerts tab lists
-    /// every paired device's events in one flat list and two devices' events could otherwise share an
-    /// `eventKey` shape.
-    var id: String { "\(deviceID)|\(eventKey)" }
+    /// terminal navigation route): qualified by device, unlike `key`, because the Alerts tab lists every
+    /// paired device's events in one flat list.
+    var id: String { "\(deviceID)|\(key)" }
 
     /// "project / workspace" or "project / workspace · device": the row's detail line. The status dot
     /// already carries the event's kind, so this line carries identity instead of a status label.
@@ -71,9 +70,9 @@ struct SpacesMobileTerminalWatchWindow: Equatable, Sendable {
     }
 }
 
-/// Pure derivation of attention events from an overview payload. All recency comes from the
-/// payload's ISO-8601 fields (`updatedAt`, `exitedAt`); sources without a usable timestamp are
-/// skipped rather than dated with a synthesized time.
+/// Pure derivation of attention events from an overview payload, on top of the shared alert candidates
+/// (`SpacesDeviceOverviewPayload.alertCandidates()`). The device decides what is dismissed and which flags
+/// exist; this decides only what the user can see on this phone.
 enum SpacesMobileAttention {
     /// Slack added to both ends of a watch window when deciding whether a bell rang inside it. `bellAt`
     /// comes from the daemon's clock while the window comes from this phone's, so an exact comparison
@@ -86,137 +85,111 @@ enum SpacesMobileAttention {
     /// - Parameters:
     ///   - deviceID/deviceText: stamped onto every event this call produces; see
     ///     `SpacesMobileAttentionEvent.deviceText`. `deviceText` is nil to hide the device segment.
-    ///   - focusedSessionID: the session the user is watching right now, whose bell is happening in front
-    ///     of them rather than being something to alert about.
-    ///   - watchWindowsBySessionID: the user's recent watches of each recently watched session. A bell for
-    ///     the focused session is excluded live by `focusedSessionID` above; once that session stops being
-    ///     focused, these remembered windows keep excluding a bell that rang while it still was, since a
-    ///     bell inside any of them is one the user already saw ring in the terminal itself.
-    ///   - includingHiddenWorkspaces: when true, a workspace's events are derived even while it (or its
-    ///     project) is hidden, instead of being skipped. Defaults to false so the Alerts tab and its badge
-    ///     stay unaffected; the only caller that opts in is `retainedDismissedEventIDs`, which needs a
-    ///     hidden workspace's events to still be derivable so their dismissals survive hiding (see that
-    ///     function's doc comment).
+    ///   - focusedSessionID: the session the user is watching right now. Its bell is hidden whatever its
+    ///     time, so a bell never flashes in the list for the terminal on screen before the watched-bell
+    ///     dismissal (see `watchedBellKeys`) reaches the device and comes back.
+    ///   - watchWindowsBySessionID: hides a bell rung inside a remembered watch the same way, for the gap
+    ///     between the watch ending and that dismissal returning.
+    ///   - includingHiddenWorkspaces: when true, a hidden workspace's events are derived too. Row-level
+    ///     "Dismiss Alert" needs this: hiding a workspace is a display suppression, not a reason a row
+    ///     cannot clear its own alerts.
     static func events(
         deviceID: String, deviceText: String?, in overview: SpacesDeviceOverviewPayload, focusedSessionID: String?,
         watchWindowsBySessionID: [String: [SpacesMobileTerminalWatchWindow]], includingHiddenWorkspaces: Bool = false, isDeviceOffline: Bool = false
     ) -> [SpacesMobileAttentionEvent] {
+        let dismissed = Set(overview.dismissedAlertKeys)
+        let sessionByID = Dictionary(overview.sessions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let workspaceByID = Dictionary(overview.workspaces.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var events: [SpacesMobileAttentionEvent] = []
-        var representedSessionIDs: Set<String> = []
-        let sessionByID = Dictionary(uniqueKeysWithValues: overview.sessions.map { ($0.id, $0) })
-        // Every event is grouped under its workspace, so a session only produces one when this overview
-        // still describes a workspace to attribute it to: a workspace hidden by its own flag or by its
-        // project's (see `SpacesDeviceOverviewPayload.isWorkspaceVisible`) has its sessions suppressed
-        // with it (unless `includingHiddenWorkspaces`), and a session whose workspace record is gone
-        // entirely — a deleted workspace's sessions linger for a refresh or two after its record — has no
-        // workspace to attribute it to at all.
-        let bandedWorkspaceIDs = Set(overview.workspaces.lazy.filter { includingHiddenWorkspaces || overview.isWorkspaceVisible($0) }.map(\.id))
-        let workspaceByID = Dictionary(uniqueKeysWithValues: overview.workspaces.map { ($0.id, $0) })
 
-        func makeEvent(
-            sourceID: String, kind: SpacesMobileAttentionEvent.Kind, date: Date, title: String, rowType: SpacesMobileWorkspaceRowType,
-            sessionID: String?, workspaceID: String
-        ) -> SpacesMobileAttentionEvent {
-            let workspace = workspaceByID[workspaceID]
-            let sampleSession = sessionID.flatMap { sessionByID[$0] }
-            return SpacesMobileAttentionEvent(
-                sourceID: sourceID, kind: kind, date: date, title: title, rowType: rowType, sessionID: sessionID, workspaceID: workspaceID,
-                deviceID: deviceID, projectName: workspace?.projectName ?? sampleSession?.projectName ?? "Unassigned",
-                workspaceDisplayName: workspace?.displayName ?? sampleSession?.workspaceTitle ?? "Unassigned", deviceText: deviceText,
-                isDeviceOffline: isDeviceOffline)
-        }
-
-        for workspace in overview.workspaces where includingHiddenWorkspaces || overview.isWorkspaceVisible(workspace) {
-            for agent in workspace.codingAgentRows {
-                if let sessionID = agent.sessionID { representedSessionIDs.insert(sessionID) }
-                let kind: SpacesMobileAttentionEvent.Kind?
-                switch agent.activityState {
-                case .waiting: kind = .waitingForInput
-                case .done: kind = .finished
-                // Exited raises no attention event: the agent is gone, nothing needs the user.
-                case .idle, .spinning, .exited: kind = nil
-                }
-                guard let kind, let date = date(fromISO8601: agent.updatedAt) else { continue }
-                events.append(
-                    makeEvent(
-                        sourceID: "agent:\(agent.id)", kind: kind, date: date, title: agent.name, rowType: .codingAgents, sessionID: agent.sessionID,
-                        workspaceID: workspace.id))
+        for candidate in overview.alertCandidates() {
+            guard !dismissed.contains(candidate.key), let date = candidate.date, let workspaceID = candidate.workspaceID,
+                let workspace = workspaceByID[workspaceID], includingHiddenWorkspaces || overview.isWorkspaceVisible(workspace),
+                let presentation = presentation(of: candidate, in: workspace, sessionByID: sessionByID)
+            else { continue }
+            if candidate.kind == .bell, let sessionID = candidate.sessionID {
+                if sessionID == focusedSessionID { continue }
+                // Any window, not just the newest: one visit to a terminal is split into several by the app
+                // backgrounding and returning, and the bell may belong to any of them.
+                if isWatched(bellAt: date, sessionID: sessionID, watchWindowsBySessionID: watchWindowsBySessionID) { continue }
             }
-
-            for process in workspace.processRows {
-                if let sessionID = process.sessionID { representedSessionIDs.insert(sessionID) }
-                guard process.runState == .exited, let date = date(fromISO8601: process.exitedAt) else { continue }
-                events.append(
-                    makeEvent(
-                        sourceID: "process:\(process.id)", kind: .exited, date: date, title: process.name, rowType: .processes,
-                        sessionID: process.sessionID, workspaceID: workspace.id))
-            }
-
-            for terminal in workspace.terminalRows {
-                if let sessionID = terminal.sessionID { representedSessionIDs.insert(sessionID) }
-                guard terminal.runState == .exited, let sessionID = terminal.sessionID, let session = sessionByID[sessionID] else { continue }
-                guard let kind = terminalKind(for: session.state), let date = date(fromISO8601: session.updatedAt) else { continue }
-                events.append(
-                    makeEvent(
-                        sourceID: "terminal:\(terminal.id)", kind: kind, date: date, title: terminal.title, rowType: .workspaceTerminals,
-                        sessionID: sessionID, workspaceID: workspace.id))
-            }
-        }
-
-        // Loose sessions: the same dedupe rule as the home tab's terminal groups — a session already
-        // represented by a workspace row is that row's event (or non-event), never a second one.
-        for session in overview.sessions
-        where session.rowKind == .liveSession && !representedSessionIDs.contains(session.id) && bandedWorkspaceIDs.contains(session.workspaceID) {
-            guard let kind = terminalKind(for: session.state), let date = date(fromISO8601: session.updatedAt) else { continue }
             events.append(
-                makeEvent(
-                    sourceID: "session:\(session.id)", kind: kind, date: date, title: session.title, rowType: .workspaceTerminals,
-                    sessionID: session.id, workspaceID: session.workspaceID))
+                SpacesMobileAttentionEvent(
+                    key: candidate.key, sourceID: presentation.sourceID, kind: presentation.kind, date: date, title: presentation.title,
+                    rowType: presentation.rowType, sessionID: candidate.sessionID, workspaceID: workspaceID, deviceID: deviceID,
+                    projectName: workspace.projectName, workspaceDisplayName: workspace.displayName, deviceText: deviceText,
+                    isDeviceOffline: isDeviceOffline))
         }
-
-        // A bell is a fact about the session itself, not the row-level exit/agent state the dedupe above
-        // guards against, so every session with a bell gets an event regardless of representedSessionIDs.
-        // The daemon records a bell no matter which client (if any) is looking at the session, since it
-        // can't see client focus: a Ghostty attachment survives tab switches, and iOS backgrounding just
-        // drops the socket without detaching. Each client is responsible for dropping the alert for the
-        // session it currently has open.
-        for session in overview.sessions where session.id != focusedSessionID && bandedWorkspaceIDs.contains(session.workspaceID) {
-            guard let date = date(fromISO8601: session.bellAt) else { continue }
-            // Any window, not just the newest: one visit to a terminal is split into several by the app
-            // backgrounding and returning, and the bell may belong to any of them.
-            if watchWindowsBySessionID[session.id]?.contains(where: { $0.contains(date, tolerance: watchedBellSkewTolerance) }) == true { continue }
-            events.append(
-                makeEvent(
-                    sourceID: "session:\(session.id)", kind: .bell, date: date, title: session.title, rowType: .workspaceTerminals,
-                    sessionID: session.id, workspaceID: session.workspaceID))
-        }
-
         return events
     }
 
-    /// The permissive event derivation every caller that needs a source's *true* event identity — not the
-    /// Alerts tab's filtered view of it — shares: no focused session, no watch windows, hidden workspaces
-    /// included. A row's exited-process dot and its "Dismiss Alert" menu item both key off this, so
-    /// neither depends on what the Alerts tab happens to be suppressing right now (a watched bell, a
-    /// hidden workspace) — only on whether the source is still in the state that produced the event.
-    static func allEvents(deviceID: String, in overview: SpacesDeviceOverviewPayload) -> [SpacesMobileAttentionEvent] {
-        events(
-            deviceID: deviceID, deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:], includingHiddenWorkspaces: true)
+    /// Keys of the undismissed bells that rang while the user was watching their session, which the
+    /// caller dismisses on the device so every client drops them. Windows must include the watch still
+    /// open, so a bell rung during it counts; a bell rung before the watch began never does, because
+    /// focusing a session does not clear an alert from a bell it rang earlier.
+    static func watchedBellKeys(in overview: SpacesDeviceOverviewPayload, watchWindowsBySessionID: [String: [SpacesMobileTerminalWatchWindow]])
+        -> [String]
+    {
+        let dismissed = Set(overview.dismissedAlertKeys)
+        return overview.alertCandidates().compactMap { candidate in
+            guard candidate.kind == .bell, !dismissed.contains(candidate.key), let sessionID = candidate.sessionID, let date = candidate.date,
+                isWatched(bellAt: date, sessionID: sessionID, watchWindowsBySessionID: watchWindowsBySessionID)
+            else { return nil }
+            return candidate.key
+        }
     }
 
-    /// The dismissals worth keeping in one device's bucket: a dismissal only means anything while its
-    /// event is still derivable, so the stored set is trimmed to the `eventKey`s `overview` still
-    /// produces. Without this, dismissals accumulate forever across launches.
-    ///
-    /// Derivation here deliberately suppresses nothing — no focused session, no watch windows, and hidden
-    /// workspaces included — because a temporarily suppressed event is still one this overview describes,
-    /// and pruning its dismissal would make it alert again once the suppression lapsed. Hiding a workspace,
-    /// directly or via its project, is exactly such a suppression: both are reversible from iOS (the
-    /// Workspaces sheet's checkboxes), and reversing either must not resurface alerts the user
-    /// already dismissed while it was hidden. A workspace the overview has stopped describing altogether
-    /// is not suppressed but deleted, so its dismissals do prune — there is nothing left to resurface them.
-    static func retainedDismissedEventIDs(_ dismissed: Set<String>, deviceID: String, in overview: SpacesDeviceOverviewPayload) -> Set<String> {
-        dismissed.intersection(Set(allEvents(deviceID: deviceID, in: overview).map(\.eventKey)))
+    private static func isWatched(bellAt date: Date, sessionID: String, watchWindowsBySessionID: [String: [SpacesMobileTerminalWatchWindow]]) -> Bool {
+        watchWindowsBySessionID[sessionID]?.contains(where: { $0.contains(date, tolerance: watchedBellSkewTolerance) }) == true
+    }
+
+    private struct Presentation {
+        let sourceID: String
+        let kind: SpacesMobileAttentionEvent.Kind
+        let title: String
+        let rowType: SpacesMobileWorkspaceRowType
+    }
+
+    /// How a candidate reads in the list, or nil when its row is gone from the workspace (an automation
+    /// run, which `SpacesMobileAutomationAlerts` presents, or a row removed since the candidate was derived).
+    private static func presentation(
+        of candidate: SpacesDeviceAlertCandidate, in workspace: SpacesDeviceWorkspaceSummary, sessionByID: [String: SpacesDeviceTerminalSessionSummary]
+    ) -> Presentation? {
+        switch candidate.kind {
+        case .agentWaiting, .agentDone:
+            guard let agent = workspace.codingAgentRows.first(where: { $0.id == candidate.subjectID }) else { return nil }
+            return Presentation(
+                sourceID: "agent:\(agent.id)", kind: candidate.kind == .agentWaiting ? .waitingForInput : .finished, title: agent.name,
+                rowType: .codingAgents)
+        case .processExited:
+            guard let process = workspace.processRows.first(where: { $0.id == candidate.subjectID }) else { return nil }
+            return Presentation(sourceID: "process:\(process.id)", kind: .exited, title: process.name, rowType: .processes)
+        case .terminalExited, .terminalFailed:
+            let kind: SpacesMobileAttentionEvent.Kind = candidate.kind == .terminalExited ? .exited : .failed
+            if let terminal = workspace.terminalRows.first(where: { $0.id == candidate.subjectID }) {
+                return Presentation(sourceID: "terminal:\(terminal.id)", kind: kind, title: terminal.title, rowType: .workspaceTerminals)
+            }
+            // A loose session no row shows.
+            guard let session = sessionByID[candidate.subjectID] else { return nil }
+            return Presentation(sourceID: "session:\(session.id)", kind: kind, title: session.title, rowType: .workspaceTerminals)
+        case .bell:
+            guard let session = sessionByID[candidate.subjectID] else { return nil }
+            return Presentation(sourceID: "session:\(session.id)", kind: .bell, title: session.title, rowType: .workspaceTerminals)
+        case .comeBackLater:
+            guard let reference = SpacesDeviceComeBackLaterFlag.rowReference(fromAlertKey: candidate.key) else { return nil }
+            switch reference.rowKind {
+            case .agent:
+                guard let agent = workspace.codingAgentRows.first(where: { $0.id == reference.rowID }) else { return nil }
+                return Presentation(sourceID: "agent:\(agent.id)", kind: .comeBackLater, title: agent.name, rowType: .codingAgents)
+            case .process:
+                guard let process = workspace.processRows.first(where: { $0.id == reference.rowID }) else { return nil }
+                return Presentation(sourceID: "process:\(process.id)", kind: .comeBackLater, title: process.name, rowType: .processes)
+            case .terminal:
+                guard let terminal = workspace.terminalRows.first(where: { $0.id == reference.rowID }) else { return nil }
+                return Presentation(sourceID: "terminal:\(terminal.id)", kind: .comeBackLater, title: terminal.title, rowType: .workspaceTerminals)
+            }
+        case .automationRunFailed, .automationRunTimedOut: return nil
+        }
     }
 
     /// Parses the daemon's ISO-8601 timestamps, including the fractional seconds emitted by Linux
@@ -225,22 +198,14 @@ enum SpacesMobileAttention {
         guard let value, !value.isEmpty else { return nil }
         return GhosttyRemoteSessionStateTimestamp.date(from: value)
     }
-
-    private static func terminalKind(for state: TerminalSessionState) -> SpacesMobileAttentionEvent.Kind? {
-        switch state {
-        case .exited: .exited
-        case .failed: .failed
-        case .starting, .running: nil
-        }
-    }
 }
 
 extension SpacesMobileWorkspaceRuntimeRow {
-    /// Whether `event` is this row's own attention event. A process/agent/terminal-kind event and its row
-    /// are built from the same underlying record, so their ids share the same `"kind:recordID"` string —
-    /// matching on `id` alone lines them up. A bell is different: it is a fact about the session, keyed by
-    /// session id (`"session:…"`), which never equals a terminal row's own id (`"terminal:…"`), so it
-    /// matches by `sessionID` instead.
+    /// Whether `event` is this row's own attention event. A process/agent/terminal-kind event (a Come Back
+    /// Later flag included) and its row are built from the same underlying record, so their ids share the
+    /// same `"kind:recordID"` string, so matching on `id` alone lines them up. A bell is different: it is a
+    /// fact about the session, keyed by session id (`"session:…"`), which never equals a terminal row's own
+    /// id (`"terminal:…"`), so it matches by `sessionID` instead.
     func matches(_ event: SpacesMobileAttentionEvent) -> Bool {
         guard event.workspaceID == workspaceID else { return false }
         if event.sourceID == id { return true }

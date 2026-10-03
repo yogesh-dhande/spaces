@@ -36,15 +36,9 @@ final class AlertsTabSmokeUITests: XCTestCase {
         XCTAssertTrue(
             SpacesMobileUITestDriver.waitForDisappearance(of: row, timeout: 10), "Dismissing \(rowIdentifier) did not remove it from the list")
 
-        // Clear takes the rest. Demo Mode is not special here: dismissal is client-side state on the
-        // events derived from the overview, so it needs nothing from the backend.
-        //
-        // The dismissals this writes reach real `UserDefaults` (the clean-slate launch arguments shadow
-        // reads, not writes) and are deliberately not restored. An attention event's dismissal identity
-        // carries its timestamp, and the demo recording rebases every timestamp to launch time, so the
-        // ids stored here match nothing on the next launch and the model prunes them off the demo
-        // device's bucket on its first overview refresh: a later Demo Mode session shows its sample
-        // alerts, and the store stays bounded.
+        // Clear takes the rest. Demo Mode's in-memory device records the dismissals like a real device and
+        // returns the refreshed overview, so the list empties only when that comes back. They last for the
+        // session: relaunching reloads the pristine recording and its sample alerts.
         let clear = app.buttons["alerts.clear"]
         XCTAssertTrue(clear.waitForExistence(timeout: 10), "The Alerts toolbar offered no Clear")
         XCTAssertTrue(clear.isEnabled, "Clear was disabled while alerts were still listed")

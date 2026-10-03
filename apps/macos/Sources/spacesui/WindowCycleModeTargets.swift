@@ -15,12 +15,11 @@ enum WindowCycleModeTargets {
 
     /// The mode's ordered set. `retainedCursors` carries the cursors of the rotation a live cycle burst
     /// froze, which the set keeps hold of even where the mode's filter no longer admits them: see
-    /// `agentTargets`. `dismissedAlertIDs` is the Alerts pane's own dismissal set, passed in rather
-    /// than read here so this stays pure and so the pane and the Alerts rotation hide the same rows.
+    /// `agentTargets`.
     static func targets(
         mode: WindowCycleMode, devices: [WindowCycleDeviceSnapshot], openTerminalSessionIDsByWorkspace: [String: [String]],
         openBrowserSessionsByWorkspace: [String: [BrowserSession]], trackedBrowserWindowIDsByWorkspace: [String: Set<Int>],
-        dismissedAlertIDs: Set<String>, recentCursors: [String], retaining retainedCursors: [WorkspaceWindowCycle.Cursor]
+        recentCursors: [String], retaining retainedCursors: [WorkspaceWindowCycle.Cursor]
     ) -> [WindowCycleTarget] {
         switch mode {
         // Workspace mode rotates over one workspace's own windows, built from that workspace's
@@ -29,8 +28,7 @@ enum WindowCycleModeTargets {
         case .workspace: return []
         case .alerts:
             return alertTargets(
-                devices: devices, openTerminalSessionIDsByWorkspace: openTerminalSessionIDsByWorkspace, dismissedAlertIDs: dismissedAlertIDs,
-                retaining: Set(retainedCursors))
+                devices: devices, openTerminalSessionIDsByWorkspace: openTerminalSessionIDsByWorkspace, retaining: Set(retainedCursors))
         // An exited row is an agent that is over, so it is not an agent the user can go back to work
         // with. An idle row is: the agent is launched and waiting for its first prompt, which is a
         // terminal the user has reason to reach.
@@ -110,7 +108,8 @@ enum WindowCycleModeTargets {
     /// The set is derived from the pane's own derivation (`AlertsController.buildOverviewAlertsGroups`
     /// filtered by `visibleAlertsGroups`) rather than from a second reading of the overview, so the
     /// rotation and the pane cannot disagree about what is alerting: a dismissal, a hidden workspace, or
-    /// a consumed bell takes a row out of both at once. Both are pure and device-scoped, so this runs
+    /// a consumed bell takes a row out of both at once. Every kind the pane lists rotates the same way,
+    /// ended terminals and Come Back Later marks included, as long as a terminal remains to land in. Both are pure and device-scoped, so this runs
     /// them again here instead of reaching for the merged, device-blind list the pane renders. Each alert
     /// is resolved to its own terminal session id first (`alertSessionID`, reading the process row, the
     /// agent record, or the bell's session directly, never a `focusable` target's kind-specific slot),
@@ -133,7 +132,7 @@ enum WindowCycleModeTargets {
     /// its construction below), so every alert for that session lands on the same candidate regardless of
     /// which kind of row named it.
     private static func alertTargets(
-        devices: [WindowCycleDeviceSnapshot], openTerminalSessionIDsByWorkspace: [String: [String]], dismissedAlertIDs: Set<String>,
+        devices: [WindowCycleDeviceSnapshot], openTerminalSessionIDsByWorkspace: [String: [String]],
         retaining retainedCursors: Set<WorkspaceWindowCycle.Cursor>
     ) -> [WindowCycleTarget] {
         var candidates: [RecencyCandidate] = []
@@ -141,8 +140,7 @@ enum WindowCycleModeTargets {
         for device in devices {
             let alertItemsByWorkspace = Dictionary(
                 AlertsController.visibleAlertsGroups(
-                    in: AlertsController.buildOverviewAlertsGroups(from: device.overview, deviceID: device.deviceID),
-                    dismissedAttentionItemIDs: dismissedAlertIDs
+                    in: AlertsController.buildOverviewAlertsGroups(from: device.overview, deviceID: device.deviceID)
                 ).map { ($0.workspaceID, $0.items) }, uniquingKeysWith: { first, _ in first })
             for workspace in cycleableWorkspaces(of: device) {
                 let detail = SpacesDeviceWorkspaceDetailViewModel(workspace: workspace)

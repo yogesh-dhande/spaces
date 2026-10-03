@@ -14,7 +14,7 @@ import workspacecore
     @Test func alertsHoldsWaitingAndDoneAgentsNewestAlertFirst() {
         let targets = WindowCycleModeTargets.targets(
             mode: .alerts, devices: twoDeviceFixture(), openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
 
         // Newest alert first, across both devices: mac "waiting" 10:05, linux "done" 10:03, mac "done"
         // 10:01. The spinning, idle, and exited rows raise no alert, so the Alerts pane does not list
@@ -37,7 +37,7 @@ import workspacecore
 
         let targets = WindowCycleModeTargets.targets(
             mode: .alerts, devices: [device], openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
 
         #expect(targets.isEmpty)
     }
@@ -55,7 +55,7 @@ import workspacecore
 
         let targets = WindowCycleModeTargets.targets(
             mode: .alerts, devices: [device], openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
 
         // The three alert kinds that name a window, newest event first: the bell at 10:06, the waiting
         // agent at 10:04, the process that exited at 10:02. Each lands on the window its pane row focuses.
@@ -84,7 +84,7 @@ import workspacecore
 
         let targets = WindowCycleModeTargets.targets(
             mode: .alerts, devices: [device], openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
 
         // One pane, one target: the bell is the newer alert but the agent target is the pane's identity,
         // exactly as Workspace mode represents this shared session (`AppKitController.workspaceShortcutTargets`
@@ -118,7 +118,7 @@ import workspacecore
 
         let targets = WindowCycleModeTargets.targets(
             mode: .alerts, devices: [device], openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
 
         // One target, the agent's, since the process's own target was dropped for the shared session; the
         // count and the rotation must not lose this pane just because its only alert named an excluded
@@ -127,27 +127,32 @@ import workspacecore
         #expect(targets.first?.cursorKey == "device:mac/workspace:w1/agent:a-exited")
     }
 
-    @Test func alertsSkipsARowWhoseAlertIsDismissed() {
-        let device = WindowCycleDeviceSnapshot(
-            deviceID: "mac",
-            overview: SpacesDeviceOverviewPayload(
-                workspaces: [
-                    workspace(
-                        id: "w1",
-                        agents: [
-                            agentRow(id: "a-dismissed", workspaceID: "w1", state: .waiting, updatedAt: "2026-01-01T10:05:00Z"),
-                            agentRow(id: "a-alerting", workspaceID: "w1", state: .done, updatedAt: "2026-01-01T10:01:00Z"),
-                        ])
-                ], sessions: []))
+    @Test func alertsSkipsARowWhoseAlertTheDeviceDismissed() {
+        let agents = [
+            agentRow(id: "a-dismissed", workspaceID: "w1", state: .waiting, updatedAt: "2026-01-01T10:05:00Z"),
+            agentRow(id: "a-alerting", workspaceID: "w1", state: .done, updatedAt: "2026-01-01T10:01:00Z"),
+        ]
+        let device = oneDevice(agents: agents, dismissed: [agentAlertKey("a-dismissed", "waiting", "2026-01-01T10:05:00Z")])
 
         let targets = WindowCycleModeTargets.targets(
             mode: .alerts, devices: [device], openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [alertID(in: device, workspaceID: "w1", agentID: "a-dismissed")],
-            recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
 
         // The dismissed agent has the newer state change, so it would lead the order: its absence is the
-        // pane's dismissal, which the rotation reads the same way the pane does.
+        // device's dismissal, which the rotation reads the same way the pane does.
         #expect(targets.map { $0.target.agentWindow?.id } == ["a-alerting"])
+    }
+
+    @Test func alertsIncludesAComeBackLaterMarkOnAnIdleAgent() {
+        let device = oneDevice(
+            agents: [agentRow(id: "a-idle", workspaceID: "w1", state: .idle, updatedAt: "2026-01-01T10:00:00Z", sessionID: "session-idle")],
+            flags: [SpacesDeviceComeBackLaterFlag(rowKind: .agent, rowID: "row-a-idle", flaggedAt: "2026-01-01T10:30:00Z")])
+
+        let targets = WindowCycleModeTargets.targets(
+            mode: .alerts, devices: [device], openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
+
+        #expect(targets.map { $0.target.agentWindow?.id } == ["a-idle"])
     }
 
     @Test func alertsSkipsAFailedAutomationRun() {
@@ -167,7 +172,7 @@ import workspacecore
 
         let targets = WindowCycleModeTargets.targets(
             mode: .alerts, devices: [device], openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
 
         // The run's card deep-links to the Runs tab instead of focusing a window, so it stays in the pane
         // and out of the rotation, even though the session it ran in is still on the workspace.
@@ -177,7 +182,7 @@ import workspacecore
     @Test func allAgentsHoldsEveryAgentThatHasNotExited() {
         let targets = WindowCycleModeTargets.targets(
             mode: .allAgents, devices: twoDeviceFixture(), openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
 
         // Idle and spinning join waiting and done: an idle agent is launched and waiting for its first
         // prompt, which is a terminal the user has reason to reach. Only the exited row, an agent that is
@@ -205,7 +210,7 @@ import workspacecore
 
         let targets = WindowCycleModeTargets.targets(
             mode: .alerts, devices: [device], openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
 
         #expect(targets.isEmpty)
     }
@@ -233,7 +238,7 @@ import workspacecore
 
         let targets = WindowCycleModeTargets.targets(
             mode: .alerts, devices: devices, openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
 
         #expect(
             Set(targets.map(\.cursorKey)) == [
@@ -264,7 +269,7 @@ import workspacecore
             trackedBrowserWindowIDsByWorkspace: [:],
             // The linux terminal was visited most recently; the two Mac ones have never been visited,
             // so they follow in sidebar order.
-            dismissedAlertIDs: [], recentCursors: ["device:linux/workspace:w3/terminal:session-c"], retaining: [])
+            recentCursors: ["device:linux/workspace:w3/terminal:session-c"], retaining: [])
 
         #expect(
             targets.map(\.cursorKey) == [
@@ -289,7 +294,7 @@ import workspacecore
         let targets = WindowCycleModeTargets.targets(
             mode: .openSessions, devices: [device], openTerminalSessionIDsByWorkspace: ["w1": ["session-open"]],
             openBrowserSessionsByWorkspace: ["w1": [BrowserSession(name: "docs", url: "http://localhost:3000")]],
-            trackedBrowserWindowIDsByWorkspace: ["w1": [7]], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: ["w1": [7]], recentCursors: [], retaining: [])
 
         #expect(
             targets.map(\.cursorKey) == ["device:mac/workspace:w1/browser:http://localhost:3000", "device:mac/workspace:w1/terminal:session-open"])
@@ -315,7 +320,7 @@ import workspacecore
 
         let targets = WindowCycleModeTargets.targets(
             mode: .alerts, devices: devices, openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: burst)
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: burst)
 
         #expect(Set(targets.map(\.cursorKey)) == Set(burst))
         // Every frozen cursor is still a candidate, so the burst walks its own order and the next press
@@ -337,7 +342,7 @@ import workspacecore
 
         let targets = WindowCycleModeTargets.targets(
             mode: .allAgents, devices: devices, openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: burst)
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: burst)
 
         #expect(Set(targets.map(\.cursorKey)) == Set(burst))
         #expect(landing(after: burst[0], in: targets, session: session(burst)) == burst[1])
@@ -345,16 +350,16 @@ import workspacecore
 
     @Test func alertsKeepsTheRowWhoseAlertWasDismissedMidBurst() {
         let burst = [agentCursor("a"), agentCursor("b")]
-        let device = oneDevice(agents: [
-            agentRow(id: "a", workspaceID: "w1", state: .waiting, updatedAt: "2026-01-01T10:01:00Z"),
-            agentRow(id: "b", workspaceID: "w1", state: .waiting, updatedAt: "2026-01-01T10:02:00Z"),
-        ])
+        let device = oneDevice(
+            agents: [
+                agentRow(id: "a", workspaceID: "w1", state: .waiting, updatedAt: "2026-01-01T10:01:00Z"),
+                agentRow(id: "b", workspaceID: "w1", state: .waiting, updatedAt: "2026-01-01T10:02:00Z"),
+            ], dismissed: [agentAlertKey("a", "waiting", "2026-01-01T10:01:00Z")])
 
         // The user landed on `a` and dismissed its alert from the pane while the burst is still live.
         let targets = WindowCycleModeTargets.targets(
             mode: .alerts, devices: [device], openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [alertID(in: device, workspaceID: "w1", agentID: "a")], recentCursors: [],
-            retaining: burst)
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: burst)
 
         // Both frozen cursors are still candidates, so the burst walks its own order rather than being
         // rebuilt around the one row that is still alerting.
@@ -375,7 +380,7 @@ import workspacecore
 
         let targets = WindowCycleModeTargets.targets(
             mode: .alerts, devices: devices, openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: burst)
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: burst)
 
         #expect(targets.map(\.cursorKey) == [agentCursor("c"), agentCursor("a")])
         // A frozen cursor is missing, so the rotation is rebuilt around what is left, the same as a
@@ -397,7 +402,7 @@ import workspacecore
 
         let targets = WindowCycleModeTargets.targets(
             mode: .alerts, devices: devices, openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
 
         // Nothing is being walked, so a working agent is simply not alerting.
         #expect(targets.map(\.cursorKey) == [agentCursor("b")])
@@ -422,7 +427,7 @@ import workspacecore
 
         let targets = WindowCycleModeTargets.targets(
             mode: .alerts, devices: [device], openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
 
         // The hidden workspace's agent has the newer state change, so it would lead the mode's order:
         // its absence is the visibility rule, not the ordering.
@@ -447,7 +452,7 @@ import workspacecore
 
         let targets = WindowCycleModeTargets.targets(
             mode: .openSessions, devices: [device], openTerminalSessionIDsByWorkspace: ["shown": ["session-shown"], "hidden": ["session-hidden"]],
-            openBrowserSessionsByWorkspace: [:], trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            openBrowserSessionsByWorkspace: [:], trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
 
         #expect(targets.map(\.cursorKey) == ["device:mac/workspace:shown/terminal:session-shown"])
     }
@@ -469,7 +474,7 @@ import workspacecore
 
         let targets = WindowCycleModeTargets.targets(
             mode: .alerts, devices: [device], openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: burst)
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: burst)
 
         #expect(targets.map(\.cursorKey) == [burst[0]])
     }
@@ -490,7 +495,7 @@ import workspacecore
 
         let targets = WindowCycleModeTargets.targets(
             mode: .alerts, devices: [device], openTerminalSessionIDsByWorkspace: [:], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
 
         #expect(targets.isEmpty)
     }
@@ -507,7 +512,7 @@ import workspacecore
 
         let targets = WindowCycleModeTargets.targets(
             mode: .alerts, devices: [device], openTerminalSessionIDsByWorkspace: ["w1": ["session-a-offline"]], openBrowserSessionsByWorkspace: [:],
-            trackedBrowserWindowIDsByWorkspace: [:], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: [:], recentCursors: [], retaining: [])
 
         #expect(targets.map { $0.target.agentWindow?.id } == ["a-offline"])
     }
@@ -529,7 +534,7 @@ import workspacecore
         let targets = WindowCycleModeTargets.targets(
             mode: .openSessions, devices: [device], openTerminalSessionIDsByWorkspace: ["w1": ["session-open"]],
             openBrowserSessionsByWorkspace: ["w1": [BrowserSession(name: "docs", url: "http://localhost:3000")]],
-            trackedBrowserWindowIDsByWorkspace: ["w1": [7]], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: ["w1": [7]], recentCursors: [], retaining: [])
 
         #expect(targets.map(\.cursorKey) == ["device:linux/workspace:w1/terminal:session-open"])
     }
@@ -548,7 +553,7 @@ import workspacecore
         let targets = WindowCycleModeTargets.targets(
             mode: .openSessions, devices: [device], openTerminalSessionIDsByWorkspace: ["w1": ["session-open"]],
             openBrowserSessionsByWorkspace: ["w1": [BrowserSession(name: "docs", url: "http://localhost:3000")]],
-            trackedBrowserWindowIDsByWorkspace: ["w1": [7]], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: ["w1": [7]], recentCursors: [], retaining: [])
 
         #expect(
             targets.map(\.cursorKey) == [
@@ -572,7 +577,7 @@ import workspacecore
         let targets = WindowCycleModeTargets.targets(
             mode: .openSessions, devices: [device], openTerminalSessionIDsByWorkspace: ["w1": ["session-open"]],
             openBrowserSessionsByWorkspace: ["w1": [BrowserSession(name: "docs", url: "http://localhost:3000")]],
-            trackedBrowserWindowIDsByWorkspace: ["w1": [7]], dismissedAlertIDs: [], recentCursors: [], retaining: [])
+            trackedBrowserWindowIDsByWorkspace: ["w1": [7]], recentCursors: [], retaining: [])
 
         #expect(
             targets.map(\.cursorKey) == ["device:mac/workspace:w1/browser:http://localhost:3000", "device:mac/workspace:w1/terminal:session-open"])
@@ -629,9 +634,13 @@ import workspacecore
         ]
     }
 
-    private func oneDevice(agents: [SpacesDeviceWorkspaceCodingAgentRow]) -> WindowCycleDeviceSnapshot {
+    private func oneDevice(
+        agents: [SpacesDeviceWorkspaceCodingAgentRow], dismissed: [String] = [], flags: [SpacesDeviceComeBackLaterFlag] = []
+    ) -> WindowCycleDeviceSnapshot {
         WindowCycleDeviceSnapshot(
-            deviceID: "mac", overview: SpacesDeviceOverviewPayload(workspaces: [workspace(id: "w1", agents: agents)], sessions: []))
+            deviceID: "mac",
+            overview: SpacesDeviceOverviewPayload(
+                workspaces: [workspace(id: "w1", agents: agents)], sessions: [], dismissedAlertKeys: dismissed, comeBackLaterFlags: flags))
     }
 
     private func agentCursor(_ agentID: String) -> String { "device:mac/workspace:w1/agent:\(agentID)" }
@@ -693,17 +702,8 @@ import workspacecore
             isSubscriptionAvailable: true, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .liveSession, bellAt: bellAt)
     }
 
-    /// The pane's own identity for the alert a row carries, read off the same derivation the mode reads,
-    /// so a dismissal in a test names what a click would dismiss instead of restating the id format.
-    private func alertID(in device: WindowCycleDeviceSnapshot, workspaceID: String, agentID: String) -> String {
-        let groups = AlertsController.buildOverviewAlertsGroups(from: device.overview, deviceID: device.deviceID)
-        let entries = AlertsController.rowAlertsAttentionEntries(in: groups, workspaceID: workspaceID, agentID: agentID)
-        guard let attentionID = entries.first?.attentionID else {
-            Issue.record("no alert derived for agent \(agentID)")
-            return ""
-        }
-        return attentionID
-    }
+    /// The device-free key of an agent row's waiting/done alert.
+    private func agentAlertKey(_ agentID: String, _ state: String, _ updatedAt: String) -> String { "agent:row-\(agentID):\(state):\(updatedAt)" }
 
     private func agentRow(id: String, workspaceID: String, state: SpacesDeviceCodingAgentActivityState, updatedAt: String?, sessionID: String? = nil)
         -> SpacesDeviceWorkspaceCodingAgentRow

@@ -14,7 +14,7 @@ struct AlertsTabView: View {
         NavigationStack {
             content.background(Theme.bg.ignoresSafeArea()).navigationTitle("Alerts").tint(Theme.accent).toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Clear") { model.clearAlerts() }.font(.system(size: 13, weight: .semibold)).disabled(model.undismissedAlertCount == 0)
+                    Button("Clear") { Task { await model.clearAlerts() } }.font(.system(size: 13, weight: .semibold)).disabled(!model.canClearAlerts)
                         .accessibilityIdentifier("alerts.clear")
                 }
             }.terminalSessionNavigation(model: model, selectedSession: $selectedSession, pendingTerminalLaunch: $pendingTerminalLaunch)
@@ -54,16 +54,18 @@ struct AlertsTabView: View {
 
     @ViewBuilder private func dismissButton(_ item: SpacesMobileAlertItem) -> some View {
         Button(role: .destructive) {
-            switch item {
-            case .event(let event): model.dismissAlert(event)
-            case .automation(let entry): model.dismissAutomationAlert(entry)
+            Task {
+                switch item {
+                case .event(let event): await model.dismissAlert(event)
+                case .automation(let entry): await model.dismissAutomationAlert(entry)
+                }
             }
         } label: {
             Label("Dismiss", systemImage: "bell.slash")
             // Same suffix the row itself carries (`alert.row.<event.id>` / `alert.automation.<entry.id>`),
             // not `item.id` (`"event:<id>"`/`"automation:<id>"`): a UI test locates a row, then derives
             // this identifier from it, so the two must agree on which string names the same alert.
-        }.accessibilityIdentifier("alert.dismiss.\(dismissIdentifierSuffix(item))")
+        }.disabled(item.isDeviceOffline).accessibilityIdentifier("alert.dismiss.\(dismissIdentifierSuffix(item))")
     }
 
     private func dismissIdentifierSuffix(_ item: SpacesMobileAlertItem) -> String {
@@ -75,8 +77,8 @@ struct AlertsTabView: View {
 
     @ViewBuilder private func eventRow(_ event: SpacesMobileAttentionEvent) -> some View {
         let row = BandRow(
-            dotKind: StatusDot.Kind(attentionKind: event.kind), tile: .tile(for: event.rowType), title: event.title, detail: event.detail,
-            detailIsMonospaced: false
+            dotKind: StatusDot.Kind(attentionKind: event.kind), tile: .tile(for: event.rowType),
+            title: event.title, detail: event.detail, detailIsMonospaced: false
         ) {
             // Reads the shared 30-second label clock rather than `Date()` so this age keeps advancing on
             // its own cadence even when the overview payload itself is unchanged (#540) — see

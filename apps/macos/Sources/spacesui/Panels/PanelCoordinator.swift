@@ -512,7 +512,10 @@ import spacesterminalcore
 
     /// The key-window change handler for the main window and every global panel window calls this:
     /// see `repaintCycleRowIfFocusedSessionChanged`.
-    func noteKeyWindowChanged() { repaintCycleRowIfFocusedSessionChanged() }
+    func noteKeyWindowChanged() {
+        repaintCycleRowIfFocusedSessionChanged()
+        host.refreshTerminalVisit()
+    }
 
     /// Syncs the layout's focused pane to the content that actually has keyboard focus (clicks inside
     /// pane content bypass the pane chrome's mouse handling, so the app's mouse-down and key-down
@@ -1851,6 +1854,8 @@ import spacesterminalcore
             for tab in state.layout.tabs { for pane in PanelLayoutEngine.panes(in: tab) { activateContentIfVisible(scope: scope, pane: pane) } }
         }
         onLayoutChanged?(scope, state.layout)
+        // The focused pane of a layout is what the visit tracker follows.
+        host.refreshTerminalVisit()
         // A global panel exists only while it has content: an emptied layout (last tab
         // closed or last pane moved away) closes its window shell.
         if case .globalWindow(let panelWindowID) = scope, state.layout.isEmpty { dismissPanelWindowShell(panelWindowID: panelWindowID) }
@@ -1904,7 +1909,7 @@ import spacesterminalcore
     /// each column skips the markdown render when its text did not change.
     func refreshAgentBriefs() {
         for (sessionID, content) in contentControllers { content.applyAgentBrief(shownAgentBrief(forSessionID: sessionID)) }
-        host.refreshWorkspaceFooterBriefToggle()
+        host.refreshWorkspaceFooterPaneToggles()
     }
 
     /// The brief toggle state of the pane a toggle in `scope` acts on.
@@ -1931,9 +1936,10 @@ import spacesterminalcore
         return true
     }
 
-    /// The session of the pane the scope's chrome names, which is the one its brief toggles act on: the
-    /// focused pane the workspace footer shows, or the pane a global window's identity strip shows.
-    private func briefToggleSessionID(scope: PanelScope) -> String? {
+    /// The session of the pane the scope's chrome names, which is the one its brief and Come Back Later
+    /// toggles act on: the focused pane the workspace footer shows, or the pane a global window's identity
+    /// strip shows.
+    func briefToggleSessionID(scope: PanelScope) -> String? {
         let layout = layout(for: scope)
         switch scope {
         case .workspace:

@@ -27,7 +27,7 @@ struct AlertsControllerBuilderTests {
 
     private func exitedProcess(id: String, processID: String, exitedAt: String?) -> SpacesDeviceWorkspaceProcessRow {
         SpacesDeviceWorkspaceProcessRow(
-            id: id, workspaceID: "ws", name: "web", command: "npm run dev", templateID: id, processID: processID, sessionID: nil, runState: .exited,
+            id: id, workspaceID: "ws", name: "web", command: "npm run dev", templateID: id, processID: processID, sessionID: "proc-session", runState: .exited,
             exitedAt: exitedAt, canRun: true, canStop: false, canRestart: true)
     }
 
@@ -46,8 +46,27 @@ struct AlertsControllerBuilderTests {
     }
 
     private func overview(
-        _ workspaces: [SpacesDeviceWorkspaceSummary], projects: [SpacesDeviceProjectSummary] = [], sessions: [SpacesDeviceTerminalSessionSummary] = []
-    ) -> SpacesDeviceOverviewPayload { SpacesDeviceOverviewPayload(projects: projects, workspaces: workspaces, sessions: sessions) }
+        _ workspaces: [SpacesDeviceWorkspaceSummary], projects: [SpacesDeviceProjectSummary] = [], sessions: [SpacesDeviceTerminalSessionSummary] = [],
+        dismissed: [String] = [], flags: [SpacesDeviceComeBackLaterFlag] = []
+    ) -> SpacesDeviceOverviewPayload {
+        SpacesDeviceOverviewPayload(
+            projects: projects, workspaces: workspaces, sessions: sessions,
+            daemonStatus: TerminalServiceDaemonStatus(version: "test", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0),
+            dismissedAlertKeys: dismissed, comeBackLaterFlags: flags)
+    }
+
+    private func terminalRow(id: String, sessionID: String?, runState: SpacesDeviceRunState = .exited) -> SpacesDeviceWorkspaceTerminalRow {
+        SpacesDeviceWorkspaceTerminalRow(
+            id: id, workspaceID: "ws", title: "scratch", workingDirectory: "/device/ws", sessionID: sessionID, runState: runState, canOpenTerminal: true,
+            liveTitle: "vim")
+    }
+
+    private func workspace(id: String, terminalRows: [SpacesDeviceWorkspaceTerminalRow]) -> SpacesDeviceWorkspaceSummary {
+        SpacesDeviceWorkspaceSummary(
+            id: id, projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/device/\(id)", isRunning: true,
+            isHidden: false, isDefault: false, notes: nil, hasTrackedRuntimeIndicators: false, assignedPorts: [], setupState: nil,
+            config: SpacesDeviceWorkspaceConfig(), processRows: [], codingAgentRows: [], terminalRows: terminalRows)
+    }
 
     /// A focus boundary dated the same way the daemon dates a bell, so tests can place a bell either side
     /// of the moment the session took focus.
@@ -59,29 +78,34 @@ struct AlertsControllerBuilderTests {
         return AlertsController.FocusedBellWatch(sessionID: sessionID, since: since)
     }
 
-    private func session(id: String, workspaceID: String = "ws", title: String = "shell-1", liveTitle: String? = nil, bellAt: String? = nil)
-        -> SpacesDeviceTerminalSessionSummary
-    {
+    private func session(
+        id: String, workspaceID: String = "ws", title: String = "shell-1", liveTitle: String? = nil, bellAt: String? = nil,
+        state: TerminalSessionState = .running, updatedAt: String = "2026-06-28T09:00:00Z"
+    ) -> SpacesDeviceTerminalSessionSummary {
         SpacesDeviceTerminalSessionSummary(
-            id: id, title: title, liveTitle: liveTitle, workingDirectory: "/device/ws", shell: "/bin/zsh", command: nil, state: .running,
+            id: id, title: title, liveTitle: liveTitle, workingDirectory: "/device/ws", shell: "/bin/zsh", command: nil, state: state,
             backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 100, childPID: nil, workspaceID: workspaceID, workspaceTitle: nil,
-            projectID: nil, projectName: nil, createdAt: "2026-06-28T09:00:00Z", updatedAt: "2026-06-28T09:00:00Z", isControlAvailable: true,
+            projectID: nil, projectName: nil, createdAt: "2026-06-28T09:00:00Z", updatedAt: updatedAt, isControlAvailable: true,
             isSubscriptionAvailable: true, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .liveSession, bellAt: bellAt)
     }
 
-    @Test func exitedProcessOnRunningWorkspaceProducesProcessAlert() {
+    @Test func exitedProcessProducesProcessAlertEvenOnAStoppedWorkspace() {
         let groups = AlertsController.buildOverviewAlertsGroups(
             from: overview([
                 workspace(
-                    id: "ws", processRows: [exitedProcess(id: "p1", processID: "run-1", exitedAt: "2026-06-28T10:00:00Z"), runningProcess(id: "p2")])
+                    id: "ws", isRunning: false,
+                    processRows: [exitedProcess(id: "p1", processID: "run-1", exitedAt: "2026-06-28T10:00:00Z"), runningProcess(id: "p2")])
             ]), deviceID: "local")
 
         #expect(groups.count == 1)
         #expect(groups[0].items.count == 1)
         let item = groups[0].items[0]
+        #expect(item.kind == .processExited)
         #expect(item.processStatus == .exited)
         #expect(item.countsTowardBadge)
-        #expect(item.attentionID == "alert:local:process:run-1:2026-06-28T10:00:00Z")
+        #expect(item.attentionID == "alert:local:process:p1:2026-06-28T10:00:00Z")
+        #expect(item.alertKey == "process:p1:2026-06-28T10:00:00Z")
+        #expect(item.deviceID == "local")
         if case .workspaceProcess(let wsID, let processID)? = item.focusRequest {
             #expect(wsID == "ws")
             #expect(processID == "run-1")
@@ -103,11 +127,10 @@ struct AlertsControllerBuilderTests {
                     ])
             ]), deviceID: "local")
 
-        // Agents draw attention even on a stopped workspace; idle/spinning never do.
         #expect(groups.count == 1)
         #expect(groups[0].items.count == 2)
         #expect(groups[0].items.allSatisfy { $0.agentStatus == .waiting || $0.agentStatus == .done })
-        #expect(groups[0].items.first?.attentionID == "alert:local:agent:ag-2:done:2026-06-28T09:30:00Z")
+        #expect(groups[0].items.first?.attentionID == "alert:local:agent:a-done:done:2026-06-28T09:30:00Z")
 
         // A finished agent isn't still blocking on the user, so it must render distinctly from a
         // waiting agent by tint alone (same cpu.fill identity, done blue vs waiting amber).
@@ -117,14 +140,6 @@ struct AlertsControllerBuilderTests {
         #expect(doneItem?.iconTint == .done)
         #expect(waitingItem?.icon == "cpu.fill")
         #expect(waitingItem?.iconTint == .warning)
-        #expect(doneItem?.iconTint != waitingItem?.iconTint)
-    }
-
-    @Test func exitedProcessOnStoppedWorkspaceIsIgnored() {
-        let groups = AlertsController.buildOverviewAlertsGroups(
-            from: overview([workspace(id: "ws", isRunning: false, processRows: [exitedProcess(id: "p1", processID: "run-1", exitedAt: "t")])]),
-            deviceID: "local")
-        #expect(groups.isEmpty)
     }
 
     @Test func itemsAndGroupsSortByEventDateDescending() {
@@ -138,10 +153,9 @@ struct AlertsControllerBuilderTests {
 
         let groups = AlertsController.buildOverviewAlertsGroups(from: overview([wsB, wsA]), deviceID: "local")
 
-        // Group whose most-recent alert is newest comes first; within a group, newest exit first.
         #expect(groups.map(\.workspaceID) == ["ws-a", "ws-b"])
         #expect(
-            groups[0].items.map(\.attentionID) == ["alert:local:process:new:2026-06-28T12:00:00Z", "alert:local:process:old:2026-06-28T08:00:00Z"])
+            groups[0].items.map(\.alertKey) == ["process:p-new:2026-06-28T12:00:00Z", "process:p-old:2026-06-28T08:00:00Z"])
     }
 
     @Test func workspaceWithoutAttentionItemsProducesNoGroup() {
@@ -150,12 +164,14 @@ struct AlertsControllerBuilderTests {
         #expect(groups.isEmpty)
     }
 
-    @Test func deviceIDScopesAttentionIDsAcrossDevices() {
-        let ws = workspace(id: "ws", processRows: [exitedProcess(id: "p", processID: "run-1", exitedAt: "t")])
+    @Test func deviceIDQualifiesTheDeviceFreeKey() {
+        let ws = workspace(id: "ws", processRows: [exitedProcess(id: "p", processID: "run-1", exitedAt: "2026-06-28T10:00:00Z")])
         let local = AlertsController.buildOverviewAlertsGroups(from: overview([ws]), deviceID: "local")
         let remote = AlertsController.buildOverviewAlertsGroups(from: overview([ws]), deviceID: "remote-device")
-        #expect(local[0].items[0].attentionID == "alert:local:process:run-1:t")
-        #expect(remote[0].items[0].attentionID == "alert:remote-device:process:run-1:t")
+        #expect(local[0].items[0].alertKey == remote[0].items[0].alertKey)
+        #expect(local[0].items[0].attentionID == "alert:local:process:p:2026-06-28T10:00:00Z")
+        #expect(remote[0].items[0].attentionID == "alert:remote-device:process:p:2026-06-28T10:00:00Z")
+        #expect(AlertsController.deviceID(fromAttentionID: remote[0].items[0].attentionID) == "remote-device")
     }
 
     @Test func sessionWithBellProducesBellAlert() {
@@ -163,13 +179,13 @@ struct AlertsControllerBuilderTests {
             from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")]), deviceID: "local")
 
         #expect(groups.count == 1)
-        #expect(groups[0].items.count == 1)
         let item = groups[0].items[0]
+        #expect(item.kind == .bell)
         #expect(item.icon == "terminal")
         #expect(item.iconTint == .terminal)
         #expect(item.label == "shell-1")
         #expect(item.detail == nil, "a shell that has reported no title has nothing to say beside its name")
-        #expect(item.attentionID == "alert:local:session:s1:bell:2026-06-28T09:00:00Z")
+        #expect(item.attentionID == "alert:local:bell:s1:2026-06-28T09:00:00Z")
         if case .terminalSession(let workspaceID, let sessionID)? = item.focusRequest {
             #expect(workspaceID == "ws")
             #expect(sessionID == "s1")
@@ -178,9 +194,8 @@ struct AlertsControllerBuilderTests {
         }
     }
 
-    /// A bell row reads exactly as the session's sidebar row does — its name, then what its program is
-    /// doing. Its presence under Alerts is what says the bell rang, so it never spends the row on
-    /// saying so.
+    /// A bell row reads exactly as the session's sidebar row does: its name, then what its program is
+    /// doing. Its presence under Alerts is what says the bell rang.
     @Test func bellAlertRowIsNamedAndDescribedLikeItsSessionRow() {
         let groups = AlertsController.buildOverviewAlertsGroups(
             from: overview(
@@ -191,145 +206,21 @@ struct AlertsControllerBuilderTests {
         #expect(groups[0].items[0].detail == "vim main.swift")
     }
 
-    @Test func bellAlertIdentityIsStableAcrossBuildsAndChangesWithBellAt() {
-        let firstBuild = AlertsController.buildOverviewAlertsGroups(
+    @Test func aLaterBellInTheSameSessionIsANewAlert() {
+        let first = AlertsController.buildOverviewAlertsGroups(
             from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")]), deviceID: "local")
-        let secondBuild = AlertsController.buildOverviewAlertsGroups(
-            from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")]), deviceID: "local")
-        #expect(firstBuild[0].items[0].attentionID == secondBuild[0].items[0].attentionID)
-
-        let laterBell = AlertsController.buildOverviewAlertsGroups(
+        let later = AlertsController.buildOverviewAlertsGroups(
             from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:05:00Z")]), deviceID: "local")
-        #expect(laterBell[0].items[0].attentionID != firstBuild[0].items[0].attentionID)
+        #expect(first[0].items[0].attentionID != later[0].items[0].attentionID)
     }
 
     /// A Linux daemon stamps its runtime state with fractional seconds, so a remote workspace's bell has
-    /// to date the row the same way a local one does — the age is the only recency a bell row carries.
+    /// to date the row the same way a local one does.
     @Test func bellAlertFromALinuxDaemonIsDated() {
         let groups = AlertsController.buildOverviewAlertsGroups(
             from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00.123Z")]),
             deviceID: "remote-device")
         #expect(groups[0].items[0].eventDate != nil)
-    }
-
-    /// The bell of the session the user is typing in is consumed, not filtered: only the focused
-    /// session's identity is taken, and the alert disappears from what the user sees.
-    @Test func focusedSessionsBellIsConsumedAndOtherSessionsStillAlert() {
-        let groups = AlertsController.buildOverviewAlertsGroups(
-            from: overview(
-                [workspace(id: "ws", isRunning: false)],
-                sessions: [
-                    session(id: "s1", title: "focused", bellAt: "2026-06-28T09:00:00Z"),
-                    session(id: "s2", title: "background", bellAt: "2026-06-28T09:00:01Z"),
-                ]), deviceID: "local")
-
-        let consumed = AlertsController.bellAttentionIDs(in: groups, watch: focusedSince("s1", "2026-06-28T08:59:00Z"))
-
-        #expect(consumed == ["alert:local:session:s1:bell:2026-06-28T09:00:00Z"])
-        let visible = AlertsController.visibleAlertsGroups(in: groups, dismissedAttentionItemIDs: consumed)
-        #expect(visible.flatMap(\.items).map(\.label) == ["background"])
-    }
-
-    /// A consumed bell must stay consumed once the user moves focus to another pane — the daemon keeps
-    /// reporting the same `bellAt`, so a suppression that only held while the session was focused would
-    /// raise the alert the moment focus moved. The identity is what survives, and a later bell in the
-    /// same session carries a new one and alerts.
-    @Test func consumedBellStaysGoneAfterFocusMovesAndALaterBellAlerts() {
-        let workspaces = [workspace(id: "ws", isRunning: false)]
-        let groups = AlertsController.buildOverviewAlertsGroups(
-            from: overview(workspaces, sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")]), deviceID: "local")
-        let dismissed = AlertsController.bellAttentionIDs(in: groups, watch: focusedSince("s1", "2026-06-28T08:59:00Z"))
-
-        // Focus has moved elsewhere: the same overview is rebuilt with nothing focused.
-        let afterFocusMoved = AlertsController.buildOverviewAlertsGroups(
-            from: overview(workspaces, sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")]), deviceID: "local")
-        #expect(AlertsController.visibleAlertsGroups(in: afterFocusMoved, dismissedAttentionItemIDs: dismissed).isEmpty)
-
-        let laterBell = AlertsController.buildOverviewAlertsGroups(
-            from: overview(workspaces, sessions: [session(id: "s1", bellAt: "2026-06-28T09:05:00Z")]), deviceID: "local")
-        #expect(AlertsController.visibleAlertsGroups(in: laterBell, dismissedAttentionItemIDs: dismissed).flatMap(\.items).count == 1)
-    }
-
-    /// Consumption is only durable if the pruning pass keeps it: dismissals are trimmed to the alerts
-    /// currently derived, and a consumed bell is still derived (that is why the builder emits it for the
-    /// focused session too). Once its `bellAt` is superseded, the stale identity is dropped.
-    @Test func consumedBellIdentitySurvivesPruningUntilItsBellAtIsSuperseded() {
-        let workspaces = [workspace(id: "ws", isRunning: false)]
-        let groups = AlertsController.buildOverviewAlertsGroups(
-            from: overview(workspaces, sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")]), deviceID: "local")
-        let dismissed = AlertsController.bellAttentionIDs(in: groups, watch: focusedSince("s1", "2026-06-28T08:59:00Z"))
-
-        #expect(AlertsController.retainedDismissedAttentionItemIDs(dismissed, in: groups) == dismissed)
-
-        let laterBell = AlertsController.buildOverviewAlertsGroups(
-            from: overview(workspaces, sessions: [session(id: "s1", bellAt: "2026-06-28T09:05:00Z")]), deviceID: "local")
-        #expect(AlertsController.retainedDismissedAttentionItemIDs(dismissed, in: laterBell).isEmpty)
-    }
-
-    /// Focusing a session is not a way to clear its alerts. A bell it rang while the user was elsewhere is
-    /// a legitimate alert, and it survives every rebuild that happens while the session holds focus —
-    /// only the user dismissing it takes it away.
-    @Test func aBellRungBeforeFocusArrivedSurvivesRebuildsWhileFocused() {
-        let payload = overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")])
-        let watch = focusedSince("s1", "2026-06-28T09:10:00Z")
-
-        for _ in 0..<2 {
-            let groups = AlertsController.buildOverviewAlertsGroups(from: payload, deviceID: "local")
-            #expect(AlertsController.bellAttentionIDs(in: groups, watch: watch).isEmpty)
-            #expect(AlertsController.visibleAlertsGroups(in: groups, dismissedAttentionItemIDs: []).flatMap(\.items).count == 1)
-        }
-    }
-
-    /// The bell rung after the user arrived is the one happening in front of them, and it is consumed even
-    /// though the same session's earlier bell was not. The boundary carries a little skew tolerance
-    /// because `bellAt` comes from the daemon's clock and the focus time from this Mac's.
-    @Test func aBellRungAfterFocusArrivedIsConsumedIncludingJustInsideTheSkewTolerance() {
-        let watch = focusedSince("s1", "2026-06-28T09:00:00Z")
-
-        let afterFocus = AlertsController.buildOverviewAlertsGroups(
-            from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:05Z")]), deviceID: "local")
-        #expect(AlertsController.bellAttentionIDs(in: afterFocus, watch: watch).count == 1)
-
-        let justBeforeFocus = AlertsController.buildOverviewAlertsGroups(
-            from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T08:59:59Z")]), deviceID: "local")
-        #expect(AlertsController.bellAttentionIDs(in: justBeforeFocus, watch: watch).count == 1)
-
-        let wellBeforeFocus = AlertsController.buildOverviewAlertsGroups(
-            from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T08:59:00Z")]), deviceID: "local")
-        #expect(AlertsController.bellAttentionIDs(in: wellBeforeFocus, watch: watch).isEmpty)
-    }
-
-    /// Every arrival at a session starts its own boundary, and leaving every pane clears it — otherwise a
-    /// session focused hours ago would keep consuming bells rung long after the user walked away.
-    @Test func theFocusBoundaryRestartsOnEachArrivalAndClearsWhenNothingIsFocused() {
-        let firstArrival = Date(timeIntervalSinceReferenceDate: 1_000_000)
-        let watch = AlertsController.updatedFocusedBellWatch(nil, focusedSessionID: "s1", now: firstArrival)
-        #expect(watch == AlertsController.FocusedBellWatch(sessionID: "s1", since: firstArrival))
-
-        // A rebuild that sees the same session focused keeps the original arrival time.
-        let unchanged = AlertsController.updatedFocusedBellWatch(watch, focusedSessionID: "s1", now: firstArrival.addingTimeInterval(60))
-        #expect(unchanged == watch)
-
-        #expect(AlertsController.updatedFocusedBellWatch(watch, focusedSessionID: nil, now: firstArrival.addingTimeInterval(120)) == nil)
-
-        let secondArrival = firstArrival.addingTimeInterval(180)
-        let returned = AlertsController.updatedFocusedBellWatch(nil, focusedSessionID: "s1", now: secondArrival)
-        #expect(returned == AlertsController.FocusedBellWatch(sessionID: "s1", since: secondArrival))
-    }
-
-    /// Focus leaving and coming back must not resurrect what was already consumed: the identity stays in
-    /// the dismissed set, and the fresh boundary only governs which *new* bells get consumed.
-    @Test func focusReturningDoesNotResurrectAConsumedBell() {
-        let payload = overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")])
-        let groups = AlertsController.buildOverviewAlertsGroups(from: payload, deviceID: "local")
-        let dismissed = AlertsController.bellAttentionIDs(in: groups, watch: focusedSince("s1", "2026-06-28T08:59:00Z"))
-        #expect(!dismissed.isEmpty)
-
-        // Focus left and came back later, so the boundary is now after that bell — it is not re-consumed,
-        // and it is not shown either, because consuming it once was a dismissal.
-        let afterReturning = AlertsController.buildOverviewAlertsGroups(from: payload, deviceID: "local")
-        #expect(AlertsController.bellAttentionIDs(in: afterReturning, watch: focusedSince("s1", "2026-06-28T09:30:00Z")).isEmpty)
-        #expect(AlertsController.visibleAlertsGroups(in: afterReturning, dismissedAttentionItemIDs: dismissed).isEmpty)
     }
 
     @Test func sessionWithoutBellProducesNoAlert() {
@@ -338,9 +229,130 @@ struct AlertsControllerBuilderTests {
         #expect(groups.isEmpty)
     }
 
-    /// Hiding a workspace, or hiding its project, tags the group rather than dropping it: the group has to
-    /// stay derived for its dismissal identities to survive the hide (see
-    /// `dismissedAlertsFromAHiddenWorkspaceAreRetained`), and the display surfaces read the tag.
+    // MARK: - Dismissal comes from the device
+
+    @Test func keysTheDeviceDismissedAreMarkedAndLeaveEveryList() {
+        let payload = overview(
+            [workspace(id: "ws", processRows: [exitedProcess(id: "p1", processID: "run-1", exitedAt: "2026-06-28T10:00:00Z")])],
+            sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")], dismissed: ["bell:s1:2026-06-28T09:00:00Z"])
+        let groups = AlertsController.buildOverviewAlertsGroups(from: payload, deviceID: "local")
+
+        #expect(groups[0].items.count == 2, "a dismissed alert stays derived so its row can still read it")
+        #expect(groups[0].items.first { $0.kind == .bell }?.isDismissed == true)
+        #expect(groups[0].items.first { $0.kind == .processExited }?.isDismissed == false)
+        let visible = AlertsController.visibleAlertsGroups(in: groups)
+        #expect(visible.flatMap(\.items).map(\.kind) == [.processExited])
+    }
+
+    @Test func aDismissedKeyOnOneDeviceDoesNotHideTheSameKeyOnAnother() {
+        let workspaces = [workspace(id: "ws", processRows: [exitedProcess(id: "p1", processID: "run-1", exitedAt: "2026-06-28T10:00:00Z")])]
+        let dismissedOnA = AlertsController.buildOverviewAlertsGroups(
+            from: overview(workspaces, dismissed: ["process:p1:2026-06-28T10:00:00Z"]), deviceID: "device-a")
+        let liveOnB = AlertsController.buildOverviewAlertsGroups(from: overview(workspaces), deviceID: "device-b")
+
+        let visible = AlertsController.visibleAlertsGroups(in: dismissedOnA + liveOnB)
+        #expect(visible.flatMap(\.items).map(\.attentionID) == ["alert:device-b:process:p1:2026-06-28T10:00:00Z"])
+    }
+
+    @Test func aProcessExitReadsAcknowledgedExactlyWhenTheDeviceDismissedIt() {
+        let workspaces = [workspace(id: "ws", processRows: [exitedProcess(id: "p1", processID: "run-1", exitedAt: "2026-06-28T10:00:00Z")])]
+        let live = AlertsController.buildOverviewAlertsGroups(from: overview(workspaces), deviceID: "local")
+        let dismissed = AlertsController.buildOverviewAlertsGroups(from: overview(workspaces, dismissed: ["process:p1:2026-06-28T10:00:00Z"]), deviceID: "local")
+        #expect(!AlertsController.isProcessExitAcknowledged(processID: "run-1", workspaceID: "ws", alertsGroups: live))
+        #expect(AlertsController.isProcessExitAcknowledged(processID: "run-1", workspaceID: "ws", alertsGroups: dismissed))
+
+        // A later exit carries a new key, so the earlier dismissal no longer applies.
+        let exitedAgain = AlertsController.buildOverviewAlertsGroups(
+            from: overview(
+                [workspace(id: "ws", processRows: [exitedProcess(id: "p1", processID: "run-1", exitedAt: "2026-06-28T11:00:00Z")])], dismissed: ["process:p1:2026-06-28T10:00:00Z"]),
+            deviceID: "local")
+        #expect(!AlertsController.isProcessExitAcknowledged(processID: "run-1", workspaceID: "ws", alertsGroups: exitedAgain))
+    }
+
+    @Test func aMarkOnAProcessDoesNotMakeItsExitReadAcknowledged() {
+        let flag = SpacesDeviceComeBackLaterFlag(rowKind: .process, rowID: "p1", flaggedAt: "2026-06-28T11:00:00Z")
+        let groups = AlertsController.buildOverviewAlertsGroups(
+            from: overview(
+                [workspace(id: "ws", processRows: [exitedProcess(id: "p1", processID: "run-1", exitedAt: "2026-06-28T10:00:00Z")])], flags: [flag]), deviceID: "local")
+        #expect(groups[0].items.count == 2)
+        #expect(!AlertsController.isProcessExitAcknowledged(processID: "run-1", workspaceID: "ws", alertsGroups: groups))
+    }
+
+    // MARK: - Ended terminals
+
+    @Test func anExitedTerminalRowAndALooseFailedSessionAlertAndFocusTheirSession() {
+        let groups = AlertsController.buildOverviewAlertsGroups(
+            from: overview(
+                [workspace(id: "ws", terminalRows: [terminalRow(id: "t1", sessionID: "s-row")])],
+                sessions: [
+                    session(id: "s-row", state: .exited, updatedAt: "2026-06-28T09:00:00Z"),
+                    session(id: "s-loose", title: "loose", state: .failed, updatedAt: "2026-06-28T09:10:00Z"),
+                ]), deviceID: "local")
+
+        let items = groups[0].items
+        #expect(items.map(\.kind) == [.terminalFailed, .terminalExited])
+        #expect(items[0].label == "loose")
+        #expect(items[1].label == "scratch")
+        #expect(items[1].detail == "vim")
+        #expect(items.allSatisfy { $0.countsTowardBadge })
+        if case .terminalSession(_, let sessionID)? = items[1].focusRequest { #expect(sessionID == "s-row") } else { Issue.record("expected focus") }
+        if case .terminalSession(_, let sessionID)? = items[0].focusRequest { #expect(sessionID == "s-loose") } else { Issue.record("expected focus") }
+    }
+
+    // MARK: - Come Back Later
+
+    @Test func comeBackLaterMarksAreAlertsNamedAfterTheirRowsAndFocusingTheirTargets() throws {
+        let workspaceWithRows = SpacesDeviceWorkspaceSummary(
+            id: "ws", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/device/ws", isRunning: true,
+            isHidden: false, isDefault: false, notes: nil, hasTrackedRuntimeIndicators: false, assignedPorts: [], setupState: nil,
+            config: SpacesDeviceWorkspaceConfig(),
+            processRows: [
+                SpacesDeviceWorkspaceProcessRow(
+                    id: "p1", workspaceID: "ws", name: "web", command: "npm run dev", templateID: "p1", processID: "run-1", sessionID: "s-proc",
+                    runState: .running, canRun: false, canStop: true, canRestart: true)
+            ], codingAgentRows: [agent(id: "a1", agentID: "ag-1", activityState: .idle, updatedAt: nil)],
+            terminalRows: [terminalRow(id: "t1", sessionID: "s-term", runState: .running)])
+        let flags = [
+            SpacesDeviceComeBackLaterFlag(rowKind: .agent, rowID: "a1", flaggedAt: "2026-06-28T10:00:00Z"),
+            SpacesDeviceComeBackLaterFlag(rowKind: .process, rowID: "p1", flaggedAt: "2026-06-28T10:05:00Z"),
+            SpacesDeviceComeBackLaterFlag(rowKind: .terminal, rowID: "t1", flaggedAt: "2026-06-28T10:10:00Z"),
+        ]
+        let groups = AlertsController.buildOverviewAlertsGroups(from: overview([workspaceWithRows], flags: flags), deviceID: "local")
+
+        let items = groups[0].items
+        #expect(items.map(\.label) == ["scratch", "web", "Codex"], "newest mark first, each named after its row")
+        #expect(items.allSatisfy { $0.kind == .comeBackLater && $0.countsTowardBadge })
+        #expect(items.map(\.icon) == ["terminal", "terminal", "cpu.fill"], "each mark keeps its row kind's icon")
+        #expect(items.map(\.iconTint) == [.terminal, .terminal, .accent])
+        #expect(items[0].attentionID == "alert:local:comebacklater:terminal:t1")
+        if case .terminalSession(_, let sessionID)? = items[0].focusRequest { #expect(sessionID == "s-term") } else { Issue.record("expected focus") }
+        if case .workspaceProcess(_, let processID)? = items[1].focusRequest { #expect(processID == "run-1") } else { Issue.record("expected focus") }
+        if case .agentWindow(let record)? = items[2].focusRequest { #expect(record.id == "ag-1") } else { Issue.record("expected focus") }
+    }
+
+    @Test func aMarkSurvivesTheRowsOwnAlertsAndIsOwnedByTheRow() {
+        let flag = SpacesDeviceComeBackLaterFlag(rowKind: .agent, rowID: "a-done", flaggedAt: "2026-06-28T11:00:00Z")
+        let groups = AlertsController.buildOverviewAlertsGroups(
+            from: overview(
+                [workspace(id: "ws", codingAgentRows: [agent(id: "a-done", agentID: "ag-2", activityState: .done, updatedAt: "2026-06-28T09:30:00Z")])],
+                flags: [flag]), deviceID: "local")
+
+        let owned = AlertsController.rowAlertsAttentionEntries(in: groups, workspaceID: "ws", agentID: "ag-2")
+        #expect(Set(owned.map(\.kind)) == [.agentDone, .comeBackLater])
+    }
+
+    @Test func aHiddenWorkspacesMarkIsDerivedButNotListed() {
+        let flag = SpacesDeviceComeBackLaterFlag(rowKind: .agent, rowID: "a1", flaggedAt: "2026-06-28T11:00:00Z")
+        let groups = AlertsController.buildOverviewAlertsGroups(
+            from: overview(
+                [workspace(id: "ws", isHidden: true, codingAgentRows: [agent(id: "a1", agentID: "ag-1", activityState: .idle, updatedAt: nil)])],
+                projects: [project(id: "project-1")], flags: [flag]), deviceID: "local")
+        #expect(groups.count == 1)
+        #expect(AlertsController.visibleAlertsGroups(in: groups).isEmpty)
+    }
+
+    // MARK: - Hidden workspaces
+
     @Test func groupsCarryWhetherTheirWorkspaceIsHidden() {
         let groups = AlertsController.buildOverviewAlertsGroups(
             from: overview(
@@ -360,8 +372,6 @@ struct AlertsControllerBuilderTests {
         #expect(groups.first { $0.workspaceID == "ws-hidden-project" }?.isFromHiddenWorkspace == true)
     }
 
-    /// The pane and the badge both derive from `visibleAlertsGroups`, so tagging is what keeps a hidden
-    /// workspace's alerts off screen and out of the count.
     @Test func hiddenWorkspaceGroupsAreNeitherShownNorCounted() {
         let groups = AlertsController.buildOverviewAlertsGroups(
             from: overview(
@@ -372,24 +382,70 @@ struct AlertsControllerBuilderTests {
                     session(id: "s2", workspaceID: "ws-hidden", bellAt: "2026-06-28T09:00:00Z"),
                 ]), deviceID: "local")
 
-        let visible = AlertsController.visibleAlertsGroups(in: groups, dismissedAttentionItemIDs: [])
+        let visible = AlertsController.visibleAlertsGroups(in: groups)
         #expect(visible.count == 1)
         #expect(visible.first?.workspaceID == "ws-visible")
-        // The badge is this reduction over the same groups (`alertsAttentionCount`).
         #expect(visible.reduce(0) { $0 + $1.items.filter(\.countsTowardBadge).count } == 1)
     }
 
-    /// Dismissals of a hidden workspace's alerts are retained, so unhiding the workspace does not bring
-    /// back alerts the user already cleared.
-    @Test func dismissedAlertsFromAHiddenWorkspaceAreRetained() {
-        let payload = overview(
-            [workspace(id: "ws-hidden", isRunning: false, isHidden: true)], projects: [project(id: "project-1")],
-            sessions: [session(id: "s1", workspaceID: "ws-hidden", bellAt: "2026-06-28T09:00:00Z")])
-        let groups = AlertsController.buildOverviewAlertsGroups(from: payload, deviceID: "local")
-        let dismissed = Set(groups.flatMap { $0.items.map(\.attentionID) })
-        #expect(dismissed.count == 1)
+    // MARK: - Watched bells
 
-        #expect(AlertsController.retainedDismissedAttentionItemIDs(dismissed, in: groups) == dismissed)
-        #expect(AlertsController.visibleAlertsGroups(in: groups, dismissedAttentionItemIDs: dismissed).isEmpty)
+    /// The bell of the session the user is typing in is taken for dismissal: only the focused session's
+    /// undismissed bell, and nothing else that happens to focus the same session.
+    @Test func onlyTheFocusedSessionsUndismissedBellIsConsumed() {
+        let payload = overview(
+            [workspace(id: "ws", isRunning: false)],
+            sessions: [
+                session(id: "s1", title: "focused", bellAt: "2026-06-28T09:00:00Z"),
+                session(id: "s2", title: "background", bellAt: "2026-06-28T09:00:01Z"),
+                session(id: "s3", title: "ended", state: .exited, updatedAt: "2026-06-28T09:00:02Z"),
+            ])
+        let groups = AlertsController.buildOverviewAlertsGroups(from: payload, deviceID: "local")
+        #expect(AlertsController.bellAttentionIDs(in: groups, watch: focusedSince("s1", "2026-06-28T08:59:00Z")) == ["alert:local:bell:s1:2026-06-28T09:00:00Z"])
+        #expect(AlertsController.bellAttentionIDs(in: groups, watch: focusedSince("s3", "2026-06-28T08:59:00Z")).isEmpty)
+
+        let alreadyDismissed = AlertsController.buildOverviewAlertsGroups(
+            from: overview(
+                [workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")],
+                dismissed: ["bell:s1:2026-06-28T09:00:00Z"]), deviceID: "local")
+        #expect(AlertsController.bellAttentionIDs(in: alreadyDismissed, watch: focusedSince("s1", "2026-06-28T08:59:00Z")).isEmpty)
+    }
+
+    /// Focusing a session is not a way to clear its alerts: a bell rung before focus arrived survives.
+    @Test func aBellRungBeforeFocusArrivedIsNotConsumed() {
+        let payload = overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")])
+        let groups = AlertsController.buildOverviewAlertsGroups(from: payload, deviceID: "local")
+        #expect(AlertsController.bellAttentionIDs(in: groups, watch: focusedSince("s1", "2026-06-28T09:10:00Z")).isEmpty)
+        #expect(AlertsController.visibleAlertsGroups(in: groups).flatMap(\.items).count == 1)
+    }
+
+    /// `bellAt` comes from the daemon's clock and the focus time from this Mac's, so the boundary carries
+    /// a little skew tolerance.
+    @Test func aBellRungAfterFocusArrivedIsConsumedIncludingJustInsideTheSkewTolerance() {
+        let watch = focusedSince("s1", "2026-06-28T09:00:00Z")
+        func consumed(bellAt: String) -> Int {
+            let groups = AlertsController.buildOverviewAlertsGroups(
+                from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: bellAt)]), deviceID: "local")
+            return AlertsController.bellAttentionIDs(in: groups, watch: watch).count
+        }
+        #expect(consumed(bellAt: "2026-06-28T09:00:05Z") == 1)
+        #expect(consumed(bellAt: "2026-06-28T08:59:59Z") == 1)
+        #expect(consumed(bellAt: "2026-06-28T08:59:00Z") == 0)
+    }
+
+    /// Every arrival at a session starts its own boundary, and leaving every pane clears it.
+    @Test func theFocusBoundaryRestartsOnEachArrivalAndClearsWhenNothingIsFocused() {
+        let firstArrival = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        let watch = AlertsController.updatedFocusedBellWatch(nil, focusedSessionID: "s1", now: firstArrival)
+        #expect(watch == AlertsController.FocusedBellWatch(sessionID: "s1", since: firstArrival))
+
+        let unchanged = AlertsController.updatedFocusedBellWatch(watch, focusedSessionID: "s1", now: firstArrival.addingTimeInterval(60))
+        #expect(unchanged == watch)
+
+        #expect(AlertsController.updatedFocusedBellWatch(watch, focusedSessionID: nil, now: firstArrival.addingTimeInterval(120)) == nil)
+
+        let secondArrival = firstArrival.addingTimeInterval(180)
+        let returned = AlertsController.updatedFocusedBellWatch(nil, focusedSessionID: "s1", now: secondArrival)
+        #expect(returned == AlertsController.FocusedBellWatch(sessionID: "s1", since: secondArrival))
     }
 }

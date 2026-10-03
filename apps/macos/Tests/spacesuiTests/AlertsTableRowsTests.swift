@@ -16,7 +16,7 @@ import workspacecore
         automationRunTarget: AlertsController.AutomationRunAlertTarget? = nil
     ) -> AlertsController.AlertsAttentionEntry {
         AlertsController.AlertsAttentionEntry(
-            attentionID: id, icon: "terminal", iconTint: .terminal, label: label, detail: detail, shortcut: "", countsTowardBadge: true,
+            attentionID: id, kind: .bell, icon: "terminal", iconTint: .terminal, label: label, detail: detail, shortcut: "", countsTowardBadge: true,
             eventDate: eventDate, focusRequest: focusRequest, automationRunTarget: automationRunTarget)
     }
 
@@ -114,6 +114,22 @@ import workspacecore
         #expect(rows.first { $0.entry.attentionID == "automation-alert" }?.isAutomationsRow == true)
     }
 
+    /// The dismiss control follows whether the owning device can take a request: the device records the
+    /// dismissal, so a row of a device that cannot act cannot be dismissed.
+    @Test func dismissingIsOfferedOnlyForADeviceThatCanAct() {
+        let mac = group(deviceID: "mac", workspaceID: "ws-mac", items: [entry(id: "mac-alert", eventDate: date(0))])
+        let linux = group(deviceID: "linux", workspaceID: "ws-linux", items: [entry(id: "linux-alert", eventDate: date(-1))])
+        let display = [
+            "mac": AlertsController.AlertsDeviceDisplay(name: "Mac", isOffline: false),
+            "linux": AlertsController.AlertsDeviceDisplay(name: "Linux box", isOffline: true, acceptsActions: false),
+        ]
+
+        let rows = AlertsController.alertsTableRows(groups: [mac, linux], deviceDisplay: display, showsDeviceColumn: true, now: date(0))
+
+        #expect(rows.first { $0.entry.attentionID == "mac-alert" }?.canDismiss == true)
+        #expect(rows.first { $0.entry.attentionID == "linux-alert" }?.canDismiss == false)
+    }
+
     /// A device with no entry in `deviceDisplay` (not yet loaded) reads as reachable rather than offline:
     /// there is no evidence either way, and treating "unknown" as "offline" would dim every row on first
     /// paint before any device section has loaded.
@@ -151,7 +167,7 @@ import workspacecore
 @Suite struct AlertsCombinedSegmentsTests {
     private func entry(label: String, detail: String?) -> AlertsController.AlertsAttentionEntry {
         AlertsController.AlertsAttentionEntry(
-            attentionID: "a", icon: "terminal", iconTint: .terminal, label: label, detail: detail, shortcut: "", countsTowardBadge: true,
+            attentionID: "a", kind: .bell, icon: "terminal", iconTint: .terminal, label: label, detail: detail, shortcut: "", countsTowardBadge: true,
             eventDate: nil)
     }
 
@@ -161,7 +177,7 @@ import workspacecore
     ) -> AlertsController.AlertsRenderPlan.Row {
         AlertsController.AlertsRenderPlan.Row(
             entry: entry, projectName: projectName, isAutomationsRow: isAutomationsRow, workspaceName: workspaceName, deviceText: nil,
-            isOffline: false, ageText: "now", shortcutIndex: 1)
+            isOffline: false, canDismiss: true, ageText: "now", shortcutIndex: 1)
     }
 
     /// A workspace alert with a title reads `project / workspace / name / title`, the confirmed final

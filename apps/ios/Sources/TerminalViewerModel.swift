@@ -970,6 +970,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// session, and the view mounts the surface on exactly this.
     var showsTerminalSurface: Bool { isOwner || ownerRenderEpoch != nil || endedRender != nil }
     var shouldPresentLiveSurface: Bool { showsTerminalSurface }
+    /// Whether a painted screen is on view rather than the "Preparing terminal…" placeholder. An owner
+    /// mounts the surface before its first frame paints (the open hold withholds it), so this, not
+    /// `showsTerminalSurface`, is when a visit to the terminal can begin.
+    var showsRenderedContent: Bool { ownerRenderEpoch != nil || endedRender != nil }
     var visibleText: String {
         if shouldRenderEndedTerminalSurface, let snapshotText = latestState?.renderText { return snapshotText }
         if isSessionUnavailable { return "This terminal session is no longer available.\nReturn to Terminals to open the current live session." }

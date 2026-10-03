@@ -37,7 +37,7 @@ import spacesterminalcore
     /// One representative instance per case, in declaration order. Field values are arbitrary — this test
     /// pins the command's wire *key* and round-trip identity, not any payload type's own field encoding.
     /// Not `private`: `SpacesDeviceAPICommandDescriptorTests` reuses this same one-per-case list so its
-    /// descriptor assertions run over the identical 82 commands this file's own assertions do, rather than
+    /// descriptor assertions run over the identical 85 commands this file's own assertions do, rather than
     /// hand-building a second payload table that could drift out of sync with this one.
     static let samples: [SpacesDeviceAPICommand] = [
         .pair(SpacesDevicePairRequest(pairingCode: "code", pairingNonce: "nonce", clientProtocolVersion: 1)), .ping, .daemonStatus,
@@ -70,6 +70,9 @@ import spacesterminalcore
         .restartWorkspaceProcess(SpacesDeviceWorkspaceProcessMutationRequest(workspaceID: "workspace-1", processID: "process-1")),
         .stopCodingAgent(SpacesDeviceCodingAgentMutationRequest(workspaceID: "workspace-1", agentID: "agent-1")),
         .renameAgentSession(SpacesDeviceAgentSessionRenameRequest(workspaceID: "workspace-1", agentID: "agent-1", title: "New Title")),
+        .dismissAlerts(SpacesDeviceDismissAlertsRequest(keys: ["process:process-1:2026-07-14T09:00:00Z"])),
+        .visitTerminalSession(SpacesDeviceVisitTerminalSessionRequest(sessionID: "session-1", focusedForSeconds: 2.5, keys: ["agent:a1:done"])),
+        .setComeBackLater(SpacesDeviceSetComeBackLaterRequest(rowKind: .agent, rowID: "agent-1", isOn: true)),
         .state(SpacesDeviceTerminalSessionRequest(sessionID: "session-1", includesRenderUpdate: true)),
         .terminalControl(SpacesDeviceTerminalControlRequest(action: .attach, sessionID: "session-1")),
         .terminalPasteImage(
@@ -143,18 +146,18 @@ import spacesterminalcore
     ///  1. `goldenWireKey`'s default-less `switch` forces a golden mapping entry for any case added to
     ///     `SpacesDeviceAPICommand` at compile time (a missing arm fails the build).
     ///  2. This assertion rejects a duplicated sample: mapping every sample through `goldenWireKey` and
-    ///     checking the resulting set is exactly 82 distinct keys catches two samples for the same case
-    ///     (the set would be smaller than the list), which a bare `count == 82` check would miss.
+    ///     checking the resulting set is exactly 85 distinct keys catches two samples for the same case
+    ///     (the set would be smaller than the list), which a bare `count == 85` check would miss.
     ///  3. What neither closes: a new 77th case added to the enum but never added to `samples`: the
     ///     switch still compiles (it only requires *a* mapping, not that every mapping is exercised) and
-    ///     the set stays "82 distinct out of 82 samples". `SpacesDeviceAPICommand` still cannot conform to
+    ///     the set stays "85 distinct out of 85 samples". `SpacesDeviceAPICommand` still cannot conform to
     ///     `CaseIterable` (its cases carry differently-typed associated values), so no enumeration source
     ///     independent of a hand-maintained list exists to close this gap against; both `goldenWireKey` and
     ///     `SpacesDeviceAPICommandDescriptor`'s own switch are default-less exhaustive switches over the
     ///     same enum, not case lists, so neither one can be diffed against `samples` to catch an omission.
     @Test func sampleListCoversEveryCurrentCaseExactlyOnce() {
         let keys = Set(Self.samples.map(Self.goldenWireKey))
-        #expect(keys.count == 82)
+        #expect(keys.count == 85)
         #expect(keys.count == Self.samples.count)
     }
 
@@ -185,7 +188,7 @@ import spacesterminalcore
     }
 
     /// The descriptor's wire keys, taken over `samples`, must be the exact same set as the golden wire
-    /// keys taken over `samples`: the same 82 distinct members, none extra, none missing. Redundant with the
+    /// keys taken over `samples`: the same 85 distinct members, none extra, none missing. Redundant with the
     /// per-sample equality above in what it would catch (a mismatched key would fail both), but it asserts
     /// the requirement at the set level explicitly, matching how `sampleListCoversEveryCurrentCaseExactlyOnce`
     /// asserts distinctness at the set level rather than only per-element.
@@ -233,6 +236,9 @@ import spacesterminalcore
         case .restartWorkspaceProcess: "restartWorkspaceProcess"
         case .stopCodingAgent: "stopCodingAgent"
         case .renameAgentSession: "renameAgentSession"
+        case .dismissAlerts: "dismissAlerts"
+        case .visitTerminalSession: "visitTerminalSession"
+        case .setComeBackLater: "setComeBackLater"
         case .state: "state"
         case .terminalControl: "terminalControl"
         case .terminalPasteImage: "terminalPasteImage"

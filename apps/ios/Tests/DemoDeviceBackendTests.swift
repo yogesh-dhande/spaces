@@ -233,6 +233,44 @@
             XCTAssertEqual(stopped.briefUpdatedAt, runningAgent.briefUpdatedAt)
         }
 
+        func testDismissingAnAlertHidesItInTheRefreshedOverviewAndPersistsForTheSession() async throws {
+            let library = try loadLibrary()
+            let backend = DemoDeviceBackend(library: library)
+            let alert = try XCTUnwrap(
+                library.overview.alertCandidates().first { $0.kind == .agentWaiting }, "The demo overview should carry a waiting agent alert.")
+
+            let response = await backend.serve(SpacesDeviceAPIRequest(command: .dismissAlerts(.init(keys: [alert.key]))))
+
+            XCTAssertTrue(response.ok)
+            XCTAssertEqual(response.overview?.dismissedAlertKeys, [alert.key])
+            let refreshed = await backend.serve(SpacesDeviceAPIRequest(command: .overview))
+            XCTAssertEqual(refreshed.overview?.dismissedAlertKeys, [alert.key])
+
+            // A row mutation republishes the overview without losing the dismissal.
+            let running = try XCTUnwrap(
+                library.overview.workspaces.lazy.flatMap { $0.processRows.filter { $0.runState == .running && $0.processID != nil } }.first)
+            let stopped = await backend.serve(
+                SpacesDeviceAPIRequest(
+                    command: .stopWorkspaceProcess(.init(workspaceID: running.workspaceID, processID: running.processID, processKey: running.name))))
+            XCTAssertEqual(stopped.overview?.dismissedAlertKeys, [alert.key])
+        }
+
+        func testComeBackLaterFlagsAndClearsARowInTheDemoOverview() async throws {
+            let library = try loadLibrary()
+            let backend = DemoDeviceBackend(library: library)
+            let agent = try XCTUnwrap(library.overview.workspaces.lazy.flatMap(\.codingAgentRows).first)
+
+            let flagged = await backend.serve(
+                SpacesDeviceAPIRequest(command: .setComeBackLater(.init(rowKind: .agent, rowID: agent.id, isOn: true))))
+            XCTAssertEqual(flagged.overview?.comeBackLaterFlags.map(\.rowID), [agent.id])
+            XCTAssertTrue(flagged.overview?.alertCandidates().contains { $0.kind == .comeBackLater && $0.subjectID == agent.id } == true)
+
+            let dismissed = await backend.serve(
+                SpacesDeviceAPIRequest(
+                    command: .dismissAlerts(.init(keys: [SpacesDeviceComeBackLaterFlag.alertKey(rowKind: .agent, rowID: agent.id)]))))
+            XCTAssertTrue(dismissed.overview?.comeBackLaterFlags.isEmpty == true, "dismissing the flag's alert clears the flag")
+        }
+
         // MARK: - Overview stream
 
         /// Mirrors the real daemon's `subscribeDeviceOverview` contract (push on subscribe, push again on
