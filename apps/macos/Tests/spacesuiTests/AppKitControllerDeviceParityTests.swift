@@ -9,6 +9,20 @@ import workspacecore
 @testable import spacesui
 
 @Suite struct AppKitControllerDeviceParityTests {
+    @Test func aVisitFollowsTheWorkspaceTheMainWindowShowsOrAGlobalPanelWindow() {
+        let workspace = DetailPane.workspace(id: "w1", deviceID: "d1")
+        #expect(
+            AppKitController.visitedPanelScope(keyWindowPanelWindowID: nil, keyWindowIsMain: true, detailPane: workspace)
+                == .workspace(deviceID: "d1", workspaceID: "w1"))
+        #expect(
+            AppKitController.visitedPanelScope(keyWindowPanelWindowID: "p1", keyWindowIsMain: false, detailPane: workspace)
+                == .globalWindow(panelWindowID: "p1"))
+        for pane in [DetailPane.alerts, .automations, .none, .compatibilityBlock(deviceID: "d1")] {
+            #expect(AppKitController.visitedPanelScope(keyWindowPanelWindowID: nil, keyWindowIsMain: true, detailPane: pane) == nil)
+        }
+        #expect(AppKitController.visitedPanelScope(keyWindowPanelWindowID: nil, keyWindowIsMain: false, detailPane: workspace) == nil)
+    }
+
     @Test func sidebarProjectActionsDoNotDependOnDeviceLocation() {
         let gitProjectActions = AppKitController.sidebarProjectActions(isGitRepo: true, kind: .standard)
         #expect(gitProjectActions.showsSettings)

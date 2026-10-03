@@ -196,14 +196,6 @@ struct ComeBackLaterMenuButton: View {
     }
 }
 
-/// The small "LATER" tag beside the title of a Come Back Later alert.
-struct ComeBackLaterTag: View {
-    var body: some View {
-        Text("LATER").font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.accent).padding(.horizontal, 5).padding(.vertical, 2).background(
-            Capsule().fill(Theme.accent.opacity(0.16)))
-    }
-}
-
 extension StatusDot.Kind {
     init(runState: SpacesDeviceRunState) {
         switch runState {

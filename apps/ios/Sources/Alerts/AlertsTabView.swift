@@ -78,12 +78,7 @@ struct AlertsTabView: View {
     @ViewBuilder private func eventRow(_ event: SpacesMobileAttentionEvent) -> some View {
         let row = BandRow(
             dotKind: StatusDot.Kind(attentionKind: event.kind), tile: .tile(for: event.rowType),
-            title: {
-                HStack(spacing: 6) {
-                    Text(event.title)
-                    if event.kind == .comeBackLater { ComeBackLaterTag() }
-                }
-            }, detail: event.detail, detailIsMonospaced: false
+            title: event.title, detail: event.detail, detailIsMonospaced: false
         ) {
             // Reads the shared 30-second label clock rather than `Date()` so this age keeps advancing on
             // its own cadence even when the overview payload itself is unchanged (#540) — see

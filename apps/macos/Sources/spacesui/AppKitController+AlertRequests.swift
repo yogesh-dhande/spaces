@@ -64,28 +64,48 @@ extension AppKitController {
                 deviceSection(id: terminal.deviceID)?.overview.map { TerminalVisitTracker.clearables(overview: $0, sessionID: terminal.sessionID) }
                     ?? TerminalVisitTracker.Clearables()
             },
-            currentFocus: { [unowned self] in focusedTerminalIfActive() },
+            currentFocus: { [unowned self] in visitedTerminalIfActive() },
             sendVisit: { [unowned self] terminal, focusedFor, keys in
                 await sendTerminalVisit(
                     deviceID: terminal.deviceID, sessionID: terminal.sessionID, focusedForSeconds: focusedFor, keys: keys.sorted())
             })
     }
 
-    /// Feeds the visit tracker the terminal holding keyboard focus and whether Spaces is frontmost. Called
-    /// wherever either can change and from the overview install funnel, which is also what tells the
-    /// tracker a new alert arrived.
+    /// Feeds the visit tracker the terminal the key window is showing and whether Spaces is frontmost.
+    /// Called wherever either can change (the focused pane of a layout, the key window, the main
+    /// window's detail pane, app activation) and from the overview install funnel, which is also what
+    /// tells the tracker a new alert arrived.
     func refreshTerminalVisit() {
-        terminalVisits.update(focus: focusedTerminalIfActive(), isActive: NSApp.isActive)
+        terminalVisits.update(focus: visitedTerminalIfActive(), isActive: NSApp.isActive)
     }
 
-    /// The terminal whose pane holds keyboard focus, nil when Spaces is not frontmost or focus is on
-    /// anything other than a pane. The one derivation behind both `refreshTerminalVisit` and the
-    /// tracker's check when a report is due.
-    private func focusedTerminalIfActive() -> TerminalVisitTracker.FocusedTerminal? {
-        guard NSApp.isActive else { return nil }
-        return panelCoordinator.focusedSessionID().flatMap { sessionID in
+    /// The terminal a visit is to: the one in the focused pane of what the key window shows (the pane
+    /// the workspace footer or a global window's identity strip names), nil when Spaces is not
+    /// frontmost or the key window shows no terminal pane. The one derivation behind both
+    /// `refreshTerminalVisit` and the tracker's check when a report is due.
+    ///
+    /// It is not the first responder: an ended terminal's pane never takes first responder, and a live
+    /// terminal's input focus lands asynchronously after the pane is shown, so the first responder
+    /// would leave exactly the terminals the user is looking at unvisitable. As a consequence keyboard
+    /// focus moving into a sidebar rename field or the notes editor does not end a visit.
+    private func visitedTerminalIfActive() -> TerminalVisitTracker.FocusedTerminal? {
+        guard NSApp.isActive, let keyWindow = NSApp.keyWindow,
+            let scope = Self.visitedPanelScope(
+                keyWindowPanelWindowID: panelCoordinator.panelWindowID(forWindow: keyWindow), keyWindowIsMain: keyWindow === window,
+                detailPane: detailPane)
+        else { return nil }
+        return panelCoordinator.briefToggleSessionID(scope: scope).flatMap { sessionID in
             deviceID(forSessionID: sessionID).map { TerminalVisitTracker.FocusedTerminal(deviceID: $0, sessionID: sessionID) }
         }
+    }
+
+    /// The panel whose focused pane a visit follows: the key window's own panel when it is a global
+    /// panel window, or the workspace panel the main window's detail shows. Nil for every other key
+    /// window and for any other detail pane (Alerts, Automations, a compatibility block, the placeholder).
+    nonisolated static func visitedPanelScope(keyWindowPanelWindowID: String?, keyWindowIsMain: Bool, detailPane: DetailPane) -> PanelScope? {
+        if let keyWindowPanelWindowID { return .globalWindow(panelWindowID: keyWindowPanelWindowID) }
+        guard keyWindowIsMain, case .workspace(let workspaceID, let deviceID) = detailPane else { return nil }
+        return .workspace(deviceID: deviceID, workspaceID: workspaceID)
     }
 
     /// The device that owns a terminal session: the device its pane is placed under, or for a pane in a

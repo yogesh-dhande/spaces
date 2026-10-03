@@ -321,7 +321,9 @@ struct AlertsControllerBuilderTests {
 
         let items = groups[0].items
         #expect(items.map(\.label) == ["scratch", "web", "Codex"], "newest mark first, each named after its row")
-        #expect(items.allSatisfy { $0.kind == .comeBackLater && $0.icon == "bell.badge" && $0.iconTint == .accent && $0.countsTowardBadge })
+        #expect(items.allSatisfy { $0.kind == .comeBackLater && $0.countsTowardBadge })
+        #expect(items.map(\.icon) == ["terminal", "terminal", "cpu.fill"], "each mark keeps its row kind's icon")
+        #expect(items.map(\.iconTint) == [.terminal, .terminal, .accent])
         #expect(items[0].attentionID == "alert:local:comebacklater:terminal:t1")
         if case .terminalSession(_, let sessionID)? = items[0].focusRequest { #expect(sessionID == "s-term") } else { Issue.record("expected focus") }
         if case .workspaceProcess(_, let processID)? = items[1].focusRequest { #expect(processID == "run-1") } else { Issue.record("expected focus") }

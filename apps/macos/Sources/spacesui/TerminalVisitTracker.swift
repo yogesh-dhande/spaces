@@ -3,12 +3,12 @@ import spacesdevicecore
 
 /// Turns "the user is looking at this terminal" into visit reports for the device that owns it.
 ///
-/// A visit is one terminal's pane holding focus while Spaces is frontmost. After `dwell` seconds of
-/// that, anything a visit clears on the device (finished-work alerts, Come Back Later flags) is reported
-/// with how long the terminal has been focused, so the device compares against its own clock. A report
-/// names exactly the keys whose own dwell completed. Leaving the
-/// terminal (another pane, the pane losing focus, Spaces resigning active) ends the visit and cancels
-/// what was pending.
+/// A visit is one terminal's pane being the focused pane of what the key window shows while Spaces is
+/// frontmost. After `dwell` seconds of that, anything a visit clears on the device (finished-work
+/// alerts, Come Back Later flags) is reported with how long the terminal has been focused, so the device
+/// compares against its own clock. A report names exactly the keys whose own dwell completed. Leaving
+/// the terminal (another pane, the pane no longer shown, Spaces resigning active) ends the visit and
+/// cancels what was pending.
 ///
 /// An alert that arrives while the terminal is watched is reported `dwell` seconds after it first
 /// appeared, within the same visit, so `focusedForSeconds` keeps growing from the visit's start. A flag
@@ -46,9 +46,8 @@ import spacesdevicecore
     private let now: () -> Date
     private let schedule: (TimeInterval, @escaping @MainActor () -> Void) -> Cancel
     private let clearables: (FocusedTerminal) -> Clearables
-    /// The terminal holding keyboard focus right now, nil when Spaces is not frontmost. Read when a
-    /// report is due because focus can leave the pane for a control in the same window without any event
-    /// reaching `update`.
+    /// The terminal the key window shows right now, nil when Spaces is not frontmost. Read when a
+    /// report is due so a visit is never reported from a stale feed.
     private let currentFocus: () -> FocusedTerminal?
     /// Sends the report and answers whether the device took it. A report that was not taken (device
     /// offline, request failed) is retried by the next overview apply, never by a timer.
@@ -86,7 +85,7 @@ import spacesdevicecore
         return result
     }
 
-    /// Reports the current focus. `focus` is the terminal holding keyboard focus, `isActive` whether
+    /// Reports the current focus. `focus` is the terminal the key window shows, `isActive` whether
     /// Spaces is frontmost; a visit exists only while both hold.
     func update(focus: FocusedTerminal?, isActive: Bool) {
         let effective = isActive ? focus : nil

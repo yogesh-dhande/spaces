@@ -34,7 +34,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case warning
         /// A coding agent that finished its turn.
         case done
-        /// A row the user asked to come back to.
+        /// A coding agent marked Come Back Later: an agent's icon takes its alert's status color.
         case accent
     }
 
@@ -3861,6 +3861,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // pane was rendered from stops describing anything on screen and must not be reused to skip a
         // later render.
         if !pane.isAlerts { alerts.invalidateRenderedAlertsDetail() }
+        // A visit follows the workspace the main window shows, so a pane change can start or end one.
+        refreshTerminalVisit()
     }
 
     /// Whether this presentation dismisses the open New Project / New Workspace / project settings

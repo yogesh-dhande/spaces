@@ -222,9 +222,13 @@ import workspacecore
                 guard let workspaceID = candidate.workspaceID, let workspace = workspacesByID[workspaceID],
                     let reference = SpacesDeviceComeBackLaterFlag.rowReference(fromAlertKey: candidate.key)
                 else { continue }
+                // The row keeps its own kind's icon. An agent's icon is tinted with its alert's status
+                // color, as on its waiting and done alerts, so here it takes the mark's accent.
                 let presentation: (label: String, detail: String?, focusRequest: WindowFocusRequest?)?
+                let icon: (name: String, tint: AppKitController.AlertsIconTint)
                 switch reference.rowKind {
                 case .agent:
+                    icon = ("cpu.fill", .accent)
                     presentation = workspace.codingAgentRows.first(where: { $0.id == reference.rowID }).map { agent in
                         (
                             agent.name,
@@ -234,10 +238,12 @@ import workspacecore
                         )
                     }
                 case .process:
+                    icon = ("terminal", .terminal)
                     presentation = workspace.processRows.first(where: { $0.id == reference.rowID }).map { process in
                         (process.name, process.command, process.processID.map { .workspaceProcess(workspaceID: workspaceID, processID: $0) })
                     }
                 case .terminal:
+                    icon = ("terminal", .terminal)
                     presentation = workspace.terminalRows.first(where: { $0.id == reference.rowID }).map { terminal in
                         (
                             terminal.title,
@@ -250,7 +256,7 @@ import workspacecore
                 guard let presentation else { continue }
                 itemsByWorkspace[workspaceID, default: []].append(
                     entry(
-                        icon: "bell.badge", iconTint: .accent, label: presentation.label, detail: presentation.detail,
+                        icon: icon.name, iconTint: icon.tint, label: presentation.label, detail: presentation.detail,
                         focusRequest: presentation.focusRequest))
             }
         }
@@ -942,7 +948,8 @@ import workspacecore
         if let detail = entry.detail, !detail.isEmpty { container.setAccessibilityValue(detail) }
         if let automationID { container.setAccessibilityIdentifier("\(automationID)-row") }
 
-        let statusView = Self.alertsStatusIndicator(processStatus: entry.processStatus, agentStatus: entry.agentStatus, automationID: automationID)
+        let statusView = Self.alertsStatusIndicator(
+            isComeBackLater: entry.kind == .comeBackLater, processStatus: entry.processStatus, agentStatus: entry.agentStatus, automationID: automationID)
 
         let shortcutLabel = NSTextField(labelWithString: shortcutText)
         shortcutLabel.font = Typography.monoBadge
@@ -1016,8 +1023,6 @@ import workspacecore
             /// name for an automation-run alert.
             case name
             case separator
-            /// "COME BACK LATER", marking an alert the user asked to return to.
-            case comeBackLaterTag
             /// The alert's live title: a bell's live terminal title, a process's command, an agent's
             /// detail, or an automation run's outcome text. The first segment to truncate under
             /// pressure (see `AlertsCombinedCompressionPriority`).
@@ -1045,7 +1050,6 @@ import workspacecore
             segments.append(AlertsCombinedSegment(kind: .separator, text: "/"))
         }
         segments.append(AlertsCombinedSegment(kind: .name, text: row.entry.label))
-        if row.entry.kind == .comeBackLater { segments.append(AlertsCombinedSegment(kind: .comeBackLaterTag, text: "COME BACK LATER")) }
         if Self.alertsRowHasTitle(entry: row.entry) {
             segments.append(AlertsCombinedSegment(kind: .separator, text: "/"))
             segments.append(AlertsCombinedSegment(kind: .title, text: row.entry.detail ?? ""))
@@ -1114,9 +1118,6 @@ import workspacecore
                 field.setContentCompressionResistancePriority(AlertsCombinedCompressionPriority.name, for: .horizontal)
                 if let automationID { field.setAccessibilityIdentifier("\(automationID)-label") }
                 labelField = field
-            case .comeBackLaterTag:
-                views.append(Self.comeBackLaterTag(text: segment.text))
-                continue
             case .title:
                 field.font = Typography.metadata
                 field.textColor = .secondaryLabelColor
@@ -1135,32 +1136,6 @@ import workspacecore
         cell.spacing = 4
         // `alertsCombinedSegments` always emits exactly one `.name` segment, so this is never nil.
         return (cell, labelField!, detailField)
-    }
-
-    /// The small accent-tinted capsule that marks a Come Back Later alert. It never truncates: it is
-    /// the only thing that tells the alert apart from the row it points at.
-    private static func comeBackLaterTag(text: String) -> NSView {
-        let label = NSTextField(labelWithString: text)
-        label.font = Typography.monoBadge
-        label.textColor = Theme.accent
-        label.translatesAutoresizingMaskIntoConstraints = false
-        let capsule = NSView()
-        capsule.wantsLayer = true
-        capsule.translatesAutoresizingMaskIntoConstraints = false
-        bindAppearanceReactiveLayer(capsule) { view in
-            view.layer?.backgroundColor = Theme.accentTint.cgColor
-            view.layer?.cornerRadius = 7
-        }
-        capsule.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: capsule.leadingAnchor, constant: 6),
-            label.trailingAnchor.constraint(equalTo: capsule.trailingAnchor, constant: -6),
-            label.topAnchor.constraint(equalTo: capsule.topAnchor, constant: 1),
-            label.bottomAnchor.constraint(equalTo: capsule.bottomAnchor, constant: -1),
-        ])
-        capsule.setContentHuggingPriority(.required, for: .horizontal)
-        capsule.setContentCompressionResistancePriority(.required, for: .horizontal)
-        return capsule
     }
 
     /// The Device column: the device's display name, with "offline" trailing it in the same red the
@@ -1189,7 +1164,18 @@ import workspacecore
     /// `RowPrimitives.statusSlot` (the same 14 pt slot the Automations table's status column uses) rather
     /// than the former `windowRow`'s own hand-built slot, so both hand-rolled tables' status columns
     /// align on the same width.
-    private static func alertsStatusIndicator(processStatus: RunningProcessState?, agentStatus: AgentWindowStatus?, automationID: String?) -> NSView {
+    private static func alertsStatusIndicator(
+        isComeBackLater: Bool, processStatus: RunningProcessState?, agentStatus: AgentWindowStatus?, automationID: String?
+    ) -> NSView {
+        // A Come Back Later row has no run status of its own to show; the status column carries the mark.
+        if isComeBackLater {
+            let mark = NSImageView()
+            mark.image = NSImage(systemSymbolName: "bell.badge", accessibilityDescription: "Come Back Later")
+            mark.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
+            mark.contentTintColor = Theme.accent
+            mark.toolTip = "Come Back Later"
+            return RowPrimitives.statusSlot(mark)
+        }
         if let agentStatus {
             guard agentStatus != .spinning else {
                 let spinner = NSProgressIndicator()

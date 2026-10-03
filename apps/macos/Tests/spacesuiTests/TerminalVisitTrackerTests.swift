@@ -179,7 +179,7 @@ import workspacecore
         #expect(harness.sent.isEmpty, "a mark the visit saw disappear is a new mark")
     }
 
-    @Test func focusMovingToANonPaneControlEndsTheVisitBeforeItsReport() async {
+    @Test func focusLeavingTheTerminalWithoutAnUpdateEndsTheVisitBeforeItsReport() async {
         let harness = Harness()
         harness.clearables[terminalA] = Clearables(alertKeys: ["agent:a:done:t1"])
         harness.update(focus: terminalA, isActive: true)

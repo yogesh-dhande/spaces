@@ -38,7 +38,7 @@ struct StatusDot: View {
     var body: some View {
         ZStack {
             if kind == .comeBackLater {
-                Image(systemName: "bell.badge").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.accent)
+                Image(systemName: "bell.badge").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.accent).accessibilityLabel("Come Back Later")
             } else if kind == .running {
                 Circle().fill(Theme.statusRunningHalo).frame(width: 14, height: 14)
                 Circle().fill(Theme.green).frame(width: 8, height: 8)

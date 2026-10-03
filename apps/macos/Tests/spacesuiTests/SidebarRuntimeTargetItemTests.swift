@@ -241,7 +241,7 @@ import workspacecore
             items.append(
                 AppKitController.AlertsAttentionEntry(
                     attentionID: "alert:local:comebacklater:terminal:term-1", kind: .comeBackLater, alertKey: "comebacklater:terminal:term-1",
-                    icon: "bell.badge", iconTint: .accent, label: "zsh", detail: nil, shortcut: "", countsTowardBadge: true, eventDate: nil,
+                    icon: "terminal", iconTint: .terminal, label: "zsh", detail: nil, shortcut: "", countsTowardBadge: true, eventDate: nil,
                     focusRequest: .terminalSession(workspaceID: "workspace", sessionID: "sess-term")))
         }
         return AppKitController.AlertsGroup(

@@ -508,12 +508,14 @@ import spacesterminalcore
         guard current != lastFocusedSessionIDForCycleRow else { return }
         lastFocusedSessionIDForCycleRow = current
         host.sidebar.refreshCycleModeRow()
-        host.refreshTerminalVisit()
     }
 
     /// The key-window change handler for the main window and every global panel window calls this:
     /// see `repaintCycleRowIfFocusedSessionChanged`.
-    func noteKeyWindowChanged() { repaintCycleRowIfFocusedSessionChanged() }
+    func noteKeyWindowChanged() {
+        repaintCycleRowIfFocusedSessionChanged()
+        host.refreshTerminalVisit()
+    }
 
     /// Syncs the layout's focused pane to the content that actually has keyboard focus (clicks inside
     /// pane content bypass the pane chrome's mouse handling, so the app's mouse-down and key-down
@@ -1852,6 +1854,8 @@ import spacesterminalcore
             for tab in state.layout.tabs { for pane in PanelLayoutEngine.panes(in: tab) { activateContentIfVisible(scope: scope, pane: pane) } }
         }
         onLayoutChanged?(scope, state.layout)
+        // The focused pane of a layout is what the visit tracker follows.
+        host.refreshTerminalVisit()
         // A global panel exists only while it has content: an emptied layout (last tab
         // closed or last pane moved away) closes its window shell.
         if case .globalWindow(let panelWindowID) = scope, state.layout.isEmpty { dismissPanelWindowShell(panelWindowID: panelWindowID) }
