@@ -53,7 +53,8 @@ import Foundation
                 return true
             }
             runtimeConfig.read_clipboard_cb = { userdata, location, state, mimes, mimesCount, list in
-                GhosttyClipboardBridge.readClipboard(userdata: userdata, location: location, state: state, mimes: mimes, mimesCount: mimesCount, list: list)
+                GhosttyClipboardBridge.readClipboard(
+                    userdata: userdata, location: location, state: state, mimes: mimes, mimesCount: mimesCount, list: list)
             }
             runtimeConfig.confirm_read_clipboard_cb = { userdata, confirm, state, _ in
                 GhosttyClipboardBridge.confirmReadClipboard(userdata: userdata, confirm: confirm, state: state)
@@ -76,6 +77,10 @@ import Foundation
             // Both captures below are read-only inputs to the large-stack thread's closure and are
             // never touched again by this thread while it runs (the thread call blocks until the
             // closure returns), so the concurrent access the compiler cannot verify never happens.
+            //
+            // ghostty_app_new also opens Ghostty's app-scoped Metal device and fails without one,
+            // even though this app only hosts renderer-free headless sessions. Accepted: every Mac
+            // that runs macOS 14 has a Metal GPU, and Apple Silicon VMs get a paravirtualized one.
             nonisolated(unsafe) let runtimeConfigForCall = runtimeConfig
             nonisolated(unsafe) let configForCall = config
             guard
