@@ -22,13 +22,24 @@ extension SQLiteStore {
         COALESCE(agent_sessions.terminal_session_id, ''),
         COALESCE(agent_sessions.session_key, ''),
         agent_sessions.status,
-        COALESCE(agent_sessions.brief, ''),
+        COALESCE(CASE WHEN agent_sessions.session_key IS NULL THEN agent_sessions.brief ELSE agent_conversation_briefs.brief END, ''),
         agent_sessions.created_at,
         agent_sessions.updated_at,
         COALESCE(agent_sessions.detected_agent_kind, ''),
         COALESCE(agent_sessions.user_label, ''),
         COALESCE(agent_sessions.launch_command, ''),
-        COALESCE(agent_sessions.brief_updated_at, '')
+        COALESCE(CASE WHEN agent_sessions.session_key IS NULL THEN agent_sessions.brief_updated_at ELSE agent_conversation_briefs.brief_updated_at END, '')
+        """
+
+    /// The FROM and JOIN clauses every `agentWindowColumns` SELECT shares. The conversation join is what
+    /// makes a keyed row show the brief saved for its conversation (see `setAgentSessionBrief`); a row
+    /// without a key reads its own column.
+    private static let agentWindowSource = """
+        FROM agent_sessions
+        LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
+        LEFT JOIN agent_conversation_briefs
+          ON agent_conversation_briefs.workspace_id = agent_sessions.workspace_id
+          AND agent_conversation_briefs.session_key = agent_sessions.session_key
         """
 
     /// Lifecycle-owning upsert. Hook/lifecycle writers (`registerAgentWindow`, `updateAgentWindowStatus`)
@@ -123,6 +134,12 @@ extension SQLiteStore {
     /// writer. The agent writes its brief while it works, often moments before a hook signal lands on
     /// another connection, and a signal upserts a record built from a snapshot read before that write; an
     /// upsert that carried the brief would put the older document back.
+    ///
+    /// The one thing an upsert does to a brief is the move that keeps the invariant "a row with a
+    /// conversation id holds no brief of its own": when the stored row has a key after the write (it just
+    /// arrived, since a keyed row never gains a row brief), the brief the row wrote before knowing its
+    /// conversation moves to that conversation, and a brief already saved for the conversation wins. The
+    /// move reads the STORED row, never the caller's record, for the same stale-snapshot reason.
     private func upsertAgentWindow(_ record: AgentWindowRecord, conflictClause: String) throws {
         let runtimeTargetID = try ensureRuntimeTargetForAgentWindow(record)
         let terminalSessionID = spacesAgentTerminalSessionID(record)
@@ -140,6 +157,47 @@ extension SQLiteStore {
                     terminalSessionID ?? "", record.sessionKey ?? "", record.detectedAgentKind ?? "", record.launchCommand ?? "", record.createdAt,
                     record.updatedAt,
                 ])
+            try moveRowBriefToConversation(agentID: record.id)
+        }
+    }
+
+    /// Restores the invariant "a row with a conversation id holds no brief of its own" for one row, from
+    /// the STORED row: a brief written before the key was known moves to the conversation, where a brief
+    /// already saved for it wins, and the row's own copy is dropped. Runs inside the caller's transaction.
+    private func moveRowBriefToConversation(agentID: String) throws {
+        try execute(
+            sql: """
+                INSERT INTO agent_conversation_briefs(workspace_id, session_key, brief, brief_updated_at)
+                SELECT workspace_id, session_key, brief, COALESCE(brief_updated_at, updated_at)
+                FROM agent_sessions
+                WHERE id = ? AND session_key IS NOT NULL AND COALESCE(brief, '') != ''
+                ON CONFLICT(workspace_id, session_key) DO NOTHING
+                """, bindings: [agentID])
+        try execute(
+            sql: """
+                UPDATE agent_sessions SET brief = NULL, brief_updated_at = NULL
+                WHERE id = ? AND session_key IS NOT NULL AND (brief IS NOT NULL OR brief_updated_at IS NOT NULL)
+                """, bindings: [agentID])
+    }
+
+    /// Writes the agent row of a restored terminal, which carries the conversation the restore resumes in
+    /// `record.sessionKey`. A row already bound to the terminal gets that key only when it has none; with no
+    /// row, the detection-shaped `record` is inserted. Either way a brief the row wrote before it had a key
+    /// moves to the conversation.
+    ///
+    /// The lookup and the write are one immediate transaction because detection and hooks write on other
+    /// connections: only a single transaction keeps one row per terminal and a hook-reported key winning,
+    /// where a separate lookup could miss a row committed between it and the insert.
+    public func upsertRestoredAgentWindow(_ record: AgentWindowRecord) throws {
+        try withImmediateTransaction {
+            if let existing = try agentWindow(workspaceID: record.workspaceID, terminalTrackingID: record.terminalTrackingID ?? "") {
+                try execute(
+                    sql: "UPDATE agent_sessions SET session_key = ? WHERE id = ? AND session_key IS NULL",
+                    bindings: [record.sessionKey ?? "", existing.id])
+                try moveRowBriefToConversation(agentID: existing.id)
+            } else {
+                try upsertAgentWindow(record, conflictClause: Self.detectionPreservingConflictClause)
+            }
         }
     }
 
@@ -148,8 +206,7 @@ extension SQLiteStore {
             sql: """
                 SELECT
                   \(Self.agentWindowColumns)
-                FROM agent_sessions
-                LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
+                \(Self.agentWindowSource)
                 WHERE agent_sessions.workspace_id = ?
                 ORDER BY agent_sessions.created_at
                 """, bindings: [workspaceID])
@@ -165,8 +222,7 @@ extension SQLiteStore {
             sql: """
                 SELECT
                   \(Self.agentWindowColumns)
-                FROM agent_sessions
-                LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
+                \(Self.agentWindowSource)
                 ORDER BY agent_sessions.workspace_id, agent_sessions.created_at
                 """)
         return Dictionary(grouping: rows.compactMap { decodeAgentWindow(row: $0) }, by: { $0.workspaceID })
@@ -178,8 +234,7 @@ extension SQLiteStore {
                 sql: """
                     SELECT
                       \(Self.agentWindowColumns)
-                    FROM agent_sessions
-                    LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
+                    \(Self.agentWindowSource)
                     WHERE agent_sessions.workspace_id = ?
                       AND (runtime_targets.tracking_id = ? OR agent_sessions.terminal_session_id = ?)
                     """, bindings: [workspaceID, terminalTrackingID, terminalTrackingID])
@@ -192,8 +247,7 @@ extension SQLiteStore {
             sql: """
                 SELECT
                   \(Self.agentWindowColumns)
-                FROM agent_sessions
-                LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
+                \(Self.agentWindowSource)
                 WHERE agent_sessions.workspace_id = ?
                 AND agent_sessions.provider = ?
                 ORDER BY agent_sessions.created_at
@@ -261,16 +315,72 @@ extension SQLiteStore {
 
     public func deleteAgentWindow(id: String) throws { try execute(sql: "DELETE FROM agent_sessions WHERE id = ?", bindings: [id]) }
 
-    /// Replaces (or, with a nil or empty `brief`, clears) an agent session's brief and stamps
-    /// `brief_updated_at` with `updatedAt`, writing those two columns and nothing else. It is the only writer
-    /// of either column (no upsert carries them; see `upsertAgentWindow`), which is what keeps a status
-    /// signal from ever clobbering a brief. `updated_at` is deliberately left alone: it tracks when the
-    /// agent entered its current lifecycle state (read as the alert event timestamp by clients such as iOS
-    /// Alerts), and a brief write is not a transition, so bumping it would make a stale blocked or finished
-    /// event appear to have just occurred.
+    /// Replaces (or, with a nil or empty `brief`, clears) an agent session's brief and stamps its
+    /// `brief_updated_at` with `updatedAt`. It is the only writer of a brief (no upsert carries one; see
+    /// `upsertAgentWindow`), which is what keeps a status signal from ever clobbering a brief.
+    ///
+    /// Where the brief lands depends on whether the row has a conversation id. With one, the brief belongs
+    /// to the conversation (`agent_conversation_briefs`), so it outlives the row and shows again on any
+    /// later row of the workspace that resumes the conversation; clearing it deletes the saved brief.
+    /// Without one, it lives on the row's own columns and goes with the row. The row is read in the same
+    /// transaction so a key arriving concurrently cannot send the write to the wrong place.
+    ///
+    /// `updated_at` is deliberately left alone: it tracks when the agent entered its current lifecycle
+    /// state (read as the alert event timestamp by clients such as iOS Alerts), and a brief write is not a
+    /// transition, so bumping it would make a stale blocked or finished event appear to have just occurred.
     public func setAgentSessionBrief(id: String, brief: String?, updatedAt: String) throws {
-        try execute(
-            sql: "UPDATE agent_sessions SET brief = NULLIF(?, ''), brief_updated_at = ? WHERE id = ?", bindings: [brief ?? "", updatedAt, id])
+        try withImmediateTransaction {
+            guard let row = try queryRow(sql: "SELECT workspace_id, COALESCE(session_key, '') FROM agent_sessions WHERE id = ?", bindings: [id]),
+                row.count >= 2
+            else { return }
+            let workspaceID = row[0]
+            let sessionKey = row[1]
+            let text = brief ?? ""
+            if sessionKey.isEmpty {
+                try execute(
+                    sql: "UPDATE agent_sessions SET brief = NULLIF(?, ''), brief_updated_at = ? WHERE id = ?", bindings: [text, updatedAt, id])
+            } else if text.isEmpty {
+                try execute(
+                    sql: "DELETE FROM agent_conversation_briefs WHERE workspace_id = ? AND session_key = ?", bindings: [workspaceID, sessionKey])
+            } else {
+                try execute(
+                    sql: """
+                        INSERT INTO agent_conversation_briefs(workspace_id, session_key, brief, brief_updated_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(workspace_id, session_key) DO UPDATE SET brief = excluded.brief, brief_updated_at = excluded.brief_updated_at
+                        """, bindings: [workspaceID, sessionKey, text, updatedAt])
+            }
+        }
+    }
+
+    /// Answers a Skip: deletes the saved briefs of the conversations `generation` offered to restore, then
+    /// clears the generation's records, in one transaction. A conversation held by a row of some other
+    /// terminal keeps its brief, since the user resumed it by hand while the offer stood. The skipped
+    /// sessions' own rows do not count: an ended session's row can linger until the next reconcile pass,
+    /// and counting it would make the outcome depend on that timing. Restore never calls this: restored
+    /// agents show the briefs their conversations kept.
+    public func discardRestorableSessions(generation: String) throws {
+        try withImmediateTransaction {
+            try execute(
+                sql: """
+                    DELETE FROM agent_conversation_briefs
+                    WHERE EXISTS (
+                        SELECT 1 FROM restorable_sessions
+                        WHERE restorable_sessions.generation = ?
+                          AND restorable_sessions.workspace_id = agent_conversation_briefs.workspace_id
+                          AND restorable_sessions.agent_session_key = agent_conversation_briefs.session_key
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM agent_sessions
+                        WHERE agent_sessions.workspace_id = agent_conversation_briefs.workspace_id
+                          AND agent_sessions.session_key = agent_conversation_briefs.session_key
+                          AND COALESCE(agent_sessions.terminal_session_id, '') NOT IN (
+                            SELECT session_id FROM restorable_sessions WHERE generation = ?
+                          )
+                      )
+                    """, bindings: [generation, generation])
+            try clearRestorableSessions(generation: generation)
+        }
     }
 
     /// Sets (or, with a nil `userLabel`, clears) the user-authored name of an agent session, writing that
@@ -612,8 +722,7 @@ extension SQLiteStore {
                 sql: """
                     SELECT
                       \(Self.agentWindowColumns)
-                    FROM agent_sessions
-                    LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
+                    \(Self.agentWindowSource)
                     WHERE agent_sessions.terminal_session_id = ? OR runtime_targets.tracking_id = ?
                     LIMIT 1
                     """, bindings: [terminalSessionID, terminalSessionID])
@@ -633,8 +742,7 @@ extension SQLiteStore {
             sql: """
                 SELECT
                   \(Self.agentWindowColumns)
-                FROM agent_sessions
-                LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
+                \(Self.agentWindowSource)
                 WHERE agent_sessions.terminal_session_id = ?
                 ORDER BY agent_sessions.created_at
                 """, bindings: [terminalSessionID])
@@ -649,8 +757,7 @@ extension SQLiteStore {
                 sql: """
                     SELECT
                       \(Self.agentWindowColumns)
-                    FROM agent_sessions
-                    LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
+                    \(Self.agentWindowSource)
                     WHERE agent_sessions.id = ?
                     LIMIT 1
                     """, bindings: [id])

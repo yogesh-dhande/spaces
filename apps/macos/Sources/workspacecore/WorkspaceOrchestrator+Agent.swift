@@ -162,7 +162,11 @@ extension WorkspaceOrchestrator {
             displayCommand: displayCommand.flatMap { $0.isEmpty ? nil : $0 }, launchCommand: launchCommand.flatMap { $0.isEmpty ? nil : $0 })
     }
 
-    func insertAdHocDetectedAgent(detectedAgent: AdHocDetectedForegroundAgent, workspace: WorkspaceRecord, sessionID: String) throws {
+    /// `sessionKey` is the record's initial conversation id, which only a restore supplies. It applies on
+    /// first insert alone: the detection conflict clause keeps whatever key the stored row holds.
+    func insertAdHocDetectedAgent(
+        detectedAgent: AdHocDetectedForegroundAgent, workspace: WorkspaceRecord, sessionID: String, sessionKey: String? = nil
+    ) throws {
         let terminalWindow = try store.windows(workspaceID: workspace.id).first { window in
             window.roleValue == .terminal && terminalHost(for: window.app) == .spaces && terminalSessionID(for: window) == sessionID
         }
@@ -196,14 +200,14 @@ extension WorkspaceOrchestrator {
         let record = AgentWindowRecord(
             id: agentID, workspaceID: workspace.id, provider: .spaces, label: resolvedLabel,
             userLabel: workspaceAgentWindows.first { $0.id == agentID }?.userLabel, runtimeTargetID: terminalWindow?.id,
-            terminalTarget: terminalTarget, sessionKey: nil, status: .idle, detectedAgentKind: detectedAgent.kind,
+            terminalTarget: terminalTarget, sessionKey: sessionKey, status: .idle, detectedAgentKind: detectedAgent.kind,
             launchCommand: detectedAgent.launchCommand, createdAt: now, updatedAt: now)
         let nextAgentWindows = workspaceAgentWindows.filter { $0.id != agentID } + [record]
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: try store.workspaceProcesses(workspaceID: workspace.id),
             browserSessions: try store.workspaceBrowserSessions(workspaceID: workspace.id), agentWindows: nextAgentWindows)
 
-        try store.upsertDetectedAgentWindow(record)
+        if sessionKey == nil { try store.upsertDetectedAgentWindow(record) } else { try store.upsertRestoredAgentWindow(record) }
         _ = try updateAdHocAgentRuntimeTargetDetail(record, displayCommand: detectedAgent.displayCommand)
     }
 
@@ -676,7 +680,7 @@ extension WorkspaceOrchestrator {
                 message: agentSessionEventMessage(
                     provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID, sessionKey: updated.sessionKey,
                     environmentKeys: environmentKeys), createdAt: now)
-            return updated
+            return try persistedAgentWindow(id: updated.id)
         }
         // A registration that reports no label materializes `Coding Agent` as the row's stored label,
         // through the same uniquifier a reported label runs through, so a second nameless agent in the
@@ -696,7 +700,18 @@ extension WorkspaceOrchestrator {
             message: agentSessionEventMessage(
                 provider: record.provider, label: record.label, terminalTrackingID: record.terminalTrackingID, sessionKey: record.sessionKey,
                 environmentKeys: environmentKeys), createdAt: now)
-        return record
+        return try persistedAgentWindow(id: record.id)
+    }
+
+    /// The row as stored after a lifecycle upsert. The record handed on to subscribers and callers has to
+    /// carry the brief of the conversation the row now names, which only the store's read resolves: a
+    /// signal can change the row's conversation id, and the brief the pre-upsert snapshot carried belongs
+    /// to the old conversation.
+    private func persistedAgentWindow(id: String) throws -> AgentWindowRecord {
+        guard let persisted = try store.agentWindow(id: id) else {
+            throw WorkspaceError.invalidArgument(message: "Agent session \(id) was removed while its state was being updated.")
+        }
+        return persisted
     }
 
     @discardableResult public func updateAgentWindowStatus(
@@ -740,7 +755,7 @@ extension WorkspaceOrchestrator {
                 message: agentSessionEventMessage(
                     provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID, sessionKey: updated.sessionKey,
                     environmentKeys: environmentKeys), createdAt: now)
-            return updated
+            return try persistedAgentWindow(id: updated.id)
         }
         return try registerAgentWindow(
             workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey,

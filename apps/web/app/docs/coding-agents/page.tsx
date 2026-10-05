@@ -93,6 +93,14 @@ export default function CodingAgentsDocsPage() {
           agent can keep one.
         </Prose>
         <Prose>
+          A brief belongs to the agent&apos;s conversation. Resume that conversation later in the same
+          workspace, by hand or through{" "}
+          <DocLink href="/docs/restarts#restore">Bringing agents back</DocLink>, and the brief comes
+          back with it; a resumed Codex shows it after your first prompt. A new conversation in the same
+          terminal, such as after <InlineCode>/clear</InlineCode>, starts without one. A brief is deleted
+          when the agent clears it or when you delete its workspace.
+        </Prose>
+        <Prose>
           On the Mac it renders as a column at the trailing edge of the agent&apos;s pane. Show or hide
           it with <InlineCode>⌥⌘B</InlineCode> (configurable in Settings → Shortcuts), the footer&apos;s brief glyph, the pane&apos;s
           &quot;&#8943;&quot; menu (&quot;Hide Brief&quot; or &quot;Show Brief&quot;), or a global panel

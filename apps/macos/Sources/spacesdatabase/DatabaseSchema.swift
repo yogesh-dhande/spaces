@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 26
+    public static let currentVersion = 27
 
     /// The coding-agent orchestration watch graph, `agent_subscriptions`. The subscriber key is a terminal
     /// session id (a subscriber may be a plain terminal with no agent row), and the target is the agent
@@ -924,7 +924,57 @@ public enum DatabaseSchema {
                     );
                     """)
         },
+        // Moves each agent's brief off its row and onto its conversation, so a resumed conversation shows the
+        // brief it had. Only rows with a conversation id move: a row without one keeps its brief, which is
+        // deleted with the row as before. Two rows of one workspace can name the same conversation (a
+        // resume leaves the older row behind), and the newest write is the one that stands, including a
+        // clear: only rows that ever wrote or cleared a brief compete, and the conversation keeps the winner's
+        // text only when it has any, so an older row's text never comes back over a newer clear. The IF NOT
+        // EXISTS guard and the idempotent copy let a retry after a half-applied step land on the same data.
+        DatabaseMigrationStep(fromVersion: 26, toVersion: 27, description: "Hold agent briefs per conversation", requiresBackup: true) { handle in
+            try migrationExecuteBatch(handle, sql: agentConversationBriefsSQL)
+            // The copy writes through the table's workspace foreign key, so it needs the parent table. A
+            // database that never had `workspaces` has no workspace for a brief to belong to, the same
+            // reading the v10 to v11 step takes.
+            guard try migrationTableExists(handle, table: "workspaces") else { return }
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    INSERT OR IGNORE INTO agent_conversation_briefs(workspace_id, session_key, brief, brief_updated_at)
+                    SELECT workspace_id, session_key, brief, COALESCE(brief_updated_at, updated_at)
+                    FROM (
+                      SELECT workspace_id, session_key, brief, brief_updated_at, updated_at,
+                        ROW_NUMBER() OVER (
+                          PARTITION BY workspace_id, session_key
+                          ORDER BY COALESCE(brief_updated_at, updated_at) DESC, rowid DESC
+                        ) AS recency
+                      FROM agent_sessions
+                      WHERE COALESCE(session_key, '') != '' AND (brief_updated_at IS NOT NULL OR brief IS NOT NULL)
+                        AND workspace_id IN (SELECT id FROM workspaces)
+                    )
+                    WHERE recency = 1 AND COALESCE(brief, '') != '';
+
+                    UPDATE agent_sessions SET brief = NULL, brief_updated_at = NULL WHERE COALESCE(session_key, '') != '';
+                    """)
+        },
     ]
+
+    /// The briefs agents wrote, keyed by the conversation they belong to rather than the agent row, so a
+    /// resumed conversation shows its brief again after the row it was written on is gone. A row with a
+    /// conversation id (`agent_sessions.session_key`) holds no brief of its own; a row without one keeps
+    /// `agent_sessions.brief`. The key is scoped by workspace because a conversation id is only
+    /// meaningful in the workspace whose worktree the agent ran in, and the cascade deletes the briefs
+    /// with that workspace.
+    static let agentConversationBriefsSQL = """
+            CREATE TABLE IF NOT EXISTS agent_conversation_briefs (
+              workspace_id TEXT NOT NULL,
+              session_key TEXT NOT NULL,
+              brief TEXT NOT NULL,
+              brief_updated_at TEXT NOT NULL,
+              PRIMARY KEY (workspace_id, session_key),
+              FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+            );
+        """
 
     /// The persisted final-render state of a session, one row per session. `has_final_render` stores
     /// whether `payload_json` carries a replayable final frame, because that single fact is read for
@@ -1289,8 +1339,10 @@ public enum DatabaseSchema {
               -- hooks and used to resume that conversation rather than start a new one.
               session_key TEXT,
               -- The agent's brief: one markdown document the agent writes about its own work, shown beside
-              -- its terminal. `brief_updated_at` is when it was last written or cleared; `updated_at` stays
-              -- the lifecycle timestamp, so a brief write never re-dates a blocked or finished alert.
+              -- its terminal. Holds the brief only for a row without a conversation id; a row with one reads
+              -- and writes `agent_conversation_briefs` instead. `brief_updated_at` is when it was last
+              -- written or cleared; `updated_at` stays the lifecycle timestamp, so a brief write never
+              -- re-dates a blocked or finished alert.
               brief TEXT,
               brief_updated_at TEXT,
               detected_agent_kind TEXT,
@@ -1303,6 +1355,8 @@ public enum DatabaseSchema {
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
               FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE SET NULL
             );
+
+            \(agentConversationBriefsSQL)
 
             \(agentSubscriptionsSQL)
 

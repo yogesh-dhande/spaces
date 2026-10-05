@@ -477,7 +477,8 @@ public final class AutomationService: @unchecked Sendable {
             try AutomationPaths.ensureRunDirectory(runID: runID)
             let session = try orchestrator.createWorkspaceAgentSession(
                 workspaceID: record.workspaceID, command: command, title: record.title, automationRunID: runID,
-                recordedLaunchCommand: record.launchCommand, workingDirectory: record.workingDirectory)
+                recordedLaunchCommand: record.launchCommand, workingDirectory: record.workingDirectory,
+                resumedAgentSessionKey: CodingAgent.resumableSessionKey(launchCommand: record.launchCommand, sessionKey: record.agentSessionKey))
             launchedSessionID = session.id
             try store.updateAutomationRun(
                 id: runID, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: session.id, startedAt: currentTime, endedAt: nil,
@@ -489,7 +490,7 @@ public final class AutomationService: @unchecked Sendable {
             // A persist failure leaves the relaunched agent running with no session id on its run row, so the
             // restore answer reports a failure while that agent keeps going, unreachable and holding the
             // automation's next agent fire blocked through its `automationRunID` stamp.
-            if let launchedSessionID { teardownUnrecordedAgentSession(sessionID: launchedSessionID) }
+            if let launchedSessionID { orchestrator.teardownUnrecordedAgentSession(sessionID: launchedSessionID) }
             // A `.running` row with no session id blocks the automation's next fire, so record the
             // failure here. `pollRunningRun` fails such a row on its next tick if this write cannot
             // commit, which is why the relaunch's own error is what propagates: it is what the restore
@@ -878,21 +879,8 @@ public final class AutomationService: @unchecked Sendable {
             // A persist failure leaves the spawned session running but unrecorded; its automationRunID stamp on the
             // session table keeps `automationHasLiveAttributedSession` true, permanently blocking future agent fires.
             // The teardown is best-effort so the run still lands `.failed`.
-            if let launchedSessionID { teardownUnrecordedAgentSession(sessionID: launchedSessionID) }
+            if let launchedSessionID { orchestrator.teardownUnrecordedAgentSession(sessionID: launchedSessionID) }
             try recordLaunchFailure(automationID: automation.id, runID: runID, startedAt: startedAt)
-        }
-    }
-
-    /// Tears down a coding-agent session that launched but whose session id never reached its run row.
-    /// Shared by both agent launch paths (a scheduled/manual fire and a session restore) because both leave
-    /// the same orphan: a live session stamped with the run id, which keeps `automationHasLiveAttributedSession`
-    /// true and permanently blocks the automation's next agent fire. Goes through the agent-kill flow so a
-    /// session that already registered a row is finalized and its subscribers told, mirroring
-    /// `teardownAgentRunSession`'s fallback to a plain termination for a not-yet-signaled session. The kill is
-    /// best-effort: it must not mask the launch error the caller is about to record and propagate.
-    private func teardownUnrecordedAgentSession(sessionID: String) {
-        if (try? orchestrator.killAgentSession(terminalSessionID: sessionID)) != true {
-            orchestrator.automationTerminateSession(sessionID: sessionID)
         }
     }
 

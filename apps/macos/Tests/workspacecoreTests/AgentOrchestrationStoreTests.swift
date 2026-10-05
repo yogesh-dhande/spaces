@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import spacesdatabase
 import spacesterminalcore
 
 @testable import workspacecore
@@ -37,6 +38,26 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         let afterBlocked = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
         XCTAssertEqual(afterBlocked.brief, "# Reviewing the auth flow")
         XCTAssertEqual(afterBlocked.status, .waiting)
+    }
+
+    /// The record a signal returns (the one subscribers are notified with) carries the brief of the
+    /// conversation the row names after the signal, not the one it named before.
+    func testSignalThatChangesTheConversationReturnsTheNewConversationsBrief() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", sessionKey: .set("conv-A"), status: .idle)
+        _ = try orchestrator.writeAgentBrief(terminalSessionID: "agent-session", markdown: "A's brief")
+
+        let toB = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", sessionKey: .set("conv-B"), status: .waiting)
+        XCTAssertEqual(toB.sessionKey, "conv-B")
+        XCTAssertNil(toB.brief)
+
+        let backToA = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", sessionKey: .set("conv-A"), status: .waiting)
+        XCTAssertEqual(backToA.brief, "A's brief")
     }
 
     /// A hook signal upserts a record built from a snapshot it read earlier, and the agent writes its brief
@@ -232,6 +253,158 @@ final class AgentOrchestrationStoreTests: XCTestCase {
             agentSessionID: agent.id, eventType: "blocked", source: "spaces_agent_signal", message: nil, createdAt: "2026-07-14T11:00:00Z")
 
         XCTAssertEqual(try store.lastAgentSignalAt(agentSessionID: agent.id), "2026-07-14T11:00:00Z")
+    }
+
+    // MARK: - Briefs follow the conversation
+
+    private func agentRecord(id: String, workspaceID: String, sessionKey: String?) -> AgentWindowRecord {
+        AgentWindowRecord(
+            id: id, workspaceID: workspaceID, provider: .spaces, label: "Claude", sessionKey: sessionKey, status: .idle,
+            createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z")
+    }
+
+    private func brief(of id: String, store: SQLiteStore) throws -> String? { try store.agentWindow(id: id)?.brief }
+
+    func testKeyedBriefSurvivesRowDeletionAndShowsOnLaterRowOfSameWorkspaceOnly() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let (_, otherWorkspace) = try makeProjectAndWorkspace(store: store)
+        try store.upsertAgentWindow(agentRecord(id: "row-1", workspaceID: workspace.id, sessionKey: "conv-A"))
+        try store.setAgentSessionBrief(id: "row-1", brief: "Auth review", updatedAt: "2026-10-01T01:00:00Z")
+        XCTAssertEqual(try store.agentWindow(id: "row-1")?.briefUpdatedAt, "2026-10-01T01:00:00Z")
+
+        try store.deleteAgentWindow(id: "row-1")
+        try store.upsertAgentWindow(agentRecord(id: "row-2", workspaceID: workspace.id, sessionKey: "conv-A"))
+        try store.upsertAgentWindow(agentRecord(id: "row-3", workspaceID: otherWorkspace.id, sessionKey: "conv-A"))
+
+        XCTAssertEqual(try brief(of: "row-2", store: store), "Auth review")
+        XCTAssertNil(try brief(of: "row-3", store: store))
+    }
+
+    func testKeyChangeShowsTheNewConversationsBriefAndReturningRestoresTheOldOne() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.upsertAgentWindow(agentRecord(id: "row", workspaceID: workspace.id, sessionKey: "conv-A"))
+        try store.setAgentSessionBrief(id: "row", brief: "A's brief", updatedAt: "2026-10-01T01:00:00Z")
+
+        try store.upsertAgentWindow(agentRecord(id: "row", workspaceID: workspace.id, sessionKey: "conv-B"))
+        XCTAssertNil(try brief(of: "row", store: store))
+
+        try store.upsertAgentWindow(agentRecord(id: "row", workspaceID: workspace.id, sessionKey: "conv-A"))
+        XCTAssertEqual(try brief(of: "row", store: store), "A's brief")
+
+        // A `.clear` carries no key, which leaves the row without a conversation and so without a brief.
+        try store.upsertAgentWindow(agentRecord(id: "row", workspaceID: workspace.id, sessionKey: nil))
+        XCTAssertNil(try brief(of: "row", store: store))
+    }
+
+    func testUnkeyedBriefMovesToTheConversationWhenItsKeyArrives() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.upsertAgentWindow(agentRecord(id: "row", workspaceID: workspace.id, sessionKey: nil))
+        try store.setAgentSessionBrief(id: "row", brief: "First turn", updatedAt: "2026-10-01T01:00:00Z")
+
+        try store.upsertAgentWindow(agentRecord(id: "row", workspaceID: workspace.id, sessionKey: "conv-A"))
+        XCTAssertEqual(try brief(of: "row", store: store), "First turn")
+
+        try store.deleteAgentWindow(id: "row")
+        try store.upsertAgentWindow(agentRecord(id: "row-2", workspaceID: workspace.id, sessionKey: "conv-A"))
+        XCTAssertEqual(try brief(of: "row-2", store: store), "First turn", "the brief moved to the conversation, so it outlives the row")
+    }
+
+    func testSavedConversationBriefWinsOverAnUnkeyedRowsEarlyBrief() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.upsertAgentWindow(agentRecord(id: "old", workspaceID: workspace.id, sessionKey: "conv-A"))
+        try store.setAgentSessionBrief(id: "old", brief: "Saved", updatedAt: "2026-10-01T01:00:00Z")
+        try store.upsertAgentWindow(agentRecord(id: "new", workspaceID: workspace.id, sessionKey: nil))
+        try store.setAgentSessionBrief(id: "new", brief: "Early", updatedAt: "2026-10-01T02:00:00Z")
+
+        try store.upsertAgentWindow(agentRecord(id: "new", workspaceID: workspace.id, sessionKey: "conv-A"))
+
+        XCTAssertEqual(try brief(of: "new", store: store), "Saved")
+        XCTAssertEqual(try brief(of: "old", store: store), "Saved")
+    }
+
+    func testUnkeyedBriefIsDeletedWithItsRow() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.upsertAgentWindow(agentRecord(id: "row", workspaceID: workspace.id, sessionKey: nil))
+        try store.setAgentSessionBrief(id: "row", brief: "Row only", updatedAt: "2026-10-01T01:00:00Z")
+        XCTAssertEqual(try brief(of: "row", store: store), "Row only")
+
+        try store.deleteAgentWindow(id: "row")
+        try store.upsertAgentWindow(agentRecord(id: "row-2", workspaceID: workspace.id, sessionKey: "conv-A"))
+
+        XCTAssertNil(try brief(of: "row-2", store: store))
+    }
+
+    func testClearingAKeyedBriefDeletesTheSavedBrief() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.upsertAgentWindow(agentRecord(id: "row", workspaceID: workspace.id, sessionKey: "conv-A"))
+        try store.setAgentSessionBrief(id: "row", brief: "Saved", updatedAt: "2026-10-01T01:00:00Z")
+
+        try store.setAgentSessionBrief(id: "row", brief: nil, updatedAt: "2026-10-01T02:00:00Z")
+        try store.deleteAgentWindow(id: "row")
+        try store.upsertAgentWindow(agentRecord(id: "row-2", workspaceID: workspace.id, sessionKey: "conv-A"))
+
+        XCTAssertNil(try brief(of: "row-2", store: store))
+    }
+
+    func testDeletingTheWorkspaceDeletesItsSavedBriefs() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.upsertAgentWindow(agentRecord(id: "row", workspaceID: workspace.id, sessionKey: "conv-A"))
+        try store.setAgentSessionBrief(id: "row", brief: "Saved", updatedAt: "2026-10-01T01:00:00Z")
+
+        try store.deleteWorkspace(id: workspace.id)
+
+        let database = try SpacesSQLiteDatabase(path: try DatabaseLocator.defaultPath())
+        XCTAssertEqual(try database.queryRow(sql: "SELECT COUNT(*) FROM agent_conversation_briefs")?.first, "0")
+    }
+
+    /// The v26 to v27 step moves a keyed row's brief onto its conversation and leaves an unkeyed row's on
+    /// the row. The v26 shape is the current one minus the conversation table, with the migration marker
+    /// set back, so opening the profile runs exactly that step.
+    func testMigrationFromV26CarriesKeyedBriefsToTheirConversations() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.upsertAgentWindow(agentRecord(id: "keyed", workspaceID: workspace.id, sessionKey: "conv-A"))
+        try store.upsertAgentWindow(agentRecord(id: "keyed-newer", workspaceID: workspace.id, sessionKey: "conv-A"))
+        try store.upsertAgentWindow(agentRecord(id: "unkeyed", workspaceID: workspace.id, sessionKey: nil))
+        let dbPath = try DatabaseLocator.defaultPath()
+        let raw = try SpacesSQLiteDatabase(path: dbPath)
+        try raw.execute(sql: "DROP TABLE agent_conversation_briefs")
+        try raw.execute(sql: "UPDATE agent_sessions SET brief = 'older', brief_updated_at = '2026-10-01T01:00:00Z' WHERE id = 'keyed'")
+        try raw.execute(sql: "UPDATE agent_sessions SET brief = 'newer', brief_updated_at = '2026-10-01T02:00:00Z' WHERE id = 'keyed-newer'")
+        try raw.execute(sql: "UPDATE agent_sessions SET brief = 'row only', brief_updated_at = '2026-10-01T03:00:00Z' WHERE id = 'unkeyed'")
+        try raw.execute(sql: "UPDATE migration_state SET current_version = 26")
+
+        let migrated = try SQLiteStore(path: dbPath)
+
+        XCTAssertEqual(try migrated.agentWindow(id: "keyed")?.brief, "newer")
+        XCTAssertEqual(try migrated.agentWindow(id: "keyed-newer")?.brief, "newer")
+        XCTAssertEqual(try migrated.agentWindow(id: "keyed-newer")?.briefUpdatedAt, "2026-10-01T02:00:00Z")
+        XCTAssertEqual(try migrated.agentWindow(id: "unkeyed")?.brief, "row only")
+    }
+
+    /// When the newest row on a conversation cleared its brief, the older row's text does not come back.
+    func testMigrationFromV26DoesNotRestoreOlderTextOverANewerClear() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        for id in ["old", "new-cleared"] { try store.upsertAgentWindow(agentRecord(id: id, workspaceID: workspace.id, sessionKey: "conv-B")) }
+        let dbPath = try DatabaseLocator.defaultPath()
+        let raw = try SpacesSQLiteDatabase(path: dbPath)
+        try raw.execute(sql: "DROP TABLE agent_conversation_briefs")
+        try raw.execute(sql: "UPDATE agent_sessions SET brief = 'stale', brief_updated_at = '2026-10-01T01:00:00Z' WHERE id = 'old'")
+        try raw.execute(sql: "UPDATE agent_sessions SET brief = NULL, brief_updated_at = '2026-10-01T02:00:00Z' WHERE id = 'new-cleared'")
+        try raw.execute(sql: "UPDATE migration_state SET current_version = 26")
+
+        let migrated = try SQLiteStore(path: dbPath)
+
+        XCTAssertNil(try migrated.agentWindow(id: "old")?.brief)
+        XCTAssertNil(try migrated.agentWindow(id: "new-cleared")?.brief)
     }
 
     func testMigrationFromV1CarriesAgentRowForwardAndEnablesBrief() throws {
@@ -719,6 +892,8 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         let sql = """
             CREATE TABLE migration_state (current_version INTEGER NOT NULL);
             INSERT INTO migration_state(current_version) VALUES (24);
+            CREATE TABLE workspaces (id TEXT PRIMARY KEY);
+            INSERT INTO workspaces(id) VALUES ('\(workspaceID)');
             CREATE TABLE runtime_targets (
               id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, type TEXT NOT NULL, name TEXT, detail TEXT,
               app TEXT NOT NULL, tracking_id TEXT, order_index INTEGER NOT NULL, updated_at TEXT NOT NULL

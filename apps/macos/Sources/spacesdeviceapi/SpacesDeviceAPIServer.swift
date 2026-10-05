@@ -7074,7 +7074,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 ?? Result {
                     try orchestrator.createWorkspaceAgentSession(
                         workspaceID: record.workspaceID, command: Self.restoreCommand(for: record), title: record.title,
-                        recordedLaunchCommand: record.launchCommand, workingDirectory: record.workingDirectory)
+                        recordedLaunchCommand: record.launchCommand, workingDirectory: record.workingDirectory,
+                        resumedAgentSessionKey: CodingAgent.resumableSessionKey(
+                            launchCommand: record.launchCommand, sessionKey: record.agentSessionKey))
                 }
             switch outcome {
             case .success(let session): newSessionIDsByCapturedSessionID[record.sessionID] = session.id
@@ -7128,7 +7130,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let store = try context.store()
         let records = try store.restorableSessions()
         if let rejection = Self.restorableGenerationRejection(records: records, requestedGeneration: payload.generation) { return rejection }
-        try store.clearRestorableSessions(generation: payload.generation)
+        try store.discardRestorableSessions(generation: payload.generation)
         return try refreshedMutationResponse(context: context, message: "Discarded \(records.count) restorable coding agent session(s).")
     }
 
