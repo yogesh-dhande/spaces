@@ -45,7 +45,7 @@ public struct SpacesDeviceAPICommandDescriptor: Sendable, Equatable {
     /// (the case name); `init(from:)`/`encode(to:)` are unchanged by this descriptor.
     public let wireKey: String
     /// Which serial lane the device-API server routes this command's handling to. The agent-hook
-    /// commands (`.agentHooksStatus`, `.installAgentHooks`, `.trustAgentHooks`) are exactly the
+    /// commands (`.agentHooksStatus`, `.installAgentHooks`, `.trustAgentHooks`, `.stopCodexSharedServer`) are exactly the
     /// `.agentHook` lane; a caller that needs to gate on "is this an agent-hook command" checks
     /// `lane == .agentHook` rather than a separate flag.
     public let lane: SpacesDeviceAPICommandLane
@@ -166,8 +166,7 @@ extension SpacesDeviceAPICommand {
             return Self.descriptor(wireKey: "stopCodingAgent", lane: .mainQueue, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .renameAgentSession:
             return Self.descriptor(wireKey: "renameAgentSession", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
-        case .dismissAlerts:
-            return Self.descriptor(wireKey: "dismissAlerts", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .dismissAlerts: return Self.descriptor(wireKey: "dismissAlerts", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .visitTerminalSession:
             return Self.descriptor(wireKey: "visitTerminalSession", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .setComeBackLater:
@@ -176,6 +175,8 @@ extension SpacesDeviceAPICommand {
             return Self.descriptor(wireKey: "agentHooksStatus", lane: .agentHook, timeoutSeconds: Self.agentHooksStatusRequestTimeoutSeconds)
         case .installAgentHooks:
             return Self.descriptor(wireKey: "installAgentHooks", lane: .agentHook, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
+        case .stopCodexSharedServer:
+            return Self.descriptor(wireKey: "stopCodexSharedServer", lane: .agentHook, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .trustAgentHooks:
             return Self.descriptor(wireKey: "trustAgentHooks", lane: .agentHook, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .spawnAgentSession:

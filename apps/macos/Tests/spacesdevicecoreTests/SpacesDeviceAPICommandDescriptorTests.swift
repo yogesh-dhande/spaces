@@ -10,7 +10,7 @@ import Testing
 ///    Which queue a command takes is a behavioral decision (it decides what a stalled command can hold up),
 ///    so it is spelled out here independently rather than read back from the descriptor's own switch,
 ///    and moving a command between lanes has to be done deliberately in both places. The `.agentHook`
-///    lane's commands (`.agentHooksStatus`, `.installAgentHooks`, `.trustAgentHooks`) are the same
+///    lane's commands (`.agentHooksStatus`, `.installAgentHooks`, `.trustAgentHooks`, `.stopCodexSharedServer`) are the same
 ///    grouping a caller checks with `lane == .agentHook`; the descriptor carries no separate agent-hook flag.
 ///  - `timeoutSeconds` mirrors the four timeout groupings `SpacesDeviceClient`'s `requestTimeoutSeconds`
 ///    switch used to compute directly, deleted from that file in the same change that added the descriptor,
@@ -92,7 +92,7 @@ import Testing
     /// ever consulted.
     private static func expectedLane(for command: SpacesDeviceAPICommand) -> SpacesDeviceAPICommandLane {
         switch command {
-        case .agentHooksStatus, .installAgentHooks, .trustAgentHooks: .agentHook
+        case .agentHooksStatus, .installAgentHooks, .trustAgentHooks, .stopCodexSharedServer: .agentHook
         case .archiveWorkspace, .deleteProject: .workspaceTeardown
         case .stopWorkspace: .workspaceStop
         case .runWorkspaceSetup: .workspaceSetup
@@ -133,9 +133,9 @@ import Testing
         case .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
             .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .startWorkspaceCommandSession, .stopWorkspaceTerminal,
             .stopWorkspaceTerminalIfBareShell, .runWorkspaceProcess, .stopWorkspaceProcess, .restartWorkspaceProcess, .stopCodingAgent,
-            .installAgentHooks, .trustAgentHooks, .spawnAgentSession, .killAgentSession, .createAutomation, .updateAutomation, .setAutomationNextRun,
-            .deleteAutomation, .triggerAutomation, .cancelAutomationRun, .endAutomationAgents, .restoreSessions, .discardRestorableSessions,
-            .workspaceFileDelete, .workspaceFileCreateDirectory, .workspaceFileRename:
+            .installAgentHooks, .trustAgentHooks, .stopCodexSharedServer, .spawnAgentSession, .killAgentSession, .createAutomation, .updateAutomation,
+            .setAutomationNextRun, .deleteAutomation, .triggerAutomation, .cancelAutomationRun, .endAutomationAgents, .restoreSessions,
+            .discardRestorableSessions, .workspaceFileDelete, .workspaceFileCreateDirectory, .workspaceFileRename:
             60
         case .agentHooksStatus: 20
         // Clamped to `TerminalScrollbackBudget.defaultMaxBytes`, written out here as its literal value for
@@ -146,11 +146,11 @@ import Testing
             60
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateProjectMetadata, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession,
-            .renameAgentSession, .dismissAlerts, .visitTerminalSession, .setComeBackLater, .state, .terminalControl, .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink,
-            .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
-            .subscribeWorkspaceFileListSignature, .openServiceTunnel, .listAgentSessions, .writeAgentBrief, .readAgentBrief, .clearAgentBrief,
-            .listAutomations, .listAutomationRuns, .workspaceReviewCommentList, .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete,
-            .workspaceReviewCommentsSend:
+            .renameAgentSession, .dismissAlerts, .visitTerminalSession, .setComeBackLater, .state, .terminalControl, .terminalPasteImage,
+            .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview,
+            .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature, .subscribeWorkspaceFileListSignature, .openServiceTunnel,
+            .listAgentSessions, .writeAgentBrief, .readAgentBrief, .clearAgentBrief, .listAutomations, .listAutomationRuns,
+            .workspaceReviewCommentList, .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete, .workspaceReviewCommentsSend:
             10
         }
     }

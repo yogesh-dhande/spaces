@@ -420,6 +420,16 @@ struct AgentConfigWatchTargets: Sendable {
             note.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             labels.append(note)
         }
+        let showsServer = !isLoading && Self.showsSharedServerStop(status: status)
+        if showsServer {
+            let warning = NSTextField(labelWithString: Self.sharedServerNote)
+            warning.font = Typography.metadata
+            warning.textColor = .systemOrange
+            warning.lineBreakMode = .byWordWrapping
+            warning.maximumNumberOfLines = 2
+            warning.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            labels.append(warning)
+        }
 
         let labelStack = NSStackView(views: labels)
         labelStack.orientation = .vertical
@@ -432,7 +442,8 @@ struct AgentConfigWatchTargets: Sendable {
             RowPrimitives.statusSlot(RowPrimitives.statusDot(statusDotKind(available: available, installState: installState))), tile, labelStack,
             NSView(),
         ]
-        let inFlightAction = inFlight?.kind == kind ? inFlight?.action : nil
+        let rowInFlight = inFlight?.kind == kind ? inFlight?.action : nil
+        let inFlightAction = rowInFlight == .stopServer ? nil : rowInFlight
         if let action = inFlightAction ?? (isLoading ? nil : Self.rowAction(for: status)) {
             let button = NSButton(
                 title: Self.actionTitle(action, agentName: kind.displayName, inProgress: inFlightAction != nil), target: self,
@@ -443,6 +454,17 @@ struct AgentConfigWatchTargets: Sendable {
             // The tint marks the row's one way forward; a button that cannot fire right now goes quiet.
             Theme.applyTintedStyle(to: button, color: button.isEnabled ? Theme.orange : Theme.mutedSecondary)
             button.setAccessibilityIdentifier("settings-coding-agents-action-\(kind.rawValue)")
+            rowViews.append(button)
+        }
+        if showsServer {
+            let stopping = rowInFlight == .stopServer
+            let button = NSButton(
+                title: Self.actionTitle(.stopServer, agentName: kind.displayName, inProgress: stopping), target: self,
+                action: #selector(performStopServer(_:)))
+            button.isEnabled = canAct
+            button.toolTip = Self.actionToolTip(.stopServer, agentName: kind.displayName)
+            Theme.applyTintedStyle(to: button, color: button.isEnabled ? Theme.orange : Theme.mutedSecondary)
+            button.setAccessibilityIdentifier("settings-coding-agents-stop-server-\(kind.rawValue)")
             rowViews.append(button)
         }
 
@@ -475,6 +497,9 @@ struct AgentConfigWatchTargets: Sendable {
         case update
         /// Ask the agent to trust the hooks it has, after the user confirms the exact commands.
         case trust
+        /// Stop Codex's shared background server, after the user confirms. Offered beside the row's
+        /// own action rather than in place of it, so `rowAction(for:)` never returns it.
+        case stopServer
     }
 
     /// A row action that failed, and the message the row explains itself with.
@@ -488,16 +513,27 @@ struct AgentConfigWatchTargets: Sendable {
     /// await trust, and a failed install or update while the hooks are short of current. Anything else
     /// means the user got past it outside Spaces (trusted the hooks in the agent, untangled its config),
     /// and a failure kept past that would come back as the caption of some later, unrelated state. An
-    /// agent the status does not cover keeps its failure, since nothing says it was fixed.
+    /// agent the status does not cover keeps its failure, since nothing says it was fixed. A refused
+    /// stop stands only while the server still reads as running.
     static func standingFailures(_ failures: [CodingAgent: RowFailure], after status: [AgentHookStatus]) -> [CodingAgent: RowFailure] {
         failures.filter { kind, failure in
-            guard let installState = status.first(where: { $0.kind == kind })?.installState else { return true }
+            guard let agentStatus = status.first(where: { $0.kind == kind }) else { return true }
             switch failure.action {
-            case .trust: return installState == .awaitingTrust
-            case .install, .update: return installState != .current
+            case .trust: return agentStatus.installState == .awaitingTrust
+            case .install, .update: return agentStatus.installState != .current
+            case .stopServer: return agentStatus.sharedServerRunning == true
             }
         }
     }
+
+    /// Whether the row carries the shared-server warning and its Stop Server button: only while the
+    /// device reports Codex's background server running.
+    static func showsSharedServerStop(status: AgentHookStatus?) -> Bool { status?.sharedServerRunning == true }
+
+    static let sharedServerNote = "Background server running: Codex sessions on it can't report to Spaces."
+
+    /// The caption a row carries when Codex would not stop its background server, led by Codex's reason.
+    static func stopFailureCaption(agentName: String, reason: String) -> String { "\(agentName) didn't stop its background server: \(reason)" }
 
     /// The one action a row offers, or nil when Spaces has nothing to do for it.
     ///
@@ -519,6 +555,7 @@ struct AgentConfigWatchTargets: Sendable {
         case .install: inProgress ? "Installing…" : "Install"
         case .update: inProgress ? "Updating…" : "Update"
         case .trust: inProgress ? "Trusting…" : "Trust in \(agentName)…"
+        case .stopServer: inProgress ? "Stopping…" : "Stop Server"
         }
     }
 
@@ -528,6 +565,7 @@ struct AgentConfigWatchTargets: Sendable {
         case .install: "Add Spaces' hooks to \(agentName)'s config."
         case .update: "Rewrite Spaces' hooks in \(agentName)'s config as this Spaces writes them."
         case .trust: "\(agentName) runs none of Spaces' hooks until they are trusted. Review the commands, then trust them."
+        case .stopServer: "Sessions attached to \(agentName)'s background server can't report to Spaces. Stopping it ends them."
         }
     }
 
@@ -571,8 +609,57 @@ struct AgentConfigWatchTargets: Sendable {
         switch Self.rowAction(for: status.first { $0.kind == kind }) {
         case .install, .update: installHooks(kind: kind)
         case .trust: confirmTrust(kind: kind)
-        case nil: return
+        case .stopServer, nil: return
         }
+    }
+
+    @objc private func performStopServer(_ sender: NSButton) {
+        guard inFlight == nil, Self.showsSharedServerStop(status: status.first { $0.kind == .codex }) else { return }
+        confirmStopServer()
+    }
+
+    private func confirmStopServer() {
+        guard let window = rowsContainer?.window, let device = resolvedDevice() else { return }
+        let targetDeviceID = device.record.id
+        CodexServerStopConfirmation(deviceName: device.label).present(on: window) { [weak self] in
+            // The rows may have moved on while the sheet was up: to another device, or into another action.
+            guard let self, self.isActive, self.deviceID == targetDeviceID, self.inFlight == nil else { return }
+            self.stopServer(device: device.record)
+        }
+    }
+
+    /// Dispatched like install and trust: the selected device's daemon answers over the Device API,
+    /// whether the device is This Mac or a paired remote.
+    private func stopServer(device: SpacesPairedDeviceRecord) {
+        let token = beginAction(kind: .codex, action: .stopServer)
+        let targetDeviceID = device.id
+        let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let result = Result { try SpacesDeviceClient.stopCodexSharedServer(context: DeviceRequestContext(device: device, profile: profile)) }
+            await self?.applyStopServer(result, token: token, deviceID: targetDeviceID)
+        }
+    }
+
+    /// Codex's refusal arrives as its failure entry and reads in the row's caption; the Stop Server
+    /// button stays for another try. Only a request that never reached the device reads under the rows.
+    private func applyStopServer(_ result: Result<AgentHookInstallOutcome, any Error>, token: Int, deviceID: String) {
+        guard token == actionToken, deviceID == self.deviceID else { return }
+        inFlight = nil
+        switch result {
+        case .success(let outcome):
+            status = outcome.agents
+            if let failure = outcome.failures.first(where: { $0.kind == .codex }) {
+                failures[.codex] = RowFailure(
+                    action: .stopServer, message: Self.stopFailureCaption(agentName: CodingAgent.codex.displayName, reason: failure.message))
+            } else if failures[.codex]?.action == .stopServer {
+                failures[.codex] = nil
+            }
+            failures = Self.standingFailures(failures, after: outcome.agents)
+            renderRows(message: nil, isLoading: false)
+        case .failure(let error): renderRows(message: "Stop failed: \(error.localizedDescription)", isLoading: false)
+        }
+        updateAgentConfigWatch()
+        emitLocalStatusChangeIfLocal()
     }
 
     private func installHooks(kind: CodingAgent) {

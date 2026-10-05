@@ -310,6 +310,16 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(context?.sessionID, "session-explicit")
     }
 
+    /// A terminal taken from the environment is checked by the daemon against this process; a terminal the
+    /// caller named states intent and sends no pid. The CLI commands and the MCP tools share this helper.
+    func testCallerProcessIDIsSentOnlyForTerminalsTakenFromTheEnvironment() {
+        XCTAssertEqual(environmentCallerProcessID(explicit: nil, processID: 4242), 4242)
+        XCTAssertEqual(environmentCallerProcessID(explicit: "", processID: 4242), 4242)
+        XCTAssertEqual(environmentCallerProcessID(explicit: "  ", processID: 4242), 4242)
+        XCTAssertNil(environmentCallerProcessID(explicit: "session-explicit", processID: 4242))
+        XCTAssertEqual(environmentCallerProcessID(explicit: nil), getpid())
+    }
+
     /// Outside a Spaces terminal, a hook that fires anyway must do nothing rather than fail.
     func testAgentSignalMissingContextIsNoOp() throws {
         XCTAssertNil(try AgentSignalCommand.resolvedSignalContext(workspace: nil, session: nil, environment: [:]))

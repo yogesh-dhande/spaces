@@ -52,6 +52,7 @@ import spacesterminalcore
             [mcp_servers.spaces]
             command = "/usr/local/bin/spaces"
             args = ["mcp"]
+            env_vars = ["SPACES_TERMINAL_TRACKING_ID", "SPACES_AUTOMATION_RUN_ID"]
             """
         #expect(MCPClientConfiguration.codexConfigTOML(cliPath: "/usr/local/bin/spaces") == expected)
     }

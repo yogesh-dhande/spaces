@@ -151,8 +151,16 @@
             let previousHome = getenv("HOME").map { String(cString: $0) }
             setenv("HOME", home.path, 1)
             defer { if let previousHome { setenv("HOME", previousHome, 1) } else { unsetenv("HOME") } }
-            try "[features]\nhooks = true\n".write(to: codexHome.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
-            try body(codex, codexHome, home.appendingPathComponent("bin/spaces").path)
+            // A Codex without a current `spaces` MCP entry reads as outdated ahead of trust, so the scratch
+            // config carries the entry setup writes.
+            let spacesPath = home.appendingPathComponent("bin/spaces").path
+            let envJSON = "[" + AgentHookCodexMCPEntry.requiredEnvVars.map { "\"\($0)\"" }.joined(separator: ", ") + "]"
+            let mcpTable = FakeCodexAppServer.mcpServerTable([
+                (key: "command", json: "\"\(spacesPath)\""), (key: "args", json: "[\"mcp\"]"), (key: "env_vars", json: envJSON),
+            ])
+            try ("[features]\nhooks = true\n" + mcpTable).write(
+                to: codexHome.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
+            try body(codex, codexHome, spacesPath)
         }
 
         private func realReading(_ codex: String, codexHome: URL, spacesPath: String) -> AgentHookCodexTrust.Reading {

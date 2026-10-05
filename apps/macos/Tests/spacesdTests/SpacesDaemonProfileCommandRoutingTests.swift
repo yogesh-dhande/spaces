@@ -60,11 +60,11 @@ import XCTest
             let onMain: [TerminalServiceProfileCommand] = [
                 .projectList, .terminalTail(TerminalServiceTerminalTailPayload(sessionID: "s")),
                 .workspaceList(TerminalServiceWorkspaceListPayload()), .agentList(TerminalServiceAgentListPayload()),
-                .agentBriefWrite(TerminalServiceAgentBriefWritePayload(sessionID: "s", markdown: "m")), .agentBriefRead(sessionID: "s"),
-                .agentBriefClear(sessionID: "s"),
+                .agentBriefWrite(TerminalServiceAgentBriefWritePayload(sessionID: "s", markdown: "m")), .agentBriefRead(.init(sessionID: "s")),
+                .agentBriefClear(.init(sessionID: "s")),
                 .agentSubscribe(TerminalServiceAgentSubscriptionPayload(subscriberTerminalSessionID: "a", agentSessionID: "b")),
                 .agentUnsubscribe(TerminalServiceAgentSubscriptionPayload(subscriberTerminalSessionID: "a", agentSessionID: "b")),
-                .agentConsumePendingEvents(subscriberTerminalSessionID: "a"),
+                .agentConsumePendingEvents(.init(sessionID: "a")),
             ]
             for command in onMain {
                 XCTAssertFalse(

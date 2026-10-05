@@ -77,11 +77,16 @@ export default function McpReferencePage() {
         <CodeBlock>{`claude mcp add spaces -s user -- spaces mcp`}</CodeBlock>
         <p className="mt-4 text-sm font-semibold text-foreground">Codex CLI</p>
         <Prose>
-          Add an <InlineCode>mcp_servers</InlineCode> table to <InlineCode>~/.codex/config.toml</InlineCode>.
+          Installing Codex&apos;s hooks from Settings &rarr; Coding Agents adds this entry for you. To add
+          it by hand, put an <InlineCode>mcp_servers</InlineCode> table in{" "}
+          <InlineCode>~/.codex/config.toml</InlineCode>. Codex passes a server only the environment
+          variables listed in <InlineCode>env_vars</InlineCode>, and these two are how the server knows
+          which terminal is calling.
         </Prose>
         <CodeBlock>{`[mcp_servers.spaces]
 command = "spaces"
-args = ["mcp"]`}</CodeBlock>
+args = ["mcp"]
+env_vars = ["SPACES_TERMINAL_TRACKING_ID", "SPACES_AUTOMATION_RUN_ID"]`}</CodeBlock>
         <p className="mt-4 text-sm font-semibold text-foreground">opencode</p>
         <Prose>
           Add a <InlineCode>spaces</InlineCode> entry to the <InlineCode>mcp</InlineCode> block in{" "}

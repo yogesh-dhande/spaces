@@ -18,14 +18,22 @@ public struct AgentHookStatus: Sendable, Equatable, Codable {
     /// The Spaces entries the agent has not trusted yet, exactly as they would run, for the confirmation
     /// a user sees before trusting them. Empty unless `installState` is `awaitingTrust`.
     public let untrustedEntries: [AgentHookEntry]
+    /// Codex only: a shared background Codex server is running for the user's `CODEX_HOME`. Sessions
+    /// attached to it cannot report to Spaces: their hooks and MCP calls are ignored because they do not
+    /// run inside a Spaces terminal. nil for other agents and when Codex is not
+    /// detected.
+    public let sharedServerRunning: Bool?
 
-    public init(kind: CodingAgent, displayName: String, available: Bool, installState: AgentHookInstallState, untrustedEntries: [AgentHookEntry] = [])
-    {
+    public init(
+        kind: CodingAgent, displayName: String, available: Bool, installState: AgentHookInstallState, untrustedEntries: [AgentHookEntry] = [],
+        sharedServerRunning: Bool? = nil
+    ) {
         self.kind = kind
         self.displayName = displayName
         self.available = available
         self.installState = installState
         self.untrustedEntries = untrustedEntries
+        self.sharedServerRunning = sharedServerRunning
     }
 }
 
@@ -108,6 +116,15 @@ public enum AgentHookInstaller {
         )
     }
 
+    /// Stops Codex's shared background server for this device's `CODEX_HOME`, which ends the Codex sessions
+    /// running on it (their conversations are kept and can be resumed), then returns fresh status for every
+    /// supported agent. Codex's own reason for not stopping it comes back as that agent's failure entry.
+    public static func stopCodexSharedServer(home: URL = defaultHome(), fileManager: FileManager = .default) -> AgentHookInstallOutcome {
+        var executableResolver = ExecutableResolver(home: home, fileManager: fileManager)
+        return stopCodexSharedServer(
+            home: home, fileManager: fileManager, executableResolver: &executableResolver, codexAppServer: AgentHookCodexAppServer.launchProcess)
+    }
+
     public static func defaultHome() -> URL { URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true) }
 
     // MARK: - Test seams
@@ -144,6 +161,15 @@ public enum AgentHookInstaller {
         return try trust(kind, home: home, fileManager: fileManager, executableResolver: &executableResolver, codexAppServer: codexAppServer)
     }
 
+    static func stopCodexSharedServer(
+        home: URL, fileManager: FileManager, environment: [String: String], shellPathDirectoryResolver: @escaping ShellPathDirectoryResolver,
+        codexAppServer: AgentHookCodexAppServer.Launcher
+    ) -> AgentHookInstallOutcome {
+        var executableResolver = ExecutableResolver(
+            home: home, fileManager: fileManager, environment: environment, shellPathDirectoryResolver: shellPathDirectoryResolver)
+        return stopCodexSharedServer(home: home, fileManager: fileManager, executableResolver: &executableResolver, codexAppServer: codexAppServer)
+    }
+
     static func isAvailable(
         _ kind: CodingAgent, home: URL, fileManager: FileManager, environment: [String: String],
         shellPathDirectoryResolver: @escaping ShellPathDirectoryResolver
@@ -175,7 +201,8 @@ public enum AgentHookInstaller {
             }
             do {
                 try kind.install(
-                    home: home, fileManager: fileManager, spacesExecutablePath: spacesExecutablePath, agentExecutablePath: agentExecutablePath)
+                    home: home, fileManager: fileManager, spacesExecutablePath: spacesExecutablePath, agentExecutablePath: agentExecutablePath,
+                    codexAppServer: codexAppServer)
             } catch { failures.append(.init(kind: kind, message: error.localizedDescription)) }
         }
         return AgentHookInstallOutcome(
@@ -208,6 +235,22 @@ public enum AgentHookInstaller {
             failures: failures)
     }
 
+    private static func stopCodexSharedServer(
+        home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver, codexAppServer: AgentHookCodexAppServer.Launcher
+    ) -> AgentHookInstallOutcome {
+        var failures: [AgentHookInstallFailure] = []
+        if let codexExecutablePath = resolvedExecutablePath(for: .codex, executableResolver: &executableResolver) {
+            do {
+                try AgentHookCodexSharedServer.stop(executablePath: codexExecutablePath, codexHome: CodingAgent.codex.configDirectoryURL(home: home))
+            } catch { failures.append(.init(kind: .codex, message: error.localizedDescription)) }
+        } else {
+            failures.append(.init(kind: .codex, message: "\(CodingAgent.codex.displayName) was not detected on this machine."))
+        }
+        return AgentHookInstallOutcome(
+            agents: status(home: home, fileManager: fileManager, executableResolver: &executableResolver, codexAppServer: codexAppServer),
+            failures: failures)
+    }
+
     /// Each agent's config files decide its state, except that a Codex whose files are current is then
     /// asked through `codex app-server` whether it trusts the entries (`AgentHookCodexTrust`), which can
     /// still move the row to `awaitingTrust`, `disabledByAgent`, or `outdated`. Codex is asked only then,
@@ -233,9 +276,14 @@ public enum AgentHookInstaller {
                     installState = .outdated
                 }
             }
+            // The probe runs only for a detected Codex, and never starts the server it asks about.
+            let sharedServerRunning: Bool? =
+                kind == .codex
+                ? executablePath.map { AgentHookCodexSharedServer.isRunning(executablePath: $0, codexHome: kind.configDirectoryURL(home: home)) }
+                : nil
             return AgentHookStatus(
                 kind: kind, displayName: kind.displayName, available: executablePath != nil, installState: installState,
-                untrustedEntries: untrustedEntries)
+                untrustedEntries: untrustedEntries, sharedServerRunning: sharedServerRunning)
         }
     }
 

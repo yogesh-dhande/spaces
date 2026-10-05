@@ -1096,6 +1096,17 @@ enum SpacesDaemonErrorClassification {
     /// runs requests on serial lanes (`TerminalServiceRequestLane`): long-running commands have lanes of
     /// their own beside the shared one; this only moves where each blocks.
     private nonisolated func dispatch(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
+        if case .profileCommand(let command) = request.command,
+            let early = SpacesDaemonCallerAttribution.earlyResponse(
+                for: command, check: .persistedRuntimeState,
+                terminalBelongsToAutomationRun: { terminalID, runID in
+                    guard let store = try? self.makeProfileOrchestrator().store else { return false }
+                    if (try? store.automationRun(id: runID))?.terminalSessionID == terminalID { return true }
+                    return (try? store.automationRunID(terminalSessionID: terminalID)) == runID
+                })
+        {
+            return early
+        }
         switch request.command {
         case .runWorkspaceCommand(let payload): return runWorkspaceCommandOffMain(payload)
         case .prepareWorkspace(let payload): return prepareWorkspaceOffMain(payload)
@@ -2032,12 +2043,12 @@ enum SpacesDaemonErrorClassification {
         case .agentBriefWrite(let payload):
             let orchestrator = try makeProfileOrchestrator()
             return try writeProfileAgentBrief(payload, orchestrator: orchestrator)
-        case .agentBriefRead(let sessionID):
+        case .agentBriefRead(let target):
             let orchestrator = try makeProfileOrchestrator()
-            return try readProfileAgentBrief(sessionID: sessionID, orchestrator: orchestrator)
-        case .agentBriefClear(let sessionID):
+            return try readProfileAgentBrief(sessionID: target.sessionID, orchestrator: orchestrator)
+        case .agentBriefClear(let target):
             let orchestrator = try makeProfileOrchestrator()
-            return try clearProfileAgentBrief(sessionID: sessionID, orchestrator: orchestrator)
+            return try clearProfileAgentBrief(sessionID: target.sessionID, orchestrator: orchestrator)
         case .agentSpawn: preconditionFailure("`.agentSpawn` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .agentKill: preconditionFailure("`.agentKill` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .agentSubscribe(let payload):
@@ -2066,7 +2077,8 @@ enum SpacesDaemonErrorClassification {
             try orchestrator.store.deleteAgentSubscription(
                 subscriberTerminalSessionID: payload.subscriberTerminalSessionID, agentSessionID: payload.agentSessionID)
             return TerminalServiceProfileCommandResponse(message: "Unsubscribed from agent session.")
-        case .agentConsumePendingEvents(let subscriberTerminalSessionID):
+        case .agentConsumePendingEvents(let target):
+            let subscriberTerminalSessionID = target.sessionID
             // The MCP piggyback drain: atomically read-and-delete this subscriber's held notifications so a
             // busy orchestrator receives them on its next tool result. Injection (the idle path) is untouched.
             let orchestrator = try makeProfileOrchestrator()
@@ -3706,6 +3718,7 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
         if let code = DaemonHandoffPreflight.respondsToCheck(arguments: CommandLine.arguments) { exit(code) }
 
         configureProcessSignals()
+        removeShellIntegrationWrapperFromSearchPath()
         configureCLISearchPath()
 
         if environmentValue("SPACESD_PRINT_CERTIFICATE_FINGERPRINT") == "1" {
@@ -3799,6 +3812,14 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
             _ = signal(SIGPIPE, SIG_IGN)
             _ = signal(SIGHUP, SIG_IGN)
         #endif
+    }
+
+    /// The daemon may itself be started from inside a Spaces terminal (dev builds often are) and so inherit
+    /// the `codex` wrapper directory on PATH. The Codex hook installer resolves `codex` from this PATH and
+    /// must never find a wrapper, so every wrapper directory is dropped before anything reads the PATH.
+    private static func removeShellIntegrationWrapperFromSearchPath() {
+        guard let path = SpacesShellIntegration.pathRemovingWrapperDirectories(environmentValue("PATH")) else { return }
+        setenv("PATH", path, 1)
     }
 
     /// spacesd is the parent of every terminal shell, workspace runtime process, and

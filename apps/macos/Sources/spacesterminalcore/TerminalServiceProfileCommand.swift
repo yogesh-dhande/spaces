@@ -156,12 +156,19 @@ public struct TerminalServiceProfileAgentSignalPayload: Codable, Sendable, Equat
     /// `agentSessionKey`, the not-yet-resumable state as `agentSessionKeyPending` — so neither can be
     /// mistaken for the other, and the property is an enum so no caller can claim both at once.
     public let agentSessionKey: AgentHookSessionKeyReport
+    /// The signaling process, set only when the terminal came from the environment rather than a flag.
+    /// The daemon drops the signal unless that terminal's shell is an ancestor of this process.
+    public let callerProcessID: Int32?
 
-    public init(workspaceID: String, terminalSessionID: String, event: String, agentSessionKey: AgentHookSessionKeyReport = .unreported) {
+    public init(
+        workspaceID: String, terminalSessionID: String, event: String, agentSessionKey: AgentHookSessionKeyReport = .unreported,
+        callerProcessID: Int32? = nil
+    ) {
         self.workspaceID = workspaceID
         self.terminalSessionID = terminalSessionID
         self.event = event
         self.agentSessionKey = agentSessionKey
+        self.callerProcessID = callerProcessID
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -170,6 +177,7 @@ public struct TerminalServiceProfileAgentSignalPayload: Codable, Sendable, Equat
         case event
         case agentSessionKey
         case agentSessionKeyPending
+        case callerProcessID
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -177,6 +185,7 @@ public struct TerminalServiceProfileAgentSignalPayload: Codable, Sendable, Equat
         try container.encode(workspaceID, forKey: .workspaceID)
         try container.encode(terminalSessionID, forKey: .terminalSessionID)
         try container.encode(event, forKey: .event)
+        try container.encodeIfPresent(callerProcessID, forKey: .callerProcessID)
         switch agentSessionKey {
         case .unreported: break
         case .pending: try container.encode(true, forKey: .agentSessionKeyPending)
@@ -189,6 +198,7 @@ public struct TerminalServiceProfileAgentSignalPayload: Codable, Sendable, Equat
         workspaceID = try container.decodeRequiredNonEmpty(forKey: .workspaceID)
         terminalSessionID = try container.decodeRequiredNonEmpty(forKey: .terminalSessionID)
         event = try container.decodeRequiredNonEmpty(forKey: .event)
+        callerProcessID = try container.decodeIfPresent(Int32.self, forKey: .callerProcessID)
         // The pending flag is read first so the three states stay total over anything that decodes: the
         // encoder above writes at most one of the two keys, and a blank id is the same as no id at all.
         if try container.decodeIfPresent(Bool.self, forKey: .agentSessionKeyPending) == true {
@@ -208,21 +218,27 @@ public struct TerminalServiceAgentListPayload: Codable, Sendable, Equatable {
     /// Optional terminal-session filter, matched against each agent's terminal tracking id. Used for a
     /// single-agent `status` view and for readiness polling.
     public let sessionID: String?
+    /// The calling process, set only when `sessionID` came from the environment. See
+    /// `TerminalServiceProfileAgentSignalPayload.callerProcessID`; here the daemon refuses the request.
+    public let callerProcessID: Int32?
 
-    public init(workspaceID: String? = nil, sessionID: String? = nil) {
+    public init(workspaceID: String? = nil, sessionID: String? = nil, callerProcessID: Int32? = nil) {
         self.workspaceID = workspaceID
         self.sessionID = sessionID
+        self.callerProcessID = callerProcessID
     }
 
     private enum CodingKeys: String, CodingKey {
         case workspaceID
         case sessionID
+        case callerProcessID
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         workspaceID = try container.decodeIfPresent(String.self, forKey: .workspaceID)
         sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID)
+        callerProcessID = try container.decodeIfPresent(Int32.self, forKey: .callerProcessID)
     }
 }
 
@@ -232,21 +248,52 @@ public struct TerminalServiceAgentBriefWritePayload: Codable, Sendable, Equatabl
     /// The whole new document. Markdown that sanitizes to nothing clears the brief, so this field is
     /// required but not normalized-non-empty at the wire boundary.
     public let markdown: String
+    /// The calling process, set only when `sessionID` came from the environment. See
+    /// `TerminalServiceProfileAgentSignalPayload.callerProcessID`; here the daemon refuses the request.
+    public let callerProcessID: Int32?
 
-    public init(sessionID: String, markdown: String) {
+    public init(sessionID: String, markdown: String, callerProcessID: Int32? = nil) {
         self.sessionID = sessionID
         self.markdown = markdown
+        self.callerProcessID = callerProcessID
     }
 
     private enum CodingKeys: String, CodingKey {
         case sessionID
         case markdown
+        case callerProcessID
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         sessionID = try container.decodeRequiredNonEmpty(forKey: .sessionID)
         markdown = try container.decode(String.self, forKey: .markdown)
+        callerProcessID = try container.decodeIfPresent(Int32.self, forKey: .callerProcessID)
+    }
+}
+
+/// A terminal session addressed by a command that needs nothing else: a brief read or clear, or the
+/// subscriber whose held notifications are consumed.
+public struct TerminalServiceAgentSessionTargetPayload: Codable, Sendable, Equatable {
+    public let sessionID: String
+    /// The calling process, set only when `sessionID` came from the environment. See
+    /// `TerminalServiceProfileAgentSignalPayload.callerProcessID`.
+    public let callerProcessID: Int32?
+
+    public init(sessionID: String, callerProcessID: Int32? = nil) {
+        self.sessionID = sessionID
+        self.callerProcessID = callerProcessID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionID
+        case callerProcessID
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionID = try container.decodeRequiredNonEmpty(forKey: .sessionID)
+        callerProcessID = try container.decodeIfPresent(Int32.self, forKey: .callerProcessID)
     }
 }
 
@@ -263,13 +310,25 @@ public struct TerminalServiceAgentSpawnPayload: Codable, Sendable, Equatable {
     /// present the daemon stamps it onto the spawned session's terminal_sessions row; nil for ordinary
     /// interactive spawns, which keeps their existing behavior unchanged.
     public let automationRunID: String?
+    /// The spawning process and the terminal the environment named for it (`SPACES_TERMINAL_TRACKING_ID`),
+    /// set only when that terminal or `automationRunID` came from the environment. The daemon refuses the
+    /// spawn unless the process runs inside that terminal and, when `automationRunID` is present, that
+    /// same terminal belongs to the run (it is the run's original terminal or its session row carries the
+    /// run id; a run id without this terminal is refused). A refused spawn leaves no orphan agent behind.
+    public let callerProcessID: Int32?
+    public let callerTerminalSessionID: String?
 
-    public init(cwd: String, workspaceID: String? = nil, command: String, title: String? = nil, automationRunID: String? = nil) {
+    public init(
+        cwd: String, workspaceID: String? = nil, command: String, title: String? = nil, automationRunID: String? = nil, callerProcessID: Int32? = nil,
+        callerTerminalSessionID: String? = nil
+    ) {
         self.cwd = cwd
         self.workspaceID = workspaceID
         self.command = command
         self.title = title
         self.automationRunID = automationRunID
+        self.callerProcessID = callerProcessID
+        self.callerTerminalSessionID = callerTerminalSessionID
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -278,6 +337,8 @@ public struct TerminalServiceAgentSpawnPayload: Codable, Sendable, Equatable {
         case command
         case title
         case automationRunID
+        case callerProcessID
+        case callerTerminalSessionID
     }
 
     public init(from decoder: any Decoder) throws {
@@ -287,6 +348,8 @@ public struct TerminalServiceAgentSpawnPayload: Codable, Sendable, Equatable {
         command = try container.decodeRequiredNonEmpty(forKey: .command)
         title = try container.decodeIfPresent(String.self, forKey: .title)
         automationRunID = try container.decodeIfPresent(String.self, forKey: .automationRunID)
+        callerProcessID = try container.decodeIfPresent(Int32.self, forKey: .callerProcessID)
+        callerTerminalSessionID = try container.decodeIfPresent(String.self, forKey: .callerTerminalSessionID)
     }
 }
 
@@ -314,17 +377,22 @@ public struct TerminalServiceAgentSubscriptionPayload: Codable, Sendable, Equata
     public let subscriberTerminalSessionID: String
     public let agentSessionID: String
     public let deviceID: String?
+    /// The calling process, set only when `subscriberTerminalSessionID` came from the environment. See
+    /// `TerminalServiceProfileAgentSignalPayload.callerProcessID`; here the daemon refuses the request.
+    public let callerProcessID: Int32?
 
-    public init(subscriberTerminalSessionID: String, agentSessionID: String, deviceID: String? = nil) {
+    public init(subscriberTerminalSessionID: String, agentSessionID: String, deviceID: String? = nil, callerProcessID: Int32? = nil) {
         self.subscriberTerminalSessionID = subscriberTerminalSessionID
         self.agentSessionID = agentSessionID
         self.deviceID = deviceID
+        self.callerProcessID = callerProcessID
     }
 
     private enum CodingKeys: String, CodingKey {
         case subscriberTerminalSessionID
         case agentSessionID
         case deviceID
+        case callerProcessID
     }
 
     public init(from decoder: any Decoder) throws {
@@ -335,6 +403,7 @@ public struct TerminalServiceAgentSubscriptionPayload: Codable, Sendable, Equata
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         }
+        callerProcessID = try container.decodeIfPresent(Int32.self, forKey: .callerProcessID)
     }
 }
 
@@ -570,9 +639,9 @@ public enum TerminalServiceProfileCommand: Sendable, Equatable {
     /// Replaces the brief of the coding agent in a terminal session, returning its updated row.
     case agentBriefWrite(TerminalServiceAgentBriefWritePayload)
     /// Reads the full brief of the coding agent in a terminal session, returned on the response's `agentBrief`.
-    case agentBriefRead(sessionID: String)
+    case agentBriefRead(TerminalServiceAgentSessionTargetPayload)
     /// Clears the brief of the coding agent in a terminal session, returning its updated row.
-    case agentBriefClear(sessionID: String)
+    case agentBriefClear(TerminalServiceAgentSessionTargetPayload)
     case agentSpawn(TerminalServiceAgentSpawnPayload)
     case agentKill(TerminalServiceAgentKillPayload)
     case agentSubscribe(TerminalServiceAgentSubscriptionPayload)
@@ -581,7 +650,7 @@ public enum TerminalServiceProfileCommand: Sendable, Equatable {
     /// returning the rendered blocks on the response's `pendingAgentEvents`. The MCP server issues this at
     /// its tools/call chokepoint so a busy orchestrator receives its watched children's held events; the
     /// idle-time injection path is unchanged.
-    case agentConsumePendingEvents(subscriberTerminalSessionID: String)
+    case agentConsumePendingEvents(TerminalServiceAgentSessionTargetPayload)
     case terminalSend(TerminalServiceTerminalSendPayload)
     case terminalTail(TerminalServiceTerminalTailPayload)
     case terminalCommand(TerminalServiceTerminalCommandPayload)
@@ -671,14 +740,14 @@ extension TerminalServiceProfileCommand: Codable {
         case .agentSignal: self = .agentSignal(try container.decode(TerminalServiceProfileAgentSignalPayload.self, forKey: key))
         case .agentList: self = .agentList(try container.decode(TerminalServiceAgentListPayload.self, forKey: key))
         case .agentBriefWrite: self = .agentBriefWrite(try container.decode(TerminalServiceAgentBriefWritePayload.self, forKey: key))
-        case .agentBriefRead: self = .agentBriefRead(sessionID: try container.decodeRequiredNonEmpty(forKey: key))
-        case .agentBriefClear: self = .agentBriefClear(sessionID: try container.decodeRequiredNonEmpty(forKey: key))
+        case .agentBriefRead: self = .agentBriefRead(try container.decode(TerminalServiceAgentSessionTargetPayload.self, forKey: key))
+        case .agentBriefClear: self = .agentBriefClear(try container.decode(TerminalServiceAgentSessionTargetPayload.self, forKey: key))
         case .agentSpawn: self = .agentSpawn(try container.decode(TerminalServiceAgentSpawnPayload.self, forKey: key))
         case .agentKill: self = .agentKill(try container.decode(TerminalServiceAgentKillPayload.self, forKey: key))
         case .agentSubscribe: self = .agentSubscribe(try container.decode(TerminalServiceAgentSubscriptionPayload.self, forKey: key))
         case .agentUnsubscribe: self = .agentUnsubscribe(try container.decode(TerminalServiceAgentSubscriptionPayload.self, forKey: key))
         case .agentConsumePendingEvents:
-            self = .agentConsumePendingEvents(subscriberTerminalSessionID: try container.decodeRequiredNonEmpty(forKey: key))
+            self = .agentConsumePendingEvents(try container.decode(TerminalServiceAgentSessionTargetPayload.self, forKey: key))
         case .terminalSend: self = .terminalSend(try container.decode(TerminalServiceTerminalSendPayload.self, forKey: key))
         case .terminalTail: self = .terminalTail(try container.decode(TerminalServiceTerminalTailPayload.self, forKey: key))
         case .terminalCommand: self = .terminalCommand(try container.decode(TerminalServiceTerminalCommandPayload.self, forKey: key))
@@ -715,14 +784,13 @@ extension TerminalServiceProfileCommand: Codable {
         case .agentSignal(let payload): try container.encode(payload, forKey: .agentSignal)
         case .agentList(let payload): try container.encode(payload, forKey: .agentList)
         case .agentBriefWrite(let payload): try container.encode(payload, forKey: .agentBriefWrite)
-        case .agentBriefRead(let sessionID): try container.encode(sessionID, forKey: .agentBriefRead)
-        case .agentBriefClear(let sessionID): try container.encode(sessionID, forKey: .agentBriefClear)
+        case .agentBriefRead(let payload): try container.encode(payload, forKey: .agentBriefRead)
+        case .agentBriefClear(let payload): try container.encode(payload, forKey: .agentBriefClear)
         case .agentSpawn(let payload): try container.encode(payload, forKey: .agentSpawn)
         case .agentKill(let payload): try container.encode(payload, forKey: .agentKill)
         case .agentSubscribe(let payload): try container.encode(payload, forKey: .agentSubscribe)
         case .agentUnsubscribe(let payload): try container.encode(payload, forKey: .agentUnsubscribe)
-        case .agentConsumePendingEvents(let subscriberTerminalSessionID):
-            try container.encode(subscriberTerminalSessionID, forKey: .agentConsumePendingEvents)
+        case .agentConsumePendingEvents(let payload): try container.encode(payload, forKey: .agentConsumePendingEvents)
         case .terminalSend(let payload): try container.encode(payload, forKey: .terminalSend)
         case .terminalTail(let payload): try container.encode(payload, forKey: .terminalTail)
         case .terminalCommand(let payload): try container.encode(payload, forKey: .terminalCommand)

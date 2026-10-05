@@ -18,6 +18,11 @@ import Foundation
 /// those tables in `config.toml`, so trust survives from one session to the next exactly as it does on
 /// disk, and a record left behind by a rewrite reads `modified` the way Codex reads it.
 ///
+/// `config/read` reports the `[mcp_servers.spaces]` table of `config.toml` as `config.mcp_servers.spaces`,
+/// and `config/batchWrite` with `mergeStrategy` `upsert` on `mcp_servers.spaces` merges each given key into
+/// that table in place, leaving the table's other keys, its subtables, and the rest of the file as they
+/// were. Values are written as JSON, which is valid TOML for the strings, numbers and string arrays used.
+///
 /// The hash is the fake's own, derived from the command text, which keeps "the text changed" visible
 /// as a different hash without the fake claiming to know Codex's scheme.
 final class FakeCodexAppServer: @unchecked Sendable {
@@ -90,6 +95,55 @@ final class FakeCodexAppServer: @unchecked Sendable {
             if let enabled { table += "enabled = \(enabled)\n" }
             return table + "trusted_hash = \"\(hash(of: commandsByKey[key] ?? ""))\"\n"
         }.joined()
+    }
+
+    /// `[mcp_servers.spaces]` seeded the way a user's own config.toml would hold it, keeping the fields
+    /// Spaces does not manage.
+    static func mcpServerTable(_ fields: [(key: String, json: String)]) -> String {
+        "\n[mcp_servers.spaces]\n" + fields.map { "\($0.key) = \($0.json)\n" }.joined()
+    }
+
+    /// The `spaces` table of `config.toml` as a dictionary, or nil without one.
+    static func mcpServerEntry(configURL: URL) -> [String: Any]? {
+        guard let contents = try? String(contentsOf: configURL, encoding: .utf8) else { return nil }
+        let lines = contents.components(separatedBy: "\n")
+        guard let header = lines.firstIndex(of: "[mcp_servers.spaces]") else { return nil }
+        var entry: [String: Any] = [:]
+        for line in lines[(header + 1)...] {
+            if line.hasPrefix("[") { break }
+            guard let equals = line.firstIndex(of: "=") else { continue }
+            let key = line[..<equals].trimmingCharacters(in: .whitespaces)
+            let raw = line[line.index(after: equals)...].trimmingCharacters(in: .whitespaces)
+            if let value = try? JSONSerialization.jsonObject(with: Data(raw.utf8), options: [.fragmentsAllowed]) { entry[key] = value }
+        }
+        return entry
+    }
+
+    private func upsertMCPServer(_ fields: [String: Any], codexHome: URL) {
+        let configURL = codexHome.appendingPathComponent("config.toml")
+        var lines = ((try? String(contentsOf: configURL, encoding: .utf8)) ?? "").components(separatedBy: "\n")
+        let header = "[mcp_servers.spaces]"
+        if lines.firstIndex(of: header) == nil { lines += ["", header] }
+        for key in fields.keys.sorted() {
+            guard
+                let data = try? JSONSerialization.data(
+                    withJSONObject: fields[key] ?? NSNull(), options: [.fragmentsAllowed, .withoutEscapingSlashes]),
+                let json = String(data: data, encoding: .utf8)
+            else { continue }
+            let line = "\(key) = \(json)"
+            let headerIndex = lines.firstIndex(of: header) ?? 0
+            var index = headerIndex + 1
+            var replaced = false
+            while index < lines.count, !lines[index].hasPrefix("[") {
+                if lines[index].hasPrefix("\(key) ") || lines[index].hasPrefix("\(key)=") {
+                    lines[index] = line
+                    replaced = true
+                }
+                index += 1
+            }
+            if !replaced { lines.insert(line, at: headerIndex + 1) }
+        }
+        try? lines.joined(separator: "\n").write(to: configURL, atomically: true, encoding: .utf8)
     }
 
     private var dropsTrustWrites: Bool { if case .dropsTrustWrites = behavior { true } else { false } }
@@ -237,6 +291,12 @@ final class FakeCodexAppServer: @unchecked Sendable {
             }
             switch method {
             case "initialize": reply(["id": id, "result": ["userAgent": "fake-codex/0.0.0"]])
+            case "config/read":
+                var servers: [String: Any] = [:]
+                if let entry = FakeCodexAppServer.mcpServerEntry(configURL: codexHome.appendingPathComponent("config.toml")) {
+                    servers["spaces"] = entry
+                }
+                reply(["id": id, "result": ["config": ["mcp_servers": servers]]])
             case "hooks/list": reply(["id": id, "result": ["data": [["cwd": "/", "hooks": server.listedHooks(codexHome: codexHome)]]]])
             case "config/batchWrite":
                 if !server.dropsTrustWrites {
@@ -249,6 +309,9 @@ final class FakeCodexAppServer: @unchecked Sendable {
                         }
                     }
                     server.recordTrust(trusts, codexHome: codexHome)
+                    for edit in edits where edit["keyPath"] as? String == "mcp_servers.spaces" && edit["mergeStrategy"] as? String == "upsert" {
+                        server.upsertMCPServer((edit["value"] as? [String: Any]) ?? [:], codexHome: codexHome)
+                    }
                 }
                 reply(["id": id, "result": ["status": "ok", "version": "1", "filePath": codexHome.appendingPathComponent("config.toml").path]])
             default: reply(["id": id, "error": ["code": -32601, "message": "unknown method \(method)"]])

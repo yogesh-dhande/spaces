@@ -52,6 +52,40 @@ export default function CodingAgentsDocsPage() {
           that changes them asks for trust again, and hooks you switched off in Codex stay off through
           it.
         </Prose>
+        <Prose>
+          A hook or an MCP call counts for a terminal only when it comes from a process running inside
+          that terminal. A process carried out of its terminal still carries that terminal&apos;s
+          identity, so Spaces ignores it rather than show its status on the wrong row. Agents running
+          inside tmux or screen therefore don&apos;t report status to Spaces.
+        </Prose>
+      </Section>
+
+      <Section id="codex-server" title="Codex's background server">
+        <Prose>
+          Codex 0.157 and later can run its sessions on one shared background server, started by the
+          first Codex you open. Every session on that server runs with the first terminal&apos;s
+          environment, so Spaces can&apos;t tell which terminal it belongs to. In Spaces terminals,
+          Spaces starts Codex with <InlineCode>--no-daemon</InlineCode>, so each session runs in its own
+          process with its own terminal&apos;s environment and reports to its own row.{" "}
+          <InlineCode>which codex</InlineCode> shows a small Spaces wrapper that runs your own Codex
+          with that flag. <InlineCode>codex agents</InlineCode>, <InlineCode>codex queue</InlineCode>,
+          and <InlineCode>--remote</InlineCode> run exactly as you typed them. This needs Codex 0.156
+          or later: an older Codex stops with &quot;unexpected argument &apos;--no-daemon&apos;&quot;
+          in Spaces terminals until you update it.
+        </Prose>
+        <Prose>
+          A Codex session started some other way can still land on the background server, and Spaces
+          ignores its hooks. While that server is running, the Codex row in Settings &rarr; Coding Agents
+          says so and offers <strong>Stop Server</strong>. Stopping ends the Codex sessions running on
+          it. Their conversations are kept, and you can resume them in a Spaces terminal.
+        </Prose>
+        <Prose>
+          Spaces keeps its wrapper first on <InlineCode>PATH</InlineCode> in zsh, bash, and fish, even
+          when your startup files add their own folders. The exception is macOS&apos;s built-in{" "}
+          <InlineCode>/bin/bash</InlineCode>, which doesn&apos;t load Spaces&apos; startup file: if your
+          bash startup files put another <InlineCode>codex</InlineCode> ahead of the wrapper, that Codex
+          can still use the background server.
+        </Prose>
       </Section>
 
       <Section id="states" title="States">
